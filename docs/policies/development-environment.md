@@ -8,7 +8,7 @@
 
 開発、ビルド、lint、テストに必要なOS相当のパッケージ、言語runtime、パッケージ管理ツールその他の実行依存は、リポジトリ内の宣言的な環境定義に記述し、lock fileまたは改変不能なdigestで固定する。ホストへ暗黙に導入されたツールへ依存してはならない。
 
-このリポジトリの環境定義は `flake.nix` と `flake.lock` とする。サポート対象はNixが動作する `x86_64-linux` と `aarch64-linux` であり、`nix --extra-experimental-features 'nix-command flakes' develop --ignore-environment --command make check` をローカルとCIの共通検証入口とする。`--ignore-environment` によりホストの環境変数を検証へ持ち込まない。Nix自体は環境を実現するためのbootstrap要件であり、検証に使うツール群はflakeで固定する。
+このリポジトリの環境定義は `devbox.json` と `devbox.lock` とする。サポート対象はDevboxが動作する `x86_64-linux` と `aarch64-linux` であり、`devbox run --pure check` をローカルとCIの共通検証入口とする。`--pure` によりホストの環境変数を原則として検証へ持ち込まない。Devboxは環境を実現するためのbootstrap要件であり、検証に使うツール群はDevboxのlock fileで固定する。Devboxが内部的に使うNixを開発者やCIの公開入口として直接操作しない。
 
 ## 変更管理
 
