@@ -26,7 +26,7 @@ fail() { printf 'install-target: %s\n' "$1" >&2; exit 1; }
 
 preflight() {
   local command_name provider=${AGENT_PROVIDER:-codex} provider_cli
-  case $provider in codex) provider_cli=codex ;; claude) provider_cli=claude ;; *) fail 'AGENT_PROVIDER must be codex or claude' ;; esac
+  case $provider in codex) provider_cli=codex ;; claude) provider_cli=claude ;; opencode) provider_cli=opencode ;; *) fail 'AGENT_PROVIDER must be codex, claude, or opencode' ;; esac
   for command_name in git gh "$provider_cli" systemctl systemd-escape; do command -v "$command_name" >/dev/null 2>&1 || fail "$command_name is required"; done
   git -C "$TARGET" rev-parse --git-dir >/dev/null 2>&1 || fail 'target must be a Git repository'
   git -C "$TARGET" remote get-url origin >/dev/null 2>&1 || fail 'origin remote is required'
