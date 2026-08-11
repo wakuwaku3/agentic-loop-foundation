@@ -4,7 +4,7 @@ set -euo pipefail
 readonly SOURCE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 readonly TARGET="${1:-.}"
 readonly SHARED_FILES=(
-  AGENTS.md .codex/config.toml docs/policies/cost.md docs/policies/testing.md
+  AGENTS.md .codex/config.toml docs/policies/cost.md docs/policies/testing.md docs/policies/development-environment.md
   docs/decisions/0002-github-issue-queue.md docs/operations/issue-queue.md
   .agents/skills/submit-requirement/SKILL.md
   .agents/skills/submit-requirement/agents/openai.yaml
@@ -12,8 +12,8 @@ readonly SHARED_FILES=(
   .githooks/pre-commit .githooks/pre-push bin/agentic-loop
 )
 readonly INIT_FILES=(
-  README.md .editorconfig .env.example .gitignore Makefile install.sh
-  docs/decisions/0001-minimal-foundation.md scripts/format.sh scripts/lint.sh scripts/install-target.sh
+  README.md .editorconfig .env.example .gitignore Makefile install.sh flake.nix flake.lock
+  docs/decisions/0001-minimal-foundation.md scripts/format.sh scripts/lint.sh scripts/check-environment.sh scripts/install-target.sh
   tests/test-agentic-loop.sh .github/workflows/ci.yml
 )
 
