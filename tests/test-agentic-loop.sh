@@ -47,6 +47,12 @@ case "${1:-} ${2:-}" in
   'project create') touch "$project"; printf '{"number":7}\n' ;;
   'project link'|'project field-create'|'project item-add') exit 0 ;;
   'project view') printf 'PVT_fake\n' ;;
+  'pr list')
+    if [[ $* == *'--head agent/issue-6'* ]]; then
+      printf 'https://github.example/%s/pull/6\n' "$slug"
+    elif [[ $* == *'--state all'* ]]; then
+      printf 'https://github.example/%s/pull/1\nhttps://github.example/%s/pull/2\n' "$slug" "$slug"
+    fi ;;
   'issue list')
     wanted=''
     for ((i=1; i<=$#; i++)); do [[ ${!i} == --label ]] && { j=$((i+1)); wanted=${!j}; }; done
@@ -214,6 +220,7 @@ assert_contains "$FAKE_GH_ROOT/calls" 'filter=is:issue is:open' 'Open Issues vie
 assert_contains "$FAKE_GH_ROOT/calls" 'filter=is:issue is:closed' 'Closed Issues view filter was not configured'
 assert_contains "$FAKE_GH_ROOT/calls" 'filter=is:pr is:open' 'Open PRs view filter was not configured'
 assert_contains "$FAKE_GH_ROOT/calls" 'filter=is:pr is:closed' 'Closed PRs view filter was not configured'
+assert_contains "$FAKE_GH_ROOT/calls" "project item-add 7 --owner acme --url https://github.example/acme/installed-project/pull/1" 'existing PR was not added to the Project'
 
 printf 'POLL_SECONDS=1\nMAX_WORKERS=2\nLEASE_SECONDS=3\nSTOP_TIMEOUT=10\nSTALE_DAYS=30\n' > "$target/.agentic-loop/config"
 "$target/bin/agentic-loop" start
@@ -288,6 +295,7 @@ printf '6 queued open\n' > "$state"
 FAKE_CODEX_GIT_OPERATIONS=1 "$target/bin/agentic-loop" _worker 6 linked-worktree-worker
 git -C "$target" fetch --quiet origin agent/issue-6
 git -C "$target" show 'origin/agent/issue-6:worker.txt' | grep -Fxq 'worker change' || fail 'linked-worktree Git metadata operations did not reach the remote'
+assert_contains "$FAKE_GH_ROOT/calls" "project item-add 7 --owner acme --url https://github.example/acme/installed-project/pull/6" 'worker PR was not added to the Project'
 
 # needs-input and failure are isolated state transitions; a later Issue reply requeues only that Issue.
 printf '4 running open\n5 running open\n' > "$state"

@@ -114,6 +114,7 @@ setup_project() {
   gh project field-create "$number" --owner "$owner" --name 'Agent status' --data-type SINGLE_SELECT \
     --single-select-options 'Inbox,Queued,Running,Needs input,In review,Done,Failed,Stale' >/dev/null 2>&1 || true
   setup_project_views "$number" "$owner"
+  setup_project_pull_requests "$number" "$owner"
 }
 
 setup_project_view() {
@@ -152,6 +153,19 @@ setup_project_views() {
   setup_project_view "$project_id" 'Closed Issues' 'is:issue is:closed'
   setup_project_view "$project_id" 'Open PRs' 'is:pr is:open'
   setup_project_view "$project_id" 'Closed PRs' 'is:pr is:closed'
+}
+
+setup_project_pull_requests() {
+  local number=$1 owner=$2 url existing_urls
+  existing_urls=$(gh project item-list "$number" --owner "$owner" --format json --limit 1000 \
+    --jq '.items[].content.url // empty' 2>/dev/null || true)
+  while IFS= read -r url; do
+    [[ -n $url ]] || continue
+    if ! grep -Fxq -- "$url" <<< "$existing_urls"; then
+      gh project item-add "$number" --owner "$owner" --url "$url" >/dev/null 2>&1 || true
+      existing_urls+="${existing_urls:+$'\n'}$url"
+    fi
+  done < <(gh pr list --state all --limit 1000 --json url --jq '.[].url')
 }
 
 cmd_setup() {
@@ -244,6 +258,19 @@ project_add_issue() {
   [[ -n $PROJECT_OWNER && $PROJECT_NUMBER =~ ^[0-9]+$ ]] || return 0
   url=$(gh issue view "$1" --json url --jq .url 2>/dev/null) || return 0
   gh project item-add "$PROJECT_NUMBER" --owner "$PROJECT_OWNER" --url "$url" >/dev/null 2>&1 || true
+}
+
+project_add_pull_requests() {
+  [[ -r $STATE_ROOT/project.env ]] || return 0
+  local branch=$1 url PROJECT_OWNER='' PROJECT_NUMBER='' key value
+  while IFS='=' read -r key value; do
+    case $key in PROJECT_OWNER) PROJECT_OWNER=$value ;; PROJECT_NUMBER) PROJECT_NUMBER=$value ;; esac
+  done < "$STATE_ROOT/project.env"
+  [[ -n $PROJECT_OWNER && $PROJECT_NUMBER =~ ^[0-9]+$ ]] || return 0
+  while IFS= read -r url; do
+    [[ -n $url ]] || continue
+    gh project item-add "$PROJECT_NUMBER" --owner "$PROJECT_OWNER" --url "$url" >/dev/null 2>&1 || true
+  done < <(gh pr list --state all --head "$branch" --limit 100 --json url --jq '.[].url' 2>/dev/null || true)
 }
 
 project_sync_state() {
@@ -445,6 +472,7 @@ worker() {
     -C "$worktree" --output-last-message "$result" "$(issue_prompt "$issue" "$repository")" || exit_code=$?
   kill "$heartbeat_pid" 2>/dev/null || true
   wait "$heartbeat_pid" 2>/dev/null || true
+  project_add_pull_requests "$branch"
   if [[ $exit_code -eq 0 ]] && grep -Fq 'AGENTIC_LOOP_RESULT=completed' "$result"; then
     set_issue_state "$issue" completed
     project_sync_state "$issue" completed
