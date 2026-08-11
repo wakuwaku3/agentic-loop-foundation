@@ -12,3 +12,6 @@ STALE_DAYS=30
 GRAPHQL_RESERVE=500
 # Processes share the latest rate-limit observation through Git common state.
 RATE_LIMIT_CACHE_SECONDS=15
+# Retry only classified transient REST failures; permanent 4xx errors fail fast.
+API_RETRY_ATTEMPTS=3
+API_RETRY_BASE_SECONDS=1

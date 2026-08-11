@@ -30,6 +30,67 @@ diagnosis_issues="$FAKE_GH_ROOT/$key.diagnosis-issues"
 printf '%s\t%s\n' "$PWD" "$*" >> "$FAKE_GH_ROOT/calls"
 case "${1:-} ${2:-}" in
   'auth status') exit 0 ;;
+  'api repos/'*)
+    rest_failures="$FAKE_GH_ROOT/$key.rest-failures"
+    current_failures=$(cat "$rest_failures" 2>/dev/null || printf '0')
+    if (( current_failures < ${FAKE_REST_FAILURES:-0} )); then
+      printf '%s\n' "$((current_failures + 1))" > "$rest_failures"
+      printf 'HTTP 503: Service Unavailable\n' >&2
+      exit 1
+    fi
+    endpoint=${2#repos/}; endpoint=${endpoint#*/}; endpoint=${endpoint#*/}
+    method=GET wanted='' form_state='' input_file=''
+    for ((i=1; i<=$#; i++)); do
+      case ${!i} in
+        --method) j=$((i+1)); method=${!j} ;;
+        labels=*) wanted=${!i#labels=} ;;
+        state=*) form_state=${!i#state=} ;;
+        --input) j=$((i+1)); input_file=${!j} ;;
+      esac
+    done
+    if [[ $endpoint == issues && $method == GET ]]; then
+      case $wanted in
+        agent:queued)
+          if [[ $* == *updated_at* ]]; then
+            awk '$2 == "queued" && $3 != "closed" && $6 != "" {print $1 "\t" $6}' "$state"
+          elif [[ $* == *created_at* ]]; then
+            awk '$2 == "queued" && $3 != "closed" {
+              rank=4; if ($4 ~ /(^|,)critical(,|$)/) rank=0; else if ($4 ~ /(^|,)high(,|$)/) rank=1; else if ($4 ~ /(^|,)medium(,|$)/) rank=2; else if ($4 ~ /(^|,)low(,|$)/) rank=3
+              created=($5 == "" ? $1 : $5); print rank "\t" created "\t" $1
+            }' "$state" | sort -k1,1n -k2,2 -k3,3n | awk 'NR == 1 {print $3}'
+          else awk '$2 == "queued" && $3 != "closed" {print $1}' "$state"; fi ;;
+        agent:running)
+          if [[ $* == *title* ]]; then awk '$2 == "running" && $3 != "closed" {print "#" $1 " Fake issue " $1}' "$state"; else awk '$2 == "running" && $3 != "closed" {print $1}' "$state"; fi ;;
+        agent:needs-input) awk '$2 == "needs-input" && $3 != "closed" {print $1}' "$state" ;;
+      esac
+    elif [[ $endpoint =~ ^issues/([0-9]+)/labels$ && $method == PUT ]]; then
+      issue=${BASH_REMATCH[1]}; payload=$(if [[ -n $input_file && $input_file != - ]]; then cat "$input_file"; else cat; fi); target=$(sed -n 's/.*"agent:\([^"]*\)".*/\1/p' <<< "$payload")
+      ( flock 9; awk -v n="$issue" -v s="$target" '{if ($1 == n) $2=s; print}' "$state" > "$state.$$.tmp" && mv "$state.$$.tmp" "$state" ) 9> "$state.lock"
+    elif [[ $endpoint =~ ^issues/([0-9]+)/comments$ ]]; then
+      issue=${BASH_REMATCH[1]}
+      if [[ $method == POST ]]; then
+        body=''; for arg in "$@"; do [[ $arg == body=* ]] && body=${arg#body=}; done
+        printf '%s %s\n' "$issue" "$body" >> "$comments"
+      elif [[ $* == *needs-input* ]]; then
+        if tail -n 1 "$comments" 2>/dev/null | grep -Fq USER_REPLY; then printf 'true\n'; else printf 'false\n'; fi
+      else tail -n 1 "$comments" 2>/dev/null || true; fi
+    elif [[ $endpoint =~ ^issues/([0-9]+)$ ]]; then
+      issue=${BASH_REMATCH[1]}
+      if [[ $method == PATCH && $form_state == closed ]]; then
+        ( flock 9; awk -v n="$issue" '{if ($1 == n) $3="closed"; print}' "$state" > "$state.$$.tmp" && mv "$state.$$.tmp" "$state" ) 9> "$state.lock"
+      elif [[ $* == *starts*with* ]]; then
+        target=$(sed -n 's/.*\["agent:\([^"]*\)"\].*/\1/p' <<< "$*"); printf '["agent:%s"]\n' "$target"
+      else awk -v n="$issue" '$1 == n {print "agent:" $2}' "$state"; fi
+    elif [[ $endpoint == pulls ]]; then
+      if [[ $form_state == closed ]]; then
+        if [[ ${FAKE_PR_MERGED:-1} == 1 ]]; then
+          head=''; for arg in "$@"; do [[ $arg == head=* ]] && head=${arg#head=}; done; head=${head#*:}
+          oid=${FAKE_PR_HEAD_OID:-$(git rev-parse "refs/heads/$head" 2>/dev/null || true)}
+          printf 'https://github.example/%s/pull/merged\t%s\n' "$slug" "$oid"
+        fi
+      elif [[ $* == *html_url* ]]; then printf 'https://github.example/%s/pull/6\n' "$slug"; fi
+    elif [[ -z $endpoint ]]; then printf 'main\n'
+    fi ;;
   'api rate_limit')
     printf '%s\t%s\n' "${FAKE_GRAPHQL_REMAINING:-5000}" "${FAKE_GRAPHQL_RESET:-$(($(date +%s) + 3600))}"
     ;;
@@ -219,6 +280,7 @@ assert_contains "$target/docs/policies/validation-harness.md" 'local fast check'
 assert_contains "$target/docs/policies/validation-harness.md" 'local full check' 'installed validation policy lacks the full check layer'
 assert_contains "$target/docs/policies/validation-harness.md" 'private repository' 'installed validation policy lacks the private repository exception'
 assert_contains "$target/.agentic-loop/config" 'GRAPHQL_RESERVE=500' 'installed configuration lacks the GraphQL reserve'
+assert_contains "$target/.agentic-loop/config" 'API_RETRY_ATTEMPTS=3' 'installed configuration lacks bounded REST retries'
 assert_contains "$target/docs/operations/issue-queue.md" 'GraphQLの残量・reset時刻' 'installed operations documentation lacks shared rate-limit handling'
 assert_contains "$target/.agents/skills/submit-requirement/SKILL.md" 'in Japanese' 'installed submission skill did not require Japanese GitHub content'
 assert_contains "$target/.agents/skills/diagnose-codebase/SKILL.md" 'without modifying' 'diagnosis skill did not prohibit code changes'
@@ -316,6 +378,11 @@ printf 'POLL_SECONDS=1\nMAX_WORKERS=2\nLEASE_SECONDS=3\nSTOP_TIMEOUT=10\nSTALE_D
 "$target/bin/agentic-loop" start
 first_pid="$(git -C "$target" rev-parse --absolute-git-dir)/agentic-loop/supervisor.pid"
 first_pid=$(cat "$first_pid")
+supervisor_service="$XDG_CONFIG_HOME/systemd/user/agentic-loop-supervisor-$(printf '%s' "${target#/}" | tr '/' '-').service"
+[[ -f $supervisor_service ]] || fail 'start did not install the repository supervisor service'
+assert_contains "$supervisor_service" 'Restart=on-failure' 'supervisor service does not restart after an unexpected exit'
+assert_contains "$supervisor_service" "ExecStart=\"$target/bin/agentic-loop\" _service" 'supervisor service does not target the repository CLI'
+assert_contains "$FAKE_GH_ROOT/systemctl-calls" "enable $(basename "$supervisor_service")" 'supervisor service was not enabled'
 "$target/bin/agentic-loop" start
 [[ $(cat "$(git -C "$target" rev-parse --absolute-git-dir)/agentic-loop/supervisor.pid") == "$first_pid" ]] || fail 'start duplicated the supervisor'
 status_output=$("$target/bin/agentic-loop" status)
@@ -324,15 +391,27 @@ grep -Fq 'running' <<< "$status_output" || fail 'status did not show the supervi
 status_output=$("$target/bin/agentic-loop" status)
 grep -Fq 'stopped' <<< "$status_output" || fail 'stop did not drain the supervisor'
 
-# An exhausted shared GraphQL budget is not mistaken for missing auth and stops polling/claiming.
+# A PID reused by an unrelated process cannot keep a stale supervisor lock alive.
+state_root="$(git -C "$target" rev-parse --absolute-git-dir)/agentic-loop"
+mkdir -p "$state_root/supervisor.lock"
+printf '%s\n' "$$" > "$state_root/supervisor.pid"
+"$target/bin/agentic-loop" start
+[[ $(cat "$state_root/supervisor.pid") != "$$" ]] || fail 'start trusted an unrelated process in a stale PID file'
+"$target/bin/agentic-loop" stop
+
+# An exhausted GraphQL budget only suppresses Projects; the REST queue still completes work.
 rm -f "$(git -C "$target" rev-parse --absolute-git-dir)/agentic-loop/graphql-rate-limit"
 printf '90 queued open none 2025-01-01T00:00:00Z\n' > "$FAKE_GH_ROOT/$state_key.state"
-before_issue_lists=$(grep -c $'\tissue list' "$FAKE_GH_ROOT/calls" || true)
-FAKE_GRAPHQL_REMAINING=499 FAKE_GRAPHQL_RESET=$(date +%s) AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _supervise
-after_issue_lists=$(grep -c $'\tissue list' "$FAKE_GH_ROOT/calls" || true)
-[[ $after_issue_lists -eq $before_issue_lists ]] || fail 'exhausted GraphQL budget still polled Issues'
-grep -Eq '^90 queued open' "$FAKE_GH_ROOT/$state_key.state" || fail 'exhausted GraphQL budget claimed an Issue'
+before_project_adds=$(grep -c $'\tproject item-add' "$FAKE_GH_ROOT/calls" || true)
+FAKE_GRAPHQL_REMAINING=499 FAKE_GRAPHQL_RESET=$(date +%s) FAKE_REST_FAILURES=1 AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _supervise
+after_project_adds=$(grep -c $'\tproject item-add' "$FAKE_GH_ROOT/calls" || true)
+grep -Eq '^90 completed closed' "$FAKE_GH_ROOT/$state_key.state" || fail 'GraphQL exhaustion stopped the REST Issue loop'
+[[ $after_project_adds -eq $before_project_adds ]] || fail 'GraphQL exhaustion did not suppress Projects synchronization'
+pending_project="$(git -C "$target" rev-parse --absolute-git-dir)/agentic-loop/project-pending"
+[[ -s $pending_project ]] || fail 'suppressed Projects synchronization was not persisted'
 rm -f "$(git -C "$target" rev-parse --absolute-git-dir)/agentic-loop/graphql-rate-limit"
+FAKE_GRAPHQL_REMAINING=5000 AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _supervise
+[[ ! -e $pending_project ]] || fail 'Projects synchronization did not resume after GraphQL recovery'
 
 # Commit the runtime configuration so worker worktrees start from a realistic default branch.
 git -C "$target" add .
