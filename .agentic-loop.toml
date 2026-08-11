@@ -1,6 +1,28 @@
 # Agentic Loop configuration. Copy overrides into .agentic-loop.local.toml
 # (git-ignored) to change values per environment; local keys win over these.
 
+[agent]
+# Default AI provider (codex | claude | opencode) for phases that set none.
+provider = "codex"
+
+# Each Issue runs a flagship plan phase, then a cheaper exec phase. Set provider
+# and model per phase to mix tools, e.g. plan with Codex and exec with opencode.
+# model is empty by default (the CLI default); opencode models use "provider/model".
+# reasoning_effort applies to Codex only (default high for plan, low for exec).
+[agent.plan]
+# provider = "codex"
+# model = "gpt-5-codex"
+reasoning_effort = "high"
+
+[agent.exec]
+# provider = "opencode"
+# model = "anthropic/claude-sonnet-4"
+reasoning_effort = "low"
+
+[agent.retry]
+# Re-plan with the flagship plan phase this many times when exec cannot complete.
+plan_max = 1
+
 [queue]
 # Polling and concurrency defaults. Use non-negative integer seconds/counts.
 poll_seconds = 30

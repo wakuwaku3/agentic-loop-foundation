@@ -26,6 +26,7 @@ RATE_LIMIT_CACHE_SECONDS=15
 API_RETRY_ATTEMPTS=3
 API_RETRY_BASE_SECONDS=1
 CONFIG_ERROR=''
+CONFIG_PROPS=''
 
 # Emit the merged configuration as dotted "key = value" lines. The committed
 # .agentic-loop.toml is overlaid by an optional .agentic-loop.local.toml, where
@@ -44,6 +45,7 @@ load_config() {
   [[ -r $CONFIG_FILE ]] || return 0
   command -v yq >/dev/null 2>&1 || { CONFIG_ERROR='yq is required to read .agentic-loop.toml'; return 1; }
   props=$(config_props 2>/dev/null) || { CONFIG_ERROR='cannot parse .agentic-loop.toml'; return 1; }
+  CONFIG_PROPS=$props
   while IFS= read -r line; do
     [[ -z $line ]] && continue
     key=${line%% = *}; value=${line#* = }
@@ -92,29 +94,51 @@ repo_name() {
 state_label() { printf 'agent:%s' "$1"; }
 
 # --- AI provider abstraction (see docs/policies/ai-tool-neutrality.md) ---
-# The provider is selected by the AGENT_PROVIDER environment so the same
-# repository can run under different AI CLIs. Models and reasoning effort are
-# pinned to bounded defaults to prevent accidental high-cost runs; override
-# them per environment through the AGENT_* variables. The autonomous supervisor
-# runs under systemd, so start bakes these variables into the service unit.
-# Each Issue runs in two stages: a flagship plan stage that only investigates
-# and a cheaper exec stage that implements it, so expensive reasoning is spent
-# on planning rather than on every edit.
-AGENT_CODEX_PLAN_REASONING_EFFORT="${AGENT_CODEX_PLAN_REASONING_EFFORT:-high}"
-AGENT_CODEX_EXEC_REASONING_EFFORT="${AGENT_CODEX_EXEC_REASONING_EFFORT:-low}"
-AGENT_PLAN_MAX_RETRIES="${AGENT_PLAN_MAX_RETRIES:-1}"
-agent_provider() { printf '%s' "${AGENT_PROVIDER:-codex}"; }
-agent_provider_valid() { case $(agent_provider) in codex | claude | opencode) return 0 ;; *) return 1 ;; esac; }
-agent_provider_command() { case $(agent_provider) in claude) printf 'claude' ;; opencode) printf 'opencode' ;; *) printf 'codex' ;; esac; }
-# Report whether the selected provider CLI can launch a non-interactive worker.
-agent_provider_ready() {
-  case $(agent_provider) in
+# Provider, model, and reasoning effort are resolved per phase from
+# .agentic-loop.toml ([agent], [agent.plan], [agent.exec]); a phase inherits
+# [agent].provider when it sets none, and reasoning effort defaults to high for
+# plan and low for exec. Environment variables of the same intent still override
+# for quick local experiments. Each Issue runs a flagship plan stage (Codex
+# read-only) then a cheaper exec stage, so expensive reasoning is spent on
+# planning rather than on every edit.
+config_value() { awk -F ' = ' -v k="$1" '$1 == k {print $2; exit}' <<< "$CONFIG_PROPS"; }
+
+agent_default_provider() {
+  local provider=${AGENT_PROVIDER:-}
+  [[ -n $provider ]] || provider=$(config_value 'agent.provider')
+  printf '%s' "${provider:-codex}"
+}
+agent_phase_provider() {
+  local provider
+  provider=$(config_value "agent.$1.provider")
+  [[ -n $provider ]] && { printf '%s' "$provider"; return; }
+  agent_default_provider
+}
+agent_phase_model() { config_value "agent.$1.model"; }
+agent_phase_effort() {
+  local effort
+  effort=$(config_value "agent.$1.reasoning_effort")
+  [[ -n $effort ]] && { printf '%s' "$effort"; return; }
+  case $1 in plan) printf 'high' ;; exec) printf 'low' ;; esac
+}
+agent_plan_max_retries() {
+  local n=${AGENT_PLAN_MAX_RETRIES:-}
+  [[ -n $n ]] || n=$(config_value 'agent.retry.plan_max')
+  [[ $n =~ ^[0-9]+$ ]] && printf '%s' "$n" || printf '1'
+}
+provider_valid() { case $1 in codex | claude | opencode) return 0 ;; *) return 1 ;; esac; }
+provider_command() { case $1 in claude) printf 'claude' ;; opencode) printf 'opencode' ;; *) printf 'codex' ;; esac; }
+# Report whether a provider CLI can launch a non-interactive worker.
+provider_ready() {
+  case $1 in
     codex) command -v codex >/dev/null 2>&1 && codex exec --help 2>/dev/null | grep -Fq -- '--add-dir' ;;
     claude) command -v claude >/dev/null 2>&1 ;;
     opencode) command -v opencode >/dev/null 2>&1 ;;
     *) return 1 ;;
   esac
 }
+# The distinct providers actually used across the worker phases.
+agent_used_providers() { printf '%s\n%s\n' "$(agent_phase_provider plan)" "$(agent_phase_provider exec)" | sort -u; }
 # Run one worker stage confined to the dedicated worktree. stage=plan only
 # investigates and returns a plan (read-only for Codex); stage=exec implements
 # it with workspace-write, granting only the resolved Git common directory and
@@ -122,13 +146,14 @@ agent_provider_ready() {
 # message is written to result_file, where the caller reads the plan text or the
 # AGENTIC_LOOP_RESULT sentinel.
 agent_run_stage() {
-  local stage=$1 worktree=$2 git_common_dir=$3 agents_dir=$4 result_file=$5 usage_file=$6 prompt=$7 model effort
+  local stage=$1 worktree=$2 git_common_dir=$3 agents_dir=$4 result_file=$5 usage_file=$6 prompt=$7 provider model effort
+  provider=$(agent_phase_provider "$stage")
+  model=$(agent_phase_model "$stage")
   : > "$usage_file"
-  printf 'provider=%s\nstage=%s\n' "$(agent_provider)" "$stage" >> "$usage_file"
-  case $(agent_provider) in
+  printf 'provider=%s\nstage=%s\n' "$provider" "$stage" >> "$usage_file"
+  [[ -n $model ]] && printf 'model=%s\n' "$model" >> "$usage_file"
+  case $provider in
     claude)
-      [[ $stage == plan ]] && model=${AGENT_CLAUDE_PLAN_MODEL:-} || model=${AGENT_CLAUDE_EXEC_MODEL:-}
-      [[ -n $model ]] && printf 'model=%s\n' "$model" >> "$usage_file"
       # --output-format json returns one object; the final message (plan text or
       # the AGENTIC_LOOP_RESULT sentinel) stays inside .result and is matched as
       # a substring, so the raw JSON is the result file. Token/cost fields are
@@ -140,8 +165,6 @@ agent_run_stage() {
       agent_usage_from_claude_json "$result_file" >> "$usage_file" || true
       ;;
     opencode)
-      [[ $stage == plan ]] && model=${AGENT_OPENCODE_PLAN_MODEL:-} || model=${AGENT_OPENCODE_EXEC_MODEL:-}
-      [[ -n $model ]] && printf 'model=%s\n' "$model" >> "$usage_file"
       # opencode has no OS sandbox; --dir scopes work to the worktree and --auto
       # avoids interactive approval. The plan stage relies on the prompt to avoid
       # writes. The final message (plan text or the AGENTIC_LOOP_RESULT sentinel)
@@ -151,12 +174,7 @@ agent_run_stage() {
       opencode "${opencode_args[@]}" "$prompt" > "$result_file"
       ;;
     *)
-      if [[ $stage == plan ]]; then
-        model=${AGENT_CODEX_PLAN_MODEL:-}; effort=$AGENT_CODEX_PLAN_REASONING_EFFORT
-      else
-        model=${AGENT_CODEX_EXEC_MODEL:-}; effort=$AGENT_CODEX_EXEC_REASONING_EFFORT
-      fi
-      [[ -n $model ]] && printf 'model=%s\n' "$model" >> "$usage_file"
+      effort=$(agent_phase_effort "$stage")
       printf 'reasoning_effort=%s\n' "$effort" >> "$usage_file"
       local -a codex_args
       if [[ $stage == plan ]]; then
@@ -317,11 +335,14 @@ graphql_budget_allows() {
 }
 
 preflight() {
-  agent_provider_valid || fail 'AGENT_PROVIDER must be codex, claude, or opencode'
+  local provider
+  for provider in $(agent_used_providers); do
+    provider_valid "$provider" || fail "unsupported AI provider: $provider (use codex, claude, or opencode)"
+    require_command "$(provider_command "$provider")"
+  done
   require_command git
   require_command gh
   require_command yq
-  require_command "$(agent_provider_command)"
   git -C "$REPO_ROOT" rev-parse --git-dir >/dev/null 2>&1 || fail 'target is not a Git repository'
   git -C "$REPO_ROOT" remote get-url origin >/dev/null 2>&1 || fail 'origin remote is required'
   gh auth status >/dev/null 2>&1 || fail 'GitHub authentication is required; run gh auth login'
@@ -332,7 +353,9 @@ preflight() {
     say 'GraphQL rate limitが枯渇しているためProjects権限検査を延期します。Issueキューはreset後に再開します。' >&2
   fi
   repo_name >/dev/null || fail 'cannot access the target GitHub repository'
-  agent_provider_ready || fail "$(agent_provider) CLI with non-interactive worker support is required"
+  for provider in $(agent_used_providers); do
+    provider_ready "$provider" || fail "$provider CLI with non-interactive worker support is required"
+  done
   validate_config
 }
 
@@ -490,12 +513,13 @@ systemd_path_value() {
 }
 
 install_supervisor_unit() {
-  local unit_dir unit_file escaped_root escaped_program service_path escaped_path
+  local unit_dir unit_file escaped_root escaped_program service_path escaped_path provider provider_dirs=''
   unit_dir="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
   unit_file="$unit_dir/$(supervisor_unit_name)"
   escaped_root=$(systemd_path_value "$REPO_ROOT") || fail 'repository path cannot be encoded safely for systemd'
   escaped_program=$(systemd_path_value "$SCRIPT_ROOT") || fail 'program path cannot be encoded safely for systemd'
-  service_path="$(dirname "$(command -v "$(agent_provider_command)")"):$(dirname "$(command -v gh)"):$(dirname "$(command -v git)"):$(dirname "$(command -v yq)"):/usr/local/bin:/usr/bin:/bin"
+  for provider in $(agent_used_providers); do provider_dirs+="$(dirname "$(command -v "$(provider_command "$provider")")"):"; done
+  service_path="${provider_dirs}$(dirname "$(command -v gh)"):$(dirname "$(command -v git)"):$(dirname "$(command -v yq)"):/usr/local/bin:/usr/bin:/bin"
   escaped_path=$(systemd_path_value "$service_path") || fail 'command PATH cannot be encoded safely for systemd'
   mkdir -p "$unit_dir"
   {
@@ -504,13 +528,6 @@ install_supervisor_unit() {
     printf 'WorkingDirectory=%s\n' "$escaped_root"
     printf 'ExecStart=%s/bin/agentic-loop _service\n' "$escaped_program"
     printf 'Environment=PATH=%s\n' "$escaped_path"
-    printf 'Environment=AGENT_PROVIDER=%s\n' "$(agent_provider)"
-    local agent_var
-    for agent_var in AGENT_CODEX_PLAN_MODEL AGENT_CODEX_EXEC_MODEL AGENT_CODEX_PLAN_REASONING_EFFORT AGENT_CODEX_EXEC_REASONING_EFFORT AGENT_CLAUDE_PLAN_MODEL AGENT_CLAUDE_EXEC_MODEL AGENT_OPENCODE_PLAN_MODEL AGENT_OPENCODE_EXEC_MODEL AGENT_PLAN_MAX_RETRIES; do
-      [[ -n ${!agent_var:-} ]] || continue
-      [[ ${!agent_var} =~ ^[A-Za-z0-9._:/-]+$ ]] || fail "$agent_var contains characters unsupported in the systemd unit"
-      printf 'Environment=%s=%s\n' "$agent_var" "${!agent_var}"
-    done
     printf '%s\n' 'Restart=on-failure' 'RestartSec=5s'
     printf '\n%s\n' '[Install]' 'WantedBy=default.target'
   } > "$unit_file"
@@ -639,9 +656,12 @@ doctor_collect() {
   elif [[ -n $default_branch ]]; then doctor_add warning 'default branch' "default branchがmainではありません（$default_branch）。main前提の同期機能は利用できません。" 'repositoryのdefault branchと運用方針を確認してください。'
   else doctor_add failure 'default branch' 'default branchを確認できません。' 'GitHubへのrepositoryアクセスとoriginを確認してください。'; fi
 
-  if ! agent_provider_valid; then doctor_add failure 'AI CLI' "AGENT_PROVIDER=$(agent_provider) は未対応です。" 'AGENT_PROVIDER を codex または claude に設定してください。'
-  elif agent_provider_ready; then doctor_add success "AI CLI ($(agent_provider))" 'Issue workerを起動できます。' '対応は不要です。'
-  else doctor_add failure "AI CLI ($(agent_provider))" 'Issue workerを安全に起動できません。' "$(agent_provider) CLIを導入または更新し、ログインしてください。"; fi
+  local phase_provider
+  for phase_provider in $(agent_used_providers); do
+    if ! provider_valid "$phase_provider"; then doctor_add failure "AI CLI ($phase_provider)" "provider $phase_provider は未対応です。" 'agent.provider / agent.plan.provider / agent.exec.provider を codex、claude、opencode のいずれかに設定してください。'
+    elif provider_ready "$phase_provider"; then doctor_add success "AI CLI ($phase_provider)" 'Issue workerを起動できます。' '対応は不要です。'
+    else doctor_add failure "AI CLI ($phase_provider)" 'Issue workerを安全に起動できません。' "$phase_provider CLIを導入または更新し、ログインしてください。"; fi
+  done
   if command -v devbox >/dev/null 2>&1; then doctor_add success 'Devbox' '固定環境の共通検証入口を利用できます。' '対応は不要です。'
   else doctor_add failure 'Devbox' '`devbox run --pure check` を実行できません。' 'https://www.jetify.com/devbox/docs/installing_devbox/ を参照してDevboxを導入してください。'; fi
 
@@ -1092,7 +1112,7 @@ worker() {
   ) & heartbeat_pid=$!
   local plan_usage="$STATE_ROOT/issue-$issue-plan-usage.txt" exec_usage="$STATE_ROOT/issue-$issue-usage.txt"
   local plan_file="$STATE_ROOT/issue-$issue-plan.txt" attempt=0 max_retries started failure_context=''
-  max_retries=${AGENT_PLAN_MAX_RETRIES:-1}; [[ $max_retries =~ ^[0-9]+$ ]] || max_retries=1
+  max_retries=$(agent_plan_max_retries)
   while :; do
     started=$(date +%s)
     agent_run_stage plan "$worktree" "$git_common_dir" "$agents_dir" "$plan_file" "$plan_usage" "$(plan_prompt "$issue" "$repository" "$failure_context")" || true
