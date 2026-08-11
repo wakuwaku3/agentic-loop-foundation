@@ -8,6 +8,14 @@
 - 要求に応じて、このループ自身も進化させてよい。
 - 変更は専用worktreeで行い、検証済みのPRを作成し、確認・修正・マージまで完遂する。
 
+## 要求のルーティング
+
+- 対話中のAgentが通常のbuild・変更要求を受けた場合、Issueキューがセットアップ済みでSupervisorが正常なら直接実装しない。同一要求を検索し、重複を作らずIssueを再利用または作成して `agent:queued` を付け、queuedまたはrunningを確認して終了する。
+- `agent:running` Issueを専用worktreeで処理中のworkerは受付を再実行しない。代替Issueを作らず、調査・変更・検証・PR・checks・review・merge・cleanupを完遂する。
+- 利用者が同期実行または直接実装を明示した場合は、その指示を優先してworker手順を実行する。
+- キューまたはSupervisorを利用できない場合は状態を明示し、[Issueキュー運用](docs/operations/issue-queue.md)の安全なfallbackに従う。
+- 読み取り専用の質問、診断、status確認、start・stopなどの運用コマンドはIssue化しない。
+
 ## 不変条件
 
 - 秘密情報をリポジトリへ保存しない。
