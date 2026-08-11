@@ -325,7 +325,7 @@ set_issue_state() {
 comment_issue() { gh issue comment "$1" --body "$2" >/dev/null; }
 
 project_add_issue() {
-  graphql_budget_allows "$GRAPHQL_RESERVE" || return 0
+  graphql_budget_allows "$((GRAPHQL_RESERVE + 1))" || return 0
   [[ -r $STATE_ROOT/project.env ]] || return 0
   local url PROJECT_OWNER='' PROJECT_NUMBER='' key value
   while IFS='=' read -r key value; do
@@ -337,7 +337,7 @@ project_add_issue() {
 }
 
 project_add_pull_requests() {
-  graphql_budget_allows "$GRAPHQL_RESERVE" || return 0
+  graphql_budget_allows "$((GRAPHQL_RESERVE + 1))" || return 0
   [[ -r $STATE_ROOT/project.env ]] || return 0
   local branch=$1 url PROJECT_OWNER='' PROJECT_NUMBER='' key value
   while IFS='=' read -r key value; do
@@ -351,7 +351,7 @@ project_add_pull_requests() {
 }
 
 project_sync_state() {
-  graphql_budget_allows "$GRAPHQL_RESERVE" || return 0
+  graphql_budget_allows "$((GRAPHQL_RESERVE + 1))" || return 0
   [[ -r $STATE_ROOT/project.env ]] || return 0
   local issue=$1 state=$2 PROJECT_OWNER='' PROJECT_NUMBER='' key value project_id item_id field_id option_id option
   while IFS='=' read -r key value; do
