@@ -104,18 +104,19 @@ cat > "$FAKE_BIN/codex" <<'FAKE_CODEX'
 set -euo pipefail
 printf '%s\n' "$*" >> "$FAKE_GH_ROOT/codex-calls"
 [[ ${1:-} == exec && ${2:-} == --help ]] && { printf '%s\n' '      --add-dir <DIR>'; exit 0; }
-output='' worktree='' add_dir=''
+output='' worktree='' add_dirs=''
 for ((i=1; i<=$#; i++)); do
   case ${!i} in
     --output-last-message) j=$((i+1)); output=${!j} ;;
     -C) j=$((i+1)); worktree=${!j} ;;
-    --add-dir) j=$((i+1)); add_dir=${!j} ;;
+    --add-dir) j=$((i+1)); add_dirs+=" ${!j}" ;;
   esac
 done
 [[ -n $output ]] || exit 2
 if [[ ${FAKE_CODEX_GIT_OPERATIONS:-0} == 1 ]]; then
   expected=$(git -C "$worktree" rev-parse --path-format=absolute --git-common-dir)
-  [[ $add_dir == "$expected" ]] || { printf 'unexpected add-dir: %s (expected %s)\n' "$add_dir" "$expected" >&2; exit 3; }
+  [[ " $add_dirs " == *" $expected "* ]] || { printf 'missing Git add-dir: %s (expected %s)\n' "$add_dirs" "$expected" >&2; exit 3; }
+  [[ " $add_dirs " == *" $worktree/.agents "* ]] || { printf 'missing .agents add-dir: %s\n' "$add_dirs" >&2; exit 3; }
   git -C "$worktree" fetch origin main
   printf 'worker change\n' > "$worktree/worker.txt"
   git -C "$worktree" add worker.txt
@@ -245,6 +246,7 @@ grep -Eq '^3 completed closed([[:space:]]|$)' "$state" || fail 'oldest critical 
 grep -Eq '^2 completed closed([[:space:]]|$)' "$state" || fail 'second critical Issue was not claimed before lower priorities'
 assert_contains "$FAKE_GH_ROOT/codex-calls" '--sandbox workspace-write' 'worker did not use workspace-write'
 assert_contains "$FAKE_GH_ROOT/codex-calls" "--add-dir $target/.git" 'worker did not grant its exact Git common directory'
+assert_contains "$FAKE_GH_ROOT/codex-calls" "--add-dir $target-worktrees/issue-3/.agents" 'worker did not grant its exact protected .agents directory'
 assert_contains "$FAKE_GH_ROOT/codex-calls" "-C $target-worktrees/issue-3" 'worker did not use the repository-adjacent worktree root'
 assert_contains "$FAKE_GH_ROOT/codex-calls" 'approval_policy="never"' 'worker can block on approval'
 assert_contains "$FAKE_GH_ROOT/codex-calls" 'GitHubのIssue、PR' 'worker prompt did not require Japanese GitHub content'

@@ -32,6 +32,6 @@ Supervisorはclaimの直前に、`agent:queued` のまま `STALE_DAYS` 日以上
 - failed: mergeを証明できず終了。原因確認後にqueuedを付けて再試行する
 - stale: queuedのまま設定日数更新されず、監査コメント付きで自動closeされた
 
-Supervisorは起動時にrunning Issueの最新leaseコメントを読み、期限切れをqueuedへ戻す。Issue worktreeは対象リポジトリと同じ親ディレクトリの `<repository>-worktrees/issue-<number>` に分離する。workerは `workspace-write` を維持し、Gitが解決した対象リポジトリのcommon metadataディレクトリだけをCodex CLIの `--add-dir` で書き込み可能にする。common directoryとworktree固有Git directoryの親子関係を検証できない場合、またはroot、home、worktree rootのような広い範囲の場合はworkerを起動しない。workerの標準出力・標準エラーはGit管理外の `.git/agentic-loop/logs` に保存し、Issueへ転載しない。ログに秘密が疑われる場合は削除し、資格情報を失効する。Project同期は再実行可能であり、`bin/agentic-loop setup` で修復する。
+Supervisorは起動時にrunning Issueの最新leaseコメントを読み、期限切れをqueuedへ戻す。Issue worktreeは対象リポジトリと同じ親ディレクトリの `<repository>-worktrees/issue-<number>` に分離する。workerは `workspace-write` を維持し、Gitが解決した対象リポジトリのcommon metadataディレクトリと、保護対象だが要求実装に必要な専用worktree内の `.agents` だけをCodex CLIの `--add-dir` で書き込み可能にする。common directoryとworktree固有Git directoryの親子関係を検証できない場合、root、home、worktree rootのような広い範囲の場合、または `.agents` がsymlinkやworktree外のpathに解決される場合はworkerを起動しない。workerの標準出力・標準エラーはGit管理外の `.git/agentic-loop/logs` に保存し、Issueへ転載しない。ログに秘密が疑われる場合は削除し、資格情報を失効する。Project同期は再実行可能であり、`bin/agentic-loop setup` で修復する。
 
 Supervisorが停止している場合はstatus、`.git/agentic-loop/supervisor.log`、`gh auth status` を確認する。同じリポジトリを複数端末から処理しない。default branch更新後の競合やrequired checks失敗はworkerが最新branchに対して修正・再検証する。

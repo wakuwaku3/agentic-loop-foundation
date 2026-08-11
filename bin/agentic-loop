@@ -389,8 +389,18 @@ resolve_worker_git_common_dir() {
   printf '%s\n' "$common_dir"
 }
 
+resolve_worker_agents_dir() {
+  local worktree=$1 worktree_root agents_dir
+  worktree_root=$(cd "$worktree" && pwd -P) || return 1
+  agents_dir="$worktree_root/.agents"
+  [[ -d $agents_dir && ! -L $agents_dir ]] || return 1
+  agents_dir=$(cd "$agents_dir" && pwd -P) || return 1
+  [[ $agents_dir == "$worktree_root/.agents" ]] || return 1
+  printf '%s\n' "$agents_dir"
+}
+
 worker() {
-  local issue=$1 worker=$2 repository default_branch branch worktree result git_common_dir exit_code=0 heartbeat_pid
+  local issue=$1 worker=$2 repository default_branch branch worktree result git_common_dir agents_dir exit_code=0 heartbeat_pid
   repository=$(repo_name)
   default_branch=$(gh repo view --json defaultBranchRef --jq .defaultBranchRef.name)
   branch="agent/issue-$issue"
@@ -422,10 +432,16 @@ worker() {
     rm -f "$STATE_ROOT/workers/$issue.pid"
     return 0
   fi
+  if ! agents_dir=$(resolve_worker_agents_dir "$worktree"); then
+    set_issue_state "$issue" failed || true
+    comment_issue "$issue" "<!-- agentic-loop:failed worker=$worker -->\nCould not safely resolve the dedicated worktree .agents directory. No protected repository path was made writable." || true
+    rm -f "$STATE_ROOT/workers/$issue.pid"
+    return 0
+  fi
   (
     while :; do sleep $((LEASE_SECONDS / 3 + 1)); lease_comment "$issue" "$worker" || true; done
   ) & heartbeat_pid=$!
-  codex exec --sandbox workspace-write --add-dir "$git_common_dir" -c 'approval_policy="never"' -c 'sandbox_workspace_write.network_access=true' \
+  codex exec --sandbox workspace-write --add-dir "$git_common_dir" --add-dir "$agents_dir" -c 'approval_policy="never"' -c 'sandbox_workspace_write.network_access=true' \
     -C "$worktree" --output-last-message "$result" "$(issue_prompt "$issue" "$repository")" || exit_code=$?
   kill "$heartbeat_pid" 2>/dev/null || true
   wait "$heartbeat_pid" 2>/dev/null || true
