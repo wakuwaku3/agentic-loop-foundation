@@ -25,9 +25,20 @@ key=$(printf '%s' "$PWD" | tr '/' '_')
 state="$FAKE_GH_ROOT/$key.state"
 project="$FAKE_GH_ROOT/$key.project"
 comments="$FAKE_GH_ROOT/$key.comments"
+views="$FAKE_GH_ROOT/$key.views"
 printf '%s\t%s\n' "$PWD" "$*" >> "$FAKE_GH_ROOT/calls"
 case "${1:-} ${2:-}" in
-  'auth status'|'api graphql') exit 0 ;;
+  'auth status') exit 0 ;;
+  'api graphql')
+    if [[ $* == *createProjectV2View* ]]; then
+      name=''
+      for ((i=1; i<=$#; i++)); do [[ ${!i} == name=* ]] && name=${!i#name=}; done
+      id="PV_$(printf '%s' "$name" | tr ' ' '_')"
+      printf '%s\t%s\n' "$id" "$name" >> "$views"
+      printf '%s\n' "$id"
+    elif [[ $* == *'views(first: 100)'* ]]; then
+      cat "$views" 2>/dev/null || true
+    fi ;;
   'repo view')
     if [[ $* == *defaultBranchRef* ]]; then printf 'main\n'; else printf '%s\n' "$slug"; fi ;;
   'label create') exit 0 ;;
@@ -35,6 +46,7 @@ case "${1:-} ${2:-}" in
     if [[ -e $project ]]; then printf '7\n'; fi ;;
   'project create') touch "$project"; printf '{"number":7}\n' ;;
   'project link'|'project field-create'|'project item-add') exit 0 ;;
+  'project view') printf 'PVT_fake\n' ;;
   'issue list')
     wanted=''
     for ((i=1; i<=$#; i++)); do [[ ${!i} == --label ]] && { j=$((i+1)); wanted=${!j}; }; done
@@ -129,6 +141,7 @@ empty_repository() {
 }
 
 target=$(new_repository installed-project)
+state_key=$(printf '%s' "$target" | tr '/' '_')
 AGENTIC_LOOP_SOURCE="$PROJECT_ROOT" AGENTIC_LOOP_TARGET="$target" AGENTIC_LOOP_SKIP_START=1 "$PROJECT_ROOT/install.sh"
 [[ -x $target/bin/agentic-loop ]] || fail 'install did not add the queue CLI'
 [[ -f $target/.agentic-loop/config ]] || fail 'install did not add safe defaults'
@@ -143,6 +156,15 @@ assert_contains "$target/.agents/skills/submit-requirement/SKILL.md" 'in Japanes
 AGENTIC_LOOP_SOURCE="$PROJECT_ROOT" AGENTIC_LOOP_TARGET="$target" AGENTIC_LOOP_SKIP_START=1 "$PROJECT_ROOT/install.sh"
 project_creates=$(grep -c $'project create' "$FAKE_GH_ROOT/calls" || true)
 [[ $project_creates -eq 1 ]] || { sed -n '1,120p' "$FAKE_GH_ROOT/calls" >&2; fail "reinstall created the Project $project_creates times"; }
+view_creates=$(grep -c $'\tapi graphql -f query=mutation($projectId: ID!, $name: String!)' "$FAKE_GH_ROOT/calls" || true)
+[[ $view_creates -eq 4 ]] || { sed -n '1,160p' "$FAKE_GH_ROOT/calls" >&2; fail "reinstall created the Project views $view_creates times"; }
+for view in 'Open Issues' 'Closed Issues' 'Open PRs' 'Closed PRs'; do
+  [[ $(awk -F '\t' -v name="$view" '$2 == name {count++} END {print count+0}' "$FAKE_GH_ROOT/$state_key.views") -eq 1 ]] || fail "Project view is not idempotent: $view"
+done
+assert_contains "$FAKE_GH_ROOT/calls" 'filter=is:issue is:open' 'Open Issues view filter was not configured'
+assert_contains "$FAKE_GH_ROOT/calls" 'filter=is:issue is:closed' 'Closed Issues view filter was not configured'
+assert_contains "$FAKE_GH_ROOT/calls" 'filter=is:pr is:open' 'Open PRs view filter was not configured'
+assert_contains "$FAKE_GH_ROOT/calls" 'filter=is:pr is:closed' 'Closed PRs view filter was not configured'
 
 printf 'POLL_SECONDS=1\nMAX_WORKERS=2\nLEASE_SECONDS=3\nSTOP_TIMEOUT=10\n' > "$target/.agentic-loop/config"
 "$target/bin/agentic-loop" start
@@ -160,7 +182,6 @@ grep -Fq 'stopped' <<< "$status_output" || fail 'stop did not drain the supervis
 git -C "$target" add .
 git -C "$target" commit --quiet -m install
 git -C "$target" push --quiet
-state_key=$(printf '%s' "$target" | tr '/' '_')
 state="$FAKE_GH_ROOT/$state_key.state"
 state_root="$(git -C "$target" rev-parse --absolute-git-dir)/agentic-loop"
 printf '1 queued open\n2 queued open\n3 queued open\n' > "$state"

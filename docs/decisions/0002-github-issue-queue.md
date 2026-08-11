@@ -13,8 +13,8 @@ GitHub Issueと `agent:*` Labelを処理状態の正本にする。リポジト�
 
 状態は `queued`、`running`、`needs-input`、`in-review`、`completed`、`failed` とする。runningにはworker ID、heartbeat、期限付きleaseをIssueコメントとして記録する。起動時に期限切れleaseをqueuedへ戻す。needs-input後のIssue返信は再取得対象へ戻す。Issueごとの失敗は他workerやキューを停止しない。
 
-Projectはリポジトリ名を含む専用名で冪等に作成または再利用し、リポジトリへlinkする。可視化はbest-effortで再同期可能とし、Project障害でIssueの取得・状態遷移を止めない。Projectの所有者アクセスがリポジトリより広い場合があるため、機密情報はProjectへ複製せず、管理者がアクセス境界を確認する。
+Projectはリポジトリ名を含む専用名で冪等に作成または再利用し、リポジトリへlinkする。Open/ClosedのIssueとPRを分ける4個のtable viewも名前で再利用し、filterを再同期する。実行中の可視化はbest-effortで再同期可能とし、Project障害でIssueの取得・状態遷移を止めない。Projectの所有者アクセスがリポジトリより広い場合があるため、機密情報はProjectへ複製せず、管理者がアクセス境界を確認する。
 
 ## 帰結
 
-状態と履歴はGitHub上でリポジトリごとに分離され、中央キューや追加の有料基盤が不要になる。同一リポジトリの単一Supervisorによりclaim競合を避ける。複数端末で同時にSupervisorを起動することはサポートしないため、運用上も一台に限定する。Projectのビューと自動追加workflowをAPIで構成できない場合は、Agent statusフィールド、link、Supervisorのitem-addまでを自動化し、Issueを正本として継続する。
+状態と履歴はGitHub上でリポジトリごとに分離され、中央キューや追加の有料基盤が不要になる。同一リポジトリの単一Supervisorによりclaim競合を避ける。複数端末で同時にSupervisorを起動することはサポートしないため、運用上も一台に限定する。Projectの自動追加workflowには依存せず、Agent statusフィールド、link、4個のview、Supervisorのitem-addまでを自動化し、Issueを正本として継続する。
