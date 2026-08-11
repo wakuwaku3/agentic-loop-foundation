@@ -608,6 +608,24 @@ assert_contains "$FAKE_GH_ROOT/$state_key.comments" '入力=123tok' 'claude usag
 # shellcheck disable=SC2016 # The dollar sign is a literal currency prefix in the recorded usage line.
 assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'cost=$0.0123' 'claude usage record lacked the reported cost'
 
+# Each Issue runs a read-only plan stage before the workspace-write exec stage,
+# and an exec that never satisfies completion triggers bounded re-planning.
+printf 'POLL_SECONDS=1\nMAX_WORKERS=1\nLEASE_SECONDS=30\nSTOP_TIMEOUT=10\nSTALE_DAYS=30\n' > "$target/.agentic-loop/config"
+printf '20 queued open none 2026-01-01T00:00:00Z\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+: > "$FAKE_GH_ROOT/codex-calls"
+AGENT_PLAN_MAX_RETRIES=1 FAKE_CODEX_RESULT='AGENTIC_LOOP_RESULT=failed' AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _supervise
+grep -Eq '^20 failed' "$state" || fail 'exhausted re-planning did not fail the Issue'
+plan_passes=$(grep -c -- '--sandbox read-only' "$FAKE_GH_ROOT/codex-calls")
+[[ $plan_passes -eq 2 ]] || fail "expected 2 planning passes (initial + 1 retry), got $plan_passes"
+exec_passes=$(grep -c -- '--sandbox workspace-write' "$FAKE_GH_ROOT/codex-calls")
+[[ $exec_passes -eq 2 ]] || fail "expected 2 exec passes (initial + 1 retry), got $exec_passes"
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'flagshipモデルで計画を見直して再実行' 're-planning was not announced on the Issue'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'stage=plan' 'plan stage usage was not recorded'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'stage=exec' 'exec stage usage was not recorded'
+git -C "$target" worktree remove "$target-worktrees/issue-20" --force 2>/dev/null || true
+git -C "$target" branch -D agent/issue-20 >/dev/null 2>&1 || true
+
 # Multiple priority labels use the highest rank; setup creates all priority and stale labels idempotently.
 grep -Fq $'label create priority:critical' "$FAKE_GH_ROOT/calls" || fail 'setup did not create the critical priority label'
 grep -Fq $'label create priority:low' "$FAKE_GH_ROOT/calls" || fail 'setup did not create the low priority label'
