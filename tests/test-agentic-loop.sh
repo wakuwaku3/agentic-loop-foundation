@@ -373,6 +373,7 @@ assert_contains "$target/docs/policies/continuous-delivery.md" '二重release' '
 assert_contains "$target/docs/policies/continuous-delivery.md" '追加課金' 'installed delivery policy lacks cost restrictions'
 assert_contains "$target/docs/policies/continuous-delivery.md" '監査証跡' 'installed delivery policy lacks audit evidence'
 assert_contains "$target/docs/policies/continuous-delivery.md" '空のpipelineを要求しない' 'installed delivery policy lacks the no-op exception'
+assert_contains "$target/.agentic-loop.toml" 'provider = "codex"' 'installed configuration lacks the default AI provider'
 assert_contains "$target/.agentic-loop.toml" 'graphql_reserve = 500' 'installed configuration lacks the GraphQL reserve'
 assert_contains "$target/.agentic-loop.toml" 'api_retry_attempts = 3' 'installed configuration lacks bounded REST retries'
 assert_contains "$target/docs/operations/issue-queue.md" 'GraphQLの残量・reset時刻' 'installed operations documentation lacks shared rate-limit handling'
@@ -641,6 +642,24 @@ grep -Eq '^30 completed closed' "$state" || fail 'opencode provider did not comp
 assert_contains "$FAKE_GH_ROOT/opencode-calls" 'run --auto' 'opencode worker did not run headless with auto-approval'
 assert_contains "$FAKE_GH_ROOT/opencode-calls" "--dir $target-worktrees/issue-30" 'opencode worker did not confine work to the worktree'
 assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'provider=opencode' 'opencode worker did not record a token usage analysis entry'
+
+# Per-phase provider selection: config routes the plan phase and exec phase to
+# different providers (plan=codex read-only, exec=opencode) within one Issue.
+{
+  printf '[agent.plan]\nprovider = "codex"\n'
+  printf '[agent.exec]\nprovider = "opencode"\n'
+  printf '[queue]\npoll_seconds = 1\nmax_workers = 1\nlease_seconds = 3\nstop_timeout = 10\nstale_days = 30\n'
+} > "$target/.agentic-loop.toml"
+printf '31 queued open none 2026-01-01T00:00:00Z\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+: > "$FAKE_GH_ROOT/codex-calls"
+: > "$FAKE_GH_ROOT/opencode-calls"
+AGENTIC_LOOP_RUN_ONCE=1 FAKE_OPENCODE_SLEEP=1 "$target/bin/agentic-loop" _supervise
+grep -Eq '^31 completed closed' "$state" || fail 'mixed-provider Issue did not complete'
+assert_contains "$FAKE_GH_ROOT/codex-calls" '--sandbox read-only' 'plan phase did not run on codex'
+assert_contains "$FAKE_GH_ROOT/opencode-calls" 'run --auto' 'exec phase did not run on opencode'
+[[ $(grep -c -- '--sandbox workspace-write' "$FAKE_GH_ROOT/codex-calls") -eq 0 ]] || fail 'exec phase unexpectedly ran on codex'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'provider=codex stage=plan' 'plan usage did not record the codex provider'
 
 # Each Issue runs a read-only plan stage before the workspace-write exec stage,
 # and an exec that never satisfies completion triggers bounded re-planning.
