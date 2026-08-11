@@ -7,6 +7,22 @@ description: Convert a natural-language product goal, change request, bug report
 
 Turn the user's short request into a verified, merged change without making them manage the engineering workflow.
 
+## Queue-first intake
+
+For an ordinary build or change request received in an interactive session, use the repository Issue queue instead of starting implementation when the queue is configured and its Supervisor is healthy:
+
+1. Exclude read-only questions, diagnosis, status checks, and operational commands such as `start` and `stop`. Also skip intake when the user explicitly requests synchronous or direct implementation.
+2. Verify `.agentic-loop/config`, executable `bin/agentic-loop`, a `running` first line from `bin/agentic-loop status`, and GitHub Issue read/write access for the repository.
+3. Search open Issue titles and bodies before creating anything. Inspect the body and comments of plausible matches and reuse an Issue that asks for the same user-visible outcome.
+4. If the matching Issue is `agent:running`, report its URL and state and stop. If it is `agent:queued`, reuse it unchanged. Otherwise remove other `agent:*` state labels and apply `agent:queued`. If no match exists, create one Issue containing the objective, constraints, and completion criteria, then apply `agent:queued`.
+5. Re-read the Issue and verify it is open and either queued or running. Report its URL and state, then stop without implementing it in the interactive session.
+
+If any queue prerequisite cannot be verified, identify the failed check and follow the safe fallback in `docs/operations/issue-queue.md`. Do not silently choose a route, create an unverified duplicate, or implement in parallel with queued work.
+
+## Non-recursive worker exception
+
+When already processing an `agent:running` Issue in its dedicated worktree, do not run queue intake or create a replacement Issue. Treat the original Issue and all comments as the requirements, then complete investigation, implementation, full validation, secret guard, commit, push, PR, required checks, review feedback, merge, default-branch verification, and cleanup.
+
 1. Inspect the repository, its `AGENTS.md`, current behavior, and relevant external facts.
 2. Infer safe, reversible details. Ask only when a missing decision has material cost, security, availability, data-loss, or product consequences.
 3. State the interpreted objective, constraints, invariants, and observable completion criteria briefly; then proceed without waiting for confirmation when the interpretation is safe.
