@@ -3,7 +3,7 @@ set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
-required=(AGENTS.md README.md Makefile .editorconfig .gitignore .env.example .codex/config.toml install.sh docs/policies/cost.md docs/policies/testing.md docs/decisions/0002-github-issue-queue.md docs/operations/issue-queue.md .agentic-loop/config .agentic-loop/guard-secrets.sh .githooks/pre-commit .githooks/pre-push .agents/skills/submit-requirement/SKILL.md bin/agentic-loop scripts/install-target.sh)
+required=(AGENTS.md README.md Makefile .editorconfig .gitignore .env.example .codex/config.toml install.sh flake.nix flake.lock docs/policies/cost.md docs/policies/testing.md docs/policies/development-environment.md docs/decisions/0002-github-issue-queue.md docs/operations/issue-queue.md .agentic-loop/config .agentic-loop/guard-secrets.sh .githooks/pre-commit .githooks/pre-push .agents/skills/submit-requirement/SKILL.md bin/agentic-loop scripts/check-environment.sh scripts/install-target.sh)
 for file in "${required[@]}"; do
   [[ -f $file ]] || { printf 'Missing required file: %s\n' "$file" >&2; exit 1; }
 done
@@ -25,6 +25,18 @@ grep -Fq '[テストポリシー](docs/policies/testing.md)' AGENTS.md || {
   printf 'Missing testing policy invariant.\n' >&2
   exit 1
 }
+grep -Fq '[開発環境ポリシー](docs/policies/development-environment.md)' AGENTS.md || {
+  printf 'Missing development environment invariant.\n' >&2
+  exit 1
+}
+grep -Fq "nix --extra-experimental-features 'nix-command flakes' develop --ignore-environment --command make check" docs/policies/development-environment.md || {
+  printf 'Invalid development environment policy.\n' >&2
+  exit 1
+}
+if grep -Eq 'uses: [^ ]+@v[0-9]' .github/workflows/ci.yml; then
+  printf 'CI actions must be pinned to immutable commit SHAs.\n' >&2
+  exit 1
+fi
 grep -Fq '外部影響を伴わない要求は、原則としてエンドツーエンド（E2E）テストでカバーする。' docs/policies/testing.md || {
   printf 'Invalid E2E testing policy.\n' >&2
   exit 1

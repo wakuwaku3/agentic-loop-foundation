@@ -24,7 +24,7 @@
 
 ## CIと実行条件
 
-すべての自動テストはリポジトリ共通の検証入口から実行でき、pushとpull requestでCIがその入口を実行しなければならない。このリポジトリの共通入口は `make check` とする。
+すべての自動テストはリポジトリ共通の検証入口から実行でき、pushとpull requestでCIがその入口を実行しなければならない。このリポジトリの共通入口は、固定された開発環境で `make check` を呼び出す `nix --extra-experimental-features 'nix-command flakes' develop --ignore-environment --command make check` とする。
 
 テストは毎回独立して実行でき、再実行可能で、実行順序や以前の実行結果に依存しないものとする。失敗時は検証した要求と差分を識別できる情報を出力する。
 

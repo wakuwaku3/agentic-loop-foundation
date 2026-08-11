@@ -12,6 +12,10 @@ assert_contains() { grep -Fq -- "$2" "$1" || fail "$3"; }
 
 mkdir -p "$FAKE_BIN" "$FAKE_GH_ROOT"
 
+if env -u DEV_ENVIRONMENT "$PROJECT_ROOT/scripts/check-environment.sh" >/dev/null 2>&1; then
+  fail 'environment guard accepted an unpinned host environment'
+fi
+
 cat > "$FAKE_BIN/gh" <<'FAKE_GH'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -98,6 +102,16 @@ new_repository() {
   printf '%s\n' "$target"
 }
 
+empty_repository() {
+  local name=$1 target bare
+  target="$TEST_ROOT/$name"
+  bare="$TEST_ROOT/$name.git"
+  git init --bare --quiet "$bare"
+  git init --quiet -b main "$target"
+  git -C "$target" remote add origin "$bare"
+  printf '%s\n' "$target"
+}
+
 target=$(new_repository installed-project)
 AGENTIC_LOOP_SOURCE="$PROJECT_ROOT" AGENTIC_LOOP_TARGET="$target" AGENTIC_LOOP_SKIP_START=1 "$PROJECT_ROOT/install.sh"
 [[ -x $target/bin/agentic-loop ]] || fail 'install did not add the queue CLI'
@@ -106,6 +120,7 @@ AGENTIC_LOOP_SOURCE="$PROJECT_ROOT" AGENTIC_LOOP_TARGET="$target" AGENTIC_LOOP_S
 [[ $(git -C "$target" config --get core.hooksPath) == .githooks ]] || fail 'install did not enable hooks'
 [[ -f $target/docs/operations/issue-queue.md ]] || fail 'init did not install operations documentation'
 [[ -f $target/docs/policies/testing.md ]] || fail 'init did not install the testing policy'
+[[ -f $target/docs/policies/development-environment.md ]] || fail 'init did not install the development environment policy'
 AGENTIC_LOOP_SOURCE="$PROJECT_ROOT" AGENTIC_LOOP_TARGET="$target" AGENTIC_LOOP_SKIP_START=1 "$PROJECT_ROOT/install.sh"
 project_creates=$(grep -c $'project create' "$FAKE_GH_ROOT/calls" || true)
 [[ $project_creates -eq 1 ]] || { sed -n '1,120p' "$FAKE_GH_ROOT/calls" >&2; fail "reinstall created the Project $project_creates times"; }
@@ -179,6 +194,11 @@ printf 'keep\n' > "$conflict/AGENTS.md"
 if AGENTIC_LOOP_SOURCE="$PROJECT_ROOT" AGENTIC_LOOP_TARGET="$conflict" AGENTIC_LOOP_SKIP_START=1 "$PROJECT_ROOT/install.sh" >/dev/null 2>&1; then fail 'install overwrote a conflict'; fi
 [[ $(cat "$conflict/AGENTS.md") == keep ]] || fail 'conflict changed an existing file'
 [[ ! -e $conflict/bin/agentic-loop ]] || fail 'conflict caused a partial copy'
+
+empty=$(empty_repository empty-project)
+AGENTIC_LOOP_SOURCE="$PROJECT_ROOT" AGENTIC_LOOP_TARGET="$empty" AGENTIC_LOOP_SKIP_START=1 "$PROJECT_ROOT/install.sh"
+[[ -f $empty/flake.nix && -f $empty/flake.lock ]] || fail 'empty repository did not get the pinned development environment'
+[[ -x $empty/scripts/check-environment.sh ]] || fail 'empty repository did not get the environment guard'
 
 secret_target="$TEST_ROOT/secret-project"
 mkdir -p "$secret_target"
