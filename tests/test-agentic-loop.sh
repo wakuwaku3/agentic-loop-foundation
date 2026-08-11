@@ -28,6 +28,10 @@ comments="$FAKE_GH_ROOT/$key.comments"
 views="$FAKE_GH_ROOT/$key.views"
 diagnosis_issues="$FAKE_GH_ROOT/$key.diagnosis-issues"
 printf '%s\t%s\n' "$PWD" "$*" >> "$FAKE_GH_ROOT/calls"
+if [[ $* == *--slurp* && $* == *--jq* ]]; then
+  printf 'the `--slurp` option is not supported with `--jq`\n' >&2
+  exit 1
+fi
 case "${1:-} ${2:-}" in
   'auth status') exit 0 ;;
   'api repos/'*)
@@ -57,7 +61,7 @@ case "${1:-} ${2:-}" in
             awk '$2 == "queued" && $3 != "closed" {
               rank=4; if ($4 ~ /(^|,)critical(,|$)/) rank=0; else if ($4 ~ /(^|,)high(,|$)/) rank=1; else if ($4 ~ /(^|,)medium(,|$)/) rank=2; else if ($4 ~ /(^|,)low(,|$)/) rank=3
               created=($5 == "" ? $1 : $5); print rank "\t" created "\t" $1
-            }' "$state" | sort -k1,1n -k2,2 -k3,3n | awk 'NR == 1 {print $3}'
+            }' "$state"
           else awk '$2 == "queued" && $3 != "closed" {print $1}' "$state"; fi ;;
         agent:running)
           if [[ $* == *title* ]]; then awk '$2 == "running" && $3 != "closed" {print "#" $1 " Fake issue " $1}' "$state"; else awk '$2 == "running" && $3 != "closed" {print $1}' "$state"; fi ;;
