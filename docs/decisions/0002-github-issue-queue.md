@@ -9,7 +9,7 @@
 
 ## 判断
 
-GitHub Issueと `agent:*` Labelを処理状態の正本にする。リポジトリごとに一つのSupervisorだけをローカルで起動し、既定2 workerをIssue専用branch/worktreeで動かす。worktreeは `.git` 配下を避けてリポジトリ隣接の専用ディレクトリに置く。workerは公式の非対話モード `codex exec` を `workspace-write` sandboxと承認待ちなしで使い、検証済みのGit common metadataと専用worktree内の `.agents` だけを `--add-dir` で追加する。OpenAI API keyとdanger-full-accessは使わない。
+GitHub Issueと `agent:*` Labelを処理状態の正本にする。リポジトリごとに一つのSupervisorだけをローカルで起動し、既定4 workerをIssue専用branch/worktreeで動かす。worktreeは `.git` 配下を避けてリポジトリ隣接の専用ディレクトリに置く。workerは公式の非対話モード `codex exec` を `workspace-write` sandboxと承認待ちなしで使い、検証済みのGit common metadataと専用worktree内の `.agents` だけを `--add-dir` で追加する。OpenAI API keyとdanger-full-accessは使わない。
 
 状態は `queued`、`running`、`needs-input`、`in-review`、`completed`、`failed`、`stale` とする。runningにはworker ID、heartbeat、期限付きleaseをIssueコメントとして記録する。起動時に期限切れleaseをqueuedへ戻す。needs-input後のIssue返信は再取得対象へ戻す。Issueごとの失敗は他workerやキューを停止しない。queued Issueはpriority Labelの優先度と作成日時で決定的に並べ、設定期間更新がないものはclaim前に監査コメントを残してstaleへ移し、closeする。自動closeは無効化でき、reopenと再queueで復旧できる。
 
