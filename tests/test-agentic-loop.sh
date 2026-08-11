@@ -381,7 +381,7 @@ first_pid=$(cat "$first_pid")
 supervisor_service="$XDG_CONFIG_HOME/systemd/user/agentic-loop-supervisor-$(printf '%s' "${target#/}" | tr '/' '-').service"
 [[ -f $supervisor_service ]] || fail 'start did not install the repository supervisor service'
 assert_contains "$supervisor_service" 'Restart=on-failure' 'supervisor service does not restart after an unexpected exit'
-assert_contains "$supervisor_service" "ExecStart=\"$target/bin/agentic-loop\" _service" 'supervisor service does not target the repository CLI'
+assert_contains "$supervisor_service" "ExecStart=$target/bin/agentic-loop _service" 'supervisor service does not target the repository CLI'
 assert_contains "$FAKE_GH_ROOT/systemctl-calls" "enable $(basename "$supervisor_service")" 'supervisor service was not enabled'
 "$target/bin/agentic-loop" start
 [[ $(cat "$(git -C "$target" rev-parse --absolute-git-dir)/agentic-loop/supervisor.pid") == "$first_pid" ]] || fail 'start duplicated the supervisor'
