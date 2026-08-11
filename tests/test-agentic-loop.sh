@@ -61,7 +61,6 @@ case "${1:-} ${2:-}" in
   *) printf 'unexpected fake gh call: %s\n' "$*" >&2; exit 1 ;;
 esac
 FAKE_GH
-
 cat > "$FAKE_BIN/codex" <<'FAKE_CODEX'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -96,6 +95,7 @@ target=$(new_repository installed-project)
 AGENTIC_LOOP_SOURCE="$PROJECT_ROOT" AGENTIC_LOOP_TARGET="$target" AGENTIC_LOOP_SKIP_START=1 "$PROJECT_ROOT/install.sh"
 [[ -x $target/bin/agentic-loop ]] || fail 'install did not add the queue CLI'
 [[ -f $target/.agentic-loop/config ]] || fail 'install did not add safe defaults'
+[[ $(cat "$target/.codex/config.toml") == 'approval_policy = "never"' ]] || fail 'install did not preserve external sandbox configuration'
 [[ $(git -C "$target" config --get core.hooksPath) == .githooks ]] || fail 'install did not enable hooks'
 [[ -f $target/docs/operations/issue-queue.md ]] || fail 'init did not install operations documentation'
 AGENTIC_LOOP_SOURCE="$PROJECT_ROOT" AGENTIC_LOOP_TARGET="$target" AGENTIC_LOOP_SKIP_START=1 "$PROJECT_ROOT/install.sh"
