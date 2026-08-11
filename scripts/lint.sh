@@ -3,19 +3,15 @@ set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
-required=(AGENTS.md README.md Makefile .editorconfig .gitignore .env.example)
+required=(AGENTS.md README.md Makefile .editorconfig .gitignore .env.example install.sh .agentic-loop/guard-secrets.sh .githooks/pre-commit .githooks/pre-push .agents/skills/submit-requirement/SKILL.md)
 for file in "${required[@]}"; do
   [[ -f $file ]] || { printf 'Missing required file: %s\n' "$file" >&2; exit 1; }
 done
 
 while IFS= read -r -d '' file; do
   bash -n "$file"
-done < <(find bin scripts tests -type f -name '*.sh' -print0)
+done < <(find bin scripts tests .agentic-loop .githooks -type f \( -name '*.sh' -o -perm -u+x \) -print0)
 bash -n bin/agentic-loop
-
-if git grep --no-index -nE -e '-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----' -- . ':!tests/' >/dev/null; then
-  printf 'Potential private key found in tracked content.\n' >&2
-  exit 1
-fi
+./.agentic-loop/guard-secrets.sh --all
 
 printf 'Lint passed.\n'

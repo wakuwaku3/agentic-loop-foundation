@@ -3,65 +3,59 @@ set -euo pipefail
 
 readonly PROGRAM_NAME="${0##*/}"
 readonly SOURCE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-readonly INIT_FILES=(
+readonly SHARED_FILES=(
   AGENTS.md
-  README.md
-  .editorconfig
-  .env.example
-  .gitignore
-  Makefile
-  bin/agentic-loop
+  .agents/skills/submit-requirement/SKILL.md
+  .agents/skills/submit-requirement/agents/openai.yaml
+  .agentic-loop/guard-secrets.sh
+  .githooks/pre-commit
+  .githooks/pre-push
+)
+readonly INIT_FILES=(
+  README.md .editorconfig .env.example .gitignore Makefile
+  bin/agentic-loop install.sh
   docs/decisions/0001-minimal-foundation.md
-  scripts/format.sh
-  scripts/lint.sh
-  tests/test-agentic-loop.sh
+  scripts/format.sh scripts/lint.sh tests/test-agentic-loop.sh
   .github/workflows/ci.yml
 )
 
-usage() {
-  printf 'Usage: %s <init|install> <target-directory>\n' "$PROGRAM_NAME" >&2
-}
-
-fail() {
-  printf '%s: %s\n' "$PROGRAM_NAME" "$1" >&2
-  exit 1
-}
+usage() { printf 'Usage: %s [target-directory]\n' "$PROGRAM_NAME" >&2; }
+fail() { printf '%s: %s\n' "$PROGRAM_NAME" "$1" >&2; exit 1; }
 
 main() {
-  [[ $# -eq 2 ]] || { usage; exit 2; }
-  local command=$1 target=$2 file
-  local -a files=(AGENTS.md)
-  [[ $command == init || $command == install ]] || { usage; exit 2; }
+  [[ $# -le 1 ]] || { usage; exit 2; }
+  local target=${1:-.} file hook_path mode=install
+  local -a files=("${SHARED_FILES[@]}")
 
-  if [[ $command == init ]]; then
-    [[ ! -e $target || -d $target ]] || fail "target is not a directory: $target"
-    if [[ -d $target ]] && find "$target" -mindepth 1 -maxdepth 1 -print -quit | grep -q .; then
-      fail "init target must be empty: $target"
-    fi
-  else
-    [[ -d $target ]] || fail "install target does not exist: $target"
+  [[ ! -e $target || -d $target ]] || fail "target is not a directory: $target"
+  mkdir -p "$target"
+
+  if ! find "$target" -mindepth 1 -maxdepth 1 ! -name .git -print -quit | grep -q .; then
+    mode=init
+    files+=("${INIT_FILES[@]}")
   fi
 
-  [[ $command == install ]] || files=("${INIT_FILES[@]}")
+  if [[ -d "$target/.git" ]]; then
+    hook_path=$(git -C "$target" config --local --get core.hooksPath || true)
+    [[ -z $hook_path || $hook_path == .githooks ]] || fail "existing core.hooksPath must be integrated manually: $hook_path"
+  fi
 
-  # Check every conflict before writing anything.
   for file in "${files[@]}"; do
     [[ ! -e "$target/$file" ]] || fail "refusing to overwrite: $target/$file"
   done
 
-  mkdir -p "$target"
   for file in "${files[@]}"; do
     mkdir -p "$target/$(dirname "$file")"
     cp "$SOURCE_ROOT/$file" "$target/$file"
   done
-  if [[ $command == init ]]; then
-    chmod +x "$target/bin/agentic-loop" "$target/scripts/format.sh" "$target/scripts/lint.sh" "$target/tests/test-agentic-loop.sh"
+  chmod +x "$target/.agentic-loop/guard-secrets.sh" "$target/.githooks/pre-commit" "$target/.githooks/pre-push"
+  if [[ $mode == init ]]; then
+    chmod +x "$target/bin/agentic-loop" "$target/install.sh" "$target/scripts/format.sh" "$target/scripts/lint.sh" "$target/tests/test-agentic-loop.sh"
   fi
 
-  if [[ $command == init ]] && [[ ! -e "$target/.git" ]]; then
-    git -C "$target" init --quiet
-  fi
-  printf 'Installed agentic loop foundation in %s\n' "$target"
+  [[ -d "$target/.git" ]] || git -C "$target" init --quiet
+  git -C "$target" config --local core.hooksPath .githooks
+  printf 'Agentic loop foundation installed (%s) in %s\n' "$mode" "$(cd "$target" && pwd)"
 }
 
 main "$@"
