@@ -209,11 +209,13 @@ agent_run_stage() {
     opencode)
       # opencode has no OS sandbox; --dir scopes work to the worktree and --auto
       # avoids interactive approval. The plan stage relies on the prompt to avoid
-      # writes. The final message (plan text or the AGENTIC_LOOP_RESULT sentinel)
-      # is printed to stdout. Token telemetry is left to the base usage record.
-      local -a opencode_args=(run --auto --dir "$worktree")
+      # writes. --format json streams events; the final message (plan text or the
+      # AGENTIC_LOOP_RESULT sentinel) stays in a text part and is matched as a
+      # substring, and step-finish parts carry token/cost telemetry.
+      local -a opencode_args=(run --auto --format json --dir "$worktree")
       [[ -n $model ]] && opencode_args+=(--model "$model")
       opencode "${opencode_args[@]}" "$prompt" > "$result_file"
+      agent_usage_from_opencode_json "$result_file" >> "$usage_file" || true
       ;;
     *)
       effort=$(agent_phase_effort "$stage")
@@ -263,6 +265,24 @@ agent_usage_from_codex_sessions() {
     local number; number=$(grep -oE "\"${value%%:*}\":[0-9]+" <<< "$line" | head -n 1 | grep -oE '[0-9]+$' || true)
     [[ -n $number ]] && printf '%s=%s\n' "${value#*:}" "$number"
   done
+  return 0
+}
+
+# Sum token and cost telemetry from an opencode --format json event stream. Each
+# step-finish part carries .part.tokens.{input,output,reasoning,cache} and
+# .part.cost; the final step may be missing (known opencode issue), so any total
+# is best-effort and simply omitted when unavailable.
+agent_usage_from_opencode_json() {
+  local file=$1 sums ti to tr cost
+  [[ -r $file ]] || return 0
+  sums=$(yq -p json -o tsv 'select(.part.type == "step-finish") | [.part.tokens.input // 0, .part.tokens.output // 0, .part.tokens.reasoning // 0, .part.cost // 0] | @tsv' "$file" 2>/dev/null \
+    | awk '{ i += $1; o += $2; r += $3; c += $4 } END { if (NR > 0) printf "%d\t%d\t%d\t%s", i, o, r, c }')
+  [[ -n $sums ]] || return 0
+  IFS=$'\t' read -r ti to tr cost <<< "$sums"
+  ((ti > 0)) && printf 'tokens_input=%s\n' "$ti"
+  ((to > 0)) && printf 'tokens_output=%s\n' "$to"
+  ((tr > 0)) && printf 'tokens_reasoning=%s\n' "$tr"
+  awk -v c="$cost" 'BEGIN { exit !(c > 0) }' && printf 'cost_usd=%s\n' "$cost"
   return 0
 }
 

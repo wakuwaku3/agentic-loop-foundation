@@ -288,8 +288,14 @@ printf '%s\n' "$*" >> "$FAKE_GH_ROOT/opencode-calls"
 [[ ${1:-} == run ]] || { printf 'opencode: unknown command\n' >&2; exit 2; }
 [[ $* == *--auto* ]] || { printf 'opencode worker must auto-approve permissions\n' >&2; exit 2; }
 sleep "${FAKE_OPENCODE_SLEEP:-0}"
-# The worker captures the final message from stdout into the result file.
-printf '%s\n' "${FAKE_OPENCODE_RESULT:-AGENTIC_LOOP_RESULT=completed}"
+# With --format json the worker reads the sentinel from a text part and token
+# telemetry from a step-finish part; otherwise it prints the plain final message.
+if [[ $* == *'--format json'* ]]; then
+  printf '{"part":{"type":"text","text":"%s"}}\n' "${FAKE_OPENCODE_RESULT:-AGENTIC_LOOP_RESULT=completed}"
+  printf '{"part":{"type":"step-finish","tokens":{"input":200,"output":50,"reasoning":5,"cache":{"read":10,"write":0}},"cost":0.02}}\n'
+else
+  printf '%s\n' "${FAKE_OPENCODE_RESULT:-AGENTIC_LOOP_RESULT=completed}"
+fi
 FAKE_OPENCODE
 cat > "$FAKE_BIN/systemctl" <<'FAKE_SYSTEMCTL'
 #!/usr/bin/env bash
@@ -640,8 +646,12 @@ printf '30 queued open none 2026-01-01T00:00:00Z\n' > "$state"
 AGENT_PROVIDER=opencode AGENTIC_LOOP_RUN_ONCE=1 FAKE_OPENCODE_SLEEP=1 "$target/bin/agentic-loop" _supervise
 grep -Eq '^30 completed closed' "$state" || fail 'opencode provider did not complete the Issue'
 assert_contains "$FAKE_GH_ROOT/opencode-calls" 'run --auto' 'opencode worker did not run headless with auto-approval'
+assert_contains "$FAKE_GH_ROOT/opencode-calls" '--format json' 'opencode worker did not request machine-readable events'
 assert_contains "$FAKE_GH_ROOT/opencode-calls" "--dir $target-worktrees/issue-30" 'opencode worker did not confine work to the worktree'
 assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'provider=opencode' 'opencode worker did not record a token usage analysis entry'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" '入力=200tok' 'opencode usage record lacked input tokens'
+# shellcheck disable=SC2016 # The dollar sign is a literal currency prefix in the recorded usage line.
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'cost=$0.02' 'opencode usage record lacked the reported cost'
 
 # Per-phase provider selection: config routes the plan phase and exec phase to
 # different providers (plan=codex read-only, exec=opencode) within one Issue.
