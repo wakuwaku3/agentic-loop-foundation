@@ -64,6 +64,45 @@ repo_name() {
 }
 state_label() { printf 'agent:%s' "$1"; }
 
+# --- AI provider abstraction (see docs/policies/ai-tool-neutrality.md) ---
+# The provider is selected by the AGENT_PROVIDER environment so the same
+# repository can run under different AI CLIs. Models and reasoning effort are
+# pinned to bounded defaults to prevent accidental high-cost runs; override
+# them per environment through the AGENT_* variables. The autonomous supervisor
+# runs under systemd, so start bakes these variables into the service unit.
+AGENT_CODEX_REASONING_EFFORT="${AGENT_CODEX_REASONING_EFFORT:-medium}"
+agent_provider() { printf '%s' "${AGENT_PROVIDER:-codex}"; }
+agent_provider_valid() { case $(agent_provider) in codex | claude) return 0 ;; *) return 1 ;; esac; }
+agent_provider_command() { case $(agent_provider) in claude) printf 'claude' ;; *) printf 'codex' ;; esac; }
+# Report whether the selected provider CLI can launch a non-interactive worker.
+agent_provider_ready() {
+  case $(agent_provider) in
+    codex) command -v codex >/dev/null 2>&1 && codex exec --help 2>/dev/null | grep -Fq -- '--add-dir' ;;
+    claude) command -v claude >/dev/null 2>&1 ;;
+    *) return 1 ;;
+  esac
+}
+# Run one autonomous worker session confined to the dedicated worktree, granting
+# only the resolved Git common directory and protected .agents directory. Never
+# bypass secret-guard hooks. The final agent message is written to result_file,
+# where the caller reads the AGENTIC_LOOP_RESULT sentinel.
+agent_run_worker() {
+  local worktree=$1 git_common_dir=$2 agents_dir=$3 result_file=$4 prompt=$5
+  case $(agent_provider) in
+    claude)
+      local -a claude_args=(--print --dangerously-skip-permissions --add-dir "$git_common_dir" --add-dir "$agents_dir")
+      [[ -n ${AGENT_CLAUDE_MODEL:-} ]] && claude_args+=(--model "$AGENT_CLAUDE_MODEL")
+      (cd "$worktree" && claude "${claude_args[@]}" "$prompt") > "$result_file"
+      ;;
+    *)
+      local -a codex_args=(exec --sandbox workspace-write --add-dir "$git_common_dir" --add-dir "$agents_dir" -c 'approval_policy="never"' -c 'sandbox_workspace_write.network_access=true')
+      [[ -n ${AGENT_CODEX_MODEL:-} ]] && codex_args+=(-c "model=$AGENT_CODEX_MODEL")
+      [[ -n $AGENT_CODEX_REASONING_EFFORT ]] && codex_args+=(-c "model_reasoning_effort=$AGENT_CODEX_REASONING_EFFORT")
+      codex "${codex_args[@]}" -C "$worktree" --output-last-message "$result_file" "$prompt"
+      ;;
+  esac
+}
+
 load_config || { [[ ${1:-} == doctor ]] || fail "$CONFIG_ERROR"; }
 
 usage() {
@@ -155,9 +194,10 @@ graphql_budget_allows() {
 }
 
 preflight() {
+  agent_provider_valid || fail 'AGENT_PROVIDER must be codex or claude'
   require_command git
   require_command gh
-  require_command codex
+  require_command "$(agent_provider_command)"
   git -C "$REPO_ROOT" rev-parse --git-dir >/dev/null 2>&1 || fail 'target is not a Git repository'
   git -C "$REPO_ROOT" remote get-url origin >/dev/null 2>&1 || fail 'origin remote is required'
   gh auth status >/dev/null 2>&1 || fail 'GitHub authentication is required; run gh auth login'
@@ -168,7 +208,7 @@ preflight() {
     say 'GraphQL rate limitが枯渇しているためProjects権限検査を延期します。Issueキューはreset後に再開します。' >&2
   fi
   repo_name >/dev/null || fail 'cannot access the target GitHub repository'
-  codex exec --help 2>/dev/null | grep -Fq -- '--add-dir' || fail 'Codex CLI exec mode with --add-dir is required'
+  agent_provider_ready || fail "$(agent_provider) CLI with non-interactive worker support is required"
   validate_config
 }
 
@@ -331,7 +371,7 @@ install_supervisor_unit() {
   unit_file="$unit_dir/$(supervisor_unit_name)"
   escaped_root=$(systemd_path_value "$REPO_ROOT") || fail 'repository path cannot be encoded safely for systemd'
   escaped_program=$(systemd_path_value "$SCRIPT_ROOT") || fail 'program path cannot be encoded safely for systemd'
-  service_path="$(dirname "$(command -v codex)"):$(dirname "$(command -v gh)"):$(dirname "$(command -v git)"):/usr/local/bin:/usr/bin:/bin"
+  service_path="$(dirname "$(command -v "$(agent_provider_command)")"):$(dirname "$(command -v gh)"):$(dirname "$(command -v git)"):/usr/local/bin:/usr/bin:/bin"
   escaped_path=$(systemd_path_value "$service_path") || fail 'command PATH cannot be encoded safely for systemd'
   mkdir -p "$unit_dir"
   {
@@ -340,6 +380,13 @@ install_supervisor_unit() {
     printf 'WorkingDirectory=%s\n' "$escaped_root"
     printf 'ExecStart=%s/bin/agentic-loop _service\n' "$escaped_program"
     printf 'Environment=PATH=%s\n' "$escaped_path"
+    printf 'Environment=AGENT_PROVIDER=%s\n' "$(agent_provider)"
+    local agent_var
+    for agent_var in AGENT_CODEX_MODEL AGENT_CODEX_REASONING_EFFORT AGENT_CLAUDE_MODEL; do
+      [[ -n ${!agent_var:-} ]] || continue
+      [[ ${!agent_var} =~ ^[A-Za-z0-9._:-]+$ ]] || fail "$agent_var contains characters unsupported in the systemd unit"
+      printf 'Environment=%s=%s\n' "$agent_var" "${!agent_var}"
+    done
     printf '%s\n' 'Restart=on-failure' 'RestartSec=5s'
     printf '\n%s\n' '[Install]' 'WantedBy=default.target'
   } > "$unit_file"
@@ -468,8 +515,9 @@ doctor_collect() {
   elif [[ -n $default_branch ]]; then doctor_add warning 'default branch' "default branchがmainではありません（$default_branch）。main前提の同期機能は利用できません。" 'repositoryのdefault branchと運用方針を確認してください。'
   else doctor_add failure 'default branch' 'default branchを確認できません。' 'GitHubへのrepositoryアクセスとoriginを確認してください。'; fi
 
-  if command -v codex >/dev/null 2>&1 && codex exec --help 2>/dev/null | grep -Fq -- '--add-dir'; then doctor_add success 'Codex CLI' 'workspace-write workerを起動できます。' '対応は不要です。'
-  else doctor_add failure 'Codex CLI' 'Issue workerを安全なsandboxで起動できません。' 'Codex CLIを導入または更新し、codex loginを実行してください。'; fi
+  if ! agent_provider_valid; then doctor_add failure 'AI CLI' "AGENT_PROVIDER=$(agent_provider) は未対応です。" 'AGENT_PROVIDER を codex または claude に設定してください。'
+  elif agent_provider_ready; then doctor_add success "AI CLI ($(agent_provider))" 'Issue workerを起動できます。' '対応は不要です。'
+  else doctor_add failure "AI CLI ($(agent_provider))" 'Issue workerを安全に起動できません。' "$(agent_provider) CLIを導入または更新し、ログインしてください。"; fi
   if command -v devbox >/dev/null 2>&1; then doctor_add success 'Devbox' '固定環境の共通検証入口を利用できます。' '対応は不要です。'
   else doctor_add failure 'Devbox' '`devbox run --pure check` を実行できません。' 'https://www.jetify.com/devbox/docs/installing_devbox/ を参照してDevboxを導入してください。'; fi
 
@@ -890,8 +938,7 @@ worker() {
   (
     while :; do sleep $((LEASE_SECONDS / 3 + 1)); lease_comment "$issue" "$worker" || true; done
   ) & heartbeat_pid=$!
-  codex exec --sandbox workspace-write --add-dir "$git_common_dir" --add-dir "$agents_dir" -c 'approval_policy="never"' -c 'sandbox_workspace_write.network_access=true' \
-    -C "$worktree" --output-last-message "$result" "$(issue_prompt "$issue" "$repository")" || exit_code=$?
+  agent_run_worker "$worktree" "$git_common_dir" "$agents_dir" "$result" "$(issue_prompt "$issue" "$repository")" || exit_code=$?
   kill "$heartbeat_pid" 2>/dev/null || true
   wait "$heartbeat_pid" 2>/dev/null || true
   project_add_pull_requests "$branch"

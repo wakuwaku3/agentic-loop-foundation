@@ -11,6 +11,8 @@ readonly SHARED_FILES=(
   .agents/skills/submit-requirement/agents/openai.yaml
   .agents/skills/diagnose-codebase/SKILL.md
   .agents/skills/diagnose-codebase/agents/openai.yaml
+  .claude/skills/submit-requirement/SKILL.md
+  .claude/skills/diagnose-codebase/SKILL.md
   .agentic-loop/guard-secrets.sh .agentic-loop/update-main.sh .agentic-loop/diagnose-codebase.sh .agentic-loop/config
   .githooks/pre-commit .githooks/pre-push bin/agentic-loop bin/agentic-loop-diagnose
 )
@@ -23,15 +25,16 @@ readonly INIT_FILES=(
 fail() { printf 'install-target: %s\n' "$1" >&2; exit 1; }
 
 preflight() {
-  local command_name
-  for command_name in git gh codex systemctl systemd-escape; do command -v "$command_name" >/dev/null 2>&1 || fail "$command_name is required"; done
+  local command_name provider=${AGENT_PROVIDER:-codex} provider_cli
+  case $provider in codex) provider_cli=codex ;; claude) provider_cli=claude ;; *) fail 'AGENT_PROVIDER must be codex or claude' ;; esac
+  for command_name in git gh "$provider_cli" systemctl systemd-escape; do command -v "$command_name" >/dev/null 2>&1 || fail "$command_name is required"; done
   git -C "$TARGET" rev-parse --git-dir >/dev/null 2>&1 || fail 'target must be a Git repository'
   git -C "$TARGET" remote get-url origin >/dev/null 2>&1 || fail 'origin remote is required'
   gh auth status >/dev/null 2>&1 || fail 'GitHub authentication is required; run gh auth login'
   gh api graphql -f query='query { viewer { login projectsV2(first: 1) { totalCount } } }' >/dev/null 2>&1 ||
     fail 'GitHub token needs repository access and project/read:project scopes'
   (cd "$TARGET" && gh repo view --json nameWithOwner --jq .nameWithOwner >/dev/null 2>&1) || fail 'cannot access the target GitHub repository'
-  codex exec --help >/dev/null 2>&1 || fail 'Codex CLI exec mode is required'
+  [[ $provider != codex ]] || codex exec --help >/dev/null 2>&1 || fail 'Codex CLI exec mode is required'
 }
 
 main() {
