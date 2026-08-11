@@ -24,6 +24,8 @@ curl -fsSL https://raw.githubusercontent.com/wakuwaku3/agentic-loop-foundation/m
 
 GitHub Issueが要求と状態履歴の正本で、Projectは障害がキューを止めない可視化層です。中央キューや外部DB、OpenAI API keyは使いません。
 
+インストールはコードベース自己診断のuser-level systemd timerも設定します。週次診断は要件と実装のずれ、構成、skill候補、不要ファイルを調べ、コードを変更せず `diagnosis` Label付きの日本語Issueを作成します。手動実行は `bin/agentic-loop-diagnose`、詳細は [コードベース自己診断](docs/operations/codebase-diagnosis.md) を参照してください。
+
 ## 要求の入力
 
 Codexで `$submit-requirement` に続けて、達成したいことを自然言語で入力してください。

@@ -10,6 +10,7 @@ readonly WORKTREE_ROOT="$(dirname "$REPO_ROOT")/$(basename "$REPO_ROOT")-worktre
 readonly CONFIG_FILE="$REPO_ROOT/.agentic-loop/config"
 readonly LABELS=(queued running needs-input in-review completed failed stale)
 readonly PRIORITY_LABELS=(critical high medium low)
+readonly DIAGNOSIS_LABEL=diagnosis
 
 cd "$REPO_ROOT"
 
@@ -95,6 +96,7 @@ setup_labels() {
     esac
     gh label create "priority:$name" --color "$color" --description "$description" --force >/dev/null
   done
+  gh label create "$DIAGNOSIS_LABEL" --color D4C5F9 --description 'Actionable finding from periodic codebase diagnosis' --force >/dev/null
 }
 
 setup_project() {
