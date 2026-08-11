@@ -64,6 +64,9 @@ case "${1:-} ${2:-}" in
               rank=4; if ($4 ~ /(^|,)critical(,|$)/) rank=0; else if ($4 ~ /(^|,)high(,|$)/) rank=1; else if ($4 ~ /(^|,)medium(,|$)/) rank=2; else if ($4 ~ /(^|,)low(,|$)/) rank=3
               created=($5 == "" ? $1 : $5); print rank "\t" created "\t" $1
             }' "$state"
+            if [[ -n ${FAKE_STALE_QUEUED_ISSUE:-} ]] && ! awk -v n="$FAKE_STALE_QUEUED_ISSUE" '$1 == n && $2 == "queued" {found=1} END {exit !found}' "$state"; then
+              awk -v n="$FAKE_STALE_QUEUED_ISSUE" '$1 == n {print "0\t" ($5 == "" ? $1 : $5) "\t" $1}' "$state"
+            fi
           else awk '$2 == "queued" && $3 != "closed" {print $1}' "$state"; fi ;;
         agent:running)
           if [[ $* == *title* ]]; then awk '$2 == "running" && $3 != "closed" {print "#" $1 " Fake issue " $1}' "$state"; else awk '$2 == "running" && $3 != "closed" {print $1}' "$state"; fi ;;
@@ -427,7 +430,7 @@ git -C "$target" push --quiet
 state="$FAKE_GH_ROOT/$state_key.state"
 state_root="$(git -C "$target" rev-parse --absolute-git-dir)/agentic-loop"
 printf '1 queued open low 2026-01-01T00:00:00Z\n2 queued open critical,low 2026-01-02T00:00:00Z\n3 queued open critical 2025-12-31T00:00:00Z\n4 queued open none 2025-01-01T00:00:00Z\n' > "$state"
-AGENTIC_LOOP_RUN_ONCE=1 FAKE_CODEX_SLEEP=1 "$target/bin/agentic-loop" _supervise
+AGENTIC_LOOP_RUN_ONCE=1 FAKE_CODEX_SLEEP=1 FAKE_STALE_QUEUED_ISSUE=3 "$target/bin/agentic-loop" _supervise
 completed_count=$(awk '$2 == "completed" {count++} END {print count+0}' "$state")
 if [[ $completed_count -ne 2 ]]; then
   cat "$state" >&2
