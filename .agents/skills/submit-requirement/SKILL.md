@@ -15,7 +15,8 @@ For an ordinary build or change request received in an interactive session, use 
 2. Verify `.agentic-loop/config`, executable `bin/agentic-loop`, a `running` first line from `bin/agentic-loop status`, and GitHub Issue read/write access for the repository.
 3. Search open Issue titles and bodies before creating anything. Inspect the body and comments of plausible matches and reuse an Issue that asks for the same user-visible outcome.
 4. If the matching Issue is `agent:running`, report its URL and state and stop. If it is `agent:queued`, reuse it unchanged. Otherwise remove other `agent:*` state labels and apply `agent:queued`. If no match exists, create one Issue containing the objective, constraints, and completion criteria, then apply `agent:queued`.
-5. Re-read the Issue and verify it is open and either queued or running. Report its URL and state, then stop without implementing it in the interactive session.
+5. Immediately after creating or re-queuing an Issue, run `bin/agentic-loop sync-issue ISSUE_NUMBER`. This best-effort command adds it to the repository Project before Supervisor claim and durably queues a retry when Projects is temporarily unavailable. Do not treat a deferred Project update as an Issue queue failure.
+6. Re-read the Issue and verify it is open and either queued or running. Report its URL and state, then stop without implementing it in the interactive session.
 
 If any queue prerequisite cannot be verified, identify the failed check and follow the safe fallback in `docs/operations/issue-queue.md`. Do not silently choose a route, create an unverified duplicate, or implement in parallel with queued work.
 
