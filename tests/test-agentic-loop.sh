@@ -48,7 +48,9 @@ case "${1:-} ${2:-}" in
   'project link'|'project field-create'|'project item-add') exit 0 ;;
   'project view') printf 'PVT_fake\n' ;;
   'pr list')
-    if [[ $* == *'--head agent/issue-6'* ]]; then
+    if [[ $* == *'--state merged'* ]]; then
+      if [[ ${FAKE_PR_MERGED:-1} == 1 ]]; then printf 'https://github.example/%s/pull/merged\n' "$slug"; fi
+    elif [[ $* == *'--head agent/issue-6'* ]]; then
       printf 'https://github.example/%s/pull/6\n' "$slug"
     elif [[ $* == *'--state all'* ]]; then
       printf 'https://github.example/%s/pull/1\nhttps://github.example/%s/pull/2\n' "$slug" "$slug"
@@ -325,6 +327,14 @@ FAKE_CODEX_GIT_OPERATIONS=1 "$target/bin/agentic-loop" _worker 6 linked-worktree
 git -C "$target" fetch --quiet origin agent/issue-6
 git -C "$target" show 'origin/agent/issue-6:worker.txt' | grep -Fxq 'worker change' || fail 'linked-worktree Git metadata operations did not reach the remote'
 assert_contains "$FAKE_GH_ROOT/calls" "project item-add 7 --owner acme --url https://github.example/acme/installed-project/pull/6" 'worker PR was not added to the Project'
+
+# A worker completion report cannot close an Issue unless GitHub confirms a merged PR for its branch.
+printf '7 running open\n' > "$state"
+FAKE_PR_MERGED=0 "$target/bin/agentic-loop" _worker 7 unmerged-worker
+grep -Eq '^7 failed open$' "$state" || fail 'unmerged worker self-report was accepted as completed'
+[[ -e $target-worktrees/issue-7 ]] || fail 'unmerged worker worktree was removed'
+# shellcheck disable=SC2016 # Backticks are literal Markdown in the expected Issue comment.
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'branch `agent/issue-7` のmerge済みPRをGitHubで確認できませんでした' 'unmerged completion did not record objective failure evidence'
 
 # needs-input and failure are isolated state transitions; a later Issue reply requeues only that Issue.
 printf '4 running open\n5 running open\n' > "$state"
