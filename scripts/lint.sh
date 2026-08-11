@@ -3,7 +3,7 @@ set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
-required=(AGENTS.md README.md Makefile .editorconfig .gitignore .env.example .codex/config.toml install.sh devbox.json devbox.lock docs/policies/cost.md docs/policies/testing.md docs/policies/external-environment.md docs/policies/development-environment.md docs/policies/github-language.md docs/policies/validation-harness.md docs/policies/continuous-delivery.md docs/decisions/0002-github-issue-queue.md docs/operations/issue-queue.md docs/operations/codebase-diagnosis.md .agentic-loop/config .agentic-loop/guard-secrets.sh .agentic-loop/update-main.sh .agentic-loop/diagnose-codebase.sh .githooks/pre-commit .githooks/pre-push .agents/skills/submit-requirement/SKILL.md .agents/skills/diagnose-codebase/SKILL.md bin/agentic-loop bin/agentic-loop-diagnose scripts/check-environment.sh scripts/install-target.sh)
+required=(AGENTS.md README.md Makefile .editorconfig .gitignore .env.example .codex/config.toml install.sh devbox.json devbox.lock docs/policies/cost.md docs/policies/testing.md docs/policies/external-environment.md docs/policies/development-environment.md docs/policies/ai-tool-neutrality.md docs/policies/github-language.md docs/policies/validation-harness.md docs/policies/continuous-delivery.md docs/decisions/0002-github-issue-queue.md docs/operations/issue-queue.md docs/operations/codebase-diagnosis.md .agentic-loop/config .agentic-loop/guard-secrets.sh .agentic-loop/update-main.sh .agentic-loop/diagnose-codebase.sh .githooks/pre-commit .githooks/pre-push .agents/skills/submit-requirement/SKILL.md .agents/skills/diagnose-codebase/SKILL.md bin/agentic-loop bin/agentic-loop-diagnose scripts/check-environment.sh scripts/install-target.sh)
 for file in "${required[@]}"; do
   [[ -f $file ]] || { printf 'Missing required file: %s\n' "$file" >&2; exit 1; }
 done
@@ -17,10 +17,20 @@ grep -Fq '[費用ポリシー](docs/policies/cost.md)' AGENTS.md || {
   printf 'Missing cost policy invariant.\n' >&2
   exit 1
 }
-grep -Fq 'Codexサブスクリプションの既存契約料金だけ' docs/policies/cost.md || {
+grep -Fq 'サブスクリプションの既存契約料金だけとする' docs/policies/cost.md || {
   printf 'Invalid cost policy.\n' >&2
   exit 1
 }
+grep -Fq '[AIツール非依存ポリシー](docs/policies/ai-tool-neutrality.md)' AGENTS.md || {
+  printf 'Missing AI tool neutrality invariant.\n' >&2
+  exit 1
+}
+for requirement in 'AGENT_PROVIDER' 'プロバイダアダプタ' 'reasoning effort'; do
+  grep -Fq "$requirement" docs/policies/ai-tool-neutrality.md || {
+    printf 'AI tool neutrality policy lacks requirement: %s\n' "$requirement" >&2
+    exit 1
+  }
+done
 grep -Fq '[テストポリシー](docs/policies/testing.md)' AGENTS.md || {
   printf 'Missing testing policy invariant.\n' >&2
   exit 1

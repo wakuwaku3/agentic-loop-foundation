@@ -22,6 +22,7 @@
 - 変更は再現可能な検証手段と、必要十分な文書を伴う。
 - [外部環境コード化ポリシー](docs/policies/external-environment.md)に従い、依存・操作する外部環境のdesired state、適用、drift検出、検証、復旧および移行を再現可能に管理する。
 - [開発環境ポリシー](docs/policies/development-environment.md)に従い、固定されたコード化済み環境で開発・検証する。
+- [AIツール非依存ポリシー](docs/policies/ai-tool-neutrality.md)に従い、特定のAIコーディングツールにベンダーロックせず、環境変数で選択可能な差し替え可能プロバイダとして扱う。
 - [テストポリシー](docs/policies/testing.md)に従い、すべての自動テストを共通入口から実行する。
 - [検証ハーネスポリシー](docs/policies/validation-harness.md)に従い、変更ライフサイクルの各gateで共通入口による検証を完了する。
 - [継続的デリバリーポリシー](docs/policies/continuous-delivery.md)に従い、最初の本番deployまたはbinary releaseと同じ変更で、mainへのmergeを起点とする再現可能なCD pipelineを実装する。

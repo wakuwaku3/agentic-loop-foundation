@@ -4,7 +4,7 @@ set -euo pipefail
 readonly SOURCE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 readonly TARGET="${1:-.}"
 readonly SHARED_FILES=(
-  AGENTS.md .codex/config.toml docs/policies/cost.md docs/policies/testing.md docs/policies/external-environment.md docs/policies/development-environment.md
+  AGENTS.md .codex/config.toml docs/policies/cost.md docs/policies/testing.md docs/policies/external-environment.md docs/policies/development-environment.md docs/policies/ai-tool-neutrality.md
   docs/policies/github-language.md docs/policies/validation-harness.md docs/policies/continuous-delivery.md
   docs/decisions/0002-github-issue-queue.md docs/operations/issue-queue.md docs/operations/codebase-diagnosis.md
   .agents/skills/submit-requirement/SKILL.md
