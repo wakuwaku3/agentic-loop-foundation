@@ -139,6 +139,48 @@ provider_ready() {
 }
 # The distinct providers actually used across the worker phases.
 agent_used_providers() { printf '%s\n%s\n' "$(agent_phase_provider plan)" "$(agent_phase_provider exec)" | sort -u; }
+
+# Weekly (secondary) rate-limit usage percent from the newest Codex session log.
+# Codex writes token_count events to ~/.codex/sessions; the schema is
+# .payload.rate_limits.secondary.used_percent on event_msg records. Returns
+# non-zero when no readable telemetry exists so the caller can fail open.
+codex_weekly_used_percent() {
+  local sessions="${CODEX_HOME:-$HOME/.codex}/sessions" file pct
+  [[ -d $sessions ]] || return 1
+  file=$(find "$sessions" -type f -name 'rollout-*.jsonl' -printf '%T@\t%p\n' 2>/dev/null | sort -rn | head -n 1 | cut -f2-)
+  [[ -n $file && -r $file ]] || return 1
+  pct=$(yq -p json -o tsv 'select(.payload.type == "token_count") | .payload.rate_limits.secondary.used_percent' "$file" 2>/dev/null | grep -E '^[0-9]+(\.[0-9]+)?$' | tail -n 1)
+  [[ -n $pct ]] || return 1
+  printf '%s' "$pct"
+}
+
+# Decide whether a new Issue may be claimed while leaving an emergency reserve.
+# Only Codex exposes usage headlessly; for other providers, or when telemetry is
+# unreadable, claiming continues (fail open). budget.weekly_reserve_percent <= 0
+# disables the guard.
+budget_allows_claim() {
+  local reserve pct limit
+  reserve=$(config_value 'budget.weekly_reserve_percent')
+  [[ $reserve =~ ^[0-9]+$ ]] || return 0
+  (( reserve <= 0 )) && return 0
+  agent_used_providers | grep -qx codex || return 0
+  pct=$(codex_weekly_used_percent) || return 0
+  limit=$((100 - reserve))
+  awk -v p="$pct" -v l="$limit" 'BEGIN { exit !(p > l) }' && return 1
+  return 0
+}
+
+# Announce only the transitions into and out of a budget pause so the local
+# supervisor log is not spammed every poll.
+budget_note_pause() {
+  local marker="$STATE_ROOT/budget-paused"
+  if budget_allows_claim; then
+    [[ -e $marker ]] && { rm -f "$marker"; say '週次利用率がreserve閾値を下回ったため、Issueのclaimを再開します。' >&2; }
+    return 0
+  fi
+  [[ -e $marker ]] || { mkdir -p "$STATE_ROOT"; : > "$marker"; say '週次利用率がreserve閾値を超えたため、緊急枠を確保するためIssueのclaimを一時停止します。' >&2; }
+  return 1
+}
 # Run one worker stage confined to the dedicated worktree. stage=plan only
 # investigates and returns a plan (read-only for Codex); stage=exec implements
 # it with workspace-write, granting only the resolved Git common directory and
@@ -966,16 +1008,18 @@ supervise() {
       reconcile_pending_project
       reconcile_queued_categories
       triage_stale_queued
-      while [[ $(worker_count) -lt $MAX_WORKERS ]]; do
-        local issue worker
-        issue=$(claim_next) || break
-        worker="$(repo_name | tr '/.' '-')-$issue-$(date +%s)-$$"
-        lease_comment "$issue" "$worker"
-        project_add_issue "$issue"
-        project_sync_state "$issue" running
-        "$0" _worker "$issue" "$worker" >> "$STATE_ROOT/logs/issue-$issue.log" 2>&1 &
-        printf '%s\n' "$!" > "$STATE_ROOT/workers/$issue.pid"
-      done
+      if budget_note_pause; then
+        while [[ $(worker_count) -lt $MAX_WORKERS ]]; do
+          local issue worker
+          issue=$(claim_next) || break
+          worker="$(repo_name | tr '/.' '-')-$issue-$(date +%s)-$$"
+          lease_comment "$issue" "$worker"
+          project_add_issue "$issue"
+          project_sync_state "$issue" running
+          "$0" _worker "$issue" "$worker" >> "$STATE_ROOT/logs/issue-$issue.log" 2>&1 &
+          printf '%s\n' "$!" > "$STATE_ROOT/workers/$issue.pid"
+        done
+      fi
       if [[ ${AGENTIC_LOOP_RUN_ONCE:-0} == 1 ]]; then
         while [[ $(worker_count) -gt 0 ]]; do sleep 1; done
         break

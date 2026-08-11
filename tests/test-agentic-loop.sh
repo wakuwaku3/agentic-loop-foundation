@@ -679,6 +679,23 @@ assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'stage=exec' 'exec stage usa
 git -C "$target" worktree remove "$target-worktrees/issue-20" --force 2>/dev/null || true
 git -C "$target" branch -D agent/issue-20 >/dev/null 2>&1 || true
 
+# Budget guard: pause claiming while the weekly Codex usage exceeds the reserve,
+# then resume once usage recovers (usage is read from the newest session log).
+codex_home="$TEST_ROOT/codex-home"
+mkdir -p "$codex_home/sessions/2026/01/01"
+{
+  printf '[budget]\nweekly_reserve_percent = 20\n'
+  printf '[queue]\npoll_seconds = 1\nmax_workers = 1\nlease_seconds = 3\nstop_timeout = 10\nstale_days = 30\n'
+} > "$target/.agentic-loop.toml"
+printf '40 queued open none 2026-01-01T00:00:00Z\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+printf '{"type":"event_msg","timestamp":"2026-01-01T00:00:00Z","payload":{"type":"token_count","rate_limits":{"secondary":{"used_percent":95,"window_minutes":10079}}}}\n' > "$codex_home/sessions/2026/01/01/rollout-over.jsonl"
+CODEX_HOME="$codex_home" AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _supervise
+grep -Eq '^40 queued open' "$state" || fail 'budget guard did not pause claiming while over the reserve'
+printf '{"type":"event_msg","timestamp":"2026-01-01T00:10:00Z","payload":{"type":"token_count","rate_limits":{"secondary":{"used_percent":10,"window_minutes":10079}}}}\n' > "$codex_home/sessions/2026/01/01/rollout-under.jsonl"
+CODEX_HOME="$codex_home" AGENTIC_LOOP_RUN_ONCE=1 FAKE_CODEX_SLEEP=1 "$target/bin/agentic-loop" _supervise
+grep -Eq '^40 completed closed' "$state" || fail 'budget guard did not resume claiming after usage recovered'
+
 # Multiple priority labels use the highest rank; setup creates all priority and stale labels idempotently.
 grep -Fq $'label create priority:critical' "$FAKE_GH_ROOT/calls" || fail 'setup did not create the critical priority label'
 grep -Fq $'label create priority:low' "$FAKE_GH_ROOT/calls" || fail 'setup did not create the low priority label'
