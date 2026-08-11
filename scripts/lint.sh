@@ -113,6 +113,7 @@ grep -Fq 'agentic-loop:usage' bin/agentic-loop || { printf 'Token usage is not r
 grep -Fq -- '--sandbox read-only' bin/agentic-loop || { printf 'Plan stage does not run read-only.\n' >&2; exit 1; }
 grep -Fq 'agent_phase_effort' bin/agentic-loop || { printf 'Plan and exec reasoning effort is not tiered.\n' >&2; exit 1; }
 grep -Fq 'agent_phase_provider' bin/agentic-loop || { printf 'Per-phase provider selection is missing.\n' >&2; exit 1; }
+grep -Fq 'budget_allows_claim' bin/agentic-loop || { printf 'Budget guard is missing.\n' >&2; exit 1; }
 if grep -Eq 'danger-full-access|OPENAI_API_KEY' bin/agentic-loop bin/agentic-loop-diagnose .agentic-loop/diagnose-codebase.sh install.sh scripts/install-target.sh; then
   printf 'Forbidden Codex execution or API-key billing configuration.\n' >&2
   exit 1

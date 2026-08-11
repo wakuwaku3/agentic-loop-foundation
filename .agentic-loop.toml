@@ -23,6 +23,12 @@ reasoning_effort = "low"
 # Re-plan with the flagship plan phase this many times when exec cannot complete.
 plan_max = 1
 
+[budget]
+# Leave an emergency reserve: pause claiming new Issues while the weekly usage
+# exceeds (100 - this percent). Only Codex exposes usage without a session, so
+# the guard is best-effort for other providers. Zero disables it.
+weekly_reserve_percent = 20
+
 [queue]
 # Polling and concurrency defaults. Use non-negative integer seconds/counts.
 poll_seconds = 30
