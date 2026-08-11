@@ -21,13 +21,15 @@ STOP_TIMEOUT=0
 STALE_DAYS=30
 GRAPHQL_RESERVE=500
 RATE_LIMIT_CACHE_SECONDS=15
+API_RETRY_ATTEMPTS=3
+API_RETRY_BASE_SECONDS=1
 
 load_config() {
   local line key value
   [[ -r $CONFIG_FILE ]] || return 0
   while IFS= read -r line || [[ -n $line ]]; do
     [[ -z $line || $line == \#* ]] && continue
-    [[ $line =~ ^(POLL_SECONDS|MAX_WORKERS|LEASE_SECONDS|STOP_TIMEOUT|STALE_DAYS|GRAPHQL_RESERVE|RATE_LIMIT_CACHE_SECONDS)=([0-9]+)$ ]] ||
+    [[ $line =~ ^(POLL_SECONDS|MAX_WORKERS|LEASE_SECONDS|STOP_TIMEOUT|STALE_DAYS|GRAPHQL_RESERVE|RATE_LIMIT_CACHE_SECONDS|API_RETRY_ATTEMPTS|API_RETRY_BASE_SECONDS)=([0-9]+)$ ]] ||
       fail "invalid configuration line: $line"
     key=${BASH_REMATCH[1]}; value=${BASH_REMATCH[2]}
     printf -v "$key" '%s' "$value"
@@ -71,6 +73,33 @@ Usage: $PROGRAM_NAME {setup|start|stop|status}
 EOF
 }
 
+repo_api() {
+  local endpoint=$1 attempt=0 delay=$API_RETRY_BASE_SECONDS rc output error input='' index
+  shift
+  local -a args=("$@")
+  mkdir -p "$STATE_ROOT"
+  output="$STATE_ROOT/api-output.$$"; error="$STATE_ROOT/api-error.$$"
+  for ((index=0; index<${#args[@]}; index++)); do
+    if [[ ${args[$index]} == --input && ${args[$((index + 1))]:-} == - ]]; then
+      input="$STATE_ROOT/api-input.$$"; cat > "$input"; args[index + 1]=$input; break
+    fi
+  done
+  while :; do
+    if gh api "repos/$(repo_name)/$endpoint" "${args[@]}" > "$output" 2> "$error"; then
+      cat "$output"; rm -f "$output" "$error" "$input"; return 0
+    else
+      rc=$?
+    fi
+    attempt=$((attempt + 1))
+    if (( attempt >= API_RETRY_ATTEMPTS )) || ! grep -Eqi 'rate limit|secondary rate|HTTP (429|5[0-9][0-9])|timed? out|timeout|connection reset|temporary failure|service unavailable|bad gateway' "$error"; then
+      cat "$error" >&2; rm -f "$output" "$error" "$input"; return "$rc"
+    fi
+    say "GitHub REST APIの一時障害を再試行します（attempt=$attempt/$API_RETRY_ATTEMPTS, wait=${delay}s）。" >&2
+    sleep "$delay"
+    delay=$((delay * 2))
+  done
+}
+
 validate_config() {
   [[ $POLL_SECONDS =~ ^[1-9][0-9]*$ ]] || fail 'POLL_SECONDS must be a positive integer'
   [[ $MAX_WORKERS =~ ^[1-9][0-9]*$ ]] || fail 'MAX_WORKERS must be a positive integer'
@@ -79,6 +108,8 @@ validate_config() {
   [[ $STALE_DAYS =~ ^[0-9]+$ ]] || fail 'STALE_DAYS must be a non-negative integer'
   [[ $GRAPHQL_RESERVE =~ ^[0-9]+$ ]] || fail 'GRAPHQL_RESERVE must be a non-negative integer'
   [[ $RATE_LIMIT_CACHE_SECONDS =~ ^[1-9][0-9]*$ ]] || fail 'RATE_LIMIT_CACHE_SECONDS must be a positive integer'
+  [[ $API_RETRY_ATTEMPTS =~ ^[1-9][0-9]*$ ]] || fail 'API_RETRY_ATTEMPTS must be a positive integer'
+  [[ $API_RETRY_BASE_SECONDS =~ ^[0-9]+$ ]] || fail 'API_RETRY_BASE_SECONDS must be a non-negative integer'
 }
 
 graphql_budget_file() { printf '%s/graphql-rate-limit' "$STATE_ROOT"; }
@@ -113,19 +144,6 @@ graphql_budget_allows() {
   budget=$(read_graphql_budget) || return 1
   IFS=$'\t' read -r remaining reset <<< "$budget"
   (( remaining >= minimum ))
-}
-
-wait_for_graphql_budget() {
-  local budget remaining reset now wait_seconds
-  budget=$(read_graphql_budget) || { sleep "$POLL_SECONDS"; return 1; }
-  IFS=$'\t' read -r remaining reset <<< "$budget"
-  (( remaining > GRAPHQL_RESERVE )) && return 0
-  now=$(date +%s); wait_seconds=$((reset - now))
-  (( wait_seconds < 1 )) && wait_seconds=1
-  (( wait_seconds > 60 )) && wait_seconds=60
-  say "GraphQL残量が保護閾値以下のため、resetまで新規claimを停止します（remaining=$remaining, reserve=$GRAPHQL_RESERVE, 残り ${wait_seconds}秒以上）。" >&2
-  sleep "$wait_seconds"
-  return 1
 }
 
 preflight() {
@@ -252,9 +270,12 @@ cmd_setup() {
 
 pid_alive() {
   [[ -r $STATE_ROOT/supervisor.pid ]] || return 1
-  local pid
+  local pid command_line
   read -r pid < "$STATE_ROOT/supervisor.pid"
-  [[ $pid =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null
+  [[ $pid =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null || return 1
+  [[ -r /proc/$pid/cmdline ]] || return 1
+  command_line=$(tr '\0' ' ' < "/proc/$pid/cmdline") || return 1
+  [[ $command_line == *"$SCRIPT_ROOT/bin/agentic-loop"* && ( $command_line == *' _service'* || $command_line == *' _supervise'* ) ]]
 }
 
 clear_stale_lock() {
@@ -264,21 +285,58 @@ clear_stale_lock() {
   rm -f "$STATE_ROOT/supervisor.pid"
 }
 
+supervisor_unit_name() {
+  printf 'agentic-loop-supervisor-%s.service\n' "$(systemd-escape --path "$REPO_ROOT")"
+}
+
+install_supervisor_unit() {
+  local unit_dir unit_file escaped_root escaped_program
+  unit_dir="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+  unit_file="$unit_dir/$(supervisor_unit_name)"
+  escaped_root=${REPO_ROOT//\\/\\\\}; escaped_root=${escaped_root//\"/\\\"}
+  escaped_program=${SCRIPT_ROOT//\\/\\\\}; escaped_program=${escaped_program//\"/\\\"}
+  mkdir -p "$unit_dir"
+  {
+    printf '%s\n' '[Unit]' 'Description=Agentic Loop repository supervisor' 'After=network-online.target'
+    printf '\n%s\n' '[Service]' 'Type=simple'
+    printf 'WorkingDirectory="%s"\n' "$escaped_root"
+    printf 'ExecStart="%s/bin/agentic-loop" _service\n' "$escaped_program"
+    printf '%s\n' 'Restart=on-failure' 'RestartSec=5s'
+    printf '\n%s\n' '[Install]' 'WantedBy=default.target'
+  } > "$unit_file"
+  systemctl --user daemon-reload
+  systemctl --user enable "$(supervisor_unit_name)" >/dev/null
+}
+
+cmd_service() {
+  mkdir -p "$STATE_ROOT/logs" "$WORKTREE_ROOT"
+  clear_stale_lock || return 0
+  mkdir "$STATE_ROOT/supervisor.lock" 2>/dev/null || return 0
+  supervise
+}
+
 cmd_start() {
   preflight
   mkdir -p "$STATE_ROOT/logs" "$WORKTREE_ROOT"
   rm -f "$STATE_ROOT/stop.requested"
-  if ! clear_stale_lock; then
+  if pid_alive; then
     say "Agentic Loop supervisor is already running (pid $(cat "$STATE_ROOT/supervisor.pid"))."
     return 0
   fi
-  mkdir "$STATE_ROOT/supervisor.lock" 2>/dev/null || fail 'supervisor is already running'
-  nohup "$0" _supervise >> "$STATE_ROOT/supervisor.log" 2>&1 </dev/null &
-  local child=$!
-  printf '%s\n' "$child" > "$STATE_ROOT/supervisor.pid"
-  sleep 0.1
-  kill -0 "$child" 2>/dev/null || { rmdir "$STATE_ROOT/supervisor.lock" 2>/dev/null || true; fail 'supervisor failed to start'; }
-  say "Agentic Loop supervisor started (pid $child, workers $MAX_WORKERS)."
+  clear_stale_lock || fail 'stale supervisor state could not be repaired'
+  install_supervisor_unit
+  systemctl --user restart "$(supervisor_unit_name)"
+  local waited=0
+  while ! pid_alive && (( waited < 50 )); do sleep 0.1; waited=$((waited + 1)); done
+  if ! pid_alive; then
+    # Allows deterministic test doubles and environments whose user manager is
+    # temporarily unavailable; the installed unit remains the crash-recovery path.
+    nohup "$0" _service >> "$STATE_ROOT/supervisor.log" 2>&1 </dev/null &
+    waited=0
+    while ! pid_alive && (( waited < 50 )); do sleep 0.1; waited=$((waited + 1)); done
+  fi
+  pid_alive || fail 'supervisor failed to start'
+  say "Agentic Loop supervisor started (pid $(cat "$STATE_ROOT/supervisor.pid"), workers $MAX_WORKERS)."
 }
 
 cmd_stop() {
@@ -298,11 +356,13 @@ cmd_stop() {
     sleep 1
     waited=$((waited + 1))
   done
+  systemctl --user stop "$(supervisor_unit_name)" >/dev/null 2>&1 || true
   say 'Agentic Loop supervisor stopped after draining workers.'
 }
 
 running_issues() {
-  gh issue list --state open --label "$(state_label running)" --limit 100 --json number,title --template '{{range .}}#{{.number}} {{.title}}{{"\\n"}}{{end}}' 2>/dev/null || true
+  repo_api issues --method GET -f state=open -f labels="$(state_label running)" -f per_page=100 --paginate \
+    --jq '.[] | select(.pull_request == null) | "#\(.number) \(.title)"' 2>/dev/null || true
 }
 
 cmd_status() {
@@ -313,31 +373,32 @@ cmd_status() {
 }
 
 set_issue_state() {
-  local issue=$1 target=$2 label
-  local -a args=(issue edit "$issue")
-  for label in "${LABELS[@]}"; do
-    [[ $label == "$target" ]] || args+=(--remove-label "$(state_label "$label")")
-  done
-  args+=(--add-label "$(state_label "$target")")
-  gh "${args[@]}" >/dev/null
+  local issue=$1 target=$2 labels
+  labels=$(repo_api "issues/$issue" --jq '[.labels[].name | select(startswith("agent:") | not)] + ["agent:'"$target"'"]') || return 1
+  printf '%s\n' "$labels" | repo_api "issues/$issue/labels" --method PUT --input - >/dev/null
 }
 
-comment_issue() { gh issue comment "$1" --body "$2" >/dev/null; }
+comment_issue() { repo_api "issues/$1/comments" --method POST -f body="$2" >/dev/null; }
+
+queue_project_sync() {
+  mkdir -p "$STATE_ROOT"
+  ( flock 9; printf '%s\n' "$*" >> "$STATE_ROOT/project-pending" ) 9> "$STATE_ROOT/project-pending.lock"
+}
 
 project_add_issue() {
-  graphql_budget_allows "$((GRAPHQL_RESERVE + 1))" || return 0
+  graphql_budget_allows "$((GRAPHQL_RESERVE + 1))" || { queue_project_sync "issue $1"; return 0; }
   [[ -r $STATE_ROOT/project.env ]] || return 0
   local url PROJECT_OWNER='' PROJECT_NUMBER='' key value
   while IFS='=' read -r key value; do
     case $key in PROJECT_OWNER) PROJECT_OWNER=$value ;; PROJECT_NUMBER) PROJECT_NUMBER=$value ;; esac
   done < "$STATE_ROOT/project.env"
   [[ -n $PROJECT_OWNER && $PROJECT_NUMBER =~ ^[0-9]+$ ]] || return 0
-  url=$(gh issue view "$1" --json url --jq .url 2>/dev/null) || return 0
+  url="https://github.com/$(repo_name)/issues/$1"
   gh project item-add "$PROJECT_NUMBER" --owner "$PROJECT_OWNER" --url "$url" >/dev/null 2>&1 || true
 }
 
 project_add_pull_requests() {
-  graphql_budget_allows "$((GRAPHQL_RESERVE + 1))" || return 0
+  graphql_budget_allows "$((GRAPHQL_RESERVE + 1))" || { queue_project_sync "pulls $1"; return 0; }
   [[ -r $STATE_ROOT/project.env ]] || return 0
   local branch=$1 url PROJECT_OWNER='' PROJECT_NUMBER='' key value
   while IFS='=' read -r key value; do
@@ -347,11 +408,11 @@ project_add_pull_requests() {
   while IFS= read -r url; do
     [[ -n $url ]] || continue
     gh project item-add "$PROJECT_NUMBER" --owner "$PROJECT_OWNER" --url "$url" >/dev/null 2>&1 || true
-  done < <(gh pr list --state all --head "$branch" --limit 100 --json url --jq '.[].url' 2>/dev/null || true)
+  done < <(repo_api pulls --method GET -f state=all -f head="${PROJECT_OWNER}:$branch" -f per_page=100 --paginate --jq '.[].html_url' 2>/dev/null || true)
 }
 
 project_sync_state() {
-  graphql_budget_allows "$((GRAPHQL_RESERVE + 1))" || return 0
+  graphql_budget_allows "$((GRAPHQL_RESERVE + 1))" || { queue_project_sync "state $1 $2"; return 0; }
   [[ -r $STATE_ROOT/project.env ]] || return 0
   local issue=$1 state=$2 PROJECT_OWNER='' PROJECT_NUMBER='' key value project_id item_id field_id option_id option
   while IFS='=' read -r key value; do
@@ -370,6 +431,21 @@ project_sync_state() {
   gh project item-edit --id "$item_id" --project-id "$project_id" --field-id "$field_id" --single-select-option-id "$option_id" >/dev/null 2>&1 || true
 }
 
+reconcile_pending_project() {
+  [[ -s $STATE_ROOT/project-pending ]] || return 0
+  graphql_budget_allows "$((GRAPHQL_RESERVE + 1))" || return 0
+  local pending="$STATE_ROOT/project-pending.$$" kind first second
+  ( flock 9; mv "$STATE_ROOT/project-pending" "$pending" ) 9> "$STATE_ROOT/project-pending.lock"
+  while read -r kind first second; do
+    case $kind in
+      issue) project_add_issue "$first" ;;
+      pulls) project_add_pull_requests "$first" ;;
+      state) project_sync_state "$first" "$second" ;;
+    esac
+  done < "$pending"
+  rm -f "$pending"
+}
+
 lease_comment() {
   local issue=$1 worker=$2 now expires
   now=$(date +%s); expires=$((now + LEASE_SECONDS))
@@ -381,13 +457,13 @@ recover_expired() {
   now=$(date +%s)
   while IFS= read -r issue; do
     [[ -n $issue ]] || continue
-    body=$(gh issue view "$issue" --json comments --jq '[.comments[].body | select(contains("agentic-loop:lease"))] | last // ""' 2>/dev/null || true)
+    body=$(repo_api "issues/$issue/comments" --method GET -f per_page=100 --paginate --slurp --jq '[.[][].body | select(contains("agentic-loop:lease"))] | last // ""' 2>/dev/null || true)
     expires=$(printf '%s\n' "$body" | sed -n 's/.*expires=\([0-9][0-9]*\).*/\1/p' | head -n 1)
     if [[ -z $expires || $expires -lt $now ]]; then
       set_issue_state "$issue" queued
       comment_issue "$issue" '<!-- agentic-loop:recovered -->\n前回のリースが期限切れとなったため、Issueを安全にキューへ戻しました。'
     fi
-  done < <(gh issue list --state open --label "$(state_label running)" --limit 100 --json number --jq '.[].number' 2>/dev/null || true)
+  done < <(repo_api issues --method GET -f state=open -f labels="$(state_label running)" -f per_page=100 --paginate --jq '.[] | select(.pull_request == null) | .number' 2>/dev/null || true)
 }
 
 requeue_answered() {
@@ -395,12 +471,12 @@ requeue_answered() {
   while IFS= read -r issue; do
     [[ -n $issue ]] || continue
     # shellcheck disable=SC2016 # This is a jq program, not a shell expression.
-    answered=$(gh issue view "$issue" --json comments --jq '.comments as $comments | ([range(0; $comments | length) | select($comments[.].body | contains("agentic-loop:needs-input"))] | last) as $marker | if $marker == null then false else any($comments[$marker + 1:][]; (.body | contains("<!-- agentic-loop:") | not)) end' 2>/dev/null || true)
+    answered=$(repo_api "issues/$issue/comments" --method GET -f per_page=100 --paginate --slurp --jq '[.[][]] as $comments | ([range(0; $comments | length) | select($comments[.].body | contains("agentic-loop:needs-input"))] | last) as $marker | if $marker == null then false else any($comments[$marker + 1:][]; (.body | contains("<!-- agentic-loop:") | not)) end' 2>/dev/null || true)
     if [[ $answered == true ]]; then
       set_issue_state "$issue" queued
       comment_issue "$issue" '<!-- agentic-loop:answer-detected -->\n返信を検出したため、このIssueをキューへ戻しました。'
     fi
-  done < <(gh issue list --state open --label "$(state_label needs-input)" --limit 100 --json number --jq '.[].number' 2>/dev/null || true)
+  done < <(repo_api issues --method GET -f state=open -f labels="$(state_label needs-input)" -f per_page=100 --paginate --jq '.[] | select(.pull_request == null) | .number' 2>/dev/null || true)
 }
 
 triage_stale_queued() {
@@ -414,17 +490,17 @@ triage_stale_queued() {
     set_issue_state "$issue" stale
     project_sync_state "$issue" stale
     comment_issue "$issue" "<!-- agentic-loop:stale days=$STALE_DAYS updated=$updated_at -->\nこのIssueは \`agent:queued\` のまま$STALE_DAYS日間更新されなかったため、claim前のトリアージで \`agent:stale\` へ移し、クローズしました。再開するにはIssueをreopenし、内容を確認・更新してから \`agent:queued\` Labelを付けてください。"
-    gh issue close "$issue" >/dev/null
-  done < <(gh issue list --state open --label "$(state_label queued)" --limit 1000 --json number,updatedAt --jq '.[] | [.number, .updatedAt] | @tsv' 2>/dev/null || true)
+    repo_api "issues/$issue" --method PATCH -f state=closed >/dev/null
+  done < <(repo_api issues --method GET -f state=open -f labels="$(state_label queued)" -f per_page=100 --paginate --jq '.[] | select(.pull_request == null) | [.number, .updated_at] | @tsv' 2>/dev/null || true)
 }
 
 claim_next() {
   local issue
   # shellcheck disable=SC2016 # This is a jq program, not a shell expression.
-  issue=$(gh issue list --state open --label "$(state_label queued)" --limit 1000 --json number,createdAt,labels --jq 'sort_by((if any(.labels[]; .name == "priority:critical") then 0 elif any(.labels[]; .name == "priority:high") then 1 elif any(.labels[]; .name == "priority:medium") then 2 elif any(.labels[]; .name == "priority:low") then 3 else 4 end), .createdAt, .number) | .[0].number // empty' 2>/dev/null || true)
+  issue=$(repo_api issues --method GET -f state=open -f labels="$(state_label queued)" -f per_page=100 --paginate --slurp --jq '[.[][] | select(.pull_request == null)] | sort_by((if any(.labels[]; .name == "priority:critical") then 0 elif any(.labels[]; .name == "priority:high") then 1 elif any(.labels[]; .name == "priority:medium") then 2 elif any(.labels[]; .name == "priority:low") then 3 else 4 end), .created_at, .number) | .[0].number // empty' 2>/dev/null || true)
   [[ -n $issue ]] || return 1
   set_issue_state "$issue" running
-  if ! gh issue view "$issue" --json labels --jq '.labels[].name' | grep -Fxq "$(state_label running)"; then return 1; fi
+  if ! repo_api "issues/$issue" --jq '.labels[].name' | grep -Fxq "$(state_label running)"; then return 1; fi
   printf '%s\n' "$issue"
 }
 
@@ -443,16 +519,9 @@ supervise() {
   trap 'rm -f "$STATE_ROOT/supervisor.pid"; rmdir "$STATE_ROOT/supervisor.lock" 2>/dev/null || true' EXIT
   mkdir -p "$STATE_ROOT/workers"
   printf '%s\n' "$$" > "$STATE_ROOT/supervisor.pid"
-  if wait_for_graphql_budget; then
-    recover_expired
-  elif [[ ${AGENTIC_LOOP_RUN_ONCE:-0} == 1 ]]; then
-    return 0
-  fi
+  recover_expired
   while :; do
-    if ! wait_for_graphql_budget; then
-      [[ ${AGENTIC_LOOP_RUN_ONCE:-0} == 1 ]] && break
-      continue
-    fi
+    reconcile_pending_project
     requeue_answered
     if [[ -e $STATE_ROOT/stop.requested ]]; then
       [[ $(worker_count) -eq 0 ]] && break
@@ -482,7 +551,7 @@ issue_prompt() {
   local issue=$1 repository=$2
   cat <<EOF
 $repository の GitHub Issue #$issue を、リポジトリの submit-requirement workflow に従って完了してください。
-Issueとそのコメントを要求として扱い、この専用worktreeだけで作業します。まず調査し、安全で可逆的な判断を行い、全検証とsecret guardを実行し、commit、push、PR作成、checksとreview feedbackの確認、不具合修正、mergeまで完遂します。既存のCodex loginとworkspace-write sandboxだけを使用し、別途課金される認証情報、有料の外部service、安全でないsandbox bypass、hook bypassは使用しません。GitHubのIssue、PR、それらへのコメントとレビューは、コード、ログ、識別子、固有名詞、引用の必要な原文を除き、日本語で記述します。Issueに進捗と検証証跡をコメントします。人の判断が必要な重大な決定または回復不能な権限問題がある場合に限り、正確な質問をコメントし、最終応答を AGENTIC_LOOP_RESULT=needs-input で終えます。mergeと検証が完了した場合は AGENTIC_LOOP_RESULT=completed で、それ以外は安全に再試行できる失敗理由を説明し、AGENTIC_LOOP_RESULT=failed で終えます。
+Issueとそのコメントを要求として扱い、この専用worktreeだけで作業します。まず調査し、安全で可逆的な判断を行い、全検証とsecret guardを実行し、commit、push、PR作成、checksとreview feedbackの確認、不具合修正、mergeまで完遂します。既存のCodex loginとworkspace-write sandboxだけを使用し、別途課金される認証情報、有料の外部service、安全でないsandbox bypass、hook bypassは使用しません。GitHubのIssue、Label、comment、PR、checkなどRESTで可能なcore操作は \`gh api\` のREST endpointを使い、GraphQLはbest-effortのProjects操作だけに限定します。GitHubのIssue、PR、それらへのコメントとレビューは、コード、ログ、識別子、固有名詞、引用の必要な原文を除き、日本語で記述します。Issueに進捗と検証証跡をコメントします。人の判断が必要な重大な決定または回復不能な権限問題がある場合に限り、正確な質問をコメントし、最終応答を AGENTIC_LOOP_RESULT=needs-input で終えます。mergeと検証が完了した場合は AGENTIC_LOOP_RESULT=completed で、それ以外は安全に再試行できる失敗理由を説明し、AGENTIC_LOOP_RESULT=failed で終えます。
 EOF
 }
 
@@ -535,7 +604,7 @@ cleanup_completed_worker() {
 worker() {
   local issue=$1 worker=$2 repository default_branch branch worktree result git_common_dir agents_dir exit_code=0 heartbeat_pid merged_pr='' merged_oid=''
   repository=$(repo_name)
-  default_branch=$(gh repo view --json defaultBranchRef --jq .defaultBranchRef.name)
+  default_branch=$(repo_api '' --jq .default_branch)
   branch="agent/issue-$issue"
   worktree="$WORKTREE_ROOT/issue-$issue"
   if ! git -C "$REPO_ROOT" fetch origin "$default_branch"; then
@@ -580,12 +649,12 @@ worker() {
   wait "$heartbeat_pid" 2>/dev/null || true
   project_add_pull_requests "$branch"
   if [[ $exit_code -eq 0 ]] && grep -Fq 'AGENTIC_LOOP_RESULT=completed' "$result"; then
-    IFS=$'\t' read -r merged_pr merged_oid < <(gh pr list --repo "$repository" --head "$branch" --state merged --json url,mergedAt,headRefName,headRefOid --jq 'map(select(.mergedAt != null and .headRefName == "'"$branch"'")) | first | [.url, .headRefOid] | @tsv' 2>/dev/null || true) || true
+    IFS=$'\t' read -r merged_pr merged_oid < <(repo_api pulls --method GET -f state=closed -f head="${repository%%/*}:$branch" -f per_page=100 --jq 'map(select(.merged_at != null and .head.ref == "'"$branch"'")) | first | [.html_url, .head.sha] | @tsv' 2>/dev/null || true) || true
     if [[ -n $merged_pr && $merged_oid =~ ^[0-9a-fA-F]{40}$ ]] && cleanup_completed_worker "$worktree" "$branch" "$merged_oid"; then
       set_issue_state "$issue" completed
       project_sync_state "$issue" completed
       comment_issue "$issue" "<!-- agentic-loop:completed pr=$merged_pr -->\nWorker \`$worker\` の完了報告と対応PRのmergeをGitHubで確認し、専用worktreeとlocal branch \`$branch\` を削除しました: $merged_pr\nremote branchは復旧とGitHubのPR設定との責務分離のため、Supervisorからは削除しません。"
-      gh issue close "$issue" >/dev/null
+      repo_api "issues/$issue" --method PATCH -f state=closed >/dev/null
     else
       exit_code=1
       set_issue_state "$issue" failed
@@ -610,6 +679,7 @@ main() {
     start) [[ $# -eq 1 ]] || fail 'start takes no arguments'; cmd_start ;;
     stop) [[ $# -eq 1 ]] || fail 'stop takes no arguments'; cmd_stop ;;
     status) [[ $# -eq 1 ]] || fail 'status takes no arguments'; cmd_status ;;
+    _service) [[ $# -eq 1 ]] || exit 2; cmd_service ;;
     _supervise) supervise ;;
     _worker) [[ $# -eq 3 ]] || exit 2; worker "$2" "$3" ;;
     *) usage; exit 2 ;;

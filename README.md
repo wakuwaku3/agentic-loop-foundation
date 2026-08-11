@@ -20,7 +20,7 @@ curl -fsSL https://raw.githubusercontent.com/wakuwaku3/agentic-loop-foundation/m
 
 対象はoriginを持つGitリポジトリである必要があります。空のGitリポジトリにはDevboxによる固定開発環境を含む完全な基盤を作成し、既存プロジェクトには既存のコード化済みツールチェーンを維持したままAgent原則、要求入力Skill、IssueキューCLI、Git hooksによる機密情報ガードを追加します。既存プロジェクトにコード化済み環境がない場合は、導入後の変更を完了する前に追加する必要があります。`git`、`gh`、Codex CLI、GitHub認証とProjects権限を変更前に検査し、既存ファイルやhooks設定との競合時は上書きせず停止します。
 
-インストールは対象リポジトリ専用のLabelsとGitHub Projectを冪等に設定し、Supervisorをバックグラウンド起動します。また、リポジトリごとのuser-level systemd timerを有効化し、15分間隔（最大2分のランダム遅延あり）でローカルの`main` worktreeを`origin/main`へ追従させます。更新はcleanかつlocal `main`が`origin/main`のancestorである場合のfast-forwardだけに限定され、ローカル変更、先行、分岐があれば何も変更せず失敗します。登録状態は`systemctl --user list-timers 'agentic-loop-main-sync-*'`、実行履歴は`journalctl --user -u 'agentic-loop-main-sync-*'`で確認できます。
+インストールは対象リポジトリ専用のLabelsとGitHub Projectを冪等に設定し、Supervisorをuser-level systemd serviceとして起動します。Supervisorは予期しない終了後に自動再起動し、Issueキューのcore操作にはREST APIを使うため、GraphQL quota枯渇中もProjects同期だけを抑制して処理を継続します。また、リポジトリごとのuser-level systemd timerを有効化し、15分間隔（最大2分のランダム遅延あり）でローカルの`main` worktreeを`origin/main`へ追従させます。更新はcleanかつlocal `main`が`origin/main`のancestorである場合のfast-forwardだけに限定され、ローカル変更、先行、分岐があれば何も変更せず失敗します。登録状態は`systemctl --user list-timers 'agentic-loop-main-sync-*'`、実行履歴は`journalctl --user -u 'agentic-loop-main-sync-*'`で確認できます。
 
 GitHub Issueが要求と状態履歴の正本で、Projectは障害がキューを止めない可視化層です。中央キューや外部DB、OpenAI API keyは使いません。
 

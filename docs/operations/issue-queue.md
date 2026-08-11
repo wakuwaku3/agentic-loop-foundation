@@ -36,11 +36,13 @@ Supervisorがclaimした `agent:running` Issueのworkerは受付を再実行し�
 
 読み取り専用要求と運用操作はその場で続行する。通常の変更要求は、専用branch/worktreeを利用でき、追加費用・秘密・破壊的操作に関する判断が不要な場合に限り、キューが利用不能であることを明示してworker workflowを同期実行する。それ以外は復旧方法または必要な判断を正確に提示して停止する。明示された同期・直接実行も同じworker workflowと不変条件に従う。
 
-`.agentic-loop/config` で `POLL_SECONDS`、`MAX_WORKERS`、`LEASE_SECONDS`、`STOP_TIMEOUT`、`STALE_DAYS`、`GRAPHQL_RESERVE`、`RATE_LIMIT_CACHE_SECONDS` を変更できる。既定の並列数は4とし、これを超えてむやみに増やさない。増加はCodex契約上の制限、Git競合、端末資源を確認してから行う。stopは新規claimを止め、workerをdrainする。`STOP_TIMEOUT=0` は完了まで待つ。
+`.agentic-loop/config` で `POLL_SECONDS`、`MAX_WORKERS`、`LEASE_SECONDS`、`STOP_TIMEOUT`、`STALE_DAYS`、`GRAPHQL_RESERVE`、`RATE_LIMIT_CACHE_SECONDS`、`API_RETRY_ATTEMPTS`、`API_RETRY_BASE_SECONDS` を変更できる。既定の並列数は4とし、これを超えてむやみに増やさない。増加はCodex契約上の制限、Git競合、端末資源を確認してから行う。stopは新規claimを止め、workerをdrainする。`STOP_TIMEOUT=0` は完了まで待つ。
 
-SupervisorとworkerはGit common stateにGraphQLの残量・reset時刻を短時間cacheして共有する。残量が `GRAPHQL_RESERVE` 以下ならSupervisorは新規claimとpollをresetまで停止し、認証不足と誤診しない。同じ閾値でIssue状態遷移と復旧用の余力を守るため、best-effortのProjects item・field同期も抑制する。Projectsは後から `bin/agentic-loop setup` で再同期でき、抑制中もIssue Labelを正本とする。既定値は500であり、0にすると残量による保護を無効化する。
+SupervisorとworkerはGit common stateにGraphQLの残量・reset時刻を短時間cacheして共有する。Issue一覧、Label、comment、heartbeat、PRのmerge確認などloopのcore操作はREST APIを使い、GraphQLはbest-effortのProjects操作だけに限定する。残量が `GRAPHQL_RESERVE` 以下ならProjects item・field同期だけを抑制し、Issue Labelを正本とするqueue処理は継続する。reset後は次のProjects操作が最新残量を再取得し、冪等な同期を再開する。既定値は500であり、0にすると残量によるProjects保護を無効化する。
 
 GraphQL枯渇時もREST APIのquotaは別に確認できる。`gh api rate_limit --jq '.resources | {graphql,core}'` で現在値を確認する。GraphQLのreset前にSupervisorを繰り返し再起動したり、`gh issue list --limit 1000` や `gh project item-list --limit 1000` を手動で反復したりしない。
+
+REST APIはrate limit、secondary rate limit、HTTP 429/5xx、timeout、connection resetなど明示的な一時障害だけを指数backoffで既定3回まで再試行する。認証・権限・入力不正など恒久的な4xxや、冪等性を確認できない操作を無制限に再試行しない。retry回数と待機は日本語でlocal logへ記録し、秘密やresponse本文はIssueへ転載しない。上限到達後は既存のlease、worktree、branchを保持し、Supervisor再起動時のlease復旧で再調査できる。
 
 Supervisorはclaimの直前に、`agent:queued` のまま `STALE_DAYS` 日以上更新されていないIssueを `agent:stale` に遷移し、監査コメントを残してcloseする。再開時はIssueをreopenし、要求を確認・更新して `agent:queued` を付ける。`STALE_DAYS=0` は自動closeを無効にする。queued以外のrunning、needs-input、failed、in-reviewや通常の未キューIssueは対象外である。
 
@@ -60,4 +62,4 @@ workerが `AGENTIC_LOOP_RESULT=completed` を返しても、それだけでは�
 
 remote branchは復旧可能性を残し、GitHubのPR merge時branch削除設定と責務を分離するため、Supervisorからは削除しない。remote branchの保持または削除はrepositoryのコード化されたGitHub設定に従い、このcleanupの成功条件には含めない。
 
-Supervisorが停止している場合はstatus、`.git/agentic-loop/supervisor.log`、`gh auth status` を確認する。同じリポジトリを複数端末から処理しない。default branch更新後の競合やrequired checks失敗はworkerが最新branchに対して修正・再検証する。
+Supervisorはrepositoryごとのuser-level systemd serviceとして登録され、予期しない終了では5秒後に自動再起動する。`stop`による正常終了では再起動しない。service名は `agentic-loop-supervisor-<repository path>.service` で、`systemctl --user status` と `journalctl --user -u` で確認できる。起動時には生存しないPIDとlockを削除してからlease復旧を行う。Supervisorが停止している場合はstatus、`.git/agentic-loop/supervisor.log`、systemd unit、`gh auth status` を確認する。同じリポジトリを複数端末から処理しない。default branch更新後の競合やrequired checks失敗はworkerが最新branchに対して修正・再検証する。
