@@ -12,7 +12,7 @@ readonly SHARED_FILES=(
   .githooks/pre-commit .githooks/pre-push bin/agentic-loop
 )
 readonly INIT_FILES=(
-  README.md .editorconfig .env.example .gitignore Makefile install.sh flake.nix flake.lock
+  README.md .editorconfig .env.example .gitignore Makefile install.sh devbox.json devbox.lock
   docs/decisions/0001-minimal-foundation.md scripts/format.sh scripts/lint.sh scripts/check-environment.sh scripts/install-target.sh
   tests/test-agentic-loop.sh .github/workflows/ci.yml
 )

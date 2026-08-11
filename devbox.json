@@ -1,0 +1,22 @@
+{
+  "$schema": "https://raw.githubusercontent.com/jetify-com/devbox/0.17.2/.schema/devbox.schema.json",
+  "packages": [
+    "bash@latest",
+    "coreutils@latest",
+    "findutils@latest",
+    "gawk@latest",
+    "git@latest",
+    "gnugrep@latest",
+    "gnumake@latest",
+    "gnused@latest",
+    "util-linux@latest"
+  ],
+  "env": {
+    "DEV_ENVIRONMENT": "agentic-loop-foundation-v2"
+  },
+  "shell": {
+    "scripts": {
+      "check": "make check"
+    }
+  }
+}
