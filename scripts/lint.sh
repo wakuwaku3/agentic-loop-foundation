@@ -61,6 +61,14 @@ grep -Fq 'devbox run --pure check' docs/policies/development-environment.md || {
   printf 'Invalid development environment policy.\n' >&2
   exit 1
 }
+grep -Fq 'doctor --format json' docs/operations/issue-queue.md || {
+  printf 'Doctor machine-readable interface is not documented.\n' >&2
+  exit 1
+}
+grep -Fq 'doctor) cmd_doctor' bin/agentic-loop || {
+  printf 'Doctor command is not distributed through the queue CLI.\n' >&2
+  exit 1
+}
 grep -Fq 'devbox run --pure check' .github/workflows/ci.yml || {
   printf 'CI does not use the common Devbox entry point.\n' >&2
   exit 1
