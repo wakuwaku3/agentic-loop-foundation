@@ -87,20 +87,84 @@ agent_provider_ready() {
 # bypass secret-guard hooks. The final agent message is written to result_file,
 # where the caller reads the AGENTIC_LOOP_RESULT sentinel.
 agent_run_worker() {
-  local worktree=$1 git_common_dir=$2 agents_dir=$3 result_file=$4 prompt=$5
+  local worktree=$1 git_common_dir=$2 agents_dir=$3 result_file=$4 usage_file=$5 prompt=$6
+  : > "$usage_file"
+  printf 'provider=%s\n' "$(agent_provider)" >> "$usage_file"
   case $(agent_provider) in
     claude)
-      local -a claude_args=(--print --dangerously-skip-permissions --add-dir "$git_common_dir" --add-dir "$agents_dir")
+      [[ -n ${AGENT_CLAUDE_MODEL:-} ]] && printf 'model=%s\n' "$AGENT_CLAUDE_MODEL" >> "$usage_file"
+      local -a claude_args=(--print --output-format json --dangerously-skip-permissions --add-dir "$git_common_dir" --add-dir "$agents_dir")
       [[ -n ${AGENT_CLAUDE_MODEL:-} ]] && claude_args+=(--model "$AGENT_CLAUDE_MODEL")
+      # --output-format json returns one object; the final message (with the
+      # AGENTIC_LOOP_RESULT sentinel) stays inside .result and is matched as a
+      # substring, so the raw JSON is the result file. Token/cost fields are
+      # extracted for the usage record without adding a jq dependency.
       (cd "$worktree" && claude "${claude_args[@]}" "$prompt") > "$result_file"
+      agent_usage_from_claude_json "$result_file" >> "$usage_file" || true
       ;;
     *)
+      [[ -n ${AGENT_CODEX_MODEL:-} ]] && printf 'model=%s\n' "$AGENT_CODEX_MODEL" >> "$usage_file"
+      printf 'reasoning_effort=%s\n' "$AGENT_CODEX_REASONING_EFFORT" >> "$usage_file"
       local -a codex_args=(exec --sandbox workspace-write --add-dir "$git_common_dir" --add-dir "$agents_dir" -c 'approval_policy="never"' -c 'sandbox_workspace_write.network_access=true')
       [[ -n ${AGENT_CODEX_MODEL:-} ]] && codex_args+=(-c "model=$AGENT_CODEX_MODEL")
       [[ -n $AGENT_CODEX_REASONING_EFFORT ]] && codex_args+=(-c "model_reasoning_effort=$AGENT_CODEX_REASONING_EFFORT")
       codex "${codex_args[@]}" -C "$worktree" --output-last-message "$result_file" "$prompt"
+      agent_usage_from_codex_sessions "$worktree" >> "$usage_file" || true
       ;;
   esac
+}
+
+# Extract token and cost fields from a Claude --output-format json payload using
+# grep only, so no jq dependency enters the pinned environment.
+agent_usage_from_claude_json() {
+  local file=$1 field key value
+  [[ -r $file ]] || return 0
+  for field in input_tokens:tokens_input output_tokens:tokens_output cache_read_input_tokens:tokens_cache_read; do
+    key=${field%%:*}; value=$(grep -oE "\"$key\":[0-9]+" "$file" | head -n 1 | grep -oE '[0-9]+$' || true)
+    [[ -n $value ]] && printf '%s=%s\n' "${field#*:}" "$value"
+  done
+  value=$(grep -oE '"total_cost_usd":[0-9.]+' "$file" | head -n 1 | grep -oE '[0-9.]+$' || true)
+  [[ -n $value ]] && printf 'cost_usd=%s\n' "$value"
+  return 0
+}
+
+# Best-effort token and rate-limit percentages for the Codex session that ran in
+# this worktree. Codex writes token_count events to ~/.codex/sessions and the
+# session log references the worktree path, so the newest matching rollout is
+# this worker's. Missing data is skipped; usage logging never fails the worker.
+agent_usage_from_codex_sessions() {
+  local worktree=$1 sessions="${CODEX_HOME:-$HOME/.codex}/sessions" file line value
+  [[ -d $sessions ]] || return 0
+  file=$(grep -rlF -- "$worktree" "$sessions" 2>/dev/null | while IFS= read -r candidate; do
+    printf '%s\t%s\n' "$(stat -c '%Y' "$candidate" 2>/dev/null || printf 0)" "$candidate"
+  done | sort -rn | head -n 1 | cut -f2-)
+  [[ -n $file && -r $file ]] || return 0
+  line=$(grep -E '"(input_tokens|used_percent)"' "$file" | tail -n 1)
+  [[ -n $line ]] || return 0
+  for value in input_tokens:tokens_input output_tokens:tokens_output cached_input_tokens:tokens_cache_read reasoning_output_tokens:tokens_reasoning; do
+    local number; number=$(grep -oE "\"${value%%:*}\":[0-9]+" <<< "$line" | head -n 1 | grep -oE '[0-9]+$' || true)
+    [[ -n $number ]] && printf '%s=%s\n' "${value#*:}" "$number"
+  done
+  return 0
+}
+
+# Record one session's token usage on the Issue for later cost analysis. Fields
+# absent from the provider output are simply omitted; posting never fails work.
+agent_post_usage() {
+  local issue=$1 worker=$2 usage_file=$3 exit_code=$4 seconds=$5 key value summary
+  local -A usage=()
+  [[ -r $usage_file ]] || return 0
+  while IFS='=' read -r key value; do [[ -n $key ]] && usage[$key]=$value; done < "$usage_file"
+  summary="<!-- agentic-loop:usage worker=$worker -->\nToken使用量（分析用）: provider=${usage[provider]:-unknown}"
+  [[ -n ${usage[model]:-} ]] && summary+=" model=${usage[model]}"
+  [[ -n ${usage[reasoning_effort]:-} ]] && summary+=" reasoning_effort=${usage[reasoning_effort]}"
+  [[ -n ${usage[tokens_input]:-} ]] && summary+=" 入力=${usage[tokens_input]}tok"
+  [[ -n ${usage[tokens_output]:-} ]] && summary+=" 出力=${usage[tokens_output]}tok"
+  [[ -n ${usage[tokens_cache_read]:-} ]] && summary+=" cache_read=${usage[tokens_cache_read]}tok"
+  [[ -n ${usage[tokens_reasoning]:-} ]] && summary+=" 推論=${usage[tokens_reasoning]}tok"
+  [[ -n ${usage[cost_usd]:-} ]] && summary+=" cost=\$${usage[cost_usd]}"
+  summary+=" 所要=${seconds}s exit=${exit_code}"
+  comment_issue "$issue" "$summary" || true
 }
 
 load_config || { [[ ${1:-} == doctor ]] || fail "$CONFIG_ERROR"; }
@@ -938,9 +1002,13 @@ worker() {
   (
     while :; do sleep $((LEASE_SECONDS / 3 + 1)); lease_comment "$issue" "$worker" || true; done
   ) & heartbeat_pid=$!
-  agent_run_worker "$worktree" "$git_common_dir" "$agents_dir" "$result" "$(issue_prompt "$issue" "$repository")" || exit_code=$?
+  local usage_file="$STATE_ROOT/issue-$issue-usage.txt" started elapsed
+  started=$(date +%s)
+  agent_run_worker "$worktree" "$git_common_dir" "$agents_dir" "$result" "$usage_file" "$(issue_prompt "$issue" "$repository")" || exit_code=$?
+  elapsed=$(( $(date +%s) - started ))
   kill "$heartbeat_pid" 2>/dev/null || true
   wait "$heartbeat_pid" 2>/dev/null || true
+  agent_post_usage "$issue" "$worker" "$usage_file" "$exit_code" "$elapsed"
   project_add_pull_requests "$branch"
   if [[ $exit_code -eq 0 ]] && grep -Fq 'AGENTIC_LOOP_RESULT=completed' "$result"; then
     IFS=$'\t' read -r merged_pr merged_oid < <(repo_api pulls --method GET -f state=closed -f head="${repository%%/*}:$branch" -f per_page=100 --jq 'map(select(.merged_at != null and .head.ref == "'"$branch"'")) | first | [.html_url, .head.sha] | @tsv' 2>/dev/null || true) || true
