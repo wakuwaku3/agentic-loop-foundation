@@ -79,6 +79,8 @@ sync_main() {
   [[ -z $(git -C "$repository" status --porcelain) ]] || fail 'refusing to update a dirty main worktree'
   git -C "$repository" fetch --quiet origin main
   [[ -z $(git -C "$repository" status --porcelain) ]] || fail 'main worktree changed while fetching'
+  git -C "$repository" merge-base --is-ancestor HEAD refs/remotes/origin/main ||
+    fail 'refusing to update a main branch that is ahead of or diverged from origin/main'
   git -C "$repository" merge --quiet --ff-only refs/remotes/origin/main
 }
 
