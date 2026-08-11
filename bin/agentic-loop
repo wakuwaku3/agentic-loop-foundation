@@ -6,6 +6,7 @@ readonly SOURCE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 readonly SHARED_FILES=(
   AGENTS.md
   .codex/config.toml
+  docs/policies/cost.md
   .agents/skills/submit-requirement/SKILL.md
   .agents/skills/submit-requirement/agents/openai.yaml
   .agentic-loop/guard-secrets.sh
