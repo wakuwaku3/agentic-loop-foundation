@@ -394,6 +394,33 @@ git -C "$target" show-ref --verify --quiet refs/heads/agent/issue-10 || fail 'br
 git -C "$target" worktree remove "$other_worktree"
 git -C "$target" branch -D agent/issue-10 >/dev/null
 
+# Resolver failures stop before Codex starts and explain the safe recovery in Japanese.
+printf '11 running open\n' > "$state"
+mkdir -p "$target-worktrees/issue-11/.agents"
+before_codex_calls=$(wc -l < "$FAKE_GH_ROOT/codex-calls")
+"$target/bin/agentic-loop" _worker 11 invalid-git-common-dir-worker
+grep -Eq '^11 failed open$' "$state" || fail 'unsafe Git common directory was accepted'
+[[ $(wc -l < "$FAKE_GH_ROOT/codex-calls") -eq $before_codex_calls ]] || fail 'Git resolver failure started Codex'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:failed worker=invalid-git-common-dir-worker' 'Git resolver failure did not preserve its machine-readable marker'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'Git common directoryを安全に解決できなかったため、workerを起動しませんでした' 'Git resolver failure did not explain the reason and impact in Japanese'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" '追加の書き込み可能pathは許可していません' 'Git resolver failure did not explain its safety measure in Japanese'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'Git metadataとworktreeの整合性を確認・復旧した後、このIssueを安全に再キューしてください' 'Git resolver failure did not explain recovery in Japanese'
+rm -r "$target-worktrees/issue-11"
+
+printf '12 running open\n' > "$state"
+git -C "$target" worktree add --quiet -b agent/issue-12 "$target-worktrees/issue-12" origin/main
+rm -r "$target-worktrees/issue-12/.agents"
+before_codex_calls=$(wc -l < "$FAKE_GH_ROOT/codex-calls")
+"$target/bin/agentic-loop" _worker 12 missing-agents-dir-worker
+grep -Eq '^12 failed open$' "$state" || fail 'unsafe .agents directory was accepted'
+[[ $(wc -l < "$FAKE_GH_ROOT/codex-calls") -eq $before_codex_calls ]] || fail '.agents resolver failure started Codex'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:failed worker=missing-agents-dir-worker' '.agents resolver failure did not preserve its machine-readable marker'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" '.agents directoryを安全に解決できなかったため、workerを起動しませんでした' '.agents resolver failure did not explain the reason and impact in Japanese'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" '保護対象のrepository pathは書き込み可能にしていません' '.agents resolver failure did not explain its safety measure in Japanese'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" '.agents directoryを安全な通常directoryとして復旧した後、このIssueを安全に再キューしてください' '.agents resolver failure did not explain recovery in Japanese'
+git -C "$target" worktree remove --force "$target-worktrees/issue-12"
+git -C "$target" branch -D agent/issue-12 >/dev/null
+
 # needs-input and failure are isolated state transitions; a later Issue reply requeues only that Issue.
 printf '4 running open\n5 running open\n' > "$state"
 FAKE_CODEX_RESULT=AGENTIC_LOOP_RESULT=needs-input "$target/bin/agentic-loop" _worker 4 test-worker

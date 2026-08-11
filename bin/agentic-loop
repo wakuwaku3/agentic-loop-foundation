@@ -477,13 +477,13 @@ worker() {
   result="$STATE_ROOT/issue-$issue-result.txt"
   if ! git_common_dir=$(resolve_worker_git_common_dir "$worktree"); then
     set_issue_state "$issue" failed || true
-    comment_issue "$issue" "<!-- agentic-loop:failed worker=$worker -->\nCould not safely resolve the dedicated worktree Git common directory. No additional writable path was granted." || true
+    comment_issue "$issue" "<!-- agentic-loop:failed worker=$worker -->\n専用worktreeのGit common directoryを安全に解決できなかったため、workerを起動しませんでした。追加の書き込み可能pathは許可していません。Git metadataとworktreeの整合性を確認・復旧した後、このIssueを安全に再キューしてください。" || true
     rm -f "$STATE_ROOT/workers/$issue.pid"
     return 0
   fi
   if ! agents_dir=$(resolve_worker_agents_dir "$worktree"); then
     set_issue_state "$issue" failed || true
-    comment_issue "$issue" "<!-- agentic-loop:failed worker=$worker -->\nCould not safely resolve the dedicated worktree .agents directory. No protected repository path was made writable." || true
+    comment_issue "$issue" "<!-- agentic-loop:failed worker=$worker -->\n専用worktreeの.agents directoryを安全に解決できなかったため、workerを起動しませんでした。保護対象のrepository pathは書き込み可能にしていません。.agents directoryを安全な通常directoryとして復旧した後、このIssueを安全に再キューしてください。" || true
     rm -f "$STATE_ROOT/workers/$issue.pid"
     return 0
   fi
