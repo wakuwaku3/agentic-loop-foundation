@@ -197,7 +197,7 @@ if AGENTIC_LOOP_SOURCE="$PROJECT_ROOT" AGENTIC_LOOP_TARGET="$conflict" AGENTIC_L
 
 empty=$(empty_repository empty-project)
 AGENTIC_LOOP_SOURCE="$PROJECT_ROOT" AGENTIC_LOOP_TARGET="$empty" AGENTIC_LOOP_SKIP_START=1 "$PROJECT_ROOT/install.sh"
-[[ -f $empty/flake.nix && -f $empty/flake.lock ]] || fail 'empty repository did not get the pinned development environment'
+[[ -f $empty/devbox.json && -f $empty/devbox.lock ]] || fail 'empty repository did not get the pinned development environment'
 [[ -x $empty/scripts/check-environment.sh ]] || fail 'empty repository did not get the environment guard'
 
 secret_target="$TEST_ROOT/secret-project"

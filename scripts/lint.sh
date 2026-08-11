@@ -3,7 +3,7 @@ set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
-required=(AGENTS.md README.md Makefile .editorconfig .gitignore .env.example .codex/config.toml install.sh flake.nix flake.lock docs/policies/cost.md docs/policies/testing.md docs/policies/development-environment.md docs/decisions/0002-github-issue-queue.md docs/operations/issue-queue.md .agentic-loop/config .agentic-loop/guard-secrets.sh .githooks/pre-commit .githooks/pre-push .agents/skills/submit-requirement/SKILL.md bin/agentic-loop scripts/check-environment.sh scripts/install-target.sh)
+required=(AGENTS.md README.md Makefile .editorconfig .gitignore .env.example .codex/config.toml install.sh devbox.json devbox.lock docs/policies/cost.md docs/policies/testing.md docs/policies/development-environment.md docs/decisions/0002-github-issue-queue.md docs/operations/issue-queue.md .agentic-loop/config .agentic-loop/guard-secrets.sh .githooks/pre-commit .githooks/pre-push .agents/skills/submit-requirement/SKILL.md bin/agentic-loop scripts/check-environment.sh scripts/install-target.sh)
 for file in "${required[@]}"; do
   [[ -f $file ]] || { printf 'Missing required file: %s\n' "$file" >&2; exit 1; }
 done
@@ -29,10 +29,18 @@ grep -Fq '[開発環境ポリシー](docs/policies/development-environment.md)' 
   printf 'Missing development environment invariant.\n' >&2
   exit 1
 }
-grep -Fq "nix --extra-experimental-features 'nix-command flakes' develop --ignore-environment --command make check" docs/policies/development-environment.md || {
+grep -Fq 'devbox run --pure check' docs/policies/development-environment.md || {
   printf 'Invalid development environment policy.\n' >&2
   exit 1
 }
+grep -Fq 'devbox run --pure check' .github/workflows/ci.yml || {
+  printf 'CI does not use the common Devbox entry point.\n' >&2
+  exit 1
+}
+if grep -ERn 'nix develop|nix-shell|flake\.nix|flake\.lock' README.md docs scripts tests .github install.sh --exclude=lint.sh; then
+  printf 'Direct Nix development entry point remains.\n' >&2
+  exit 1
+fi
 if grep -Eq 'uses: [^ ]+@v[0-9]' .github/workflows/ci.yml; then
   printf 'CI actions must be pinned to immutable commit SHAs.\n' >&2
   exit 1

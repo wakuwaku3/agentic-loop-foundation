@@ -55,6 +55,7 @@ main() {
       git ls-files | scan_names
       git diff --no-index -- /dev/null /dev/null > "$patch" || true
       while IFS= read -r file; do
+        [[ -f $file ]] || continue
         git diff --no-index --unified=0 /dev/null "$file" >> "$patch" || true
       done < <(git ls-files)
       ;;

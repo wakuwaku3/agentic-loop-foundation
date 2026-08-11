@@ -13,7 +13,10 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-      - uses: DeterminateSystems/nix-installer-action@33c9ab3ef95cd57c164d9d6eb1f9a46338538d41
+      - uses: jetify-com/devbox-install-action@a0d2d53632934ae004f878c840055956d9f741b0
         with:
-          determinate: false
-      - run: nix --extra-experimental-features 'nix-command flakes' develop --ignore-environment --command make check
+          devbox-version: 0.17.2
+          sha256-checksum: 163798986bbe2a246e36be35a3c3d6c4df5e048969b399847592704f4f3fa95c
+          # The repository uses GitHub's default 10 GB limit; older entries are evicted at the limit.
+          enable-cache: 'true'
+      - run: devbox run --pure check
