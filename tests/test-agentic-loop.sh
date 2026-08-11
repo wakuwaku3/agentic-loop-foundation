@@ -24,6 +24,7 @@ slug="acme/$(basename "$PWD")"
 key=$(printf '%s' "$PWD" | tr '/' '_')
 state="$FAKE_GH_ROOT/$key.state"
 project="$FAKE_GH_ROOT/$key.project"
+project_items="$FAKE_GH_ROOT/$key.project-items"
 comments="$FAKE_GH_ROOT/$key.comments"
 views="$FAKE_GH_ROOT/$key.views"
 diagnosis_issues="$FAKE_GH_ROOT/$key.diagnosis-issues"
@@ -54,7 +55,9 @@ case "${1:-} ${2:-}" in
         --input) j=$((i+1)); input_file=${!j} ;;
       esac
     done
-    if [[ $endpoint == issues && $method == GET ]]; then
+    if [[ $endpoint == issues && $method == GET && $form_state == all ]]; then
+      awk -v slug="$slug" '{print "https://github.example/" slug "/issues/" $1}' "$state" 2>/dev/null || true
+    elif [[ $endpoint == issues && $method == GET ]]; then
       case $wanted in
         agent:queued)
           if [[ $* == *updated_at* ]]; then
@@ -97,6 +100,8 @@ case "${1:-} ${2:-}" in
           oid=${FAKE_PR_HEAD_OID:-$(git rev-parse "refs/heads/$head" 2>/dev/null || true)}
           printf 'https://github.example/%s/pull/merged\t%s\n' "$slug" "$oid"
         fi
+      elif [[ $* == *head=* && $* == *html_url* ]]; then printf 'https://github.example/%s/pull/6\n' "$slug"
+      elif [[ $form_state == all && $* == *html_url* ]]; then printf 'https://github.example/%s/pull/1\nhttps://github.example/%s/pull/2\n' "$slug" "$slug"
       elif [[ $* == *html_url* ]]; then printf 'https://github.example/%s/pull/6\n' "$slug"; fi
     elif [[ -z $endpoint ]]; then printf 'main\n'
     fi ;;
@@ -119,8 +124,19 @@ case "${1:-} ${2:-}" in
   'project list')
     if [[ -e $project ]]; then printf '7\n'; fi ;;
   'project create') touch "$project"; printf '{"number":7}\n' ;;
-  'project link'|'project field-create'|'project item-add') exit 0 ;;
+  'project link'|'project field-create'|'project item-edit') exit 0 ;;
+  'project item-list')
+    if [[ $* == *content.number* ]]; then printf 'PVTI_fake\n'; else cat "$project_items" 2>/dev/null || true; fi ;;
+  'project item-add')
+    if (( ${FAKE_PROJECT_FAILURES:-0} > 0 )); then
+      failure_file="$FAKE_GH_ROOT/$key.project-failures"
+      failures=$(cat "$failure_file" 2>/dev/null || printf '0')
+      if (( failures < FAKE_PROJECT_FAILURES )); then printf '%s\n' "$((failures + 1))" > "$failure_file"; exit 1; fi
+    fi
+    url=''; for ((i=1; i<=$#; i++)); do [[ ${!i} == --url ]] && { j=$((i+1)); url=${!j}; }; done
+    grep -Fxq -- "$url" "$project_items" 2>/dev/null || printf '%s\n' "$url" >> "$project_items" ;;
   'project view') printf 'PVT_fake\n' ;;
+  'project field-list') printf 'PVTF_fake\n' ;;
   'pr list')
     if [[ $* == *'--state merged'* ]]; then
       if [[ ${FAKE_PR_MERGED:-1} == 1 ]]; then
@@ -209,6 +225,7 @@ if [[ $* == *'Use $diagnose-codebase'* ]]; then
   existing=$(gh issue list --search diagnosis-finding --state all --limit 100 --json url --jq '.[].url')
   if [[ -z $existing ]]; then
     gh issue create --title '診断所見' --body 'diagnosis-finding' --label diagnosis --label agent:queued >/dev/null
+    "$worktree/bin/agentic-loop" sync-issue 99 >/dev/null
   fi
 fi
 if [[ ${FAKE_CODEX_GIT_OPERATIONS:-0} == 1 ]]; then
@@ -383,6 +400,7 @@ if "$target/.agentic-loop/update-main.sh" sync "$target" >/dev/null 2>&1; then f
 [[ $(git -C "$target" rev-parse HEAD) == "$before_head" ]] || fail 'periodic updater changed HEAD for a main branch diverged from origin/main'
 [[ $(git -C "$target" status --porcelain) == "$before_status" ]] || fail 'periodic updater changed the worktree for a main branch diverged from origin/main'
 git -C "$target" reset --quiet --hard refs/remotes/origin/main
+printf '88 inbox open none 2025-01-01T00:00:00Z\n89 inbox closed none 2025-01-02T00:00:00Z\n' > "$FAKE_GH_ROOT/$state_key.state"
 AGENTIC_LOOP_SOURCE="$PROJECT_ROOT" AGENTIC_LOOP_TARGET="$target" AGENTIC_LOOP_SKIP_START=1 "$PROJECT_ROOT/install.sh"
 project_creates=$(grep -c $'project create' "$FAKE_GH_ROOT/calls" || true)
 [[ $project_creates -eq 1 ]] || { sed -n '1,120p' "$FAKE_GH_ROOT/calls" >&2; fail "reinstall created the Project $project_creates times"; }
@@ -396,6 +414,19 @@ assert_contains "$FAKE_GH_ROOT/calls" 'filter=is:issue is:closed' 'Closed Issues
 assert_contains "$FAKE_GH_ROOT/calls" 'filter=is:pr is:open' 'Open PRs view filter was not configured'
 assert_contains "$FAKE_GH_ROOT/calls" 'filter=is:pr is:closed' 'Closed PRs view filter was not configured'
 assert_contains "$FAKE_GH_ROOT/calls" "project item-add 7 --owner acme --url https://github.example/acme/installed-project/pull/1" 'existing PR was not added to the Project'
+assert_contains "$FAKE_GH_ROOT/calls" "project item-add 7 --owner acme --url https://github.example/acme/installed-project/issues/88" 'existing open Issue was not added to the Project'
+assert_contains "$FAKE_GH_ROOT/calls" "project item-add 7 --owner acme --url https://github.example/acme/installed-project/issues/89" 'existing closed Issue was not added to the Project'
+
+# Intake synchronization is immediate, idempotent, and persists temporary Projects failures for reconciliation.
+rm -f "$FAKE_GH_ROOT/$state_key.project-failures" "$(git -C "$target" rev-parse --absolute-git-dir)/agentic-loop/graphql-rate-limit"
+FAKE_PROJECT_FAILURES=1 FAKE_GRAPHQL_REMAINING=5000 "$target/bin/agentic-loop" sync-issue 91 >/dev/null
+pending_project="$(git -C "$target" rev-parse --absolute-git-dir)/agentic-loop/project-pending"
+assert_contains "$pending_project" 'content https://github.com/acme/installed-project/issues/91' 'temporary Project failure was not persisted'
+FAKE_PROJECT_FAILURES=1 "$target/bin/agentic-loop" sync-issue 91 >/dev/null
+[[ $(grep -Fxc 'https://github.com/acme/installed-project/issues/91' "$FAKE_GH_ROOT/$state_key.project-items") -eq 1 ]] || fail 'repeated immediate synchronization duplicated the Issue item'
+printf '91 inbox open none 2026-01-01T00:00:00Z\n' > "$FAKE_GH_ROOT/$state_key.state"
+AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _supervise
+[[ ! -e $pending_project ]] || fail 'successful reconciliation did not clear the Project retry queue'
 
 printf 'POLL_SECONDS=1\nMAX_WORKERS=2\nLEASE_SECONDS=3\nSTOP_TIMEOUT=10\nSTALE_DAYS=30\n' > "$target/.agentic-loop/config"
 "$target/bin/agentic-loop" start

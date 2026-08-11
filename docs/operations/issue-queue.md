@@ -2,7 +2,7 @@
 
 ## セットアップ
 
-`install.sh` は変更前に `git`、`gh`、Codex CLI、GitHubログイン、origin、リポジトリ参照、Projects API権限を検査する。既存ファイルとの競合もコピー前に検査する。検査後、7個の状態Label、`priority:critical`、`priority:high`、`priority:medium`、`priority:low` と `Agentic Loop - OWNER/REPOSITORY` Projectを冪等に用意し、既定ではSupervisorを起動する。
+`install.sh` は変更前に `git`、`gh`、Codex CLI、GitHubログイン、origin、リポジトリ参照、Projects API権限を検査する。既存ファイルとの競合もコピー前に検査する。検査後、7個の状態Label、`priority:critical`、`priority:high`、`priority:medium`、`priority:low` と `Agentic Loop - OWNER/REPOSITORY` Projectを冪等に用意し、既定ではSupervisorを起動する。`install.sh` と `bin/agentic-loop setup` はRESTで既存のOpen/Closed IssueとPRを列挙し、Projectにないitemをbackfillする。
 
 GitHub tokenには対象リポジトリのIssue/PR操作権限と `project`、`read:project` scopeが必要である。不足時は `gh auth refresh -s project,read:project` など、利用中のGitHub認証方式に合う方法で追加する。Projectはuser/org所有のため、対象リポジトリとProjectの閲覧者が一致することを管理者が確認する。privateリポジトリの内容や秘密情報をProjectフィールドへ転記しない。
 
@@ -26,7 +26,8 @@ bin/agentic-loop stop
 2. `.agentic-loop/config` と実行可能な `bin/agentic-loop` があり、`bin/agentic-loop status` の先頭行が `running` で、`gh`が対象repositoryのIssueを参照・更新できることを確認する。
 3. open Issueのtitleとbodyを検索し、要求の目的と対象範囲が同じIssueがないか確認する。候補の本文とコメントを読み、同じ利用者結果を求めるなら再利用して新規作成しない。
 4. 重複Issueが `agent:running` ならURLと状態を報告して終了し、`agent:queued` ならそのまま再利用する。それ以外は他の `agent:*` 状態Labelを外して `agent:queued` を付ける。重複がなければ要求・制約・完了条件を本文にしたIssueを作り、`agent:queued` を付ける。
-5. Issueを再取得し、openかつ `agent:queued` または `agent:running` であることを確認する。URLと状態を報告し、直接実装せず終了する。
+5. 新規作成または再キュー直後に `bin/agentic-loop sync-issue ISSUE_NUMBER` を実行する。Supervisorのclaimを待たずProjectへ追加し、一時障害時は再試行queueへ永続化する。Project障害はIssue受付を停止しない。
+6. Issueを再取得し、openかつ `agent:queued` または `agent:running` であることを確認する。URLと状態を報告し、直接実装せず終了する。
 
 Supervisorがclaimした `agent:running` Issueのworkerは受付を再実行しない。元Issueとコメントを要求として、専用branch/worktree、全検証、secret guard、commit、push、PR、required checks、review対応、merge、default branch確認、branch/worktree cleanupまで進め、再帰的な代替Issueを作らない。
 
