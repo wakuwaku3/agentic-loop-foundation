@@ -5,6 +5,7 @@ readonly SOURCE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 readonly TARGET="${1:-.}"
 readonly SHARED_FILES=(
   AGENTS.md .codex/config.toml docs/policies/cost.md docs/policies/testing.md docs/policies/development-environment.md
+  docs/policies/github-language.md
   docs/decisions/0002-github-issue-queue.md docs/operations/issue-queue.md
   .agents/skills/submit-requirement/SKILL.md
   .agents/skills/submit-requirement/agents/openai.yaml

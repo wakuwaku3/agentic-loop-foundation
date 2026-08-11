@@ -215,7 +215,7 @@ project_sync_state() {
 lease_comment() {
   local issue=$1 worker=$2 now expires
   now=$(date +%s); expires=$((now + LEASE_SECONDS))
-  comment_issue "$issue" "<!-- agentic-loop:lease worker=$worker heartbeat=$now expires=$expires -->\nAgentic Loop worker \`$worker\` heartbeat; lease expires at epoch $expires."
+  comment_issue "$issue" "<!-- agentic-loop:lease worker=$worker heartbeat=$now expires=$expires -->\nAgentic Loop worker \`$worker\` のハートビートです。リースは epoch $expires に期限切れとなります。"
 }
 
 recover_expired() {
@@ -227,7 +227,7 @@ recover_expired() {
     expires=$(printf '%s\n' "$body" | sed -n 's/.*expires=\([0-9][0-9]*\).*/\1/p' | head -n 1)
     if [[ -z $expires || $expires -lt $now ]]; then
       set_issue_state "$issue" queued
-      comment_issue "$issue" '<!-- agentic-loop:recovered -->\nThe previous lease expired. The Issue was safely returned to the queue.'
+      comment_issue "$issue" '<!-- agentic-loop:recovered -->\n前回のリースが期限切れとなったため、Issueを安全にキューへ戻しました。'
     fi
   done < <(gh issue list --state open --label "$(state_label running)" --limit 100 --json number --jq '.[].number' 2>/dev/null || true)
 }
@@ -239,7 +239,7 @@ requeue_answered() {
     answered=$(gh issue view "$issue" --json comments --jq '.comments as $comments | ([range(0; $comments | length) | select($comments[.].body | contains("agentic-loop:needs-input"))] | last) as $marker | if $marker == null then false else any($comments[$marker + 1:][]; (.body | contains("<!-- agentic-loop:") | not)) end' 2>/dev/null || true)
     if [[ $answered == true ]]; then
       set_issue_state "$issue" queued
-      comment_issue "$issue" '<!-- agentic-loop:answer-detected -->\nA reply was detected; this Issue returned to the queue.'
+      comment_issue "$issue" '<!-- agentic-loop:answer-detected -->\n返信を検出したため、このIssueをキューへ戻しました。'
     fi
   done < <(gh issue list --state open --label "$(state_label needs-input)" --limit 100 --json number --jq '.[].number' 2>/dev/null || true)
 }
@@ -297,8 +297,8 @@ supervise() {
 issue_prompt() {
   local issue=$1 repository=$2
   cat <<EOF
-Use the repository's submit-requirement workflow to complete GitHub Issue #$issue in $repository.
-Treat the Issue and its comments as the requirement. Work only in this dedicated worktree. Inspect first, make safe reversible decisions, run full validation and the secret guard, commit, push, open a PR, monitor checks and review feedback, fix failures, and merge. Use only the existing Codex login and workspace-write sandbox; never use separately billed credentials, paid external services, unsafe sandbox bypasses, or bypass hooks. Comment progress and evidence on the Issue. If and only if a consequential decision or irrecoverable permission problem needs a human, comment the exact question and end your final response with AGENTIC_LOOP_RESULT=needs-input. On complete merged work end with AGENTIC_LOOP_RESULT=completed. Otherwise end with AGENTIC_LOOP_RESULT=failed and explain the retry-safe failure.
+$repository の GitHub Issue #$issue を、リポジトリの submit-requirement workflow に従って完了してください。
+Issueとそのコメントを要求として扱い、この専用worktreeだけで作業します。まず調査し、安全で可逆的な判断を行い、全検証とsecret guardを実行し、commit、push、PR作成、checksとreview feedbackの確認、不具合修正、mergeまで完遂します。既存のCodex loginとworkspace-write sandboxだけを使用し、別途課金される認証情報、有料の外部service、安全でないsandbox bypass、hook bypassは使用しません。GitHubのIssue、PR、それらへのコメントとレビューは、コード、ログ、識別子、固有名詞、引用の必要な原文を除き、日本語で記述します。Issueに進捗と検証証跡をコメントします。人の判断が必要な重大な決定または回復不能な権限問題がある場合に限り、正確な質問をコメントし、最終応答を AGENTIC_LOOP_RESULT=needs-input で終えます。mergeと検証が完了した場合は AGENTIC_LOOP_RESULT=completed で、それ以外は安全に再試行できる失敗理由を説明し、AGENTIC_LOOP_RESULT=failed で終えます。
 EOF
 }
 
@@ -310,7 +310,7 @@ worker() {
   worktree="$WORKTREE_ROOT/issue-$issue"
   if ! git -C "$REPO_ROOT" fetch origin "$default_branch"; then
     set_issue_state "$issue" failed || true
-    comment_issue "$issue" "<!-- agentic-loop:failed worker=$worker -->\nCould not fetch the latest default branch. The Issue can be safely requeued after repository access is restored." || true
+    comment_issue "$issue" "<!-- agentic-loop:failed worker=$worker -->\n最新のdefault branchをfetchできませんでした。リポジトリへのアクセスが復旧した後、このIssueは安全に再キューできます。" || true
     rm -f "$STATE_ROOT/workers/$issue.pid"
     return 0
   fi
@@ -323,7 +323,7 @@ worker() {
     fi
     if [[ $exit_code -ne 0 ]]; then
       set_issue_state "$issue" failed || true
-      comment_issue "$issue" "<!-- agentic-loop:failed worker=$worker -->\nCould not prepare the dedicated worktree. Existing branch data was preserved for inspection." || true
+      comment_issue "$issue" "<!-- agentic-loop:failed worker=$worker -->\n専用worktreeを準備できませんでした。調査できるように既存のbranch dataは保持しています。" || true
       rm -f "$STATE_ROOT/workers/$issue.pid"
       return 0
     fi
@@ -345,16 +345,16 @@ worker() {
   if [[ $exit_code -eq 0 ]] && grep -Fq 'AGENTIC_LOOP_RESULT=completed' "$result"; then
     set_issue_state "$issue" completed
     project_sync_state "$issue" completed
-    comment_issue "$issue" "<!-- agentic-loop:completed -->\nWorker \`$worker\` completed the requirement. The final worker report and PR contain implementation and verification evidence."
+    comment_issue "$issue" "<!-- agentic-loop:completed -->\nWorker \`$worker\` が要求を完了しました。最終worker reportとPRに実装および検証の証跡があります。"
     gh issue close "$issue" >/dev/null
   elif [[ $exit_code -eq 0 ]] && grep -Fq 'AGENTIC_LOOP_RESULT=needs-input' "$result"; then
     set_issue_state "$issue" needs-input
     project_sync_state "$issue" needs-input
-    comment_issue "$issue" "<!-- agentic-loop:needs-input worker=$worker -->\nA consequential decision or permission is required. See the worker's preceding comment; reply here to requeue automatically."
+    comment_issue "$issue" "<!-- agentic-loop:needs-input worker=$worker -->\n重大な決定または権限が必要です。直前のworker commentを確認し、自動的に再キューするにはここへ返信してください。"
   else
     set_issue_state "$issue" failed
     project_sync_state "$issue" failed
-    comment_issue "$issue" "<!-- agentic-loop:failed worker=$worker exit=$exit_code -->\nThe worker stopped without a verified merge. Logs remain local and secrets are not copied here. Reapply \`agent:queued\` to retry after inspection."
+    comment_issue "$issue" "<!-- agentic-loop:failed worker=$worker exit=$exit_code -->\nWorkerは検証済みのmergeを完了せずに停止しました。Logはlocalにのみ保持され、秘密情報はここに転記されません。調査後に再試行するには \`agent:queued\` を再度付与してください。"
   fi
   rm -f "$STATE_ROOT/workers/$issue.pid"
   if [[ $exit_code -eq 0 ]] && grep -Fq 'AGENTIC_LOOP_RESULT=completed' "$result"; then

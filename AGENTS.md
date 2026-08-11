@@ -16,3 +16,4 @@
 - [テストポリシー](docs/policies/testing.md)に従い、すべてのテストをCIで実行する。
 - 破壊的・不可逆または重大なコストを伴う判断は、実行前に明示的な承認を得る。
 - [費用ポリシー](docs/policies/cost.md)をすべての機能・設計・運用に適用し、許容されない金銭的コストを発生させない。
+- [GitHub日本語運用ポリシー](docs/policies/github-language.md)に従い、Issue、PR、コメント、レビューは日本語で記述する。

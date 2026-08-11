@@ -16,4 +16,6 @@ Turn the user's short request into a verified, merged change without making them
 7. Commit, push, open a PR, monitor required checks, address failures and review feedback, and merge the PR. Remove the worktree and branch after a successful merge.
 8. Report the outcome, verification evidence, PR link, and any genuinely unresolved risk concisely.
 
+Write GitHub Issue and PR titles, bodies, comments, and reviews in Japanese. Preserve code, logs, identifiers, proper nouns, and quotations in their necessary original form.
+
 Treat requests about this workflow exactly like application requests. Improve the loop when doing so is required by the user's goal.
