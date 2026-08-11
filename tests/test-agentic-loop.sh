@@ -423,6 +423,16 @@ assert_contains "$target/.agents/skills/diagnose-codebase/SKILL.md" '`diagnosis`
 # shellcheck disable=SC2016 # Backticks are literal Markdown in installed documentation.
 assert_contains "$target/docs/operations/codebase-diagnosis.md" '`diagnosis`、`category:improvement`、`agent:queued`' 'installed diagnosis docs did not describe categorized queueing'
 assert_contains "$target/.agentic-loop/diagnose-codebase.sh" 'diagnosis, category:improvement, and agent:queued labels' 'installed diagnosis prompt did not request categorized queueing'
+
+# Diagnosis honors the configured provider (agent.diagnose.provider).
+cp "$target/.agentic-loop.toml" "$target/.agentic-loop.toml.bak"
+printf '[agent.diagnose]\nprovider = "opencode"\n' > "$target/.agentic-loop.toml"
+: > "$FAKE_GH_ROOT/opencode-calls"
+"$target/bin/agentic-loop-diagnose" >/dev/null
+# shellcheck disable=SC2016 # The dollar-prefixed value is a literal skill invocation.
+assert_contains "$FAKE_GH_ROOT/opencode-calls" 'Use $diagnose-codebase' 'diagnosis did not honor the configured opencode provider'
+mv "$target/.agentic-loop.toml.bak" "$target/.agentic-loop.toml"
+
 git -C "$target" add .
 git -C "$target" commit --quiet -m install
 git -C "$target" push --quiet
