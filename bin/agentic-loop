@@ -19,13 +19,15 @@ MAX_WORKERS=4
 LEASE_SECONDS=300
 STOP_TIMEOUT=0
 STALE_DAYS=30
+GRAPHQL_RESERVE=500
+RATE_LIMIT_CACHE_SECONDS=15
 
 load_config() {
   local line key value
   [[ -r $CONFIG_FILE ]] || return 0
   while IFS= read -r line || [[ -n $line ]]; do
     [[ -z $line || $line == \#* ]] && continue
-    [[ $line =~ ^(POLL_SECONDS|MAX_WORKERS|LEASE_SECONDS|STOP_TIMEOUT|STALE_DAYS)=([0-9]+)$ ]] ||
+    [[ $line =~ ^(POLL_SECONDS|MAX_WORKERS|LEASE_SECONDS|STOP_TIMEOUT|STALE_DAYS|GRAPHQL_RESERVE|RATE_LIMIT_CACHE_SECONDS)=([0-9]+)$ ]] ||
       fail "invalid configuration line: $line"
     key=${BASH_REMATCH[1]}; value=${BASH_REMATCH[2]}
     printf -v "$key" '%s' "$value"
@@ -35,7 +37,25 @@ load_config() {
 say() { printf '%s\n' "$*"; }
 fail() { printf '%s: %s\n' "$PROGRAM_NAME" "$*" >&2; exit 1; }
 require_command() { command -v "$1" >/dev/null 2>&1 || fail "$1 is required"; }
-repo_name() { gh repo view --json nameWithOwner --jq .nameWithOwner; }
+repo_name() {
+  local url slug
+  if [[ -r $STATE_ROOT/repository ]]; then
+    read -r slug < "$STATE_ROOT/repository"
+    [[ $slug =~ ^[^/]+/[^/]+$ ]] && { printf '%s\n' "$slug"; return 0; }
+  fi
+  url=$(git -C "$REPO_ROOT" remote get-url origin 2>/dev/null) || return 1
+  case $url in
+    https://github.com/*) slug=${url#https://github.com/} ;;
+    ssh://git@github.com/*) slug=${url#ssh://git@github.com/} ;;
+    git@github.com:*) slug=${url#git@github.com:} ;;
+    *) slug=$(gh repo view --json nameWithOwner --jq .nameWithOwner) || return 1 ;;
+  esac
+  slug=${slug%.git}; slug=${slug%/}
+  [[ $slug =~ ^[^/]+/[^/]+$ ]] || return 1
+  mkdir -p "$STATE_ROOT"
+  printf '%s\n' "$slug" > "$STATE_ROOT/repository"
+  printf '%s\n' "$slug"
+}
 state_label() { printf 'agent:%s' "$1"; }
 
 load_config
@@ -57,6 +77,55 @@ validate_config() {
   [[ $LEASE_SECONDS =~ ^[1-9][0-9]*$ ]] || fail 'LEASE_SECONDS must be a positive integer'
   [[ $STOP_TIMEOUT =~ ^[0-9]+$ ]] || fail 'STOP_TIMEOUT must be a non-negative integer'
   [[ $STALE_DAYS =~ ^[0-9]+$ ]] || fail 'STALE_DAYS must be a non-negative integer'
+  [[ $GRAPHQL_RESERVE =~ ^[0-9]+$ ]] || fail 'GRAPHQL_RESERVE must be a non-negative integer'
+  [[ $RATE_LIMIT_CACHE_SECONDS =~ ^[1-9][0-9]*$ ]] || fail 'RATE_LIMIT_CACHE_SECONDS must be a positive integer'
+}
+
+graphql_budget_file() { printf '%s/graphql-rate-limit' "$STATE_ROOT"; }
+
+refresh_graphql_budget() {
+  local snapshot remaining reset now tmp
+  mkdir -p "$STATE_ROOT"
+  snapshot=$(gh api rate_limit --jq '[.resources.graphql.remaining, .resources.graphql.reset] | @tsv' 2>/dev/null) || return 1
+  IFS=$'\t' read -r remaining reset <<< "$snapshot"
+  [[ $remaining =~ ^[0-9]+$ && $reset =~ ^[0-9]+$ ]] || return 1
+  now=$(date +%s)
+  tmp="$(graphql_budget_file).$$"
+  printf '%s\t%s\t%s\n' "$now" "$remaining" "$reset" > "$tmp"
+  mv "$tmp" "$(graphql_budget_file)"
+}
+
+read_graphql_budget() {
+  local fetched remaining reset now
+  if [[ -r $(graphql_budget_file) ]]; then
+    IFS=$'\t' read -r fetched remaining reset < "$(graphql_budget_file)" || true
+  fi
+  now=$(date +%s)
+  if [[ ! ${fetched:-} =~ ^[0-9]+$ || ! ${remaining:-} =~ ^[0-9]+$ || ! ${reset:-} =~ ^[0-9]+$ || $((now - fetched)) -ge $RATE_LIMIT_CACHE_SECONDS ]]; then
+    refresh_graphql_budget || return 1
+    IFS=$'\t' read -r fetched remaining reset < "$(graphql_budget_file)"
+  fi
+  printf '%s\t%s\n' "$remaining" "$reset"
+}
+
+graphql_budget_allows() {
+  local minimum=${1:-1} budget remaining reset
+  budget=$(read_graphql_budget) || return 1
+  IFS=$'\t' read -r remaining reset <<< "$budget"
+  (( remaining >= minimum ))
+}
+
+wait_for_graphql_budget() {
+  local budget remaining reset now wait_seconds
+  budget=$(read_graphql_budget) || { sleep "$POLL_SECONDS"; return 1; }
+  IFS=$'\t' read -r remaining reset <<< "$budget"
+  (( remaining > GRAPHQL_RESERVE )) && return 0
+  now=$(date +%s); wait_seconds=$((reset - now))
+  (( wait_seconds < 1 )) && wait_seconds=1
+  (( wait_seconds > 60 )) && wait_seconds=60
+  say "GraphQL残量が保護閾値以下のため、resetまで新規claimを停止します（remaining=$remaining, reserve=$GRAPHQL_RESERVE, 残り ${wait_seconds}秒以上）。" >&2
+  sleep "$wait_seconds"
+  return 1
 }
 
 preflight() {
@@ -66,8 +135,12 @@ preflight() {
   git -C "$REPO_ROOT" rev-parse --git-dir >/dev/null 2>&1 || fail 'target is not a Git repository'
   git -C "$REPO_ROOT" remote get-url origin >/dev/null 2>&1 || fail 'origin remote is required'
   gh auth status >/dev/null 2>&1 || fail 'GitHub authentication is required; run gh auth login'
-  gh api graphql -f query='query { viewer { login projectsV2(first: 1) { totalCount } } }' >/dev/null 2>&1 ||
-    fail 'GitHub token needs repository access and project/read:project scopes; run gh auth refresh -s project,read:project'
+  if graphql_budget_allows 1; then
+    gh api graphql -f query='query { viewer { login projectsV2(first: 1) { totalCount } } }' >/dev/null 2>&1 ||
+      fail 'GitHub token needs repository access and project/read:project scopes; run gh auth refresh -s project,read:project'
+  else
+    say 'GraphQL rate limitが枯渇しているためProjects権限検査を延期します。Issueキューはreset後に再開します。' >&2
+  fi
   repo_name >/dev/null || fail 'cannot access the target GitHub repository'
   codex exec --help 2>/dev/null | grep -Fq -- '--add-dir' || fail 'Codex CLI exec mode with --add-dir is required'
   validate_config
@@ -252,6 +325,7 @@ set_issue_state() {
 comment_issue() { gh issue comment "$1" --body "$2" >/dev/null; }
 
 project_add_issue() {
+  graphql_budget_allows "$GRAPHQL_RESERVE" || return 0
   [[ -r $STATE_ROOT/project.env ]] || return 0
   local url PROJECT_OWNER='' PROJECT_NUMBER='' key value
   while IFS='=' read -r key value; do
@@ -263,6 +337,7 @@ project_add_issue() {
 }
 
 project_add_pull_requests() {
+  graphql_budget_allows "$GRAPHQL_RESERVE" || return 0
   [[ -r $STATE_ROOT/project.env ]] || return 0
   local branch=$1 url PROJECT_OWNER='' PROJECT_NUMBER='' key value
   while IFS='=' read -r key value; do
@@ -276,6 +351,7 @@ project_add_pull_requests() {
 }
 
 project_sync_state() {
+  graphql_budget_allows "$GRAPHQL_RESERVE" || return 0
   [[ -r $STATE_ROOT/project.env ]] || return 0
   local issue=$1 state=$2 PROJECT_OWNER='' PROJECT_NUMBER='' key value project_id item_id field_id option_id option
   while IFS='=' read -r key value; do
@@ -367,8 +443,16 @@ supervise() {
   trap 'rm -f "$STATE_ROOT/supervisor.pid"; rmdir "$STATE_ROOT/supervisor.lock" 2>/dev/null || true' EXIT
   mkdir -p "$STATE_ROOT/workers"
   printf '%s\n' "$$" > "$STATE_ROOT/supervisor.pid"
-  recover_expired
+  if wait_for_graphql_budget; then
+    recover_expired
+  elif [[ ${AGENTIC_LOOP_RUN_ONCE:-0} == 1 ]]; then
+    return 0
+  fi
   while :; do
+    if ! wait_for_graphql_budget; then
+      [[ ${AGENTIC_LOOP_RUN_ONCE:-0} == 1 ]] && break
+      continue
+    fi
     requeue_answered
     if [[ -e $STATE_ROOT/stop.requested ]]; then
       [[ $(worker_count) -eq 0 ]] && break

@@ -30,6 +30,9 @@ diagnosis_issues="$FAKE_GH_ROOT/$key.diagnosis-issues"
 printf '%s\t%s\n' "$PWD" "$*" >> "$FAKE_GH_ROOT/calls"
 case "${1:-} ${2:-}" in
   'auth status') exit 0 ;;
+  'api rate_limit')
+    printf '%s\t%s\n' "${FAKE_GRAPHQL_REMAINING:-5000}" "${FAKE_GRAPHQL_RESET:-$(($(date +%s) + 3600))}"
+    ;;
   'api graphql')
     if [[ $* == *createProjectV2View* ]]; then
       name=''
@@ -215,6 +218,8 @@ assert_contains "$target/AGENTS.md" '検証ハーネスポリシー' 'installed 
 assert_contains "$target/docs/policies/validation-harness.md" 'local fast check' 'installed validation policy lacks the fast check layer'
 assert_contains "$target/docs/policies/validation-harness.md" 'local full check' 'installed validation policy lacks the full check layer'
 assert_contains "$target/docs/policies/validation-harness.md" 'private repository' 'installed validation policy lacks the private repository exception'
+assert_contains "$target/.agentic-loop/config" 'GRAPHQL_RESERVE=500' 'installed configuration lacks the GraphQL reserve'
+assert_contains "$target/docs/operations/issue-queue.md" 'GraphQLの残量・reset時刻' 'installed operations documentation lacks shared rate-limit handling'
 assert_contains "$target/.agents/skills/submit-requirement/SKILL.md" 'in Japanese' 'installed submission skill did not require Japanese GitHub content'
 assert_contains "$target/.agents/skills/diagnose-codebase/SKILL.md" 'without modifying' 'diagnosis skill did not prohibit code changes'
 assert_contains "$target/AGENTS.md" '通常のbuild・変更要求' 'installed AGENTS.md lacks queue-first routing'
@@ -318,6 +323,16 @@ grep -Fq 'running' <<< "$status_output" || fail 'status did not show the supervi
 "$target/bin/agentic-loop" stop
 status_output=$("$target/bin/agentic-loop" status)
 grep -Fq 'stopped' <<< "$status_output" || fail 'stop did not drain the supervisor'
+
+# An exhausted shared GraphQL budget is not mistaken for missing auth and stops polling/claiming.
+rm -f "$(git -C "$target" rev-parse --absolute-git-dir)/agentic-loop/graphql-rate-limit"
+printf '90 queued open none 2025-01-01T00:00:00Z\n' > "$FAKE_GH_ROOT/$state_key.state"
+before_issue_lists=$(grep -c $'\tissue list' "$FAKE_GH_ROOT/calls" || true)
+FAKE_GRAPHQL_REMAINING=499 FAKE_GRAPHQL_RESET=$(date +%s) AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _supervise
+after_issue_lists=$(grep -c $'\tissue list' "$FAKE_GH_ROOT/calls" || true)
+[[ $after_issue_lists -eq $before_issue_lists ]] || fail 'exhausted GraphQL budget still polled Issues'
+grep -Eq '^90 queued open' "$FAKE_GH_ROOT/$state_key.state" || fail 'exhausted GraphQL budget claimed an Issue'
+rm -f "$(git -C "$target" rev-parse --absolute-git-dir)/agentic-loop/graphql-rate-limit"
 
 # Commit the runtime configuration so worker worktrees start from a realistic default branch.
 git -C "$target" add .

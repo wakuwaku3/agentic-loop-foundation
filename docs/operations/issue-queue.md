@@ -36,7 +36,11 @@ Supervisorがclaimした `agent:running` Issueのworkerは受付を再実行し�
 
 読み取り専用要求と運用操作はその場で続行する。通常の変更要求は、専用branch/worktreeを利用でき、追加費用・秘密・破壊的操作に関する判断が不要な場合に限り、キューが利用不能であることを明示してworker workflowを同期実行する。それ以外は復旧方法または必要な判断を正確に提示して停止する。明示された同期・直接実行も同じworker workflowと不変条件に従う。
 
-`.agentic-loop/config` で `POLL_SECONDS`、`MAX_WORKERS`、`LEASE_SECONDS`、`STOP_TIMEOUT`、`STALE_DAYS` を変更できる。既定の並列数は4とし、これを超えてむやみに増やさない。増加はCodex契約上の制限、Git競合、端末資源を確認してから行う。stopは新規claimを止め、workerをdrainする。`STOP_TIMEOUT=0` は完了まで待つ。
+`.agentic-loop/config` で `POLL_SECONDS`、`MAX_WORKERS`、`LEASE_SECONDS`、`STOP_TIMEOUT`、`STALE_DAYS`、`GRAPHQL_RESERVE`、`RATE_LIMIT_CACHE_SECONDS` を変更できる。既定の並列数は4とし、これを超えてむやみに増やさない。増加はCodex契約上の制限、Git競合、端末資源を確認してから行う。stopは新規claimを止め、workerをdrainする。`STOP_TIMEOUT=0` は完了まで待つ。
+
+SupervisorとworkerはGit common stateにGraphQLの残量・reset時刻を短時間cacheして共有する。残量が `GRAPHQL_RESERVE` 以下ならSupervisorは新規claimとpollをresetまで停止し、認証不足と誤診しない。同じ閾値でIssue状態遷移と復旧用の余力を守るため、best-effortのProjects item・field同期も抑制する。Projectsは後から `bin/agentic-loop setup` で再同期でき、抑制中もIssue Labelを正本とする。既定値は500であり、0にすると残量による保護を無効化する。
+
+GraphQL枯渇時もREST APIのquotaは別に確認できる。`gh api rate_limit --jq '.resources | {graphql,core}'` で現在値を確認する。GraphQLのreset前にSupervisorを繰り返し再起動したり、`gh issue list --limit 1000` や `gh project item-list --limit 1000` を手動で反復したりしない。
 
 Supervisorはclaimの直前に、`agent:queued` のまま `STALE_DAYS` 日以上更新されていないIssueを `agent:stale` に遷移し、監査コメントを残してcloseする。再開時はIssueをreopenし、要求を確認・更新して `agent:queued` を付ける。`STALE_DAYS=0` は自動closeを無効にする。queued以外のrunning、needs-input、failed、in-reviewや通常の未キューIssueは対象外である。
 
