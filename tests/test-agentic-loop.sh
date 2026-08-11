@@ -12,6 +12,7 @@ AGENTIC_LOOP_SOURCE="$PROJECT_ROOT" AGENTIC_LOOP_TARGET="$new_target" "$PROJECT_
 [[ -d "$new_target/.git" ]] || fail 'init did not initialize Git'
 [[ -f "$new_target/AGENTS.md" ]] || fail 'init did not install AGENTS.md'
 [[ $(cat "$new_target/.codex/config.toml") == $'approval_policy = "never"\nsandbox_mode = "workspace-write"' ]] || fail 'init did not install Codex settings'
+[[ -f "$new_target/docs/policies/cost.md" ]] || fail 'init did not install the cost policy'
 [[ $(git -C "$new_target" config --get core.hooksPath) == .githooks ]] || fail 'init did not enable hooks'
 make -s -C "$new_target" lint >/dev/null
 
@@ -22,6 +23,7 @@ printf 'existing\n' > "$existing_target/README.md"
 [[ $(cat "$existing_target/README.md") == existing ]] || fail 'install changed an existing file'
 [[ -f "$existing_target/AGENTS.md" ]] || fail 'install did not add AGENTS.md'
 [[ $(cat "$existing_target/.codex/config.toml") == $'approval_policy = "never"\nsandbox_mode = "workspace-write"' ]] || fail 'install did not install Codex settings'
+[[ -f "$existing_target/docs/policies/cost.md" ]] || fail 'install did not add the cost policy'
 [[ ! -e "$existing_target/Makefile" ]] || fail 'install added project tooling'
 [[ -f "$existing_target/.agents/skills/submit-requirement/SKILL.md" ]] || fail 'install did not add the skill'
 [[ -x "$existing_target/.githooks/pre-push" ]] || fail 'install did not add secret hooks'
