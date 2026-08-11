@@ -260,7 +260,13 @@ printf '%s\n' "$*" >> "$FAKE_GH_ROOT/claude-calls"
 [[ $* == *--dangerously-skip-permissions* ]] || { printf 'claude worker must not block on permissions\n' >&2; exit 2; }
 sleep "${FAKE_CLAUDE_SLEEP:-0}"
 # The Claude worker captures the final message from stdout into the result file.
-printf '%s\n' "${FAKE_CLAUDE_RESULT:-AGENTIC_LOOP_RESULT=completed}"
+# With --output-format json the sentinel stays inside .result and usage fields
+# accompany it for the token analysis record.
+if [[ $* == *'--output-format json'* ]]; then
+  printf '{"type":"result","result":"%s","usage":{"input_tokens":123,"output_tokens":45,"cache_read_input_tokens":10},"total_cost_usd":0.0123}\n' "${FAKE_CLAUDE_RESULT:-AGENTIC_LOOP_RESULT=completed}"
+else
+  printf '%s\n' "${FAKE_CLAUDE_RESULT:-AGENTIC_LOOP_RESULT=completed}"
+fi
 FAKE_CLAUDE
 cat > "$FAKE_BIN/systemctl" <<'FAKE_SYSTEMCTL'
 #!/usr/bin/env bash
@@ -581,6 +587,7 @@ assert_contains "$FAKE_GH_ROOT/codex-calls" 'GitHubのIssue、PR' 'worker prompt
 assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'のハートビートです' 'supervisor did not write its Issue comments in Japanese'
 if grep -Eq 'danger-full-access|OPENAI_API_KEY|--add-dir /($| )|--add-dir /home($| )' "$FAKE_GH_ROOT/codex-calls"; then fail 'worker used forbidden Codex configuration or a broad writable path'; fi
 [[ ! -e $state_root/worktrees ]] || fail 'worker worktrees were placed inside Git metadata'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'Token使用量（分析用）: provider=codex' 'codex worker did not record a token usage analysis entry'
 
 # AGENT_PROVIDER=claude routes the worker to the Claude CLI, confining writes to the worktree.
 [[ -f $target/.claude/skills/submit-requirement/SKILL.md ]] || fail 'install did not add the Claude submit-requirement skill'
@@ -595,6 +602,11 @@ assert_contains "$FAKE_GH_ROOT/claude-calls" '--print' 'claude worker did not ru
 assert_contains "$FAKE_GH_ROOT/claude-calls" '--dangerously-skip-permissions' 'claude worker did not skip permission prompts'
 assert_contains "$FAKE_GH_ROOT/claude-calls" "--add-dir $target/.git" 'claude worker did not grant its exact Git common directory'
 assert_contains "$FAKE_GH_ROOT/claude-calls" "--add-dir $target-worktrees/issue-7/.agents" 'claude worker did not grant its exact protected .agents directory'
+assert_contains "$FAKE_GH_ROOT/claude-calls" '--output-format json' 'claude worker did not request a machine-readable usage payload'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'Token使用量（分析用）: provider=claude' 'claude worker did not record its token usage on the Issue'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" '入力=123tok' 'claude usage record lacked input token count'
+# shellcheck disable=SC2016 # The dollar sign is a literal currency prefix in the recorded usage line.
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'cost=$0.0123' 'claude usage record lacked the reported cost'
 
 # Multiple priority labels use the highest rank; setup creates all priority and stale labels idempotently.
 grep -Fq $'label create priority:critical' "$FAKE_GH_ROOT/calls" || fail 'setup did not create the critical priority label'
