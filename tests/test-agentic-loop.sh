@@ -26,6 +26,7 @@ state="$FAKE_GH_ROOT/$key.state"
 project="$FAKE_GH_ROOT/$key.project"
 comments="$FAKE_GH_ROOT/$key.comments"
 views="$FAKE_GH_ROOT/$key.views"
+diagnosis_issues="$FAKE_GH_ROOT/$key.diagnosis-issues"
 printf '%s\t%s\n' "$PWD" "$*" >> "$FAKE_GH_ROOT/calls"
 case "${1:-} ${2:-}" in
   'auth status') exit 0 ;;
@@ -61,6 +62,10 @@ case "${1:-} ${2:-}" in
       printf 'https://github.example/%s/pull/1\nhttps://github.example/%s/pull/2\n' "$slug" "$slug"
     fi ;;
   'issue list')
+    if [[ $* == *diagnosis-finding* ]]; then
+      [[ -e $diagnosis_issues ]] && printf 'https://github.example/%s/issues/diagnosis\n' "$slug"
+      exit 0
+    fi
     wanted=''
     for ((i=1; i<=$#; i++)); do [[ ${!i} == --label ]] && { j=$((i+1)); wanted=${!j}; }; done
     [[ -e $state ]] || exit 0
@@ -85,6 +90,7 @@ case "${1:-} ${2:-}" in
     elif [[ $wanted == agent:needs-input ]]; then
       awk '$2 == "needs-input" && $3 != "closed" {print $1}' "$state"
     fi ;;
+  'issue create') touch "$diagnosis_issues"; printf 'https://github.example/%s/issues/diagnosis\n' "$slug" ;;
   'issue edit')
     issue=$3 target=''
     for ((i=1; i<=$#; i++)); do [[ ${!i} == --add-label ]] && { j=$((i+1)); target=${!j#agent:}; }; done
@@ -126,6 +132,12 @@ for ((i=1; i<=$#; i++)); do
   esac
 done
 [[ -n $output ]] || exit 2
+if [[ $* == *'Use $diagnose-codebase'* ]]; then
+  existing=$(gh issue list --search diagnosis-finding --state all --limit 100 --json url --jq '.[].url')
+  if [[ -z $existing ]]; then
+    gh issue create --title '診断所見' --body 'diagnosis-finding' --label diagnosis --label agent:queued >/dev/null
+  fi
+fi
 if [[ ${FAKE_CODEX_GIT_OPERATIONS:-0} == 1 ]]; then
   expected=$(git -C "$worktree" rev-parse --path-format=absolute --git-common-dir)
   [[ " $add_dirs " == *" $expected "* ]] || { printf 'missing Git add-dir: %s (expected %s)\n' "$add_dirs" "$expected" >&2; exit 3; }
@@ -230,8 +242,19 @@ diagnosis_output=$("$target/bin/agentic-loop-diagnose")
 assert_contains "$FAKE_GH_ROOT/codex-calls" '--sandbox read-only' 'diagnosis did not use the read-only sandbox'
 # shellcheck disable=SC2016 # The dollar-prefixed value is a literal skill invocation.
 assert_contains "$FAKE_GH_ROOT/codex-calls" 'Use $diagnose-codebase' 'manual diagnosis did not invoke the diagnosis skill'
-assert_contains "$FAKE_GH_ROOT/codex-calls" 'create non-queued diagnosis Issues' 'diagnosis prompt did not limit GitHub changes'
+assert_contains "$FAKE_GH_ROOT/codex-calls" 'both diagnosis and agent:queued labels' 'diagnosis prompt did not queue findings'
+assert_contains "$FAKE_GH_ROOT/calls" 'issue create --title 診断所見 --body diagnosis-finding --label diagnosis --label agent:queued' 'diagnosis did not create a queued finding with both labels'
+first_diagnosis_creates=$(grep -c $'\tissue create ' "$FAKE_GH_ROOT/calls")
+second_diagnosis_output=$("$target/bin/agentic-loop-diagnose")
+[[ $second_diagnosis_output == AGENTIC_LOOP_RESULT=completed ]] || fail 'repeated diagnosis did not report the Codex result'
+second_diagnosis_creates=$(grep -c $'\tissue create ' "$FAKE_GH_ROOT/calls")
+[[ $second_diagnosis_creates -eq $first_diagnosis_creates ]] || fail 'repeated diagnosis created a duplicate Issue'
 grep -Fq $'label create diagnosis' "$FAKE_GH_ROOT/calls" || fail 'setup did not create the diagnosis label'
+# shellcheck disable=SC2016 # Backticks are literal Markdown in installed documentation.
+assert_contains "$target/.agents/skills/diagnose-codebase/SKILL.md" 'both the `diagnosis` and `agent:queued` labels' 'installed diagnosis skill did not queue findings'
+# shellcheck disable=SC2016 # Backticks are literal Markdown in installed documentation.
+assert_contains "$target/docs/operations/codebase-diagnosis.md" '`diagnosis` と `agent:queued`' 'installed diagnosis docs did not describe automatic queueing'
+assert_contains "$target/.agentic-loop/diagnose-codebase.sh" 'both diagnosis and agent:queued labels' 'installed diagnosis prompt did not request automatic queueing'
 git -C "$target" add .
 git -C "$target" commit --quiet -m install
 git -C "$target" push --quiet
