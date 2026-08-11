@@ -7,3 +7,8 @@ STOP_TIMEOUT=0
 # Zero disables automatic stale closure. Otherwise queued Issues inactive for
 # this many days are marked agent:stale and closed before work is claimed.
 STALE_DAYS=30
+# Keep enough GraphQL capacity for Issue state transitions and worker recovery.
+# Best-effort Projects synchronization pauses below this remaining budget.
+GRAPHQL_RESERVE=500
+# Processes share the latest rate-limit observation through Git common state.
+RATE_LIMIT_CACHE_SECONDS=15
