@@ -817,6 +817,54 @@
           "store_path": "/nix/store/4235prclh3wvcqzri7hxssb47i6d444j-util-linux-2.42.2-bin"
         }
       }
+    },
+    "yq-go@latest": {
+      "last_modified": "2026-08-01T16:34:20Z",
+      "resolved": "github:NixOS/nixpkgs/a5cbcfe954791221bfffe2307f7d1a1bf61a871e#yq-go",
+      "source": "devbox-search",
+      "version": "4.53.3",
+      "systems": {
+        "aarch64-darwin": {
+          "outputs": [
+            {
+              "name": "out",
+              "path": "/nix/store/ka1kvl4b0zhcz16kb6amn86qjjqglw3z-yq-go-4.53.3",
+              "default": true
+            }
+          ],
+          "store_path": "/nix/store/ka1kvl4b0zhcz16kb6amn86qjjqglw3z-yq-go-4.53.3"
+        },
+        "aarch64-linux": {
+          "outputs": [
+            {
+              "name": "out",
+              "path": "/nix/store/f3mpc2r89qqvqz9sya611fr5lf4qawb5-yq-go-4.53.3",
+              "default": true
+            }
+          ],
+          "store_path": "/nix/store/f3mpc2r89qqvqz9sya611fr5lf4qawb5-yq-go-4.53.3"
+        },
+        "x86_64-darwin": {
+          "outputs": [
+            {
+              "name": "out",
+              "path": "/nix/store/agf9fyr053m3092vsmh6vih3apz0kw05-yq-go-4.53.3",
+              "default": true
+            }
+          ],
+          "store_path": "/nix/store/agf9fyr053m3092vsmh6vih3apz0kw05-yq-go-4.53.3"
+        },
+        "x86_64-linux": {
+          "outputs": [
+            {
+              "name": "out",
+              "path": "/nix/store/pyy2agrvaazs49lkpn75dibpvz45pwkm-yq-go-4.53.3",
+              "default": true
+            }
+          ],
+          "store_path": "/nix/store/pyy2agrvaazs49lkpn75dibpvz45pwkm-yq-go-4.53.3"
+        }
+      }
     }
   }
 }

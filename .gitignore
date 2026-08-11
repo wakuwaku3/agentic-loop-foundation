@@ -1,7 +1,7 @@
 # Secrets and local configuration
 .env
 .env.*
-!.env.example
+.agentic-loop.local.toml
 *.pem
 *.key
 *.p12

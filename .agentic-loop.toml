@@ -1,17 +1,21 @@
-# Polling and concurrency defaults. Use positive integer seconds/counts.
-POLL_SECONDS=30
-MAX_WORKERS=4
-LEASE_SECONDS=300
+# Agentic Loop configuration. Copy overrides into .agentic-loop.local.toml
+# (git-ignored) to change values per environment; local keys win over these.
+
+[queue]
+# Polling and concurrency defaults. Use non-negative integer seconds/counts.
+poll_seconds = 30
+max_workers = 4
+lease_seconds = 300
 # Zero waits indefinitely for workers during a graceful stop.
-STOP_TIMEOUT=0
+stop_timeout = 0
 # Zero disables automatic stale closure. Otherwise queued Issues inactive for
 # this many days are marked agent:stale and closed before work is claimed.
-STALE_DAYS=30
+stale_days = 30
 # Keep enough GraphQL capacity for Issue state transitions and worker recovery.
 # Best-effort Projects synchronization pauses below this remaining budget.
-GRAPHQL_RESERVE=500
+graphql_reserve = 500
 # Processes share the latest rate-limit observation through Git common state.
-RATE_LIMIT_CACHE_SECONDS=15
+rate_limit_cache_seconds = 15
 # Retry only classified transient REST failures; permanent 4xx errors fail fast.
-API_RETRY_ATTEMPTS=3
-API_RETRY_BASE_SECONDS=1
+api_retry_attempts = 3
+api_retry_base_seconds = 1

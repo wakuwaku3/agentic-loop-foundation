@@ -7,7 +7,8 @@ readonly SCRIPT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 readonly REPO_ROOT="$(git -C "$SCRIPT_ROOT" rev-parse --show-toplevel 2>/dev/null || printf '%s' "$SCRIPT_ROOT")"
 readonly STATE_ROOT="$(git -C "$REPO_ROOT" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || printf '%s/.git' "$REPO_ROOT")/agentic-loop"
 readonly WORKTREE_ROOT="$(dirname "$REPO_ROOT")/$(basename "$REPO_ROOT")-worktrees"
-readonly CONFIG_FILE="$REPO_ROOT/.agentic-loop/config"
+readonly CONFIG_FILE="$REPO_ROOT/.agentic-loop.toml"
+readonly CONFIG_LOCAL="$REPO_ROOT/.agentic-loop.local.toml"
 readonly LABELS=(queued running needs-input in-review completed failed stale)
 readonly PRIORITY_LABELS=(critical high medium low)
 readonly CATEGORY_LABELS=(loop-continuity confidentiality-incident integrity-incident availability-incident feature improvement)
@@ -26,18 +27,44 @@ API_RETRY_ATTEMPTS=3
 API_RETRY_BASE_SECONDS=1
 CONFIG_ERROR=''
 
+# Emit the merged configuration as dotted "key = value" lines. The committed
+# .agentic-loop.toml is overlaid by an optional .agentic-loop.local.toml, where
+# individual keys in the local file win. yq is invoked directly so its argument
+# is not re-globbed by any wrapper shell.
+config_props() {
+  if [[ -r $CONFIG_LOCAL ]]; then
+    yq -p toml -o props eval-all 'select(fi==0) * select(fi==1)' "$CONFIG_FILE" "$CONFIG_LOCAL"
+  else
+    yq -p toml -o props "$CONFIG_FILE"
+  fi
+}
+
 load_config() {
-  local line key value
+  local line key value props
   [[ -r $CONFIG_FILE ]] || return 0
-  while IFS= read -r line || [[ -n $line ]]; do
-    [[ -z $line || $line == \#* ]] && continue
-    if [[ ! $line =~ ^(POLL_SECONDS|MAX_WORKERS|LEASE_SECONDS|STOP_TIMEOUT|STALE_DAYS|GRAPHQL_RESERVE|RATE_LIMIT_CACHE_SECONDS|API_RETRY_ATTEMPTS|API_RETRY_BASE_SECONDS)=([0-9]+)$ ]]; then
-      CONFIG_ERROR="invalid configuration line: $line"
+  command -v yq >/dev/null 2>&1 || { CONFIG_ERROR='yq is required to read .agentic-loop.toml'; return 1; }
+  props=$(config_props 2>/dev/null) || { CONFIG_ERROR='cannot parse .agentic-loop.toml'; return 1; }
+  while IFS= read -r line; do
+    [[ -z $line ]] && continue
+    key=${line%% = *}; value=${line#* = }
+    case $key in
+      queue.poll_seconds) key=POLL_SECONDS ;;
+      queue.max_workers) key=MAX_WORKERS ;;
+      queue.lease_seconds) key=LEASE_SECONDS ;;
+      queue.stop_timeout) key=STOP_TIMEOUT ;;
+      queue.stale_days) key=STALE_DAYS ;;
+      queue.graphql_reserve) key=GRAPHQL_RESERVE ;;
+      queue.rate_limit_cache_seconds) key=RATE_LIMIT_CACHE_SECONDS ;;
+      queue.api_retry_attempts) key=API_RETRY_ATTEMPTS ;;
+      queue.api_retry_base_seconds) key=API_RETRY_BASE_SECONDS ;;
+      *) continue ;;
+    esac
+    if [[ ! $value =~ ^[0-9]+$ ]]; then
+      CONFIG_ERROR="invalid configuration value for $key: $value"
       return 1
     fi
-    key=${BASH_REMATCH[1]}; value=${BASH_REMATCH[2]}
     printf -v "$key" '%s' "$value"
-  done < "$CONFIG_FILE"
+  done <<< "$props"
 }
 
 say() { printf '%s\n' "$*"; }
@@ -290,9 +317,10 @@ graphql_budget_allows() {
 }
 
 preflight() {
-  agent_provider_valid || fail 'AGENT_PROVIDER must be codex or claude'
+  agent_provider_valid || fail 'AGENT_PROVIDER must be codex, claude, or opencode'
   require_command git
   require_command gh
+  require_command yq
   require_command "$(agent_provider_command)"
   git -C "$REPO_ROOT" rev-parse --git-dir >/dev/null 2>&1 || fail 'target is not a Git repository'
   git -C "$REPO_ROOT" remote get-url origin >/dev/null 2>&1 || fail 'origin remote is required'
@@ -467,7 +495,7 @@ install_supervisor_unit() {
   unit_file="$unit_dir/$(supervisor_unit_name)"
   escaped_root=$(systemd_path_value "$REPO_ROOT") || fail 'repository path cannot be encoded safely for systemd'
   escaped_program=$(systemd_path_value "$SCRIPT_ROOT") || fail 'program path cannot be encoded safely for systemd'
-  service_path="$(dirname "$(command -v "$(agent_provider_command)")"):$(dirname "$(command -v gh)"):$(dirname "$(command -v git)"):/usr/local/bin:/usr/bin:/bin"
+  service_path="$(dirname "$(command -v "$(agent_provider_command)")"):$(dirname "$(command -v gh)"):$(dirname "$(command -v git)"):$(dirname "$(command -v yq)"):/usr/local/bin:/usr/bin:/bin"
   escaped_path=$(systemd_path_value "$service_path") || fail 'command PATH cannot be encoded safely for systemd'
   mkdir -p "$unit_dir"
   {
@@ -582,7 +610,7 @@ doctor_non_negative_config() {
 doctor_collect() {
   local origin='' default_branch='' hooks='' project_owner='' project_number='' project_id='' project_ok='' repository='' owner='' name='' unit_dir unit issue_worktrees='' agent_branches='' log_files=''
   if [[ -n $CONFIG_ERROR ]]; then
-    doctor_add failure '設定ファイル' '設定を解釈できないためSupervisorを安全に起動できません。' '.agentic-loop/config を documented KEY=INTEGER 形式に修正してください。'
+    doctor_add failure '設定ファイル' '設定を解釈できないためSupervisorを安全に起動できません。' '.agentic-loop.toml（および任意の .agentic-loop.local.toml）を有効なTOMLに修正し、yqを導入してください。'
   else
     doctor_positive_config POLL_SECONDS "$POLL_SECONDS"; doctor_positive_config MAX_WORKERS "$MAX_WORKERS"
     doctor_positive_config LEASE_SECONDS "$LEASE_SECONDS"; doctor_non_negative_config STOP_TIMEOUT "$STOP_TIMEOUT"
