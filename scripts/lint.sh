@@ -9,7 +9,10 @@ for file in "${required[@]}"; do
 done
 
 grep -Fxq 'approval_policy = "never"' .codex/config.toml || { printf 'Invalid Codex approval policy.\n' >&2; exit 1; }
-grep -Fxq 'sandbox_mode = "workspace-write"' .codex/config.toml || { printf 'Invalid Codex sandbox mode.\n' >&2; exit 1; }
+if grep -Eq '^[[:space:]]*sandbox_mode[[:space:]]*=' .codex/config.toml; then
+  printf 'Codex sandbox mode must be configured outside the repository.\n' >&2
+  exit 1
+fi
 grep -Fq '[費用ポリシー](docs/policies/cost.md)' AGENTS.md || {
   printf 'Missing cost policy invariant.\n' >&2
   exit 1
