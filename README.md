@@ -50,7 +50,7 @@ model = "anthropic/claude-sonnet-4"
 
 個人環境の上書きは git 管理外の `.agentic-loop.local.toml` に同じキーを書けば、キー単位で優先されます（例: 手元ではexecもcodexにする）。
 
-Claudeとopencodeは（Codexと異なり）OS levelのsandboxを持たないため、書き込みの隔離は専用worktreeと秘密情報guard hookに依存します。opencodeは `opencode run --auto --dir <worktree>` で作業ディレクトリに限定して実行します。設定を変えたら `bin/agentic-loop start`（またはSupervisor再起動）で反映します。
+Claudeとopencodeは（Codexと異なり）OS levelのsandboxを持たないため、書き込みの隔離は専用worktreeと秘密情報guard hookに依存します。opencodeは `opencode run --auto --format json --dir <worktree>` で作業ディレクトリに限定して実行し、step-finishイベントからtoken/コストを記録します。設定を変えたら `bin/agentic-loop start`（またはSupervisor再起動）で反映します。
 
 ## 要求の入力
 
