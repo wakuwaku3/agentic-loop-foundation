@@ -3,7 +3,7 @@ set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
-required=(AGENTS.md README.md Makefile .editorconfig .gitignore .env.example .codex/config.toml install.sh devbox.json devbox.lock docs/policies/cost.md docs/policies/testing.md docs/policies/external-environment.md docs/policies/development-environment.md docs/policies/github-language.md docs/policies/validation-harness.md docs/decisions/0002-github-issue-queue.md docs/operations/issue-queue.md docs/operations/codebase-diagnosis.md .agentic-loop/config .agentic-loop/guard-secrets.sh .agentic-loop/update-main.sh .agentic-loop/diagnose-codebase.sh .githooks/pre-commit .githooks/pre-push .agents/skills/submit-requirement/SKILL.md .agents/skills/diagnose-codebase/SKILL.md bin/agentic-loop bin/agentic-loop-diagnose scripts/check-environment.sh scripts/install-target.sh)
+required=(AGENTS.md README.md Makefile .editorconfig .gitignore .env.example .codex/config.toml install.sh devbox.json devbox.lock docs/policies/cost.md docs/policies/testing.md docs/policies/external-environment.md docs/policies/development-environment.md docs/policies/github-language.md docs/policies/validation-harness.md docs/policies/continuous-delivery.md docs/decisions/0002-github-issue-queue.md docs/operations/issue-queue.md docs/operations/codebase-diagnosis.md .agentic-loop/config .agentic-loop/guard-secrets.sh .agentic-loop/update-main.sh .agentic-loop/diagnose-codebase.sh .githooks/pre-commit .githooks/pre-push .agents/skills/submit-requirement/SKILL.md .agents/skills/diagnose-codebase/SKILL.md bin/agentic-loop bin/agentic-loop-diagnose scripts/check-environment.sh scripts/install-target.sh)
 for file in "${required[@]}"; do
   [[ -f $file ]] || { printf 'Missing required file: %s\n' "$file" >&2; exit 1; }
 done
