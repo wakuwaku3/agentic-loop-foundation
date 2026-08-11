@@ -35,6 +35,7 @@ fi
 case "${1:-} ${2:-}" in
   'auth status') exit 0 ;;
   'api repos/'*)
+    [[ $2 != */ ]] || { printf 'HTTP 404: Not Found\n' >&2; exit 1; }
     rest_failures="$FAKE_GH_ROOT/$key.rest-failures"
     current_failures=$(cat "$rest_failures" 2>/dev/null || printf '0')
     if (( current_failures < ${FAKE_REST_FAILURES:-0} )); then
@@ -42,7 +43,8 @@ case "${1:-} ${2:-}" in
       printf 'HTTP 503: Service Unavailable\n' >&2
       exit 1
     fi
-    endpoint=${2#repos/}; endpoint=${endpoint#*/}; endpoint=${endpoint#*/}
+    endpoint=${2#repos/}; endpoint=${endpoint#*/}
+    if [[ $endpoint == */* ]]; then endpoint=${endpoint#*/}; else endpoint=''; fi
     method=GET wanted='' form_state='' input_file=''
     for ((i=1; i<=$#; i++)); do
       case ${!i} in
