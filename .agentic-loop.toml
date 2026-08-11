@@ -23,6 +23,13 @@ reasoning_effort = "low"
 # Re-plan with the flagship plan phase this many times when exec cannot complete.
 plan_max = 1
 
+# Weekly codebase self-diagnosis. Inherits [agent].provider when unset. Only
+# Codex enforces read-only via its sandbox; other providers rely on the prompt.
+[agent.diagnose]
+# provider = "codex"
+# model = "gpt-5-codex"
+reasoning_effort = "low"
+
 [budget]
 # Leave an emergency reserve: pause claiming new Issues while the weekly usage
 # exceeds (100 - this percent). Only Codex exposes usage without a session, so
