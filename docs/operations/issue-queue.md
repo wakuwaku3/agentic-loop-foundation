@@ -2,7 +2,7 @@
 
 ## セットアップ
 
-`install.sh` は変更前に `git`、`gh`、Codex CLI、GitHubログイン、origin、リポジトリ参照、Projects API権限を検査する。既存ファイルとの競合もコピー前に検査する。検査後、7個の状態Label、`priority:critical`、`priority:high`、`priority:medium`、`priority:low` と `Agentic Loop - OWNER/REPOSITORY` Projectを冪等に用意し、既定ではSupervisorを起動する。`install.sh` と `bin/agentic-loop setup` はRESTで既存のOpen/Closed IssueとPRを列挙し、Projectにないitemをbackfillする。
+`install.sh` は変更前に `git`、`gh`、Codex CLI、GitHubログイン、origin、リポジトリ参照、Projects API権限を検査する。既存ファイルとの競合もコピー前に検査する。検査後、7個の状態Label、4個の `priority:*` Label、6個の `category:*` Labelと `Agentic Loop - OWNER/REPOSITORY` Projectを冪等に用意し、既定ではSupervisorを起動する。Projectには同じ6選択肢の `Category` fieldを作成する。`install.sh` と `bin/agentic-loop setup` はRESTで既存のOpen/Closed IssueとPRを列挙し、Projectにないitemをbackfillする。
 
 GitHub tokenには対象リポジトリのIssue/PR操作権限と `project`、`read:project` scopeが必要である。不足時は `gh auth refresh -s project,read:project` など、利用中のGitHub認証方式に合う方法で追加する。Projectはuser/org所有のため、対象リポジトリとProjectの閲覧者が一致することを管理者が確認する。privateリポジトリの内容や秘密情報をProjectフィールドへ転記しない。
 
@@ -27,7 +27,7 @@ bin/agentic-loop doctor
 bin/agentic-loop doctor --format json
 ```
 
-利用者は要求をIssueとして登録し、`agent:queued` を付ける。取得順はcritical、high、medium、low、優先度なしで、同じ優先度では作成日時が古いIssueを先にする。複数のpriority LabelがあるIssueは最も高いものを使う。依存関係はIssue本文に明記する。回答は `agent:needs-input` のIssueへコメントする。
+利用者は要求をIssueとして登録し、6個の `category:*` のうち1つと `agent:queued` を付ける。取得順はcategory、同一category内のcritical、high、medium、low、優先度なし、作成日時、Issue番号の順とする。category順は `loop-continuity`、`confidentiality-incident`、`integrity-incident`、`availability-incident`、`feature`、`improvement` で固定する。複数のpriority LabelがあるIssueは最も高いものを使う。依存関係はIssue本文に明記する。回答は `agent:needs-input` のIssueへコメントする。
 
 ### 対話要求の受付
 
@@ -36,11 +36,18 @@ bin/agentic-loop doctor --format json
 1. 読み取り専用の質問、診断、status確認、`start`・`stop`などの運用操作はIssue化しない。同期実行または直接実装を利用者が明示した場合も受付を省略する。
 2. `.agentic-loop/config` と実行可能な `bin/agentic-loop` があり、`bin/agentic-loop status` の先頭行が `running` で、`gh`が対象repositoryのIssueを参照・更新できることを確認する。
 3. open Issueのtitleとbodyを検索し、要求の目的と対象範囲が同じIssueがないか確認する。候補の本文とコメントを読み、同じ利用者結果を求めるなら再利用して新規作成しない。
-4. 重複Issueが `agent:running` ならURLと状態を報告して終了し、`agent:queued` ならそのまま再利用する。それ以外は他の `agent:*` 状態Labelを外して `agent:queued` を付ける。重複がなければ要求・制約・完了条件を本文にしたIssueを作り、`agent:queued` を付ける。
-5. 新規作成または再キュー直後に `bin/agentic-loop sync-issue ISSUE_NUMBER` を実行する。Supervisorのclaimを待たずProjectへ追加し、一時障害時は再試行queueへ永続化する。Project障害はIssue受付を停止しない。
-6. Issueを再取得し、openかつ `agent:queued` または `agent:running` であることを確認する。URLと状態を報告し、直接実装せず終了する。
+4. 要求を `loop-continuity`、`confidentiality-incident`、`integrity-incident`、`availability-incident`、`feature`、`improvement` の順に評価し、該当する最上位の `category:*` を1個選ぶ。incidentはCIAへの実害で分類し、単なる重要度では選ばない。分類不能時は `category:improvement` を安全な既定値として使い、queued中に再トリアージする旨を記録する。
+5. 重複Issueが `agent:running` ならURLと状態を報告して終了し、`agent:queued` なら選択カテゴリが1個だけになるよう確認して再利用する。それ以外は他の `agent:*` 状態Labelを外し、カテゴリ1個と `agent:queued` を付ける。重複がなければ要求・制約・完了条件を本文にしたIssueを作り、カテゴリと `agent:queued` を同時に付ける。
+6. 新規作成、再キュー、または再分類の直後に `bin/agentic-loop sync-issue ISSUE_NUMBER` を実行する。Supervisorのclaimを待たずProjectへ追加し、一時障害時は再試行queueへ永続化する。Project障害はIssue受付を停止しない。
+7. Issueを再取得し、open、カテゴリが1個、かつ `agent:queued` または `agent:running` であることを確認する。URL、カテゴリ、状態を報告し、直接実装せず終了する。
 
 Supervisorがclaimした `agent:running` Issueのworkerは受付を再実行しない。元Issueとコメントを要求として、専用branch/worktree、全検証、secret guard、commit、push、PR、required checks、review対応、merge、default branch確認、branch/worktree cleanupまで進め、再帰的な代替Issueを作らない。
+
+### カテゴリの修復とincident取扱い
+
+Supervisorはclaim前、`setup`、およびProject同期の再処理時にqueued Issueを検査する。カテゴリなしには監査コメント付きで `category:improvement` を補い、複数カテゴリには上記順位の最上位だけを残す。どちらもqueued中にLabelを1個だけ残せば再分類でき、次のreconcileでProjectの `Category` と一致する。たとえばqueue停止やworker復旧障害は `loop-continuity`、認証情報の露出は `confidentiality-incident`、artifact改変は `integrity-incident`、利用機能の停止は `availability-incident`、新機能は `feature`、文書整理は `improvement` とする。loop自体が停止した可用性障害は `loop-continuity` を優先する。
+
+incident Issueには、秘密の値、攻撃手順、不要な個人情報を本文・コメント・Label・Projectへ転記しない。LabelとProjectにはカテゴリ名だけを保存し、詳細証跡は承認された秘密保管境界で管理する。
 
 ### 安全なfallback
 

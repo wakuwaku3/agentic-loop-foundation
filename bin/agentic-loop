@@ -10,6 +10,7 @@ readonly WORKTREE_ROOT="$(dirname "$REPO_ROOT")/$(basename "$REPO_ROOT")-worktre
 readonly CONFIG_FILE="$REPO_ROOT/.agentic-loop/config"
 readonly LABELS=(queued running needs-input in-review completed failed stale)
 readonly PRIORITY_LABELS=(critical high medium low)
+readonly CATEGORY_LABELS=(loop-continuity confidentiality-incident integrity-incident availability-incident feature improvement)
 readonly DIAGNOSIS_LABEL=diagnosis
 
 cd "$REPO_ROOT"
@@ -194,6 +195,17 @@ setup_labels() {
     esac
     gh label create "priority:$name" --color "$color" --description "$description" --force >/dev/null
   done
+  for name in "${CATEGORY_LABELS[@]}"; do
+    case $name in
+      loop-continuity) color=5319E7; description='Agentic Loop continuity and maintenance' ;;
+      confidentiality-incident) color=B60205; description='Confidentiality incident' ;;
+      integrity-incident) color=D93F0B; description='Integrity incident' ;;
+      availability-incident) color=FBCA04; description='Availability incident' ;;
+      feature) color=1D76DB; description='New user-facing value or capability' ;;
+      improvement) color=0E8A16; description='Quality, performance, maintenance, documentation, or operations improvement' ;;
+    esac
+    gh label create "category:$name" --color "$color" --description "$description" --force >/dev/null
+  done
   gh label create "$DIAGNOSIS_LABEL" --color D4C5F9 --description 'Actionable finding from periodic codebase diagnosis' --force >/dev/null
 }
 
@@ -213,6 +225,8 @@ setup_project() {
   gh project link "$number" --owner "$owner" --repo "$repository" >/dev/null 2>&1 || true
   gh project field-create "$number" --owner "$owner" --name 'Agent status' --data-type SINGLE_SELECT \
     --single-select-options 'Inbox,Queued,Running,Needs input,In review,Done,Failed,Stale' >/dev/null 2>&1 || true
+  gh project field-create "$number" --owner "$owner" --name 'Category' --data-type SINGLE_SELECT \
+    --single-select-options 'Loop continuity,Confidentiality incident,Integrity incident,Availability incident,Feature,Improvement' >/dev/null 2>&1 || true
   setup_project_views "$number" "$owner"
   setup_project_content "$number" "$owner"
 }
@@ -279,6 +293,7 @@ cmd_setup() {
   preflight
   setup_labels
   setup_project
+  reconcile_queued_categories
   say "Agentic Loop GitHub queue is ready for $(repo_name)."
 }
 
@@ -597,6 +612,27 @@ project_sync_state() {
   gh project item-edit --id "$item_id" --project-id "$project_id" --field-id "$field_id" --single-select-option-id "$option_id" >/dev/null 2>&1 || queue_project_sync "state $issue $state"
 }
 
+project_sync_category() {
+  graphql_budget_allows "$((GRAPHQL_RESERVE + 1))" || { queue_project_sync "category $1 $2"; return 0; }
+  [[ -r $STATE_ROOT/project.env ]] || return 0
+  local issue=$1 category=$2 PROJECT_OWNER='' PROJECT_NUMBER='' key value project_id item_id field_id option_id option
+  while IFS='=' read -r key value; do
+    case $key in PROJECT_OWNER) PROJECT_OWNER=$value ;; PROJECT_NUMBER) PROJECT_NUMBER=$value ;; esac
+  done < "$STATE_ROOT/project.env"
+  [[ -n $PROJECT_OWNER && $PROJECT_NUMBER =~ ^[0-9]+$ ]] || return 0
+  case $category in
+    loop-continuity) option='Loop continuity' ;; confidentiality-incident) option='Confidentiality incident' ;;
+    integrity-incident) option='Integrity incident' ;; availability-incident) option='Availability incident' ;;
+    feature) option=Feature ;; improvement) option=Improvement ;; *) return 0 ;;
+  esac
+  project_id=$(gh project view "$PROJECT_NUMBER" --owner "$PROJECT_OWNER" --format json --jq .id 2>/dev/null) || return 0
+  item_id=$(gh project item-list "$PROJECT_NUMBER" --owner "$PROJECT_OWNER" --format json --limit 1000 --jq ".items[] | select(.content.number == $issue) | .id" 2>/dev/null | head -n 1) || return 0
+  field_id=$(gh project field-list "$PROJECT_NUMBER" --owner "$PROJECT_OWNER" --format json --jq '.fields[] | select(.name == "Category") | .id' 2>/dev/null | head -n 1) || return 0
+  option_id=$(gh project field-list "$PROJECT_NUMBER" --owner "$PROJECT_OWNER" --format json --jq ".fields[] | select(.name == \"Category\") | .options[] | select(.name == \"$option\") | .id" 2>/dev/null | head -n 1) || return 0
+  [[ -n $project_id && -n $item_id && -n $field_id && -n $option_id ]] || return 0
+  gh project item-edit --id "$item_id" --project-id "$project_id" --field-id "$field_id" --single-select-option-id "$option_id" >/dev/null 2>&1 || true
+}
+
 reconcile_pending_project() {
   [[ -s $STATE_ROOT/project-pending ]] || return 0
   graphql_budget_allows "$((GRAPHQL_RESERVE + 1))" || return 0
@@ -608,9 +644,35 @@ reconcile_pending_project() {
       issue) project_add_issue "$first" ;; # backward-compatible pending entries
       pulls) project_add_pull_requests "$first" ;;
       state) project_sync_state "$first" "$second" ;;
+      category) project_sync_category "$first" "$second" ;;
     esac
   done < "$pending"
   rm -f "$pending"
+}
+
+reconcile_queued_categories() {
+  local issue categories category found name payload
+  while IFS= read -r issue; do
+    [[ -n $issue ]] || continue
+    categories=$(repo_api "issues/$issue" --jq '[.labels[].name | select(startswith("category:"))] | join(",")') || continue
+    category=''; found=0
+    for name in "${CATEGORY_LABELS[@]}"; do
+      if [[ ,$categories, == *,category:$name,* ]]; then
+        found=$((found + 1)); [[ -n $category ]] || category=$name
+      fi
+    done
+    project_add_issue "$issue"
+    if (( found == 1 )); then project_sync_category "$issue" "$category"; continue; fi
+    [[ -n $category ]] || category=improvement
+    payload=$(repo_api "issues/$issue" --jq '[.labels[].name | select(startswith("category:") | not)] + ["category:'"$category"'"]') || continue
+    printf '%s\n' "$payload" | repo_api "issues/$issue/labels" --method PUT --input - >/dev/null
+    project_sync_category "$issue" "$category"
+    if (( found == 0 )); then
+      comment_issue "$issue" '<!-- agentic-loop:category-reconciled reason=missing -->\nカテゴリが未設定だったため、安全な既定値 `category:improvement` を付与しました。要求の実態が別カテゴリに該当する場合は、queued中にカテゴリLabelを1つだけ残して再トリアージしてください。incidentの詳細や秘密情報はLabel、Issue本文、Projectへ転記しないでください。'
+    else
+      comment_issue "$issue" "<!-- agentic-loop:category-reconciled reason=multiple selected=$category -->\n複数のカテゴリを検出したため、定義済みの最上位カテゴリ \`category:$category\` だけを残しました。必要ならqueued中にカテゴリLabelを1つだけ残して再トリアージしてください。"
+    fi
+  done < <(repo_api issues --method GET -f state=open -f labels="$(state_label queued)" -f per_page=100 --paginate --jq '.[] | select(.pull_request == null) | .number' 2>/dev/null || true)
 }
 
 cmd_sync_issue() {
@@ -682,7 +744,7 @@ claim_next() {
       printf '%s\n' "$issue"
       return 0
     fi
-  done < <(repo_api issues --method GET -f state=open -f labels="$(state_label queued)" -f per_page=100 --paginate --jq '.[] | select(.pull_request == null) | [(if any(.labels[]; .name == "priority:critical") then 0 elif any(.labels[]; .name == "priority:high") then 1 elif any(.labels[]; .name == "priority:medium") then 2 elif any(.labels[]; .name == "priority:low") then 3 else 4 end), .created_at, .number] | @tsv' 2>/dev/null | sort -k1,1n -k2,2 -k3,3n | awk -F '\t' '{print $3}')
+  done < <(repo_api issues --method GET -f state=open -f labels="$(state_label queued)" -f per_page=100 --paginate --jq '.[] | select(.pull_request == null) | [(if any(.labels[]; .name == "category:loop-continuity") then 0 elif any(.labels[]; .name == "category:confidentiality-incident") then 1 elif any(.labels[]; .name == "category:integrity-incident") then 2 elif any(.labels[]; .name == "category:availability-incident") then 3 elif any(.labels[]; .name == "category:feature") then 4 else 5 end), (if any(.labels[]; .name == "priority:critical") then 0 elif any(.labels[]; .name == "priority:high") then 1 elif any(.labels[]; .name == "priority:medium") then 2 elif any(.labels[]; .name == "priority:low") then 3 else 4 end), .created_at, .number] | @tsv' 2>/dev/null | sort -k1,1n -k2,2n -k3,3 -k4,4n | awk -F '\t' '{print $4}')
   return 1
 }
 
@@ -710,6 +772,7 @@ supervise() {
       continue
     else
       reconcile_pending_project
+      reconcile_queued_categories
       triage_stale_queued
       while [[ $(worker_count) -lt $MAX_WORKERS ]]; do
         local issue worker

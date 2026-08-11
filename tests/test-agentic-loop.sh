@@ -64,8 +64,9 @@ case "${1:-} ${2:-}" in
             awk '$2 == "queued" && $3 != "closed" && $6 != "" {print $1 "\t" $6}' "$state"
           elif [[ $* == *created_at* ]]; then
             awk '$2 == "queued" && $3 != "closed" {
-              rank=4; if ($4 ~ /(^|,)critical(,|$)/) rank=0; else if ($4 ~ /(^|,)high(,|$)/) rank=1; else if ($4 ~ /(^|,)medium(,|$)/) rank=2; else if ($4 ~ /(^|,)low(,|$)/) rank=3
-              created=($5 == "" ? $1 : $5); print rank "\t" created "\t" $1
+              category=5; if ($7 ~ /(^|,)loop-continuity(,|$)/) category=0; else if ($7 ~ /(^|,)confidentiality-incident(,|$)/) category=1; else if ($7 ~ /(^|,)integrity-incident(,|$)/) category=2; else if ($7 ~ /(^|,)availability-incident(,|$)/) category=3; else if ($7 ~ /(^|,)feature(,|$)/) category=4
+              priority=4; if ($4 ~ /(^|,)critical(,|$)/) priority=0; else if ($4 ~ /(^|,)high(,|$)/) priority=1; else if ($4 ~ /(^|,)medium(,|$)/) priority=2; else if ($4 ~ /(^|,)low(,|$)/) priority=3
+              created=($5 == "" ? $1 : $5); print category "\t" priority "\t" created "\t" $1
             }' "$state"
             if [[ -n ${FAKE_STALE_QUEUED_ISSUE:-} ]] && ! awk -v n="$FAKE_STALE_QUEUED_ISSUE" '$1 == n && $2 == "queued" {found=1} END {exit !found}' "$state"; then
               awk -v n="$FAKE_STALE_QUEUED_ISSUE" '$1 == n {print "0\t" ($5 == "" ? $1 : $5) "\t" $1}' "$state"
@@ -76,8 +77,8 @@ case "${1:-} ${2:-}" in
         agent:needs-input) awk '$2 == "needs-input" && $3 != "closed" {print $1}' "$state" ;;
       esac
     elif [[ $endpoint =~ ^issues/([0-9]+)/labels$ && $method == PUT ]]; then
-      issue=${BASH_REMATCH[1]}; payload=$(if [[ -n $input_file && $input_file != - ]]; then cat "$input_file"; else cat; fi); target=$(sed -n 's/.*"agent:\([^"]*\)".*/\1/p' <<< "$payload")
-      ( flock 9; awk -v n="$issue" -v s="$target" '{if ($1 == n) $2=s; print}' "$state" > "$state.$$.tmp" && mv "$state.$$.tmp" "$state" ) 9> "$state.lock"
+      issue=${BASH_REMATCH[1]}; payload=$(if [[ -n $input_file && $input_file != - ]]; then cat "$input_file"; else cat; fi); target=$(sed -n 's/.*"agent:\([^"]*\)".*/\1/p' <<< "$payload"); category=$(grep -o 'category:[a-z-]*' <<< "$payload" | head -n 1 | cut -d: -f2 || true)
+      ( flock 9; awk -v n="$issue" -v s="$target" -v c="$category" '{if ($1 == n) {if (s != "") $2=s; if (c != "") $7=c} print}' "$state" > "$state.$$.tmp" && mv "$state.$$.tmp" "$state" ) 9> "$state.lock"
     elif [[ $endpoint =~ ^issues/([0-9]+)/comments$ ]]; then
       issue=${BASH_REMATCH[1]}
       if [[ $method == POST ]]; then
@@ -90,6 +91,12 @@ case "${1:-} ${2:-}" in
       issue=${BASH_REMATCH[1]}
       if [[ $method == PATCH && $form_state == closed ]]; then
         ( flock 9; awk -v n="$issue" '{if ($1 == n) $3="closed"; print}' "$state" > "$state.$$.tmp" && mv "$state.$$.tmp" "$state" ) 9> "$state.lock"
+      elif [[ $* == *'join(",")'* ]]; then
+        awk -v n="$issue" '$1 == n {split($7,c,","); out=""; for(i in c) if(c[i] != "" && c[i] != "none") out=out (out=="" ? "" : ",") "category:" c[i]; print out}' "$state"
+      elif [[ $* == *'startswith("category:") | not'* ]]; then
+        category=$(grep -o 'category:[a-z-]*' <<< "$*" | tail -n 1); printf '["agent:queued","%s"]\n' "$category"
+      elif [[ $* == *'[.labels[].name]'* ]]; then
+        awk -v n="$issue" '$1 == n {printf "[\"agent:%s\"", $2; split($4,p,","); for(i in p) if(p[i] != "" && p[i] != "none") printf ",\"priority:%s\"",p[i]; split($7,c,","); for(i in c) if(c[i] != "" && c[i] != "none") printf ",\"category:%s\"",c[i]; print "]"}' "$state"
       elif [[ $* == *starts*with* ]]; then
         target=$(sed -n 's/.*\["agent:\([^"]*\)"\].*/\1/p' <<< "$*"); printf '["agent:%s"]\n' "$target"
       else awk -v n="$issue" '$1 == n {print "agent:" $2}' "$state"; fi
@@ -227,7 +234,7 @@ done
 if [[ $* == *'Use $diagnose-codebase'* ]]; then
   existing=$(gh issue list --search diagnosis-finding --state all --limit 100 --json url --jq '.[].url')
   if [[ -z $existing ]]; then
-    gh issue create --title '診断所見' --body 'diagnosis-finding' --label diagnosis --label agent:queued >/dev/null
+    gh issue create --title '診断所見' --body 'diagnosis-finding' --label diagnosis --label category:improvement --label agent:queued >/dev/null
     "$worktree/bin/agentic-loop" sync-issue 99 >/dev/null
   fi
 fi
@@ -356,8 +363,8 @@ diagnosis_output=$("$target/bin/agentic-loop-diagnose")
 assert_contains "$FAKE_GH_ROOT/codex-calls" '--sandbox read-only' 'diagnosis did not use the read-only sandbox'
 # shellcheck disable=SC2016 # The dollar-prefixed value is a literal skill invocation.
 assert_contains "$FAKE_GH_ROOT/codex-calls" 'Use $diagnose-codebase' 'manual diagnosis did not invoke the diagnosis skill'
-assert_contains "$FAKE_GH_ROOT/codex-calls" 'both diagnosis and agent:queued labels' 'diagnosis prompt did not queue findings'
-assert_contains "$FAKE_GH_ROOT/calls" 'issue create --title 診断所見 --body diagnosis-finding --label diagnosis --label agent:queued' 'diagnosis did not create a queued finding with both labels'
+assert_contains "$FAKE_GH_ROOT/codex-calls" 'diagnosis, category:improvement, and agent:queued labels' 'diagnosis prompt did not categorize queued findings'
+assert_contains "$FAKE_GH_ROOT/calls" 'issue create --title 診断所見 --body diagnosis-finding --label diagnosis --label category:improvement --label agent:queued' 'diagnosis did not create a categorized queued finding'
 first_diagnosis_creates=$(grep -c $'\tissue create ' "$FAKE_GH_ROOT/calls")
 second_diagnosis_output=$("$target/bin/agentic-loop-diagnose")
 [[ $second_diagnosis_output == AGENTIC_LOOP_RESULT=completed ]] || fail 'repeated diagnosis did not report the Codex result'
@@ -365,10 +372,10 @@ second_diagnosis_creates=$(grep -c $'\tissue create ' "$FAKE_GH_ROOT/calls")
 [[ $second_diagnosis_creates -eq $first_diagnosis_creates ]] || fail 'repeated diagnosis created a duplicate Issue'
 grep -Fq $'label create diagnosis' "$FAKE_GH_ROOT/calls" || fail 'setup did not create the diagnosis label'
 # shellcheck disable=SC2016 # Backticks are literal Markdown in installed documentation.
-assert_contains "$target/.agents/skills/diagnose-codebase/SKILL.md" 'both the `diagnosis` and `agent:queued` labels' 'installed diagnosis skill did not queue findings'
+assert_contains "$target/.agents/skills/diagnose-codebase/SKILL.md" '`diagnosis`, `category:improvement`, and `agent:queued` labels' 'installed diagnosis skill did not categorize findings'
 # shellcheck disable=SC2016 # Backticks are literal Markdown in installed documentation.
-assert_contains "$target/docs/operations/codebase-diagnosis.md" '`diagnosis` と `agent:queued`' 'installed diagnosis docs did not describe automatic queueing'
-assert_contains "$target/.agentic-loop/diagnose-codebase.sh" 'both diagnosis and agent:queued labels' 'installed diagnosis prompt did not request automatic queueing'
+assert_contains "$target/docs/operations/codebase-diagnosis.md" '`diagnosis`、`category:improvement`、`agent:queued`' 'installed diagnosis docs did not describe categorized queueing'
+assert_contains "$target/.agentic-loop/diagnose-codebase.sh" 'diagnosis, category:improvement, and agent:queued labels' 'installed diagnosis prompt did not request categorized queueing'
 git -C "$target" add .
 git -C "$target" commit --quiet -m install
 git -C "$target" push --quiet
@@ -524,6 +531,20 @@ git -C "$target" commit --quiet -m configure
 git -C "$target" push --quiet
 state="$FAKE_GH_ROOT/$state_key.state"
 state_root="$(git -C "$target" rev-parse --absolute-git-dir)/agentic-loop"
+
+# Category is the primary queue key, followed by priority, creation time, and Issue number.
+printf 'POLL_SECONDS=1\nMAX_WORKERS=11\nLEASE_SECONDS=30\nSTOP_TIMEOUT=10\nSTALE_DAYS=30\n' > "$target/.agentic-loop/config"
+printf '101 queued open low 2026-01-01T00:00:00Z none loop-continuity\n102 queued open critical 2026-01-01T00:00:00Z none confidentiality-incident\n103 queued open none 2026-01-01T00:00:00Z none integrity-incident\n104 queued open none 2026-01-01T00:00:00Z none availability-incident\n105 queued open none 2026-01-01T00:00:00Z none feature\n106 queued open none 2026-01-01T00:00:00Z none improvement\n107 queued open critical 2026-01-02T00:00:00Z none improvement\n108 queued open low 2025-01-01T00:00:00Z none improvement\n109 queued open critical 2026-01-02T00:00:00Z none improvement\n110 queued open none 2026-01-03T00:00:00Z none none\n111 queued open critical 2026-01-01T00:00:00Z none feature,availability-incident\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+AGENTIC_LOOP_RUN_ONCE=1 FAKE_CODEX_SLEEP=1 "$target/bin/agentic-loop" _supervise
+claim_order=$(sed -n 's/^\([0-9][0-9]*\) .*agentic-loop:lease.*/\1/p' "$FAKE_GH_ROOT/$state_key.comments" | awk '!seen[$0]++' | paste -sd, -)
+[[ $claim_order == 101,102,103,111,104,105,107,109,108,106,110 ]] || fail "category queue order was incorrect: $claim_order"
+grep -Eq '^110 completed closed .* improvement$' "$state" || fail 'missing category was not repaired to improvement'
+grep -Eq '^111 completed closed .* availability-incident$' "$state" || fail 'multiple categories did not retain only the highest-ranked category'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'category-reconciled reason=missing' 'missing category repair was not audited'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'category-reconciled reason=multiple selected=availability-incident' 'multiple category repair was not audited'
+
+printf 'POLL_SECONDS=1\nMAX_WORKERS=2\nLEASE_SECONDS=3\nSTOP_TIMEOUT=10\nSTALE_DAYS=30\n' > "$target/.agentic-loop/config"
 printf '1 queued open low 2026-01-01T00:00:00Z\n2 queued open critical,low 2026-01-02T00:00:00Z\n3 queued open critical 2025-12-31T00:00:00Z\n4 queued open none 2025-01-01T00:00:00Z\n' > "$state"
 AGENTIC_LOOP_RUN_ONCE=1 FAKE_CODEX_SLEEP=1 FAKE_STALE_QUEUED_ISSUE=3 "$target/bin/agentic-loop" _supervise
 completed_count=$(awk '$2 == "completed" {count++} END {print count+0}' "$state")
@@ -554,6 +575,10 @@ if grep -Eq 'danger-full-access|OPENAI_API_KEY|--add-dir /($| )|--add-dir /home(
 grep -Fq $'label create priority:critical' "$FAKE_GH_ROOT/calls" || fail 'setup did not create the critical priority label'
 grep -Fq $'label create priority:low' "$FAKE_GH_ROOT/calls" || fail 'setup did not create the low priority label'
 grep -Fq $'label create agent:stale' "$FAKE_GH_ROOT/calls" || fail 'setup did not create the stale state label'
+for category in loop-continuity confidentiality-incident integrity-incident availability-incident feature improvement; do
+  grep -Fq "label create category:$category" "$FAKE_GH_ROOT/calls" || fail "setup did not create category:$category"
+done
+assert_contains "$FAKE_GH_ROOT/calls" 'project field-create 7 --owner acme --name Category --data-type SINGLE_SELECT' 'setup did not create the Project Category field'
 
 # Only inactive queued Issues are closed; the audit explains safe recovery.
 old_date=$(date -u -d '40 days ago' +%Y-%m-%dT%H:%M:%SZ)
