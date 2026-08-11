@@ -508,13 +508,21 @@ triage_stale_queued() {
 }
 
 claim_next() {
-  local issue
+  local issue pid
   # shellcheck disable=SC2016 # This is a jq program, not a shell expression.
-  issue=$(repo_api issues --method GET -f state=open -f labels="$(state_label queued)" -f per_page=100 --paginate --jq '.[] | select(.pull_request == null) | [(if any(.labels[]; .name == "priority:critical") then 0 elif any(.labels[]; .name == "priority:high") then 1 elif any(.labels[]; .name == "priority:medium") then 2 elif any(.labels[]; .name == "priority:low") then 3 else 4 end), .created_at, .number] | @tsv' 2>/dev/null | sort -k1,1n -k2,2 -k3,3n | awk -F '\t' 'NR == 1 {print $3}' || true)
-  [[ -n $issue ]] || return 1
-  set_issue_state "$issue" running
-  if ! repo_api "issues/$issue" --jq '.labels[].name' | grep -Fxq "$(state_label running)"; then return 1; fi
-  printf '%s\n' "$issue"
+  while IFS= read -r issue; do
+    [[ -n $issue ]] || continue
+    if [[ -r $STATE_ROOT/workers/$issue.pid ]]; then
+      read -r pid < "$STATE_ROOT/workers/$issue.pid" || true
+      [[ $pid =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null && continue
+    fi
+    set_issue_state "$issue" running
+    if repo_api "issues/$issue" --jq '.labels[].name' | grep -Fxq "$(state_label running)"; then
+      printf '%s\n' "$issue"
+      return 0
+    fi
+  done < <(repo_api issues --method GET -f state=open -f labels="$(state_label queued)" -f per_page=100 --paginate --jq '.[] | select(.pull_request == null) | [(if any(.labels[]; .name == "priority:critical") then 0 elif any(.labels[]; .name == "priority:high") then 1 elif any(.labels[]; .name == "priority:medium") then 2 elif any(.labels[]; .name == "priority:low") then 3 else 4 end), .created_at, .number] | @tsv' 2>/dev/null | sort -k1,1n -k2,2 -k3,3n | awk -F '\t' '{print $3}')
+  return 1
 }
 
 worker_count() {
