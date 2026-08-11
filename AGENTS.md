@@ -22,7 +22,8 @@
 - 変更は再現可能な検証手段と、必要十分な文書を伴う。
 - [外部環境コード化ポリシー](docs/policies/external-environment.md)に従い、依存・操作する外部環境のdesired state、適用、drift検出、検証、復旧および移行を再現可能に管理する。
 - [開発環境ポリシー](docs/policies/development-environment.md)に従い、固定されたコード化済み環境で開発・検証する。
-- [テストポリシー](docs/policies/testing.md)に従い、すべてのテストをCIで実行する。
+- [テストポリシー](docs/policies/testing.md)に従い、すべての自動テストを共通入口から実行する。
+- [検証ハーネスポリシー](docs/policies/validation-harness.md)に従い、変更ライフサイクルの各gateで共通入口による検証を完了する。
 - 破壊的・不可逆または重大なコストを伴う判断は、実行前に明示的な承認を得る。
 - [費用ポリシー](docs/policies/cost.md)をすべての機能・設計・運用に適用し、許容されない金銭的コストを発生させない。
 - [GitHub日本語運用ポリシー](docs/policies/github-language.md)に従い、Issue、PR、コメント、レビューは日本語で記述する。

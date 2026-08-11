@@ -3,7 +3,7 @@ set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
-required=(AGENTS.md README.md Makefile .editorconfig .gitignore .env.example .codex/config.toml install.sh devbox.json devbox.lock docs/policies/cost.md docs/policies/testing.md docs/policies/external-environment.md docs/policies/development-environment.md docs/policies/github-language.md docs/decisions/0002-github-issue-queue.md docs/operations/issue-queue.md docs/operations/codebase-diagnosis.md .agentic-loop/config .agentic-loop/guard-secrets.sh .agentic-loop/update-main.sh .agentic-loop/diagnose-codebase.sh .githooks/pre-commit .githooks/pre-push .agents/skills/submit-requirement/SKILL.md .agents/skills/diagnose-codebase/SKILL.md bin/agentic-loop bin/agentic-loop-diagnose scripts/check-environment.sh scripts/install-target.sh)
+required=(AGENTS.md README.md Makefile .editorconfig .gitignore .env.example .codex/config.toml install.sh devbox.json devbox.lock docs/policies/cost.md docs/policies/testing.md docs/policies/external-environment.md docs/policies/development-environment.md docs/policies/github-language.md docs/policies/validation-harness.md docs/decisions/0002-github-issue-queue.md docs/operations/issue-queue.md docs/operations/codebase-diagnosis.md .agentic-loop/config .agentic-loop/guard-secrets.sh .agentic-loop/update-main.sh .agentic-loop/diagnose-codebase.sh .githooks/pre-commit .githooks/pre-push .agents/skills/submit-requirement/SKILL.md .agents/skills/diagnose-codebase/SKILL.md bin/agentic-loop bin/agentic-loop-diagnose scripts/check-environment.sh scripts/install-target.sh)
 for file in "${required[@]}"; do
   [[ -f $file ]] || { printf 'Missing required file: %s\n' "$file" >&2; exit 1; }
 done
@@ -41,6 +41,20 @@ for requirement in 'GitHub Repository' 'GitHub Projects' 'CI workflow' 'デプ�
 done
 grep -Fq '[外部環境コード化ポリシー](external-environment.md)' docs/policies/development-environment.md || {
   printf 'Development environment policy does not identify its parent policy.\n' >&2
+  exit 1
+}
+grep -Fq '[検証ハーネスポリシー](docs/policies/validation-harness.md)' AGENTS.md || {
+  printf 'Missing validation harness invariant.\n' >&2
+  exit 1
+}
+for requirement in 'local fast check' 'local full check' 'public repository' 'private repository' 'push gate' 'merge gate' 'commit SHA' 'hook bypass' 'AI review'; do
+  grep -Fq "$requirement" docs/policies/validation-harness.md || {
+    printf 'Validation harness policy lacks requirement: %s\n' "$requirement" >&2
+    exit 1
+  }
+done
+grep -Fq 'docs/policies/validation-harness.md' scripts/install-target.sh || {
+  printf 'Validation harness policy is not distributed.\n' >&2
   exit 1
 }
 grep -Fq 'devbox run --pure check' docs/policies/development-environment.md || {
