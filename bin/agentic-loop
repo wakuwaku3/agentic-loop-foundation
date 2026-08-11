@@ -465,7 +465,7 @@ recover_expired() {
   now=$(date +%s)
   while IFS= read -r issue; do
     [[ -n $issue ]] || continue
-    body=$(repo_api "issues/$issue/comments" --method GET -f per_page=100 --paginate --slurp --jq '[.[][].body | select(contains("agentic-loop:lease"))] | last // ""' 2>/dev/null || true)
+    body=$(repo_api "issues/$issue/comments" --method GET -f per_page=100 --paginate --jq '[.[].body | select(contains("agentic-loop:lease"))] | last // ""' 2>/dev/null | tail -n 1 || true)
     expires=$(printf '%s\n' "$body" | sed -n 's/.*expires=\([0-9][0-9]*\).*/\1/p' | head -n 1)
     if [[ -z $expires || $expires -lt $now ]]; then
       set_issue_state "$issue" queued
@@ -479,7 +479,7 @@ requeue_answered() {
   while IFS= read -r issue; do
     [[ -n $issue ]] || continue
     # shellcheck disable=SC2016 # This is a jq program, not a shell expression.
-    answered=$(repo_api "issues/$issue/comments" --method GET -f per_page=100 --paginate --slurp --jq '[.[][]] as $comments | ([range(0; $comments | length) | select($comments[.].body | contains("agentic-loop:needs-input"))] | last) as $marker | if $marker == null then false else any($comments[$marker + 1:][]; (.body | contains("<!-- agentic-loop:") | not)) end' 2>/dev/null || true)
+    answered=$(repo_api "issues/$issue/comments" --method GET -f per_page=100 --jq '. as $comments | ([range(0; $comments | length) | select($comments[.].body | contains("agentic-loop:needs-input"))] | last) as $marker | if $marker == null then false else any($comments[$marker + 1:][]; (.body | contains("<!-- agentic-loop:") | not)) end' 2>/dev/null || true)
     if [[ $answered == true ]]; then
       set_issue_state "$issue" queued
       comment_issue "$issue" '<!-- agentic-loop:answer-detected -->\n返信を検出したため、このIssueをキューへ戻しました。'
@@ -505,7 +505,7 @@ triage_stale_queued() {
 claim_next() {
   local issue
   # shellcheck disable=SC2016 # This is a jq program, not a shell expression.
-  issue=$(repo_api issues --method GET -f state=open -f labels="$(state_label queued)" -f per_page=100 --paginate --slurp --jq '[.[][] | select(.pull_request == null)] | sort_by((if any(.labels[]; .name == "priority:critical") then 0 elif any(.labels[]; .name == "priority:high") then 1 elif any(.labels[]; .name == "priority:medium") then 2 elif any(.labels[]; .name == "priority:low") then 3 else 4 end), .created_at, .number) | .[0].number // empty' 2>/dev/null || true)
+  issue=$(repo_api issues --method GET -f state=open -f labels="$(state_label queued)" -f per_page=100 --paginate --jq '.[] | select(.pull_request == null) | [(if any(.labels[]; .name == "priority:critical") then 0 elif any(.labels[]; .name == "priority:high") then 1 elif any(.labels[]; .name == "priority:medium") then 2 elif any(.labels[]; .name == "priority:low") then 3 else 4 end), .created_at, .number] | @tsv' 2>/dev/null | sort -k1,1n -k2,2 -k3,3n | awk -F '\t' 'NR == 1 {print $3}' || true)
   [[ -n $issue ]] || return 1
   set_issue_state "$issue" running
   if ! repo_api "issues/$issue" --jq '.labels[].name' | grep -Fxq "$(state_label running)"; then return 1; fi
