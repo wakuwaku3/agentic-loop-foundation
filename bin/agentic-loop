@@ -428,8 +428,28 @@ resolve_worker_agents_dir() {
   printf '%s\n' "$agents_dir"
 }
 
+cleanup_completed_worker() {
+  local worktree=$1 branch=$2 merged_oid=$3 worktree_root registered_branch branch_ref local_oid
+  worktree_root=$(cd "$worktree" && pwd -P) || return 1
+  [[ $worktree_root == "$WORKTREE_ROOT"/issue-[0-9]* && ! -L $worktree ]] || return 1
+  branch_ref="refs/heads/$branch"
+  registered_branch=$(git -C "$REPO_ROOT" worktree list --porcelain | awk -v path="$worktree_root" '
+    $1 == "worktree" {matched=($2 == path)}
+    matched && $1 == "branch" {print $2; exit}
+  ')
+  [[ $registered_branch == "$branch_ref" ]] || return 1
+  [[ $(git -C "$worktree_root" symbolic-ref -q HEAD) == "$branch_ref" ]] || return 1
+  [[ -z $(git -C "$worktree_root" status --porcelain) ]] || return 1
+  local_oid=$(git -C "$REPO_ROOT" rev-parse --verify "$branch_ref") || return 1
+  [[ $local_oid == "$merged_oid" ]] || return 1
+  git -C "$REPO_ROOT" worktree remove "$worktree_root" || return 1
+  git -C "$REPO_ROOT" update-ref -d "$branch_ref" "$local_oid" || return 1
+  [[ ! -e $worktree_root ]] || return 1
+  ! git -C "$REPO_ROOT" show-ref --verify --quiet "$branch_ref"
+}
+
 worker() {
-  local issue=$1 worker=$2 repository default_branch branch worktree result git_common_dir agents_dir exit_code=0 heartbeat_pid merged_pr=''
+  local issue=$1 worker=$2 repository default_branch branch worktree result git_common_dir agents_dir exit_code=0 heartbeat_pid merged_pr='' merged_oid=''
   repository=$(repo_name)
   default_branch=$(gh repo view --json defaultBranchRef --jq .defaultBranchRef.name)
   branch="agent/issue-$issue"
@@ -476,17 +496,17 @@ worker() {
   wait "$heartbeat_pid" 2>/dev/null || true
   project_add_pull_requests "$branch"
   if [[ $exit_code -eq 0 ]] && grep -Fq 'AGENTIC_LOOP_RESULT=completed' "$result"; then
-    merged_pr=$(gh pr list --repo "$repository" --head "$branch" --state merged --json url,mergedAt --jq 'map(select(.mergedAt != null)) | first | .url // empty') || true
-    if [[ -n $merged_pr ]]; then
+    IFS=$'\t' read -r merged_pr merged_oid < <(gh pr list --repo "$repository" --head "$branch" --state merged --json url,mergedAt,headRefName,headRefOid --jq 'map(select(.mergedAt != null and .headRefName == "'"$branch"'")) | first | [.url, .headRefOid] | @tsv' 2>/dev/null || true) || true
+    if [[ -n $merged_pr && $merged_oid =~ ^[0-9a-fA-F]{40}$ ]] && cleanup_completed_worker "$worktree" "$branch" "$merged_oid"; then
       set_issue_state "$issue" completed
       project_sync_state "$issue" completed
-      comment_issue "$issue" "<!-- agentic-loop:completed pr=$merged_pr -->\nWorker \`$worker\` の完了報告に加え、対応PRのmergeをGitHubで確認しました: $merged_pr"
+      comment_issue "$issue" "<!-- agentic-loop:completed pr=$merged_pr -->\nWorker \`$worker\` の完了報告と対応PRのmergeをGitHubで確認し、専用worktreeとlocal branch \`$branch\` を削除しました: $merged_pr\nremote branchは復旧とGitHubのPR設定との責務分離のため、Supervisorからは削除しません。"
       gh issue close "$issue" >/dev/null
     else
       exit_code=1
       set_issue_state "$issue" failed
       project_sync_state "$issue" failed
-      comment_issue "$issue" "<!-- agentic-loop:failed worker=$worker reason=unmerged -->\nWorkerは完了を報告しましたが、branch \`$branch\` のmerge済みPRをGitHubで確認できませんでした。Issueはcloseせず、専用worktreeを保持します。原因確認後に再試行するには \`agent:queued\` を再度付与してください。"
+      comment_issue "$issue" "<!-- agentic-loop:failed worker=$worker reason=merge-or-cleanup -->\nWorkerは完了を報告しましたが、branch \`$branch\` のmerge済みPRと一致するcommitを確認できないか、安全なcleanupを完了できませんでした。Issueはcloseせず、残っているworktreeまたはbranch dataを保持します。原因確認後に再試行するには \`agent:queued\` を再度付与してください。"
     fi
   elif [[ $exit_code -eq 0 ]] && grep -Fq 'AGENTIC_LOOP_RESULT=needs-input' "$result"; then
     set_issue_state "$issue" needs-input
@@ -498,9 +518,6 @@ worker() {
     comment_issue "$issue" "<!-- agentic-loop:failed worker=$worker exit=$exit_code -->\nWorkerは検証済みのmergeを完了せずに停止しました。Logはlocalにのみ保持され、秘密情報はここに転記されません。調査後に再試行するには \`agent:queued\` を再度付与してください。"
   fi
   rm -f "$STATE_ROOT/workers/$issue.pid"
-  if [[ $exit_code -eq 0 && -n $merged_pr ]]; then
-    git -C "$REPO_ROOT" worktree remove "$worktree" >/dev/null 2>&1 || true
-  fi
 }
 
 main() {

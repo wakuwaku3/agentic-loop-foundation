@@ -49,7 +49,12 @@ case "${1:-} ${2:-}" in
   'project view') printf 'PVT_fake\n' ;;
   'pr list')
     if [[ $* == *'--state merged'* ]]; then
-      if [[ ${FAKE_PR_MERGED:-1} == 1 ]]; then printf 'https://github.example/%s/pull/merged\n' "$slug"; fi
+      if [[ ${FAKE_PR_MERGED:-1} == 1 ]]; then
+        head=''
+        for ((i=1; i<=$#; i++)); do [[ ${!i} == --head ]] && { j=$((i+1)); head=${!j}; }; done
+        oid=${FAKE_PR_HEAD_OID:-$(git rev-parse "refs/heads/$head" 2>/dev/null || true)}
+        printf 'https://github.example/%s/pull/merged\t%s\n' "$slug" "$oid"
+      fi
     elif [[ $* == *'--head agent/issue-6'* ]]; then
       printf 'https://github.example/%s/pull/6\n' "$slug"
     elif [[ $* == *'--state all'* ]]; then
@@ -287,6 +292,11 @@ fi
 [[ $(awk '$2 == "queued" {count++} END {print count+0}' "$state") -eq 2 ]] || fail 'run-once claimed more than the worker limit'
 grep -Eq '^3 completed closed([[:space:]]|$)' "$state" || fail 'oldest critical Issue was not claimed first'
 grep -Eq '^2 completed closed([[:space:]]|$)' "$state" || fail 'second critical Issue was not claimed before lower priorities'
+for issue in 2 3; do
+  [[ ! -e $target-worktrees/issue-$issue ]] || fail "completed worker worktree remained: issue-$issue"
+  ! git -C "$target" show-ref --verify --quiet "refs/heads/agent/issue-$issue" || fail "completed worker local branch remained: agent/issue-$issue"
+done
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'remote branchは復旧' 'completed cleanup did not record the remote branch policy'
 assert_contains "$FAKE_GH_ROOT/codex-calls" '--sandbox workspace-write' 'worker did not use workspace-write'
 assert_contains "$FAKE_GH_ROOT/codex-calls" "--add-dir $target/.git" 'worker did not grant its exact Git common directory'
 assert_contains "$FAKE_GH_ROOT/codex-calls" "--add-dir $target-worktrees/issue-3/.agents" 'worker did not grant its exact protected .agents directory'
@@ -332,6 +342,9 @@ FAKE_CODEX_GIT_OPERATIONS=1 "$target/bin/agentic-loop" _worker 6 linked-worktree
 git -C "$target" fetch --quiet origin agent/issue-6
 git -C "$target" show 'origin/agent/issue-6:worker.txt' | grep -Fxq 'worker change' || fail 'linked-worktree Git metadata operations did not reach the remote'
 assert_contains "$FAKE_GH_ROOT/calls" "project item-add 7 --owner acme --url https://github.example/acme/installed-project/pull/6" 'worker PR was not added to the Project'
+[[ ! -e $target-worktrees/issue-6 ]] || fail 'completed linked worker worktree remained'
+! git -C "$target" show-ref --verify --quiet refs/heads/agent/issue-6 || fail 'completed linked worker local branch remained'
+git -C "$target" ls-remote --exit-code --heads origin refs/heads/agent/issue-6 >/dev/null || fail 'Supervisor deleted the remote worker branch'
 
 # A worker completion report cannot close an Issue unless GitHub confirms a merged PR for its branch.
 printf '7 running open\n' > "$state"
@@ -339,7 +352,26 @@ FAKE_PR_MERGED=0 "$target/bin/agentic-loop" _worker 7 unmerged-worker
 grep -Eq '^7 failed open$' "$state" || fail 'unmerged worker self-report was accepted as completed'
 [[ -e $target-worktrees/issue-7 ]] || fail 'unmerged worker worktree was removed'
 # shellcheck disable=SC2016 # Backticks are literal Markdown in the expected Issue comment.
-assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'branch `agent/issue-7` のmerge済みPRをGitHubで確認できませんでした' 'unmerged completion did not record objective failure evidence'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" '安全なcleanupを完了できませんでした' 'unmerged completion did not record objective failure evidence'
+
+# A merged PR whose commit does not match the dedicated branch cannot trigger destructive cleanup.
+printf '8 running open\n' > "$state"
+FAKE_PR_HEAD_OID=0000000000000000000000000000000000000000 "$target/bin/agentic-loop" _worker 8 unexpected-ref-worker
+grep -Eq '^8 failed open$' "$state" || fail 'unexpected merged PR ref was accepted'
+[[ -e $target-worktrees/issue-8 ]] || fail 'unexpected ref worker worktree was removed'
+git -C "$target" show-ref --verify --quiet refs/heads/agent/issue-8 || fail 'unexpected ref local branch was removed'
+
+# A branch already checked out by another worktree is retained without replacing that worktree.
+printf '10 running open\n' > "$state"
+other_worktree="$TEST_ROOT/other-issue-10"
+git -C "$target" worktree add --quiet -b agent/issue-10 "$other_worktree" origin/main
+"$target/bin/agentic-loop" _worker 10 other-worktree-worker
+grep -Eq '^10 failed open$' "$state" || fail 'branch used by another worktree was accepted'
+[[ -e $other_worktree ]] || fail 'other worktree was removed'
+git -C "$target" show-ref --verify --quiet refs/heads/agent/issue-10 || fail 'branch used by another worktree was removed'
+[[ ! -e $target-worktrees/issue-10 ]] || fail 'worker replaced the expected path while the branch was in use'
+git -C "$target" worktree remove "$other_worktree"
+git -C "$target" branch -D agent/issue-10 >/dev/null
 
 # needs-input and failure are isolated state transitions; a later Issue reply requeues only that Issue.
 printf '4 running open\n5 running open\n' > "$state"
