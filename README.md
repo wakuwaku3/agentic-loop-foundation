@@ -16,6 +16,8 @@ curl -fsSL https://raw.githubusercontent.com/wakuwaku3/agentic-loop-foundation/m
 
 Codexで `$submit-requirement` に続けて、達成したいことを自然言語で入力してください。
 
+インストールされる `.codex/config.toml` により、Codex は承認確認なしで動作し、ファイルの書き込み先はワークスペース内に制限されます。既存の `.codex/config.toml` がある場合は上書きせず、インストールを停止します。
+
 > `$submit-requirement 商品を検索できるWebアプリを作って`
 
 設計上の判断は [docs/decisions/0001-minimal-foundation.md](docs/decisions/0001-minimal-foundation.md) に記録しています。
