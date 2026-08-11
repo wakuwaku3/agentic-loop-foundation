@@ -52,7 +52,21 @@ case "${1:-} ${2:-}" in
     for ((i=1; i<=$#; i++)); do [[ ${!i} == --label ]] && { j=$((i+1)); wanted=${!j}; }; done
     [[ -e $state ]] || exit 0
     if [[ $wanted == agent:queued ]]; then
-      if [[ $* == *'--limit 1'* ]]; then awk '$2 == "queued" && $3 != "closed" {print $1; exit}' "$state"; else awk '$2 == "queued" && $3 != "closed" {print $1}' "$state"; fi
+      if [[ $* == *updatedAt* ]]; then
+        awk '$2 == "queued" && $3 != "closed" && $6 != "" {print $1 "\t" $6}' "$state"
+      elif [[ $* == *createdAt* ]]; then
+        awk '$2 == "queued" && $3 != "closed" {
+          rank=4
+          if ($4 ~ /(^|,)critical(,|$)/) rank=0
+          else if ($4 ~ /(^|,)high(,|$)/) rank=1
+          else if ($4 ~ /(^|,)medium(,|$)/) rank=2
+          else if ($4 ~ /(^|,)low(,|$)/) rank=3
+          created=($5 == "" ? $1 : $5)
+          print rank "\t" created "\t" $1
+        }' "$state" | sort -k1,1n -k2,2 -k3,3n | awk 'NR == 1 {print $3}'
+      else
+        awk '$2 == "queued" && $3 != "closed" {print $1}' "$state"
+      fi
     elif [[ $wanted == agent:running ]]; then
       if [[ $* == *template* ]]; then awk '$2 == "running" && $3 != "closed" {print "#" $1 " Fake issue " $1}' "$state"; else awk '$2 == "running" && $3 != "closed" {print $1}' "$state"; fi
     elif [[ $wanted == agent:needs-input ]]; then
@@ -200,7 +214,7 @@ assert_contains "$FAKE_GH_ROOT/calls" 'filter=is:issue is:closed' 'Closed Issues
 assert_contains "$FAKE_GH_ROOT/calls" 'filter=is:pr is:open' 'Open PRs view filter was not configured'
 assert_contains "$FAKE_GH_ROOT/calls" 'filter=is:pr is:closed' 'Closed PRs view filter was not configured'
 
-printf 'POLL_SECONDS=1\nMAX_WORKERS=2\nLEASE_SECONDS=3\nSTOP_TIMEOUT=10\n' > "$target/.agentic-loop/config"
+printf 'POLL_SECONDS=1\nMAX_WORKERS=2\nLEASE_SECONDS=3\nSTOP_TIMEOUT=10\nSTALE_DAYS=30\n' > "$target/.agentic-loop/config"
 "$target/bin/agentic-loop" start
 first_pid="$(git -C "$target" rev-parse --absolute-git-dir)/agentic-loop/supervisor.pid"
 first_pid=$(cat "$first_pid")
@@ -218,7 +232,7 @@ git -C "$target" commit --quiet -m configure
 git -C "$target" push --quiet
 state="$FAKE_GH_ROOT/$state_key.state"
 state_root="$(git -C "$target" rev-parse --absolute-git-dir)/agentic-loop"
-printf '1 queued open\n2 queued open\n3 queued open\n' > "$state"
+printf '1 queued open low 2026-01-01T00:00:00Z\n2 queued open critical,low 2026-01-02T00:00:00Z\n3 queued open critical 2025-12-31T00:00:00Z\n4 queued open none 2025-01-01T00:00:00Z\n' > "$state"
 AGENTIC_LOOP_RUN_ONCE=1 FAKE_CODEX_SLEEP=1 "$target/bin/agentic-loop" _supervise
 completed_count=$(awk '$2 == "completed" {count++} END {print count+0}' "$state")
 if [[ $completed_count -ne 2 ]]; then
@@ -226,15 +240,46 @@ if [[ $completed_count -ne 2 ]]; then
   find "$state_root" -type f -maxdepth 3 -print -exec sed -n '1,160p' {} \; >&2 || true
   fail "supervisor completed $completed_count Issues instead of 2"
 fi
-[[ $(awk '$2 == "queued" {count++} END {print count+0}' "$state") -eq 1 ]] || fail 'run-once claimed more than the worker limit'
+[[ $(awk '$2 == "queued" {count++} END {print count+0}' "$state") -eq 2 ]] || fail 'run-once claimed more than the worker limit'
+grep -Eq '^3 completed closed([[:space:]]|$)' "$state" || fail 'oldest critical Issue was not claimed first'
+grep -Eq '^2 completed closed([[:space:]]|$)' "$state" || fail 'second critical Issue was not claimed before lower priorities'
 assert_contains "$FAKE_GH_ROOT/codex-calls" '--sandbox workspace-write' 'worker did not use workspace-write'
 assert_contains "$FAKE_GH_ROOT/codex-calls" "--add-dir $target/.git" 'worker did not grant its exact Git common directory'
-assert_contains "$FAKE_GH_ROOT/codex-calls" "-C $target-worktrees/issue-1" 'worker did not use the repository-adjacent worktree root'
+assert_contains "$FAKE_GH_ROOT/codex-calls" "-C $target-worktrees/issue-3" 'worker did not use the repository-adjacent worktree root'
 assert_contains "$FAKE_GH_ROOT/codex-calls" 'approval_policy="never"' 'worker can block on approval'
 assert_contains "$FAKE_GH_ROOT/codex-calls" 'GitHubのIssue、PR' 'worker prompt did not require Japanese GitHub content'
 assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'のハートビートです' 'supervisor did not write its Issue comments in Japanese'
 if grep -Eq 'danger-full-access|OPENAI_API_KEY|--add-dir /($| )|--add-dir /home($| )' "$FAKE_GH_ROOT/codex-calls"; then fail 'worker used forbidden Codex configuration or a broad writable path'; fi
 [[ ! -e $state_root/worktrees ]] || fail 'worker worktrees were placed inside Git metadata'
+
+# Multiple priority labels use the highest rank; setup creates all priority and stale labels idempotently.
+grep -Fq $'label create priority:critical' "$FAKE_GH_ROOT/calls" || fail 'setup did not create the critical priority label'
+grep -Fq $'label create priority:low' "$FAKE_GH_ROOT/calls" || fail 'setup did not create the low priority label'
+grep -Fq $'label create agent:stale' "$FAKE_GH_ROOT/calls" || fail 'setup did not create the stale state label'
+
+# Only inactive queued Issues are closed; the audit explains safe recovery.
+old_date=$(date -u -d '40 days ago' +%Y-%m-%dT%H:%M:%SZ)
+recent_date=$(date -u -d '1 day ago' +%Y-%m-%dT%H:%M:%SZ)
+printf '20 queued open none 2025-01-01T00:00:00Z %s\n21 queued open none 2025-01-02T00:00:00Z %s\n22 running open none 2025-01-01T00:00:00Z %s\n23 needs-input open none 2025-01-01T00:00:00Z %s\n24 failed open none 2025-01-01T00:00:00Z %s\n25 in-review open none 2025-01-01T00:00:00Z %s\n26 none open none 2025-01-01T00:00:00Z %s\n' "$old_date" "$recent_date" "$old_date" "$old_date" "$old_date" "$old_date" "$old_date" > "$state"
+printf '22 <!-- agentic-loop:lease worker=active heartbeat=%s expires=%s -->\n' "$(date +%s)" "$(($(date +%s) + 3600))" > "$FAKE_GH_ROOT/$state_key.comments"
+AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _supervise
+grep -Eq '^20 stale closed' "$state" || fail 'inactive queued Issue was not marked stale and closed'
+grep -Eq '^21 completed closed' "$state" || fail 'recent queued Issue was not left available for claim'
+for issue_state in '22 running open' '23 needs-input open' '24 failed open' '25 in-review open' '26 none open'; do
+  grep -Eq "^$issue_state" "$state" || fail "excluded Issue changed state: $issue_state"
+done
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:stale days=30' 'stale audit marker was not recorded'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'reopen' 'stale audit did not explain reopening'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agent:queued' 'stale audit did not explain requeueing'
+
+# STALE_DAYS=0 disables automatic closure while preserving normal claiming.
+printf 'POLL_SECONDS=1\nMAX_WORKERS=1\nLEASE_SECONDS=3\nSTOP_TIMEOUT=10\nSTALE_DAYS=0\n' > "$target/.agentic-loop/config"
+printf '30 queued open none 2025-01-01T00:00:00Z %s\n31 queued open none 2025-01-02T00:00:00Z %s\n' "$old_date" "$old_date" > "$state"
+AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _supervise
+[[ $(awk '$2 == "stale" {count++} END {print count+0}' "$state") -eq 0 ]] || fail 'STALE_DAYS=0 marked an Issue stale'
+[[ $(awk '$2 == "queued" {count++} END {print count+0}' "$state") -eq 1 ]] || fail 'disabled stale handling did not preserve the remaining queue'
+
+printf 'POLL_SECONDS=1\nMAX_WORKERS=2\nLEASE_SECONDS=3\nSTOP_TIMEOUT=10\nSTALE_DAYS=30\n' > "$target/.agentic-loop/config"
 
 # A linked-worktree worker can fetch, commit, and push through the constructed invocation boundary.
 printf '6 queued open\n' > "$state"

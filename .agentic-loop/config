@@ -4,3 +4,6 @@ MAX_WORKERS=2
 LEASE_SECONDS=300
 # Zero waits indefinitely for workers during a graceful stop.
 STOP_TIMEOUT=0
+# Zero disables automatic stale closure. Otherwise queued Issues inactive for
+# this many days are marked agent:stale and closed before work is claimed.
+STALE_DAYS=30

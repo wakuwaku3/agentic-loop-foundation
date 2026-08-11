@@ -8,7 +8,8 @@ readonly REPO_ROOT="$(git -C "$SCRIPT_ROOT" rev-parse --show-toplevel 2>/dev/nul
 readonly STATE_ROOT="$(git -C "$REPO_ROOT" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || printf '%s/.git' "$REPO_ROOT")/agentic-loop"
 readonly WORKTREE_ROOT="$(dirname "$REPO_ROOT")/$(basename "$REPO_ROOT")-worktrees"
 readonly CONFIG_FILE="$REPO_ROOT/.agentic-loop/config"
-readonly LABELS=(queued running needs-input in-review completed failed)
+readonly LABELS=(queued running needs-input in-review completed failed stale)
+readonly PRIORITY_LABELS=(critical high medium low)
 
 cd "$REPO_ROOT"
 
@@ -16,13 +17,14 @@ POLL_SECONDS=30
 MAX_WORKERS=2
 LEASE_SECONDS=300
 STOP_TIMEOUT=0
+STALE_DAYS=30
 
 load_config() {
   local line key value
   [[ -r $CONFIG_FILE ]] || return 0
   while IFS= read -r line || [[ -n $line ]]; do
     [[ -z $line || $line == \#* ]] && continue
-    [[ $line =~ ^(POLL_SECONDS|MAX_WORKERS|LEASE_SECONDS|STOP_TIMEOUT)=([0-9]+)$ ]] ||
+    [[ $line =~ ^(POLL_SECONDS|MAX_WORKERS|LEASE_SECONDS|STOP_TIMEOUT|STALE_DAYS)=([0-9]+)$ ]] ||
       fail "invalid configuration line: $line"
     key=${BASH_REMATCH[1]}; value=${BASH_REMATCH[2]}
     printf -v "$key" '%s' "$value"
@@ -53,6 +55,7 @@ validate_config() {
   [[ $MAX_WORKERS =~ ^[1-9][0-9]*$ ]] || fail 'MAX_WORKERS must be a positive integer'
   [[ $LEASE_SECONDS =~ ^[1-9][0-9]*$ ]] || fail 'LEASE_SECONDS must be a positive integer'
   [[ $STOP_TIMEOUT =~ ^[0-9]+$ ]] || fail 'STOP_TIMEOUT must be a non-negative integer'
+  [[ $STALE_DAYS =~ ^[0-9]+$ ]] || fail 'STALE_DAYS must be a non-negative integer'
 }
 
 preflight() {
@@ -79,8 +82,18 @@ setup_labels() {
       in-review) color=5319E7; description='Pull request under review' ;;
       completed) color=0E8A16; description='Merged and verified' ;;
       failed) color=B60205; description='Worker failed; safe to inspect or retry' ;;
+      stale) color=6E7781; description='Queued work closed after the configured inactivity period' ;;
     esac
     gh label create "$(state_label "$name")" --color "$color" --description "$description" --force >/dev/null
+  done
+  for name in "${PRIORITY_LABELS[@]}"; do
+    case $name in
+      critical) color=B60205; description='Critical priority' ;;
+      high) color=D93F0B; description='High priority' ;;
+      medium) color=FBCA04; description='Medium priority' ;;
+      low) color=0E8A16; description='Low priority' ;;
+    esac
+    gh label create "priority:$name" --color "$color" --description "$description" --force >/dev/null
   done
 }
 
@@ -99,7 +112,7 @@ setup_project() {
   printf 'PROJECT_OWNER=%q\nPROJECT_NUMBER=%q\n' "$owner" "$number" > "$STATE_ROOT/project.env"
   gh project link "$number" --owner "$owner" --repo "$repository" >/dev/null 2>&1 || true
   gh project field-create "$number" --owner "$owner" --name 'Agent status' --data-type SINGLE_SELECT \
-    --single-select-options 'Inbox,Queued,Running,Needs input,In review,Done,Failed' >/dev/null 2>&1 || true
+    --single-select-options 'Inbox,Queued,Running,Needs input,In review,Done,Failed,Stale' >/dev/null 2>&1 || true
   setup_project_views "$number" "$owner"
 }
 
@@ -242,7 +255,7 @@ project_sync_state() {
   [[ -n $PROJECT_OWNER && $PROJECT_NUMBER =~ ^[0-9]+$ ]] || return 0
   case $state in
     queued) option=Queued ;; running) option=Running ;; needs-input) option='Needs input' ;;
-    in-review) option='In review' ;; completed) option=Done ;; failed) option=Failed ;; *) option=Inbox ;;
+    in-review) option='In review' ;; completed) option=Done ;; failed) option=Failed ;; stale) option=Stale ;; *) option=Inbox ;;
   esac
   project_id=$(gh project view "$PROJECT_NUMBER" --owner "$PROJECT_OWNER" --format json --jq .id 2>/dev/null) || return 0
   item_id=$(gh project item-list "$PROJECT_NUMBER" --owner "$PROJECT_OWNER" --format json --limit 1000 --jq ".items[] | select(.content.number == $issue) | .id" 2>/dev/null | head -n 1) || return 0
@@ -285,9 +298,25 @@ requeue_answered() {
   done < <(gh issue list --state open --label "$(state_label needs-input)" --limit 100 --json number --jq '.[].number' 2>/dev/null || true)
 }
 
+triage_stale_queued() {
+  (( STALE_DAYS > 0 )) || return 0
+  local issue updated_at updated_epoch cutoff
+  cutoff=$(($(date +%s) - STALE_DAYS * 86400))
+  while IFS=$'\t' read -r issue updated_at; do
+    [[ -n $issue && -n $updated_at ]] || continue
+    updated_epoch=$(date -d "$updated_at" +%s 2>/dev/null) || continue
+    (( updated_epoch <= cutoff )) || continue
+    set_issue_state "$issue" stale
+    project_sync_state "$issue" stale
+    comment_issue "$issue" "<!-- agentic-loop:stale days=$STALE_DAYS updated=$updated_at -->\nこのIssueは \`agent:queued\` のまま$STALE_DAYS日間更新されなかったため、claim前のトリアージで \`agent:stale\` へ移し、クローズしました。再開するにはIssueをreopenし、内容を確認・更新してから \`agent:queued\` Labelを付けてください。"
+    gh issue close "$issue" >/dev/null
+  done < <(gh issue list --state open --label "$(state_label queued)" --limit 1000 --json number,updatedAt --jq '.[] | [.number, .updatedAt] | @tsv' 2>/dev/null || true)
+}
+
 claim_next() {
   local issue
-  issue=$(gh issue list --state open --label "$(state_label queued)" --limit 1 --json number --jq '.[0].number // empty' 2>/dev/null || true)
+  # shellcheck disable=SC2016 # This is a jq program, not a shell expression.
+  issue=$(gh issue list --state open --label "$(state_label queued)" --limit 1000 --json number,createdAt,labels --jq 'sort_by((if any(.labels[]; .name == "priority:critical") then 0 elif any(.labels[]; .name == "priority:high") then 1 elif any(.labels[]; .name == "priority:medium") then 2 elif any(.labels[]; .name == "priority:low") then 3 else 4 end), .createdAt, .number) | .[0].number // empty' 2>/dev/null || true)
   [[ -n $issue ]] || return 1
   set_issue_state "$issue" running
   if ! gh issue view "$issue" --json labels --jq '.labels[].name' | grep -Fxq "$(state_label running)"; then return 1; fi
@@ -315,6 +344,7 @@ supervise() {
     if [[ -e $STATE_ROOT/stop.requested ]]; then
       [[ $(worker_count) -eq 0 ]] && break
     else
+      triage_stale_queued
       while [[ $(worker_count) -lt $MAX_WORKERS ]]; do
         local issue worker
         issue=$(claim_next) || break
