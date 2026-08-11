@@ -9,7 +9,7 @@ readonly SHARED_FILES=(
   docs/decisions/0002-github-issue-queue.md docs/operations/issue-queue.md
   .agents/skills/submit-requirement/SKILL.md
   .agents/skills/submit-requirement/agents/openai.yaml
-  .agentic-loop/guard-secrets.sh .agentic-loop/config
+  .agentic-loop/guard-secrets.sh .agentic-loop/update-main.sh .agentic-loop/config
   .githooks/pre-commit .githooks/pre-push bin/agentic-loop
 )
 readonly INIT_FILES=(
@@ -22,7 +22,7 @@ fail() { printf 'install-target: %s\n' "$1" >&2; exit 1; }
 
 preflight() {
   local command_name
-  for command_name in git gh codex; do command -v "$command_name" >/dev/null 2>&1 || fail "$command_name is required"; done
+  for command_name in git gh codex systemctl systemd-escape; do command -v "$command_name" >/dev/null 2>&1 || fail "$command_name is required"; done
   git -C "$TARGET" rev-parse --git-dir >/dev/null 2>&1 || fail 'target must be a Git repository'
   git -C "$TARGET" remote get-url origin >/dev/null 2>&1 || fail 'origin remote is required'
   gh auth status >/dev/null 2>&1 || fail 'GitHub authentication is required; run gh auth login'
@@ -46,10 +46,11 @@ main() {
   for file in "${files[@]}"; do
     if [[ ! -e $target/$file ]]; then mkdir -p "$target/$(dirname "$file")"; cp "$SOURCE_ROOT/$file" "$target/$file"; fi
   done
-  chmod +x "$target/bin/agentic-loop" "$target/.agentic-loop/guard-secrets.sh" "$target/.githooks/pre-commit" "$target/.githooks/pre-push"
+  chmod +x "$target/bin/agentic-loop" "$target/.agentic-loop/guard-secrets.sh" "$target/.agentic-loop/update-main.sh" "$target/.githooks/pre-commit" "$target/.githooks/pre-push"
   [[ $mode == init ]] && chmod +x "$target/install.sh" "$target/scripts/"*.sh "$target/tests/"*.sh
   git -C "$target" config --local core.hooksPath .githooks
   "$target/bin/agentic-loop" setup
+  "$target/.agentic-loop/update-main.sh" install "$target"
   if [[ ${AGENTIC_LOOP_SKIP_START:-0} != 1 ]]; then "$target/bin/agentic-loop" start; fi
   printf 'Agentic loop installed (%s) in %s\n' "$mode" "$(cd "$target" && pwd)"
 }
