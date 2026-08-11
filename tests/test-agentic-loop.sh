@@ -76,7 +76,7 @@ cat > "$FAKE_BIN/codex" <<'FAKE_CODEX'
 #!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "$*" >> "$FAKE_GH_ROOT/codex-calls"
-[[ ${1:-} == exec && ${2:-} == --help ]] && exit 0
+[[ ${1:-} == exec && ${2:-} == --help ]] && { printf '%s\n' '      --add-dir <DIR>'; exit 0; }
 output=''
 for ((i=1; i<=$#; i++)); do [[ ${!i} == --output-last-message ]] && { j=$((i+1)); output=${!j}; }; done
 [[ -n $output ]] || exit 2
@@ -154,8 +154,11 @@ if [[ $completed_count -ne 2 ]]; then
 fi
 [[ $(awk '$2 == "queued" {count++} END {print count+0}' "$state") -eq 1 ]] || fail 'run-once claimed more than the worker limit'
 assert_contains "$FAKE_GH_ROOT/codex-calls" '--sandbox workspace-write' 'worker did not use workspace-write'
+assert_contains "$FAKE_GH_ROOT/codex-calls" "--add-dir $target/.git" 'worker did not grant its exact Git common directory'
+assert_contains "$FAKE_GH_ROOT/codex-calls" "-C $target-worktrees/issue-1" 'worker did not use the repository-adjacent worktree root'
 assert_contains "$FAKE_GH_ROOT/codex-calls" 'approval_policy="never"' 'worker can block on approval'
-if grep -Eq 'danger-full-access|OPENAI_API_KEY' "$FAKE_GH_ROOT/codex-calls"; then fail 'worker used forbidden Codex configuration'; fi
+if grep -Eq 'danger-full-access|OPENAI_API_KEY|--add-dir /($| )|--add-dir /home($| )' "$FAKE_GH_ROOT/codex-calls"; then fail 'worker used forbidden Codex configuration or a broad writable path'; fi
+[[ ! -e $state_root/worktrees ]] || fail 'worker worktrees were placed inside Git metadata'
 
 # needs-input and failure are isolated state transitions; a later Issue reply requeues only that Issue.
 printf '4 running open\n5 running open\n' > "$state"

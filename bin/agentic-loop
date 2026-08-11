@@ -5,6 +5,7 @@ readonly PROGRAM_NAME="${0##*/}"
 readonly SCRIPT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 readonly REPO_ROOT="$(git -C "$SCRIPT_ROOT" rev-parse --show-toplevel 2>/dev/null || printf '%s' "$SCRIPT_ROOT")"
 readonly STATE_ROOT="$(git -C "$REPO_ROOT" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || printf '%s/.git' "$REPO_ROOT")/agentic-loop"
+readonly WORKTREE_ROOT="$(dirname "$REPO_ROOT")/$(basename "$REPO_ROOT")-worktrees"
 readonly CONFIG_FILE="$REPO_ROOT/.agentic-loop/config"
 readonly LABELS=(queued running needs-input in-review completed failed)
 
@@ -63,7 +64,7 @@ preflight() {
   gh api graphql -f query='query { viewer { login projectsV2(first: 1) { totalCount } } }' >/dev/null 2>&1 ||
     fail 'GitHub token needs repository access and project/read:project scopes; run gh auth refresh -s project,read:project'
   repo_name >/dev/null || fail 'cannot access the target GitHub repository'
-  codex exec --help >/dev/null 2>&1 || fail 'Codex CLI does not provide non-interactive exec mode'
+  codex exec --help 2>/dev/null | grep -Fq -- '--add-dir' || fail 'Codex CLI exec mode with --add-dir is required'
   validate_config
 }
 
@@ -123,7 +124,7 @@ clear_stale_lock() {
 
 cmd_start() {
   preflight
-  mkdir -p "$STATE_ROOT/logs" "$STATE_ROOT/worktrees"
+  mkdir -p "$STATE_ROOT/logs" "$WORKTREE_ROOT"
   rm -f "$STATE_ROOT/stop.requested"
   if ! clear_stale_lock; then
     say "Agentic Loop supervisor is already running (pid $(cat "$STATE_ROOT/supervisor.pid"))."
@@ -302,11 +303,11 @@ EOF
 }
 
 worker() {
-  local issue=$1 worker=$2 repository default_branch branch worktree result exit_code=0 heartbeat_pid
+  local issue=$1 worker=$2 repository default_branch branch worktree result git_common_dir exit_code=0 heartbeat_pid
   repository=$(repo_name)
   default_branch=$(gh repo view --json defaultBranchRef --jq .defaultBranchRef.name)
   branch="agent/issue-$issue"
-  worktree="$STATE_ROOT/worktrees/issue-$issue"
+  worktree="$WORKTREE_ROOT/issue-$issue"
   if ! git -C "$REPO_ROOT" fetch origin "$default_branch"; then
     set_issue_state "$issue" failed || true
     comment_issue "$issue" "<!-- agentic-loop:failed worker=$worker -->\nCould not fetch the latest default branch. The Issue can be safely requeued after repository access is restored." || true
@@ -328,10 +329,16 @@ worker() {
     fi
   fi
   result="$STATE_ROOT/issue-$issue-result.txt"
+  git_common_dir=$(git -C "$REPO_ROOT" rev-parse --path-format=absolute --git-common-dir) || fail 'cannot resolve the Git common directory'
+  [[ $git_common_dir == /* && -d $git_common_dir && -f $git_common_dir/HEAD && -d $git_common_dir/objects && -d $git_common_dir/refs ]] ||
+    fail 'refusing an invalid Git common directory'
+  case $git_common_dir in
+    /|"${HOME:-}"|/home|/Users) fail 'refusing a broad Git common directory' ;;
+  esac
   (
     while :; do sleep $((LEASE_SECONDS / 3 + 1)); lease_comment "$issue" "$worker" || true; done
   ) & heartbeat_pid=$!
-  codex exec --sandbox workspace-write -c 'approval_policy="never"' -c 'sandbox_workspace_write.network_access=true' \
+  codex exec --sandbox workspace-write --add-dir "$git_common_dir" -c 'approval_policy="never"' -c 'sandbox_workspace_write.network_access=true' \
     -C "$worktree" --output-last-message "$result" "$(issue_prompt "$issue" "$repository")" || exit_code=$?
   kill "$heartbeat_pid" 2>/dev/null || true
   wait "$heartbeat_pid" 2>/dev/null || true
