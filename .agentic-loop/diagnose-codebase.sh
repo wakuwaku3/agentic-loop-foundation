@@ -71,7 +71,7 @@ run_diagnosis() {
   exec 9> "$lock_file"
   flock -n 9 || fail 'another diagnosis is already running'
   codex exec --sandbox read-only --config 'approval_policy="never"' -C "$root" --output-last-message "$result_file" \
-    "Use \$diagnose-codebase to audit this repository now. The GitHub repository is $repository. You may use gh only to search Issues and create non-duplicate diagnosis Issues with diagnosis, category:improvement, and agent:queued labels. Do not modify any repository file or other GitHub state."
+    "Use \$diagnose-codebase to audit this repository now. The GitHub repository is $repository. You may use gh only to search Issues and create non-duplicate diagnosis Issues with diagnosis, category:improvement, and agent:queued labels, then run bin/agentic-loop sync-issue ISSUE_NUMBER for every created Issue. Do not modify any repository file or other GitHub state."
   [[ -s $result_file ]] && cat "$result_file"
 }
 

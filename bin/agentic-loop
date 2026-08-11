@@ -65,9 +65,10 @@ load_config
 
 usage() {
   cat >&2 <<EOF
-Usage: $PROGRAM_NAME {setup|start|stop|status}
+Usage: $PROGRAM_NAME {setup|sync-issue ISSUE|start|stop|status}
 
   setup   Create or reuse this repository's labels and Project
+  sync-issue  Add one Issue to the Project now, or queue a retry
   start   Start one background supervisor for this repository
   stop    Stop claiming work and drain running workers
   status  Show the supervisor and running Issues
@@ -223,7 +224,7 @@ setup_project() {
   gh project field-create "$number" --owner "$owner" --name 'Category' --data-type SINGLE_SELECT \
     --single-select-options 'Loop continuity,Confidentiality incident,Integrity incident,Availability incident,Feature,Improvement' >/dev/null 2>&1 || true
   setup_project_views "$number" "$owner"
-  setup_project_pull_requests "$number" "$owner"
+  setup_project_content "$number" "$owner"
 }
 
 setup_project_view() {
@@ -264,17 +265,24 @@ setup_project_views() {
   setup_project_view "$project_id" 'Closed PRs' 'is:pr is:closed'
 }
 
-setup_project_pull_requests() {
+setup_project_content() {
   local number=$1 owner=$2 url existing_urls
   existing_urls=$(gh project item-list "$number" --owner "$owner" --format json --limit 1000 \
     --jq '.items[].content.url // empty' 2>/dev/null || true)
   while IFS= read -r url; do
     [[ -n $url ]] || continue
     if ! grep -Fxq -- "$url" <<< "$existing_urls"; then
-      gh project item-add "$number" --owner "$owner" --url "$url" >/dev/null 2>&1 || true
-      existing_urls+="${existing_urls:+$'\n'}$url"
+      if gh project item-add "$number" --owner "$owner" --url "$url" >/dev/null 2>&1; then
+        existing_urls+="${existing_urls:+$'\n'}$url"
+      else
+        queue_project_sync "content $url"
+      fi
     fi
-  done < <(gh pr list --state all --limit 1000 --json url --jq '.[].url')
+  done < <(
+    repo_api issues --method GET -f state=all -f per_page=100 --paginate \
+      --jq '.[] | select(.pull_request == null) | .html_url' 2>/dev/null || true
+    repo_api pulls --method GET -f state=all -f per_page=100 --paginate --jq '.[].html_url' 2>/dev/null || true
+  )
 }
 
 cmd_setup() {
@@ -410,19 +418,26 @@ comment_issue() { repo_api "issues/$1/comments" --method POST -f body="$2" >/dev
 
 queue_project_sync() {
   mkdir -p "$STATE_ROOT"
-  ( flock 9; printf '%s\n' "$*" >> "$STATE_ROOT/project-pending" ) 9> "$STATE_ROOT/project-pending.lock"
+  ( flock 9; grep -Fxq -- "$*" "$STATE_ROOT/project-pending" 2>/dev/null || printf '%s\n' "$*" >> "$STATE_ROOT/project-pending" ) 9> "$STATE_ROOT/project-pending.lock"
 }
 
-project_add_issue() {
-  graphql_budget_allows "$((GRAPHQL_RESERVE + 1))" || { queue_project_sync "issue $1"; return 0; }
+project_add_content() {
+  local url=$1
+  graphql_budget_allows "$((GRAPHQL_RESERVE + 1))" || { queue_project_sync "content $url"; return 0; }
   [[ -r $STATE_ROOT/project.env ]] || return 0
-  local url PROJECT_OWNER='' PROJECT_NUMBER='' key value
+  local PROJECT_OWNER='' PROJECT_NUMBER='' key value existing
   while IFS='=' read -r key value; do
     case $key in PROJECT_OWNER) PROJECT_OWNER=$value ;; PROJECT_NUMBER) PROJECT_NUMBER=$value ;; esac
   done < "$STATE_ROOT/project.env"
   [[ -n $PROJECT_OWNER && $PROJECT_NUMBER =~ ^[0-9]+$ ]] || return 0
-  url="https://github.com/$(repo_name)/issues/$1"
-  gh project item-add "$PROJECT_NUMBER" --owner "$PROJECT_OWNER" --url "$url" >/dev/null 2>&1 || true
+  existing=$(gh project item-list "$PROJECT_NUMBER" --owner "$PROJECT_OWNER" --format json --limit 1000 \
+    --jq '.items[].content.url // empty' 2>/dev/null) || { queue_project_sync "content $url"; return 0; }
+  grep -Fxq -- "$url" <<< "$existing" && return 0
+  gh project item-add "$PROJECT_NUMBER" --owner "$PROJECT_OWNER" --url "$url" >/dev/null 2>&1 || queue_project_sync "content $url"
+}
+
+project_add_issue() {
+  project_add_content "https://github.com/$(repo_name)/issues/$1"
 }
 
 project_add_pull_requests() {
@@ -435,7 +450,7 @@ project_add_pull_requests() {
   [[ -n $PROJECT_OWNER && $PROJECT_NUMBER =~ ^[0-9]+$ ]] || return 0
   while IFS= read -r url; do
     [[ -n $url ]] || continue
-    gh project item-add "$PROJECT_NUMBER" --owner "$PROJECT_OWNER" --url "$url" >/dev/null 2>&1 || true
+    project_add_content "$url"
   done < <(repo_api pulls --method GET -f state=all -f head="${PROJECT_OWNER}:$branch" -f per_page=100 --paginate --jq '.[].html_url' 2>/dev/null || true)
 }
 
@@ -451,12 +466,12 @@ project_sync_state() {
     queued) option=Queued ;; running) option=Running ;; needs-input) option='Needs input' ;;
     in-review) option='In review' ;; completed) option=Done ;; failed) option=Failed ;; stale) option=Stale ;; *) option=Inbox ;;
   esac
-  project_id=$(gh project view "$PROJECT_NUMBER" --owner "$PROJECT_OWNER" --format json --jq .id 2>/dev/null) || return 0
-  item_id=$(gh project item-list "$PROJECT_NUMBER" --owner "$PROJECT_OWNER" --format json --limit 1000 --jq ".items[] | select(.content.number == $issue) | .id" 2>/dev/null | head -n 1) || return 0
-  field_id=$(gh project field-list "$PROJECT_NUMBER" --owner "$PROJECT_OWNER" --format json --jq '.fields[] | select(.name == "Agent status") | .id' 2>/dev/null | head -n 1) || return 0
-  option_id=$(gh project field-list "$PROJECT_NUMBER" --owner "$PROJECT_OWNER" --format json --jq ".fields[] | select(.name == \"Agent status\") | .options[] | select(.name == \"$option\") | .id" 2>/dev/null | head -n 1) || return 0
-  [[ -n $project_id && -n $item_id && -n $field_id && -n $option_id ]] || return 0
-  gh project item-edit --id "$item_id" --project-id "$project_id" --field-id "$field_id" --single-select-option-id "$option_id" >/dev/null 2>&1 || true
+  project_id=$(gh project view "$PROJECT_NUMBER" --owner "$PROJECT_OWNER" --format json --jq .id 2>/dev/null) || { queue_project_sync "state $issue $state"; return 0; }
+  item_id=$(gh project item-list "$PROJECT_NUMBER" --owner "$PROJECT_OWNER" --format json --limit 1000 --jq ".items[] | select(.content.number == $issue) | .id" 2>/dev/null | head -n 1) || true
+  field_id=$(gh project field-list "$PROJECT_NUMBER" --owner "$PROJECT_OWNER" --format json --jq '.fields[] | select(.name == "Agent status") | .id' 2>/dev/null | head -n 1) || true
+  option_id=$(gh project field-list "$PROJECT_NUMBER" --owner "$PROJECT_OWNER" --format json --jq ".fields[] | select(.name == \"Agent status\") | .options[] | select(.name == \"$option\") | .id" 2>/dev/null | head -n 1) || true
+  [[ -n $project_id && -n $item_id && -n $field_id && -n $option_id ]] || { queue_project_sync "state $issue $state"; return 0; }
+  gh project item-edit --id "$item_id" --project-id "$project_id" --field-id "$field_id" --single-select-option-id "$option_id" >/dev/null 2>&1 || queue_project_sync "state $issue $state"
 }
 
 project_sync_category() {
@@ -487,7 +502,8 @@ reconcile_pending_project() {
   ( flock 9; mv "$STATE_ROOT/project-pending" "$pending" ) 9> "$STATE_ROOT/project-pending.lock"
   while read -r kind first second; do
     case $kind in
-      issue) project_add_issue "$first" ;;
+      content) project_add_content "$first" ;;
+      issue) project_add_issue "$first" ;; # backward-compatible pending entries
       pulls) project_add_pull_requests "$first" ;;
       state) project_sync_state "$first" "$second" ;;
       category) project_sync_category "$first" "$second" ;;
@@ -519,6 +535,13 @@ reconcile_queued_categories() {
       comment_issue "$issue" "<!-- agentic-loop:category-reconciled reason=multiple selected=$category -->\n複数のカテゴリを検出したため、定義済みの最上位カテゴリ \`category:$category\` だけを残しました。必要ならqueued中にカテゴリLabelを1つだけ残して再トリアージしてください。"
     fi
   done < <(repo_api issues --method GET -f state=open -f labels="$(state_label queued)" -f per_page=100 --paginate --jq '.[] | select(.pull_request == null) | .number' 2>/dev/null || true)
+}
+
+cmd_sync_issue() {
+  [[ ${1:-} =~ ^[1-9][0-9]*$ ]] || fail 'sync-issue requires a positive Issue number'
+  project_add_issue "$1"
+  project_sync_state "$1" queued
+  say "Issue #$1 のProject同期を実行しました（障害時は再試行queueへ保存済みです）。"
 }
 
 lease_comment() {
@@ -762,6 +785,7 @@ worker() {
 main() {
   case ${1:-} in
     setup) [[ $# -eq 1 ]] || fail 'setup takes no arguments'; cmd_setup ;;
+    sync-issue) [[ $# -eq 2 ]] || fail 'sync-issue requires one Issue number'; cmd_sync_issue "$2" ;;
     start) [[ $# -eq 1 ]] || fail 'start takes no arguments'; cmd_start ;;
     stop) [[ $# -eq 1 ]] || fail 'stop takes no arguments'; cmd_stop ;;
     status) [[ $# -eq 1 ]] || fail 'status takes no arguments'; cmd_status ;;
