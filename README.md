@@ -26,9 +26,17 @@ GitHub Issueが要求と状態履歴の正本で、Projectは障害がキュー�
 
 インストールはコードベース自己診断のuser-level systemd timerも設定します。週次診断は要件と実装のずれ、構成、skill候補、不要ファイルを調べ、コードを変更せず `diagnosis` と `agent:queued` Label付きの日本語Issueを作成してSupervisorへ修正を委譲します。手動実行は `bin/agentic-loop-diagnose`、詳細は [コードベース自己診断](docs/operations/codebase-diagnosis.md) を参照してください。
 
+## AIツールの選択
+
+要求処理のworkerが使うAIコーディングツールは環境変数 `AGENT_PROVIDER` で選択します（`codex` または `claude`、既定は `codex`）。同じリポジトリをローカル環境に応じて切り替えられ、特定ツールへ固定しません（[AIツール非依存ポリシー](docs/policies/ai-tool-neutrality.md)）。事故的な高コスト実行を防ぐため、モデルと推論強度は `AGENT_CODEX_MODEL`、`AGENT_CODEX_REASONING_EFFORT`（既定 `medium`）、`AGENT_CLAUDE_MODEL` で明示的にピン留めできます。常駐Supervisorはsystemd管理のため、これらは `bin/agentic-loop start` 実行時のシェル環境からserviceへ焼き込まれます。Claudeを使う場合はOS levelのsandboxが無く、隔離は専用worktreeと秘密情報guard hookに依存します。
+
+```sh
+AGENT_PROVIDER=claude bin/agentic-loop start
+```
+
 ## 要求の入力
 
-Codexで `$submit-requirement` に続けて、達成したいことを自然言語で入力してください。
+`$submit-requirement`（Codex）または `/submit-requirement`（Claude）に続けて、達成したいことを自然言語で入力してください。
 
 インストールされる `.codex/config.toml` により、Codex は承認確認なしで動作し、ファイルの書き込み先はワークスペース内に制限されます。既存の `.codex/config.toml` がある場合は上書きせず、インストールを停止します。
 
@@ -43,6 +51,6 @@ bin/agentic-loop status
 bin/agentic-loop doctor
 ```
 
-`doctor` はGitHub認証とrepository権限、origin/default branch、Codex CLI、Devbox、hooks、Supervisor、systemd service/timer、GitHub Project、設定、残存worktree/branch/logを読み取り専用で検査します。各結果を成功・警告・失敗に分類し、影響と復旧方法を日本語で表示します。必須条件の失敗がある場合だけ終了code 1、警告だけなら0です。自動監視では `bin/agentic-loop doctor --format json` を使用できます。診断はtoken本体を表示せず、修復は `setup`、`start`、install再実行などの明示的な別操作で行います。
+`doctor` はGitHub認証とrepository権限、origin/default branch、選択中のAI CLI（Codex/Claude）、Devbox、hooks、Supervisor、systemd service/timer、GitHub Project、設定、残存worktree/branch/logを読み取り専用で検査します。各結果を成功・警告・失敗に分類し、影響と復旧方法を日本語で表示します。必須条件の失敗がある場合だけ終了code 1、警告だけなら0です。自動監視では `bin/agentic-loop doctor --format json` を使用できます。診断はtoken本体を表示せず、修復は `setup`、`start`、install再実行などの明示的な別操作で行います。
 
 既定では30秒poll、最大4件を並列実行します。設定、状態遷移、lease復旧、Projectの制約、トラブルシュートは [Issueキュー運用](docs/operations/issue-queue.md)、設計上の判断は [0001](docs/decisions/0001-minimal-foundation.md) と [0002](docs/decisions/0002-github-issue-queue.md) に記録しています。

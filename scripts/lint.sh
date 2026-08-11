@@ -3,7 +3,7 @@ set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
-required=(AGENTS.md README.md Makefile .editorconfig .gitignore .env.example .codex/config.toml install.sh devbox.json devbox.lock docs/policies/cost.md docs/policies/testing.md docs/policies/external-environment.md docs/policies/development-environment.md docs/policies/ai-tool-neutrality.md docs/policies/github-language.md docs/policies/validation-harness.md docs/policies/continuous-delivery.md docs/decisions/0002-github-issue-queue.md docs/operations/issue-queue.md docs/operations/codebase-diagnosis.md .agentic-loop/config .agentic-loop/guard-secrets.sh .agentic-loop/update-main.sh .agentic-loop/diagnose-codebase.sh .githooks/pre-commit .githooks/pre-push .agents/skills/submit-requirement/SKILL.md .agents/skills/diagnose-codebase/SKILL.md bin/agentic-loop bin/agentic-loop-diagnose scripts/check-environment.sh scripts/install-target.sh)
+required=(AGENTS.md README.md Makefile .editorconfig .gitignore .env.example .codex/config.toml install.sh devbox.json devbox.lock docs/policies/cost.md docs/policies/testing.md docs/policies/external-environment.md docs/policies/development-environment.md docs/policies/ai-tool-neutrality.md docs/policies/github-language.md docs/policies/validation-harness.md docs/policies/continuous-delivery.md docs/decisions/0002-github-issue-queue.md docs/operations/issue-queue.md docs/operations/codebase-diagnosis.md .agentic-loop/config .agentic-loop/guard-secrets.sh .agentic-loop/update-main.sh .agentic-loop/diagnose-codebase.sh .githooks/pre-commit .githooks/pre-push .agents/skills/submit-requirement/SKILL.md .agents/skills/diagnose-codebase/SKILL.md .claude/skills/submit-requirement/SKILL.md .claude/skills/diagnose-codebase/SKILL.md bin/agentic-loop bin/agentic-loop-diagnose scripts/check-environment.sh scripts/install-target.sh)
 for file in "${required[@]}"; do
   [[ -f $file ]] || { printf 'Missing required file: %s\n' "$file" >&2; exit 1; }
 done
@@ -107,6 +107,8 @@ bash -n bin/agentic-loop
 shellcheck bin/agentic-loop bin/agentic-loop-diagnose .agentic-loop/diagnose-codebase.sh tests/test-agentic-loop.sh
 grep -Fq 'MAX_WORKERS=4' .agentic-loop/config || { printf 'Unsafe worker default.\n' >&2; exit 1; }
 grep -Fq -- '--sandbox workspace-write' bin/agentic-loop || { printf 'Unsafe Codex sandbox.\n' >&2; exit 1; }
+grep -Fq 'AGENT_PROVIDER' bin/agentic-loop || { printf 'AI provider is not selectable.\n' >&2; exit 1; }
+grep -Fq -- '--dangerously-skip-permissions' bin/agentic-loop || { printf 'Claude worker isolation is not configured.\n' >&2; exit 1; }
 if grep -Eq 'danger-full-access|OPENAI_API_KEY' bin/agentic-loop bin/agentic-loop-diagnose .agentic-loop/diagnose-codebase.sh install.sh scripts/install-target.sh; then
   printf 'Forbidden Codex execution or API-key billing configuration.\n' >&2
   exit 1

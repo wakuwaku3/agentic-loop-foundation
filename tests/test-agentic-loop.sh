@@ -251,6 +251,17 @@ fi
 sleep "${FAKE_CODEX_SLEEP:-0}"
 printf '%s\n' "${FAKE_CODEX_RESULT:-AGENTIC_LOOP_RESULT=completed}" > "$output"
 FAKE_CODEX
+cat > "$FAKE_BIN/claude" <<'FAKE_CLAUDE'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >> "$FAKE_GH_ROOT/claude-calls"
+[[ ${1:-} == --version || ${1:-} == --help ]] && { printf 'claude 1.0.0\n'; exit 0; }
+[[ $* == *--print* ]] || { printf 'claude worker must run non-interactively\n' >&2; exit 2; }
+[[ $* == *--dangerously-skip-permissions* ]] || { printf 'claude worker must not block on permissions\n' >&2; exit 2; }
+sleep "${FAKE_CLAUDE_SLEEP:-0}"
+# The Claude worker captures the final message from stdout into the result file.
+printf '%s\n' "${FAKE_CLAUDE_RESULT:-AGENTIC_LOOP_RESULT=completed}"
+FAKE_CLAUDE
 cat > "$FAKE_BIN/systemctl" <<'FAKE_SYSTEMCTL'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -266,7 +277,7 @@ cat > "$FAKE_BIN/devbox" <<'FAKE_DEVBOX'
 #!/usr/bin/env bash
 exit 0
 FAKE_DEVBOX
-chmod +x "$FAKE_BIN/gh" "$FAKE_BIN/codex" "$FAKE_BIN/systemctl" "$FAKE_BIN/systemd-escape" "$FAKE_BIN/devbox"
+chmod +x "$FAKE_BIN/gh" "$FAKE_BIN/codex" "$FAKE_BIN/claude" "$FAKE_BIN/systemctl" "$FAKE_BIN/systemd-escape" "$FAKE_BIN/devbox"
 export PATH="$FAKE_BIN:$PATH" FAKE_GH_ROOT XDG_CONFIG_HOME="$TEST_ROOT/config"
 
 new_repository() {
@@ -570,6 +581,20 @@ assert_contains "$FAKE_GH_ROOT/codex-calls" 'GitHubのIssue、PR' 'worker prompt
 assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'のハートビートです' 'supervisor did not write its Issue comments in Japanese'
 if grep -Eq 'danger-full-access|OPENAI_API_KEY|--add-dir /($| )|--add-dir /home($| )' "$FAKE_GH_ROOT/codex-calls"; then fail 'worker used forbidden Codex configuration or a broad writable path'; fi
 [[ ! -e $state_root/worktrees ]] || fail 'worker worktrees were placed inside Git metadata'
+
+# AGENT_PROVIDER=claude routes the worker to the Claude CLI, confining writes to the worktree.
+[[ -f $target/.claude/skills/submit-requirement/SKILL.md ]] || fail 'install did not add the Claude submit-requirement skill'
+[[ -f $target/.claude/skills/diagnose-codebase/SKILL.md ]] || fail 'install did not add the Claude diagnosis skill'
+printf 'POLL_SECONDS=1\nMAX_WORKERS=1\nLEASE_SECONDS=3\nSTOP_TIMEOUT=10\nSTALE_DAYS=30\n' > "$target/.agentic-loop/config"
+printf '7 queued open none 2026-01-01T00:00:00Z\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+: > "$FAKE_GH_ROOT/claude-calls"
+AGENT_PROVIDER=claude AGENTIC_LOOP_RUN_ONCE=1 FAKE_CLAUDE_SLEEP=1 "$target/bin/agentic-loop" _supervise
+grep -Eq '^7 completed closed' "$state" || fail 'claude provider did not complete the Issue'
+assert_contains "$FAKE_GH_ROOT/claude-calls" '--print' 'claude worker did not run non-interactively'
+assert_contains "$FAKE_GH_ROOT/claude-calls" '--dangerously-skip-permissions' 'claude worker did not skip permission prompts'
+assert_contains "$FAKE_GH_ROOT/claude-calls" "--add-dir $target/.git" 'claude worker did not grant its exact Git common directory'
+assert_contains "$FAKE_GH_ROOT/claude-calls" "--add-dir $target-worktrees/issue-7/.agents" 'claude worker did not grant its exact protected .agents directory'
 
 # Multiple priority labels use the highest rank; setup creates all priority and stale labels idempotently.
 grep -Fq $'label create priority:critical' "$FAKE_GH_ROOT/calls" || fail 'setup did not create the critical priority label'
