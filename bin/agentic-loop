@@ -2,62 +2,369 @@
 set -euo pipefail
 
 readonly PROGRAM_NAME="${0##*/}"
-readonly SOURCE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-readonly SHARED_FILES=(
-  AGENTS.md
-  .codex/config.toml
-  docs/policies/cost.md
-  .agents/skills/submit-requirement/SKILL.md
-  .agents/skills/submit-requirement/agents/openai.yaml
-  .agentic-loop/guard-secrets.sh
-  .githooks/pre-commit
-  .githooks/pre-push
-)
-readonly INIT_FILES=(
-  README.md .editorconfig .env.example .gitignore Makefile
-  bin/agentic-loop install.sh
-  docs/decisions/0001-minimal-foundation.md
-  scripts/format.sh scripts/lint.sh tests/test-agentic-loop.sh
-  .github/workflows/ci.yml
-)
+readonly SCRIPT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+readonly REPO_ROOT="$(git -C "$SCRIPT_ROOT" rev-parse --show-toplevel 2>/dev/null || printf '%s' "$SCRIPT_ROOT")"
+readonly STATE_ROOT="$(git -C "$REPO_ROOT" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || printf '%s/.git' "$REPO_ROOT")/agentic-loop"
+readonly CONFIG_FILE="$REPO_ROOT/.agentic-loop/config"
+readonly LABELS=(queued running needs-input in-review completed failed)
 
-usage() { printf 'Usage: %s [target-directory]\n' "$PROGRAM_NAME" >&2; }
-fail() { printf '%s: %s\n' "$PROGRAM_NAME" "$1" >&2; exit 1; }
+cd "$REPO_ROOT"
+
+POLL_SECONDS=30
+MAX_WORKERS=2
+LEASE_SECONDS=300
+STOP_TIMEOUT=0
+
+load_config() {
+  local line key value
+  [[ -r $CONFIG_FILE ]] || return 0
+  while IFS= read -r line || [[ -n $line ]]; do
+    [[ -z $line || $line == \#* ]] && continue
+    [[ $line =~ ^(POLL_SECONDS|MAX_WORKERS|LEASE_SECONDS|STOP_TIMEOUT)=([0-9]+)$ ]] ||
+      fail "invalid configuration line: $line"
+    key=${BASH_REMATCH[1]}; value=${BASH_REMATCH[2]}
+    printf -v "$key" '%s' "$value"
+  done < "$CONFIG_FILE"
+}
+
+say() { printf '%s\n' "$*"; }
+fail() { printf '%s: %s\n' "$PROGRAM_NAME" "$*" >&2; exit 1; }
+require_command() { command -v "$1" >/dev/null 2>&1 || fail "$1 is required"; }
+repo_name() { gh repo view --json nameWithOwner --jq .nameWithOwner; }
+state_label() { printf 'agent:%s' "$1"; }
+
+load_config
+
+usage() {
+  cat >&2 <<EOF
+Usage: $PROGRAM_NAME {setup|start|stop|status}
+
+  setup   Create or reuse this repository's labels and Project
+  start   Start one background supervisor for this repository
+  stop    Stop claiming work and drain running workers
+  status  Show the supervisor and running Issues
+EOF
+}
+
+validate_config() {
+  [[ $POLL_SECONDS =~ ^[1-9][0-9]*$ ]] || fail 'POLL_SECONDS must be a positive integer'
+  [[ $MAX_WORKERS =~ ^[1-9][0-9]*$ ]] || fail 'MAX_WORKERS must be a positive integer'
+  [[ $LEASE_SECONDS =~ ^[1-9][0-9]*$ ]] || fail 'LEASE_SECONDS must be a positive integer'
+  [[ $STOP_TIMEOUT =~ ^[0-9]+$ ]] || fail 'STOP_TIMEOUT must be a non-negative integer'
+}
+
+preflight() {
+  require_command git
+  require_command gh
+  require_command codex
+  git -C "$REPO_ROOT" rev-parse --git-dir >/dev/null 2>&1 || fail 'target is not a Git repository'
+  git -C "$REPO_ROOT" remote get-url origin >/dev/null 2>&1 || fail 'origin remote is required'
+  gh auth status >/dev/null 2>&1 || fail 'GitHub authentication is required; run gh auth login'
+  gh api graphql -f query='query { viewer { login projectsV2(first: 1) { totalCount } } }' >/dev/null 2>&1 ||
+    fail 'GitHub token needs repository access and project/read:project scopes; run gh auth refresh -s project,read:project'
+  repo_name >/dev/null || fail 'cannot access the target GitHub repository'
+  codex exec --help >/dev/null 2>&1 || fail 'Codex CLI does not provide non-interactive exec mode'
+  validate_config
+}
+
+setup_labels() {
+  local name color description
+  for name in "${LABELS[@]}"; do
+    case $name in
+      queued) color=1D76DB; description='Ready for Agentic Loop' ;;
+      running) color=FBCA04; description='Claimed by an Agentic Loop worker' ;;
+      needs-input) color=D93F0B; description='Blocked on a consequential user decision' ;;
+      in-review) color=5319E7; description='Pull request under review' ;;
+      completed) color=0E8A16; description='Merged and verified' ;;
+      failed) color=B60205; description='Worker failed; safe to inspect or retry' ;;
+    esac
+    gh label create "$(state_label "$name")" --color "$color" --description "$description" --force >/dev/null
+  done
+}
+
+setup_project() {
+  local repository owner title number project_json
+  repository=$(repo_name)
+  owner=${repository%%/*}
+  title="Agentic Loop - $repository"
+  mkdir -p "$STATE_ROOT"
+  number=$(gh project list --owner "$owner" --format json --limit 100 --jq ".projects[] | select(.title == \"$title\") | .number" 2>/dev/null | head -n 1 || true)
+  if [[ -z $number ]]; then
+    project_json=$(gh project create --owner "$owner" --title "$title" --format json)
+    number=$(printf '%s\n' "$project_json" | sed -n 's/.*"number"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' | head -n 1)
+  fi
+  [[ -n $number ]] || fail 'could not create or identify the repository Project'
+  printf 'PROJECT_OWNER=%q\nPROJECT_NUMBER=%q\n' "$owner" "$number" > "$STATE_ROOT/project.env"
+  gh project link "$number" --owner "$owner" --repo "$repository" >/dev/null 2>&1 || true
+  gh project field-create "$number" --owner "$owner" --name 'Agent status' --data-type SINGLE_SELECT \
+    --single-select-options 'Inbox,Queued,Running,Needs input,In review,Done,Failed' >/dev/null 2>&1 || true
+}
+
+cmd_setup() {
+  preflight
+  setup_labels
+  setup_project
+  say "Agentic Loop GitHub queue is ready for $(repo_name)."
+}
+
+pid_alive() {
+  [[ -r $STATE_ROOT/supervisor.pid ]] || return 1
+  local pid
+  read -r pid < "$STATE_ROOT/supervisor.pid"
+  [[ $pid =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null
+}
+
+clear_stale_lock() {
+  [[ -d $STATE_ROOT/supervisor.lock ]] || return 0
+  pid_alive && return 1
+  rmdir "$STATE_ROOT/supervisor.lock" 2>/dev/null || return 1
+  rm -f "$STATE_ROOT/supervisor.pid"
+}
+
+cmd_start() {
+  preflight
+  mkdir -p "$STATE_ROOT/logs" "$STATE_ROOT/worktrees"
+  rm -f "$STATE_ROOT/stop.requested"
+  if ! clear_stale_lock; then
+    say "Agentic Loop supervisor is already running (pid $(cat "$STATE_ROOT/supervisor.pid"))."
+    return 0
+  fi
+  mkdir "$STATE_ROOT/supervisor.lock" 2>/dev/null || fail 'supervisor is already running'
+  nohup "$0" _supervise >> "$STATE_ROOT/supervisor.log" 2>&1 </dev/null &
+  local child=$!
+  printf '%s\n' "$child" > "$STATE_ROOT/supervisor.pid"
+  sleep 0.1
+  kill -0 "$child" 2>/dev/null || { rmdir "$STATE_ROOT/supervisor.lock" 2>/dev/null || true; fail 'supervisor failed to start'; }
+  say "Agentic Loop supervisor started (pid $child, workers $MAX_WORKERS)."
+}
+
+cmd_stop() {
+  mkdir -p "$STATE_ROOT"
+  if ! pid_alive; then
+    clear_stale_lock || true
+    say 'Agentic Loop supervisor is not running.'
+    return 0
+  fi
+  : > "$STATE_ROOT/stop.requested"
+  local pid waited=0
+  read -r pid < "$STATE_ROOT/supervisor.pid"
+  while kill -0 "$pid" 2>/dev/null; do
+    if (( STOP_TIMEOUT > 0 && waited >= STOP_TIMEOUT )); then
+      fail 'supervisor is still draining workers'
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+  say 'Agentic Loop supervisor stopped after draining workers.'
+}
+
+running_issues() {
+  gh issue list --state open --label "$(state_label running)" --limit 100 --json number,title --template '{{range .}}#{{.number}} {{.title}}{{"\\n"}}{{end}}' 2>/dev/null || true
+}
+
+cmd_status() {
+  if pid_alive; then say "running (pid $(cat "$STATE_ROOT/supervisor.pid"), max workers $MAX_WORKERS)"; else say 'stopped'; fi
+  local issues
+  issues=$(running_issues)
+  if [[ -n $issues ]]; then printf 'Running Issues:\n%s\n' "$issues"; else say 'Running Issues: none'; fi
+}
+
+set_issue_state() {
+  local issue=$1 target=$2 label
+  local -a args=(issue edit "$issue")
+  for label in "${LABELS[@]}"; do
+    [[ $label == "$target" ]] || args+=(--remove-label "$(state_label "$label")")
+  done
+  args+=(--add-label "$(state_label "$target")")
+  gh "${args[@]}" >/dev/null
+}
+
+comment_issue() { gh issue comment "$1" --body "$2" >/dev/null; }
+
+project_add_issue() {
+  [[ -r $STATE_ROOT/project.env ]] || return 0
+  local url PROJECT_OWNER='' PROJECT_NUMBER='' key value
+  while IFS='=' read -r key value; do
+    case $key in PROJECT_OWNER) PROJECT_OWNER=$value ;; PROJECT_NUMBER) PROJECT_NUMBER=$value ;; esac
+  done < "$STATE_ROOT/project.env"
+  [[ -n $PROJECT_OWNER && $PROJECT_NUMBER =~ ^[0-9]+$ ]] || return 0
+  url=$(gh issue view "$1" --json url --jq .url 2>/dev/null) || return 0
+  gh project item-add "$PROJECT_NUMBER" --owner "$PROJECT_OWNER" --url "$url" >/dev/null 2>&1 || true
+}
+
+project_sync_state() {
+  [[ -r $STATE_ROOT/project.env ]] || return 0
+  local issue=$1 state=$2 PROJECT_OWNER='' PROJECT_NUMBER='' key value project_id item_id field_id option_id option
+  while IFS='=' read -r key value; do
+    case $key in PROJECT_OWNER) PROJECT_OWNER=$value ;; PROJECT_NUMBER) PROJECT_NUMBER=$value ;; esac
+  done < "$STATE_ROOT/project.env"
+  [[ -n $PROJECT_OWNER && $PROJECT_NUMBER =~ ^[0-9]+$ ]] || return 0
+  case $state in
+    queued) option=Queued ;; running) option=Running ;; needs-input) option='Needs input' ;;
+    in-review) option='In review' ;; completed) option=Done ;; failed) option=Failed ;; *) option=Inbox ;;
+  esac
+  project_id=$(gh project view "$PROJECT_NUMBER" --owner "$PROJECT_OWNER" --format json --jq .id 2>/dev/null) || return 0
+  item_id=$(gh project item-list "$PROJECT_NUMBER" --owner "$PROJECT_OWNER" --format json --limit 1000 --jq ".items[] | select(.content.number == $issue) | .id" 2>/dev/null | head -n 1) || return 0
+  field_id=$(gh project field-list "$PROJECT_NUMBER" --owner "$PROJECT_OWNER" --format json --jq '.fields[] | select(.name == "Agent status") | .id' 2>/dev/null | head -n 1) || return 0
+  option_id=$(gh project field-list "$PROJECT_NUMBER" --owner "$PROJECT_OWNER" --format json --jq ".fields[] | select(.name == \"Agent status\") | .options[] | select(.name == \"$option\") | .id" 2>/dev/null | head -n 1) || return 0
+  [[ -n $project_id && -n $item_id && -n $field_id && -n $option_id ]] || return 0
+  gh project item-edit --id "$item_id" --project-id "$project_id" --field-id "$field_id" --single-select-option-id "$option_id" >/dev/null 2>&1 || true
+}
+
+lease_comment() {
+  local issue=$1 worker=$2 now expires
+  now=$(date +%s); expires=$((now + LEASE_SECONDS))
+  comment_issue "$issue" "<!-- agentic-loop:lease worker=$worker heartbeat=$now expires=$expires -->\nAgentic Loop worker \`$worker\` heartbeat; lease expires at epoch $expires."
+}
+
+recover_expired() {
+  local issue body expires now
+  now=$(date +%s)
+  while IFS= read -r issue; do
+    [[ -n $issue ]] || continue
+    body=$(gh issue view "$issue" --json comments --jq '[.comments[].body | select(contains("agentic-loop:lease"))] | last // ""' 2>/dev/null || true)
+    expires=$(printf '%s\n' "$body" | sed -n 's/.*expires=\([0-9][0-9]*\).*/\1/p' | head -n 1)
+    if [[ -z $expires || $expires -lt $now ]]; then
+      set_issue_state "$issue" queued
+      comment_issue "$issue" '<!-- agentic-loop:recovered -->\nThe previous lease expired. The Issue was safely returned to the queue.'
+    fi
+  done < <(gh issue list --state open --label "$(state_label running)" --limit 100 --json number --jq '.[].number' 2>/dev/null || true)
+}
+
+requeue_answered() {
+  local issue answered
+  while IFS= read -r issue; do
+    [[ -n $issue ]] || continue
+    answered=$(gh issue view "$issue" --json comments --jq '.comments as $comments | ([range(0; $comments | length) | select($comments[.].body | contains("agentic-loop:needs-input"))] | last) as $marker | if $marker == null then false else any($comments[$marker + 1:][]; (.body | contains("<!-- agentic-loop:") | not)) end' 2>/dev/null || true)
+    if [[ $answered == true ]]; then
+      set_issue_state "$issue" queued
+      comment_issue "$issue" '<!-- agentic-loop:answer-detected -->\nA reply was detected; this Issue returned to the queue.'
+    fi
+  done < <(gh issue list --state open --label "$(state_label needs-input)" --limit 100 --json number --jq '.[].number' 2>/dev/null || true)
+}
+
+claim_next() {
+  local issue
+  issue=$(gh issue list --state open --label "$(state_label queued)" --limit 1 --json number --jq '.[0].number // empty' 2>/dev/null || true)
+  [[ -n $issue ]] || return 1
+  set_issue_state "$issue" running
+  if ! gh issue view "$issue" --json labels --jq '.labels[].name' | grep -Fxq "$(state_label running)"; then return 1; fi
+  printf '%s\n' "$issue"
+}
+
+worker_count() {
+  local count=0 pid
+  shopt -s nullglob
+  for pidfile in "$STATE_ROOT"/workers/*.pid; do
+    read -r pid < "$pidfile" || true
+    if [[ $pid =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then count=$((count + 1)); else rm -f "$pidfile"; fi
+  done
+  shopt -u nullglob
+  printf '%s\n' "$count"
+}
+
+supervise() {
+  trap 'rm -f "$STATE_ROOT/supervisor.pid"; rmdir "$STATE_ROOT/supervisor.lock" 2>/dev/null || true' EXIT
+  mkdir -p "$STATE_ROOT/workers"
+  printf '%s\n' "$$" > "$STATE_ROOT/supervisor.pid"
+  recover_expired
+  while :; do
+    requeue_answered
+    if [[ -e $STATE_ROOT/stop.requested ]]; then
+      [[ $(worker_count) -eq 0 ]] && break
+    else
+      while [[ $(worker_count) -lt $MAX_WORKERS ]]; do
+        local issue worker
+        issue=$(claim_next) || break
+        worker="$(repo_name | tr '/.' '-')-$issue-$(date +%s)-$$"
+        lease_comment "$issue" "$worker"
+        project_add_issue "$issue"
+        project_sync_state "$issue" running
+        "$0" _worker "$issue" "$worker" >> "$STATE_ROOT/logs/issue-$issue.log" 2>&1 &
+        printf '%s\n' "$!" > "$STATE_ROOT/workers/$issue.pid"
+      done
+      if [[ ${AGENTIC_LOOP_RUN_ONCE:-0} == 1 ]]; then
+        while [[ $(worker_count) -gt 0 ]]; do sleep 1; done
+        break
+      fi
+    fi
+    sleep "$POLL_SECONDS"
+  done
+  rm -f "$STATE_ROOT/stop.requested"
+}
+
+issue_prompt() {
+  local issue=$1 repository=$2
+  cat <<EOF
+Use the repository's submit-requirement workflow to complete GitHub Issue #$issue in $repository.
+Treat the Issue and its comments as the requirement. Work only in this dedicated worktree. Inspect first, make safe reversible decisions, run full validation and the secret guard, commit, push, open a PR, monitor checks and review feedback, fix failures, and merge. Use only the existing Codex login and workspace-write sandbox; never use separately billed credentials, paid external services, unsafe sandbox bypasses, or bypass hooks. Comment progress and evidence on the Issue. If and only if a consequential decision or irrecoverable permission problem needs a human, comment the exact question and end your final response with AGENTIC_LOOP_RESULT=needs-input. On complete merged work end with AGENTIC_LOOP_RESULT=completed. Otherwise end with AGENTIC_LOOP_RESULT=failed and explain the retry-safe failure.
+EOF
+}
+
+worker() {
+  local issue=$1 worker=$2 repository default_branch branch worktree result exit_code=0 heartbeat_pid
+  repository=$(repo_name)
+  default_branch=$(gh repo view --json defaultBranchRef --jq .defaultBranchRef.name)
+  branch="agent/issue-$issue"
+  worktree="$STATE_ROOT/worktrees/issue-$issue"
+  if ! git -C "$REPO_ROOT" fetch origin "$default_branch"; then
+    set_issue_state "$issue" failed || true
+    comment_issue "$issue" "<!-- agentic-loop:failed worker=$worker -->\nCould not fetch the latest default branch. The Issue can be safely requeued after repository access is restored." || true
+    rm -f "$STATE_ROOT/workers/$issue.pid"
+    return 0
+  fi
+  if [[ ! -e $worktree ]]; then
+    git -C "$REPO_ROOT" worktree prune
+    if git -C "$REPO_ROOT" show-ref --verify --quiet "refs/heads/$branch"; then
+      git -C "$REPO_ROOT" worktree add "$worktree" "$branch" || exit_code=$?
+    else
+      git -C "$REPO_ROOT" worktree add -b "$branch" "$worktree" "origin/$default_branch" || exit_code=$?
+    fi
+    if [[ $exit_code -ne 0 ]]; then
+      set_issue_state "$issue" failed || true
+      comment_issue "$issue" "<!-- agentic-loop:failed worker=$worker -->\nCould not prepare the dedicated worktree. Existing branch data was preserved for inspection." || true
+      rm -f "$STATE_ROOT/workers/$issue.pid"
+      return 0
+    fi
+  fi
+  result="$STATE_ROOT/issue-$issue-result.txt"
+  (
+    while :; do sleep $((LEASE_SECONDS / 3 + 1)); lease_comment "$issue" "$worker" || true; done
+  ) & heartbeat_pid=$!
+  codex exec --sandbox workspace-write -c 'approval_policy="never"' -c 'sandbox_workspace_write.network_access=true' \
+    -C "$worktree" --output-last-message "$result" "$(issue_prompt "$issue" "$repository")" || exit_code=$?
+  kill "$heartbeat_pid" 2>/dev/null || true
+  wait "$heartbeat_pid" 2>/dev/null || true
+  if [[ $exit_code -eq 0 ]] && grep -Fq 'AGENTIC_LOOP_RESULT=completed' "$result"; then
+    set_issue_state "$issue" completed
+    project_sync_state "$issue" completed
+    comment_issue "$issue" "<!-- agentic-loop:completed -->\nWorker \`$worker\` completed the requirement. The final worker report and PR contain implementation and verification evidence."
+    gh issue close "$issue" >/dev/null
+  elif [[ $exit_code -eq 0 ]] && grep -Fq 'AGENTIC_LOOP_RESULT=needs-input' "$result"; then
+    set_issue_state "$issue" needs-input
+    project_sync_state "$issue" needs-input
+    comment_issue "$issue" "<!-- agentic-loop:needs-input worker=$worker -->\nA consequential decision or permission is required. See the worker's preceding comment; reply here to requeue automatically."
+  else
+    set_issue_state "$issue" failed
+    project_sync_state "$issue" failed
+    comment_issue "$issue" "<!-- agentic-loop:failed worker=$worker exit=$exit_code -->\nThe worker stopped without a verified merge. Logs remain local and secrets are not copied here. Reapply \`agent:queued\` to retry after inspection."
+  fi
+  rm -f "$STATE_ROOT/workers/$issue.pid"
+  if [[ $exit_code -eq 0 ]] && grep -Fq 'AGENTIC_LOOP_RESULT=completed' "$result"; then
+    git -C "$REPO_ROOT" worktree remove "$worktree" >/dev/null 2>&1 || true
+  fi
+}
 
 main() {
-  [[ $# -le 1 ]] || { usage; exit 2; }
-  local target=${1:-.} file hook_path mode=install
-  local -a files=("${SHARED_FILES[@]}")
-
-  [[ ! -e $target || -d $target ]] || fail "target is not a directory: $target"
-  mkdir -p "$target"
-
-  if ! find "$target" -mindepth 1 -maxdepth 1 ! -name .git -print -quit | grep -q .; then
-    mode=init
-    files+=("${INIT_FILES[@]}")
-  fi
-
-  if [[ -d "$target/.git" ]]; then
-    hook_path=$(git -C "$target" config --local --get core.hooksPath || true)
-    [[ -z $hook_path || $hook_path == .githooks ]] || fail "existing core.hooksPath must be integrated manually: $hook_path"
-  fi
-
-  for file in "${files[@]}"; do
-    [[ ! -e "$target/$file" ]] || fail "refusing to overwrite: $target/$file"
-  done
-
-  for file in "${files[@]}"; do
-    mkdir -p "$target/$(dirname "$file")"
-    cp "$SOURCE_ROOT/$file" "$target/$file"
-  done
-  chmod +x "$target/.agentic-loop/guard-secrets.sh" "$target/.githooks/pre-commit" "$target/.githooks/pre-push"
-  if [[ $mode == init ]]; then
-    chmod +x "$target/bin/agentic-loop" "$target/install.sh" "$target/scripts/format.sh" "$target/scripts/lint.sh" "$target/tests/test-agentic-loop.sh"
-  fi
-
-  [[ -d "$target/.git" ]] || git -C "$target" init --quiet
-  git -C "$target" config --local core.hooksPath .githooks
-  printf 'Agentic loop foundation installed (%s) in %s\n' "$mode" "$(cd "$target" && pwd)"
+  case ${1:-} in
+    setup) [[ $# -eq 1 ]] || fail 'setup takes no arguments'; cmd_setup ;;
+    start) [[ $# -eq 1 ]] || fail 'start takes no arguments'; cmd_start ;;
+    stop) [[ $# -eq 1 ]] || fail 'stop takes no arguments'; cmd_stop ;;
+    status) [[ $# -eq 1 ]] || fail 'status takes no arguments'; cmd_status ;;
+    _supervise) supervise ;;
+    _worker) [[ $# -eq 3 ]] || exit 2; worker "$2" "$3" ;;
+    *) usage; exit 2 ;;
+  esac
 }
 
 main "$@"
