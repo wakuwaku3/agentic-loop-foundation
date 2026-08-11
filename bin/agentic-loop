@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+readonly PROGRAM_NAME="${0##*/}"
+readonly SOURCE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+readonly INIT_FILES=(
+  AGENTS.md
+  README.md
+  .editorconfig
+  .env.example
+  .gitignore
+  Makefile
+  bin/agentic-loop
+  docs/decisions/0001-minimal-foundation.md
+  scripts/format.sh
+  scripts/lint.sh
+  tests/test-agentic-loop.sh
+  .github/workflows/ci.yml
+)
+
+usage() {
+  printf 'Usage: %s <init|install> <target-directory>\n' "$PROGRAM_NAME" >&2
+}
+
+fail() {
+  printf '%s: %s\n' "$PROGRAM_NAME" "$1" >&2
+  exit 1
+}
+
+main() {
+  [[ $# -eq 2 ]] || { usage; exit 2; }
+  local command=$1 target=$2 file
+  local -a files=(AGENTS.md)
+  [[ $command == init || $command == install ]] || { usage; exit 2; }
+
+  if [[ $command == init ]]; then
+    [[ ! -e $target || -d $target ]] || fail "target is not a directory: $target"
+    if [[ -d $target ]] && find "$target" -mindepth 1 -maxdepth 1 -print -quit | grep -q .; then
+      fail "init target must be empty: $target"
+    fi
+  else
+    [[ -d $target ]] || fail "install target does not exist: $target"
+  fi
+
+  [[ $command == install ]] || files=("${INIT_FILES[@]}")
+
+  # Check every conflict before writing anything.
+  for file in "${files[@]}"; do
+    [[ ! -e "$target/$file" ]] || fail "refusing to overwrite: $target/$file"
+  done
+
+  mkdir -p "$target"
+  for file in "${files[@]}"; do
+    mkdir -p "$target/$(dirname "$file")"
+    cp "$SOURCE_ROOT/$file" "$target/$file"
+  done
+  if [[ $command == init ]]; then
+    chmod +x "$target/bin/agentic-loop" "$target/scripts/format.sh" "$target/scripts/lint.sh" "$target/tests/test-agentic-loop.sh"
+  fi
+
+  if [[ $command == init ]] && [[ ! -e "$target/.git" ]]; then
+    git -C "$target" init --quiet
+  fi
+  printf 'Installed agentic loop foundation in %s\n' "$target"
+}
+
+main "$@"
