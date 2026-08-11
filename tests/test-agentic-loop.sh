@@ -268,6 +268,17 @@ else
   printf '%s\n' "${FAKE_CLAUDE_RESULT:-AGENTIC_LOOP_RESULT=completed}"
 fi
 FAKE_CLAUDE
+cat > "$FAKE_BIN/opencode" <<'FAKE_OPENCODE'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >> "$FAKE_GH_ROOT/opencode-calls"
+[[ ${1:-} == --version ]] && { printf 'opencode 1.0.0\n'; exit 0; }
+[[ ${1:-} == run ]] || { printf 'opencode: unknown command\n' >&2; exit 2; }
+[[ $* == *--auto* ]] || { printf 'opencode worker must auto-approve permissions\n' >&2; exit 2; }
+sleep "${FAKE_OPENCODE_SLEEP:-0}"
+# The worker captures the final message from stdout into the result file.
+printf '%s\n' "${FAKE_OPENCODE_RESULT:-AGENTIC_LOOP_RESULT=completed}"
+FAKE_OPENCODE
 cat > "$FAKE_BIN/systemctl" <<'FAKE_SYSTEMCTL'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -283,7 +294,7 @@ cat > "$FAKE_BIN/devbox" <<'FAKE_DEVBOX'
 #!/usr/bin/env bash
 exit 0
 FAKE_DEVBOX
-chmod +x "$FAKE_BIN/gh" "$FAKE_BIN/codex" "$FAKE_BIN/claude" "$FAKE_BIN/systemctl" "$FAKE_BIN/systemd-escape" "$FAKE_BIN/devbox"
+chmod +x "$FAKE_BIN/gh" "$FAKE_BIN/codex" "$FAKE_BIN/claude" "$FAKE_BIN/opencode" "$FAKE_BIN/systemctl" "$FAKE_BIN/systemd-escape" "$FAKE_BIN/devbox"
 export PATH="$FAKE_BIN:$PATH" FAKE_GH_ROOT XDG_CONFIG_HOME="$TEST_ROOT/config"
 
 new_repository() {
@@ -607,6 +618,17 @@ assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'Token使用量（分析用�
 assert_contains "$FAKE_GH_ROOT/$state_key.comments" '入力=123tok' 'claude usage record lacked input token count'
 # shellcheck disable=SC2016 # The dollar sign is a literal currency prefix in the recorded usage line.
 assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'cost=$0.0123' 'claude usage record lacked the reported cost'
+
+# AGENT_PROVIDER=opencode routes the worker to `opencode run`, scoped to the worktree.
+printf 'POLL_SECONDS=1\nMAX_WORKERS=1\nLEASE_SECONDS=3\nSTOP_TIMEOUT=10\nSTALE_DAYS=30\n' > "$target/.agentic-loop/config"
+printf '30 queued open none 2026-01-01T00:00:00Z\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+: > "$FAKE_GH_ROOT/opencode-calls"
+AGENT_PROVIDER=opencode AGENTIC_LOOP_RUN_ONCE=1 FAKE_OPENCODE_SLEEP=1 "$target/bin/agentic-loop" _supervise
+grep -Eq '^30 completed closed' "$state" || fail 'opencode provider did not complete the Issue'
+assert_contains "$FAKE_GH_ROOT/opencode-calls" 'run --auto' 'opencode worker did not run headless with auto-approval'
+assert_contains "$FAKE_GH_ROOT/opencode-calls" "--dir $target-worktrees/issue-30" 'opencode worker did not confine work to the worktree'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'provider=opencode' 'opencode worker did not record a token usage analysis entry'
 
 # Each Issue runs a read-only plan stage before the workspace-write exec stage,
 # and an exec that never satisfies completion triggers bounded re-planning.

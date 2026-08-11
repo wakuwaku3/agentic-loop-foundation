@@ -77,13 +77,14 @@ AGENT_CODEX_PLAN_REASONING_EFFORT="${AGENT_CODEX_PLAN_REASONING_EFFORT:-high}"
 AGENT_CODEX_EXEC_REASONING_EFFORT="${AGENT_CODEX_EXEC_REASONING_EFFORT:-low}"
 AGENT_PLAN_MAX_RETRIES="${AGENT_PLAN_MAX_RETRIES:-1}"
 agent_provider() { printf '%s' "${AGENT_PROVIDER:-codex}"; }
-agent_provider_valid() { case $(agent_provider) in codex | claude) return 0 ;; *) return 1 ;; esac; }
-agent_provider_command() { case $(agent_provider) in claude) printf 'claude' ;; *) printf 'codex' ;; esac; }
+agent_provider_valid() { case $(agent_provider) in codex | claude | opencode) return 0 ;; *) return 1 ;; esac; }
+agent_provider_command() { case $(agent_provider) in claude) printf 'claude' ;; opencode) printf 'opencode' ;; *) printf 'codex' ;; esac; }
 # Report whether the selected provider CLI can launch a non-interactive worker.
 agent_provider_ready() {
   case $(agent_provider) in
     codex) command -v codex >/dev/null 2>&1 && codex exec --help 2>/dev/null | grep -Fq -- '--add-dir' ;;
     claude) command -v claude >/dev/null 2>&1 ;;
+    opencode) command -v opencode >/dev/null 2>&1 ;;
     *) return 1 ;;
   esac
 }
@@ -110,6 +111,17 @@ agent_run_stage() {
       [[ -n $model ]] && claude_args+=(--model "$model")
       (cd "$worktree" && claude "${claude_args[@]}" "$prompt") > "$result_file"
       agent_usage_from_claude_json "$result_file" >> "$usage_file" || true
+      ;;
+    opencode)
+      [[ $stage == plan ]] && model=${AGENT_OPENCODE_PLAN_MODEL:-} || model=${AGENT_OPENCODE_EXEC_MODEL:-}
+      [[ -n $model ]] && printf 'model=%s\n' "$model" >> "$usage_file"
+      # opencode has no OS sandbox; --dir scopes work to the worktree and --auto
+      # avoids interactive approval. The plan stage relies on the prompt to avoid
+      # writes. The final message (plan text or the AGENTIC_LOOP_RESULT sentinel)
+      # is printed to stdout. Token telemetry is left to the base usage record.
+      local -a opencode_args=(run --auto --dir "$worktree")
+      [[ -n $model ]] && opencode_args+=(--model "$model")
+      opencode "${opencode_args[@]}" "$prompt" > "$result_file"
       ;;
     *)
       if [[ $stage == plan ]]; then
@@ -466,9 +478,9 @@ install_supervisor_unit() {
     printf 'Environment=PATH=%s\n' "$escaped_path"
     printf 'Environment=AGENT_PROVIDER=%s\n' "$(agent_provider)"
     local agent_var
-    for agent_var in AGENT_CODEX_PLAN_MODEL AGENT_CODEX_EXEC_MODEL AGENT_CODEX_PLAN_REASONING_EFFORT AGENT_CODEX_EXEC_REASONING_EFFORT AGENT_CLAUDE_PLAN_MODEL AGENT_CLAUDE_EXEC_MODEL AGENT_PLAN_MAX_RETRIES; do
+    for agent_var in AGENT_CODEX_PLAN_MODEL AGENT_CODEX_EXEC_MODEL AGENT_CODEX_PLAN_REASONING_EFFORT AGENT_CODEX_EXEC_REASONING_EFFORT AGENT_CLAUDE_PLAN_MODEL AGENT_CLAUDE_EXEC_MODEL AGENT_OPENCODE_PLAN_MODEL AGENT_OPENCODE_EXEC_MODEL AGENT_PLAN_MAX_RETRIES; do
       [[ -n ${!agent_var:-} ]] || continue
-      [[ ${!agent_var} =~ ^[A-Za-z0-9._:-]+$ ]] || fail "$agent_var contains characters unsupported in the systemd unit"
+      [[ ${!agent_var} =~ ^[A-Za-z0-9._:/-]+$ ]] || fail "$agent_var contains characters unsupported in the systemd unit"
       printf 'Environment=%s=%s\n' "$agent_var" "${!agent_var}"
     done
     printf '%s\n' 'Restart=on-failure' 'RestartSec=5s'

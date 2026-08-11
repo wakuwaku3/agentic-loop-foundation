@@ -28,7 +28,7 @@ GitHub Issueが要求と状態履歴の正本で、Projectは障害がキュー�
 
 ## AIツールの選択
 
-要求処理のworkerが使うAIコーディングツールは環境変数 `AGENT_PROVIDER` で選択します（`codex` または `claude`、既定は `codex`）。同じリポジトリをローカル環境に応じて切り替えられ、特定のツールへ固定しません（[AIツール非依存ポリシー](docs/policies/ai-tool-neutrality.md)）。
+要求処理のworkerが使うAIコーディングツールは環境変数 `AGENT_PROVIDER` で選択します（`codex`、`claude`、または `opencode`、既定は `codex`）。同じリポジトリをローカル環境に応じて切り替えられ、特定のツールへ固定しません（[AIツール非依存ポリシー](docs/policies/ai-tool-neutrality.md)）。
 
 各Issueは2段で処理します。まず調査と計画だけを行う高品質な**plan段**（Codexは read-only sandbox）、続いて計画に従って実装・検証・PR・mergeまで行う低コストな**exec段**です。高コストな推論を計画に集中させ、実作業は安価に回します。exec段が完了条件を満たせない場合は、回数上限（既定1回、`AGENT_PLAN_MAX_RETRIES`）まで flagship で計画を見直して再実行します。
 
@@ -39,9 +39,12 @@ GitHub Issueが要求と状態履歴の正本で、Projectは障害がキュー�
 | `AGENT_CODEX_PLAN_MODEL` / `AGENT_CODEX_EXEC_MODEL` | Codexの段別モデル | 空（CLI既定） |
 | `AGENT_CODEX_PLAN_REASONING_EFFORT` / `AGENT_CODEX_EXEC_REASONING_EFFORT` | Codexの段別推論強度 | `high` / `low` |
 | `AGENT_CLAUDE_PLAN_MODEL` / `AGENT_CLAUDE_EXEC_MODEL` | Claudeの段別モデル（例: opus / sonnet） | 空（CLI既定） |
+| `AGENT_OPENCODE_PLAN_MODEL` / `AGENT_OPENCODE_EXEC_MODEL` | opencodeの段別モデル（`provider/model` 形式） | 空（CLI既定） |
 | `AGENT_PLAN_MAX_RETRIES` | exec失敗時の再plan上限 | `1` |
 
-常駐Supervisorはsystemd管理のため、これらは `bin/agentic-loop start` 実行時のシェル環境からserviceへ焼き込まれます。Claudeを使う場合はOS levelのsandboxが無く、隔離は専用worktreeと秘密情報guard hookに依存します。
+Claudeとopencodeは（Codexと異なり）OS levelのsandboxを持たないため、書き込みの隔離は専用worktreeと秘密情報guard hookに依存します。opencodeは `opencode run --auto --dir <worktree>` で作業ディレクトリに限定して実行します。
+
+常駐Supervisorはsystemd管理のため、これらは `bin/agentic-loop start` 実行時のシェル環境からserviceへ焼き込まれます。
 
 ```sh
 AGENT_PROVIDER=claude bin/agentic-loop start
