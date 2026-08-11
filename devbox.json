@@ -10,7 +10,8 @@
     "gnumake@latest",
     "gnused@latest",
     "shellcheck@latest",
-    "util-linux@latest"
+    "util-linux@latest",
+    "yq-go@latest"
   ],
   "env": {
     "DEV_ENVIRONMENT": "agentic-loop-foundation-v2"

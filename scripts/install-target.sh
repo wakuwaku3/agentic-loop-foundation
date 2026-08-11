@@ -13,11 +13,11 @@ readonly SHARED_FILES=(
   .agents/skills/diagnose-codebase/agents/openai.yaml
   .claude/skills/submit-requirement/SKILL.md
   .claude/skills/diagnose-codebase/SKILL.md
-  .agentic-loop/guard-secrets.sh .agentic-loop/update-main.sh .agentic-loop/diagnose-codebase.sh .agentic-loop/config
+  .agentic-loop/guard-secrets.sh .agentic-loop/update-main.sh .agentic-loop/diagnose-codebase.sh .agentic-loop.toml
   .githooks/pre-commit .githooks/pre-push bin/agentic-loop bin/agentic-loop-diagnose
 )
 readonly INIT_FILES=(
-  README.md .editorconfig .env.example .gitignore Makefile install.sh devbox.json devbox.lock
+  README.md .editorconfig .gitignore Makefile install.sh devbox.json devbox.lock
   docs/decisions/0001-minimal-foundation.md scripts/format.sh scripts/lint.sh scripts/check-environment.sh scripts/install-target.sh
   tests/test-agentic-loop.sh .github/workflows/ci.yml
 )
@@ -27,7 +27,7 @@ fail() { printf 'install-target: %s\n' "$1" >&2; exit 1; }
 preflight() {
   local command_name provider=${AGENT_PROVIDER:-codex} provider_cli
   case $provider in codex) provider_cli=codex ;; claude) provider_cli=claude ;; opencode) provider_cli=opencode ;; *) fail 'AGENT_PROVIDER must be codex, claude, or opencode' ;; esac
-  for command_name in git gh "$provider_cli" systemctl systemd-escape; do command -v "$command_name" >/dev/null 2>&1 || fail "$command_name is required"; done
+  for command_name in git gh yq "$provider_cli" systemctl systemd-escape; do command -v "$command_name" >/dev/null 2>&1 || fail "$command_name is required"; done
   git -C "$TARGET" rev-parse --git-dir >/dev/null 2>&1 || fail 'target must be a Git repository'
   git -C "$TARGET" remote get-url origin >/dev/null 2>&1 || fail 'origin remote is required'
   gh auth status >/dev/null 2>&1 || fail 'GitHub authentication is required; run gh auth login'

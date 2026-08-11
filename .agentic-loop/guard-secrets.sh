@@ -13,7 +13,6 @@ fail() {
 scan_names() {
   local name
   while IFS= read -r name; do
-    [[ $name == .env.example || $name == */.env.example ]] && continue
     [[ $name =~ $SENSITIVE_PATH ]] && fail "sensitive path: $name"
   done
   return 0

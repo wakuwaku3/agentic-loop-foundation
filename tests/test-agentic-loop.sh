@@ -11,6 +11,18 @@ trap 'rm -rf "$TEST_ROOT"' EXIT
 fail() { printf 'FAIL: %s\n' "$1" >&2; exit 1; }
 assert_contains() { grep -Fq -- "$2" "$1" || fail "$3"; }
 
+# write_queue_config FILE KEY=VAL ... -> render a [queue] TOML config
+write_queue_config() {
+  local file=$1 kv key val
+  shift
+  printf '[queue]\n' > "$file"
+  for kv in "$@"; do
+    key=${kv%%=*}
+    val=${kv#*=}
+    printf '%s = %s\n' "${key,,}" "$val" >> "$file"
+  done
+}
+
 mkdir -p "$FAKE_BIN" "$FAKE_GH_ROOT"
 
 if env -u DEV_ENVIRONMENT "$PROJECT_ROOT/scripts/check-environment.sh" >/dev/null 2>&1; then
@@ -328,7 +340,7 @@ state_key=$(printf '%s' "$target" | tr '/' '_')
 AGENTIC_LOOP_SOURCE="$PROJECT_ROOT" AGENTIC_LOOP_TARGET="$target" AGENTIC_LOOP_SKIP_START=1 "$PROJECT_ROOT/install.sh"
 [[ -x $target/bin/agentic-loop ]] || fail 'install did not add the queue CLI'
 [[ -x $target/bin/agentic-loop-diagnose ]] || fail 'install did not add the manual diagnosis CLI'
-[[ -f $target/.agentic-loop/config ]] || fail 'install did not add safe defaults'
+[[ -f $target/.agentic-loop.toml ]] || fail 'install did not add safe defaults'
 [[ -f $target/.agents/skills/diagnose-codebase/SKILL.md ]] || fail 'install did not add the diagnosis skill'
 [[ $(cat "$target/.codex/config.toml") == 'approval_policy = "never"' ]] || fail 'install did not preserve external sandbox configuration'
 [[ $(git -C "$target" config --get core.hooksPath) == .githooks ]] || fail 'install did not enable hooks'
@@ -361,8 +373,8 @@ assert_contains "$target/docs/policies/continuous-delivery.md" '二重release' '
 assert_contains "$target/docs/policies/continuous-delivery.md" '追加課金' 'installed delivery policy lacks cost restrictions'
 assert_contains "$target/docs/policies/continuous-delivery.md" '監査証跡' 'installed delivery policy lacks audit evidence'
 assert_contains "$target/docs/policies/continuous-delivery.md" '空のpipelineを要求しない' 'installed delivery policy lacks the no-op exception'
-assert_contains "$target/.agentic-loop/config" 'GRAPHQL_RESERVE=500' 'installed configuration lacks the GraphQL reserve'
-assert_contains "$target/.agentic-loop/config" 'API_RETRY_ATTEMPTS=3' 'installed configuration lacks bounded REST retries'
+assert_contains "$target/.agentic-loop.toml" 'graphql_reserve = 500' 'installed configuration lacks the GraphQL reserve'
+assert_contains "$target/.agentic-loop.toml" 'api_retry_attempts = 3' 'installed configuration lacks bounded REST retries'
 assert_contains "$target/docs/operations/issue-queue.md" 'GraphQLの残量・reset時刻' 'installed operations documentation lacks shared rate-limit handling'
 assert_contains "$target/.agents/skills/submit-requirement/SKILL.md" 'in Japanese' 'installed submission skill did not require Japanese GitHub content'
 assert_contains "$target/.agents/skills/diagnose-codebase/SKILL.md" 'without modifying' 'diagnosis skill did not prohibit code changes'
@@ -470,7 +482,7 @@ printf '91 inbox open none 2026-01-01T00:00:00Z\n' > "$FAKE_GH_ROOT/$state_key.s
 AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _supervise
 [[ ! -e $pending_project ]] || fail 'successful reconciliation did not clear the Project retry queue'
 
-printf 'POLL_SECONDS=1\nMAX_WORKERS=2\nLEASE_SECONDS=3\nSTOP_TIMEOUT=10\nSTALE_DAYS=30\n' > "$target/.agentic-loop/config"
+write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=2 LEASE_SECONDS=3 STOP_TIMEOUT=10 STALE_DAYS=30
 "$target/bin/agentic-loop" start
 first_pid="$(git -C "$target" rev-parse --absolute-git-dir)/agentic-loop/supervisor.pid"
 first_pid=$(cat "$first_pid")
@@ -524,11 +536,11 @@ if "$target/bin/agentic-loop" doctor > /tmp/agentic-loop-doctor-stopped.$$; then
 grep -Fq '[失敗] Supervisor' /tmp/agentic-loop-doctor-stopped.$$ || fail 'doctor did not classify a stopped Supervisor'
 rm -f /tmp/agentic-loop-doctor-stopped.$$
 
-cp "$target/.agentic-loop/config" "$target/.agentic-loop/config.valid"
-printf 'MAX_WORKERS=invalid\n' > "$target/.agentic-loop/config"
+cp "$target/.agentic-loop.toml" "$target/.agentic-loop.toml.valid"
+write_queue_config "$target/.agentic-loop.toml" MAX_WORKERS=invalid
 if "$target/bin/agentic-loop" doctor > /tmp/agentic-loop-doctor-config.$$; then fail 'doctor accepted invalid configuration'; fi
 grep -Fq '[失敗] 設定ファイル' /tmp/agentic-loop-doctor-config.$$ || fail 'doctor did not classify invalid configuration'
-mv "$target/.agentic-loop/config.valid" "$target/.agentic-loop/config"
+mv "$target/.agentic-loop.toml.valid" "$target/.agentic-loop.toml"
 rm -f /tmp/agentic-loop-doctor-config.$$
 
 # A PID reused by an unrelated process cannot keep a stale supervisor lock alive.
@@ -561,7 +573,7 @@ state="$FAKE_GH_ROOT/$state_key.state"
 state_root="$(git -C "$target" rev-parse --absolute-git-dir)/agentic-loop"
 
 # Category is the primary queue key, followed by priority, creation time, and Issue number.
-printf 'POLL_SECONDS=1\nMAX_WORKERS=11\nLEASE_SECONDS=30\nSTOP_TIMEOUT=10\nSTALE_DAYS=30\n' > "$target/.agentic-loop/config"
+write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=11 LEASE_SECONDS=30 STOP_TIMEOUT=10 STALE_DAYS=30
 printf '101 queued open low 2026-01-01T00:00:00Z none loop-continuity\n102 queued open critical 2026-01-01T00:00:00Z none confidentiality-incident\n103 queued open none 2026-01-01T00:00:00Z none integrity-incident\n104 queued open none 2026-01-01T00:00:00Z none availability-incident\n105 queued open none 2026-01-01T00:00:00Z none feature\n106 queued open none 2026-01-01T00:00:00Z none improvement\n107 queued open critical 2026-01-02T00:00:00Z none improvement\n108 queued open low 2025-01-01T00:00:00Z none improvement\n109 queued open critical 2026-01-02T00:00:00Z none improvement\n110 queued open none 2026-01-03T00:00:00Z none none\n111 queued open critical 2026-01-01T00:00:00Z none feature,availability-incident\n' > "$state"
 : > "$FAKE_GH_ROOT/$state_key.comments"
 AGENTIC_LOOP_RUN_ONCE=1 FAKE_CODEX_SLEEP=1 "$target/bin/agentic-loop" _supervise
@@ -572,7 +584,7 @@ grep -Eq '^111 completed closed .* availability-incident$' "$state" || fail 'mul
 assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'category-reconciled reason=missing' 'missing category repair was not audited'
 assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'category-reconciled reason=multiple selected=availability-incident' 'multiple category repair was not audited'
 
-printf 'POLL_SECONDS=1\nMAX_WORKERS=2\nLEASE_SECONDS=3\nSTOP_TIMEOUT=10\nSTALE_DAYS=30\n' > "$target/.agentic-loop/config"
+write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=2 LEASE_SECONDS=3 STOP_TIMEOUT=10 STALE_DAYS=30
 printf '1 queued open low 2026-01-01T00:00:00Z\n2 queued open critical,low 2026-01-02T00:00:00Z\n3 queued open critical 2025-12-31T00:00:00Z\n4 queued open none 2025-01-01T00:00:00Z\n' > "$state"
 AGENTIC_LOOP_RUN_ONCE=1 FAKE_CODEX_SLEEP=1 FAKE_STALE_QUEUED_ISSUE=3 "$target/bin/agentic-loop" _supervise
 completed_count=$(awk '$2 == "completed" {count++} END {print count+0}' "$state")
@@ -603,7 +615,7 @@ assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'Token使用量（分析用�
 # AGENT_PROVIDER=claude routes the worker to the Claude CLI, confining writes to the worktree.
 [[ -f $target/.claude/skills/submit-requirement/SKILL.md ]] || fail 'install did not add the Claude submit-requirement skill'
 [[ -f $target/.claude/skills/diagnose-codebase/SKILL.md ]] || fail 'install did not add the Claude diagnosis skill'
-printf 'POLL_SECONDS=1\nMAX_WORKERS=1\nLEASE_SECONDS=3\nSTOP_TIMEOUT=10\nSTALE_DAYS=30\n' > "$target/.agentic-loop/config"
+write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=3 STOP_TIMEOUT=10 STALE_DAYS=30
 printf '7 queued open none 2026-01-01T00:00:00Z\n' > "$state"
 : > "$FAKE_GH_ROOT/$state_key.comments"
 : > "$FAKE_GH_ROOT/claude-calls"
@@ -620,7 +632,7 @@ assert_contains "$FAKE_GH_ROOT/$state_key.comments" '入力=123tok' 'claude usag
 assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'cost=$0.0123' 'claude usage record lacked the reported cost'
 
 # AGENT_PROVIDER=opencode routes the worker to `opencode run`, scoped to the worktree.
-printf 'POLL_SECONDS=1\nMAX_WORKERS=1\nLEASE_SECONDS=3\nSTOP_TIMEOUT=10\nSTALE_DAYS=30\n' > "$target/.agentic-loop/config"
+write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=3 STOP_TIMEOUT=10 STALE_DAYS=30
 printf '30 queued open none 2026-01-01T00:00:00Z\n' > "$state"
 : > "$FAKE_GH_ROOT/$state_key.comments"
 : > "$FAKE_GH_ROOT/opencode-calls"
@@ -632,7 +644,7 @@ assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'provider=opencode' 'opencod
 
 # Each Issue runs a read-only plan stage before the workspace-write exec stage,
 # and an exec that never satisfies completion triggers bounded re-planning.
-printf 'POLL_SECONDS=1\nMAX_WORKERS=1\nLEASE_SECONDS=30\nSTOP_TIMEOUT=10\nSTALE_DAYS=30\n' > "$target/.agentic-loop/config"
+write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=30 STOP_TIMEOUT=10 STALE_DAYS=30
 printf '20 queued open none 2026-01-01T00:00:00Z\n' > "$state"
 : > "$FAKE_GH_ROOT/$state_key.comments"
 : > "$FAKE_GH_ROOT/codex-calls"
@@ -673,13 +685,13 @@ assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'reopen' 'stale audit did no
 assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agent:queued' 'stale audit did not explain requeueing'
 
 # STALE_DAYS=0 disables automatic closure while preserving normal claiming.
-printf 'POLL_SECONDS=1\nMAX_WORKERS=1\nLEASE_SECONDS=3\nSTOP_TIMEOUT=10\nSTALE_DAYS=0\n' > "$target/.agentic-loop/config"
+write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=3 STOP_TIMEOUT=10 STALE_DAYS=0
 printf '30 queued open none 2025-01-01T00:00:00Z %s\n31 queued open none 2025-01-02T00:00:00Z %s\n' "$old_date" "$old_date" > "$state"
 AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _supervise
 [[ $(awk '$2 == "stale" {count++} END {print count+0}' "$state") -eq 0 ]] || fail 'STALE_DAYS=0 marked an Issue stale'
 [[ $(awk '$2 == "queued" {count++} END {print count+0}' "$state") -eq 1 ]] || fail 'disabled stale handling did not preserve the remaining queue'
 
-printf 'POLL_SECONDS=1\nMAX_WORKERS=2\nLEASE_SECONDS=3\nSTOP_TIMEOUT=10\nSTALE_DAYS=30\n' > "$target/.agentic-loop/config"
+write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=2 LEASE_SECONDS=3 STOP_TIMEOUT=10 STALE_DAYS=30
 
 # A linked-worktree worker can fetch, commit, and push through the constructed invocation boundary.
 printf '6 queued open\n' > "$state"

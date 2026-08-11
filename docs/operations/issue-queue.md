@@ -34,7 +34,7 @@ bin/agentic-loop doctor --format json
 通常のbuild・変更要求を受けた対話中のAgentは、次の順序で経路を決める。
 
 1. 読み取り専用の質問、診断、status確認、`start`・`stop`などの運用操作はIssue化しない。同期実行または直接実装を利用者が明示した場合も受付を省略する。
-2. `.agentic-loop/config` と実行可能な `bin/agentic-loop` があり、`bin/agentic-loop status` の先頭行が `running` で、`gh`が対象repositoryのIssueを参照・更新できることを確認する。
+2. `.agentic-loop.toml` と実行可能な `bin/agentic-loop` があり、`bin/agentic-loop status` の先頭行が `running` で、`gh`が対象repositoryのIssueを参照・更新できることを確認する。
 3. open Issueのtitleとbodyを検索し、要求の目的と対象範囲が同じIssueがないか確認する。候補の本文とコメントを読み、同じ利用者結果を求めるなら再利用して新規作成しない。
 4. 要求を `loop-continuity`、`confidentiality-incident`、`integrity-incident`、`availability-incident`、`feature`、`improvement` の順に評価し、該当する最上位の `category:*` を1個選ぶ。incidentはCIAへの実害で分類し、単なる重要度では選ばない。分類不能時は `category:improvement` を安全な既定値として使い、queued中に再トリアージする旨を記録する。
 5. 重複Issueが `agent:running` ならURLと状態を報告して終了し、`agent:queued` なら選択カテゴリが1個だけになるよう確認して再利用する。それ以外は他の `agent:*` 状態Labelを外し、カテゴリ1個と `agent:queued` を付ける。重複がなければ要求・制約・完了条件を本文にしたIssueを作り、カテゴリと `agent:queued` を同時に付ける。
@@ -55,7 +55,7 @@ incident Issueには、秘密の値、攻撃手順、不要な個人情報を本
 
 読み取り専用要求と運用操作はその場で続行する。通常の変更要求は、専用branch/worktreeを利用でき、追加費用・秘密・破壊的操作に関する判断が不要な場合に限り、キューが利用不能であることを明示してworker workflowを同期実行する。それ以外は復旧方法または必要な判断を正確に提示して停止する。明示された同期・直接実行も同じworker workflowと不変条件に従う。
 
-`.agentic-loop/config` で `POLL_SECONDS`、`MAX_WORKERS`、`LEASE_SECONDS`、`STOP_TIMEOUT`、`STALE_DAYS`、`GRAPHQL_RESERVE`、`RATE_LIMIT_CACHE_SECONDS`、`API_RETRY_ATTEMPTS`、`API_RETRY_BASE_SECONDS` を変更できる。既定の並列数は4とし、これを超えてむやみに増やさない。増加はCodex契約上の制限、Git競合、端末資源を確認してから行う。stopは新規claimを止め、workerをdrainする。`STOP_TIMEOUT=0` は完了まで待つ。
+`.agentic-loop.toml` の `[queue]` で `poll_seconds`、`max_workers`、`lease_seconds`、`stop_timeout`、`stale_days`、`graphql_reserve`、`rate_limit_cache_seconds`、`api_retry_attempts`、`api_retry_base_seconds` を変更できる。個人環境向けの上書きは git 管理外の `.agentic-loop.local.toml` に同じキーを書けば、キー単位で優先される。設定はTOMLで、読み取りには `yq` を用いる。既定の並列数は4とし、これを超えてむやみに増やさない。増加はCodex契約上の制限、Git競合、端末資源を確認してから行う。stopは新規claimを止め、workerをdrainする。`STOP_TIMEOUT=0` は完了まで待つ。
 
 SupervisorとworkerはGit common stateにGraphQLの残量・reset時刻を短時間cacheして共有する。Issue一覧、Label、comment、heartbeat、PRのmerge確認などloopのcore操作はREST APIを使い、GraphQLはbest-effortのProjects操作だけに限定する。残量が `GRAPHQL_RESERVE` 以下ならProjects item・field同期だけを抑制し、Issue Labelを正本とするqueue処理は継続する。reset後は次のProjects操作が最新残量を再取得し、冪等な同期を再開する。既定値は500であり、0にすると残量によるProjects保護を無効化する。
 
