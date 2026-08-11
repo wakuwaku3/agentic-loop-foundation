@@ -1,0 +1,6 @@
+# Polling and concurrency defaults. Use positive integer seconds/counts.
+POLL_SECONDS=30
+MAX_WORKERS=2
+LEASE_SECONDS=300
+# Zero waits indefinitely for workers during a graceful stop.
+STOP_TIMEOUT=0

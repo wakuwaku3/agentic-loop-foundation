@@ -10,7 +10,9 @@
 curl -fsSL https://raw.githubusercontent.com/wakuwaku3/agentic-loop-foundation/main/install.sh | bash
 ```
 
-空のディレクトリには完全な基盤を作成し、既存プロジェクトには既存のツールチェーンを維持したままAgent原則、要求入力Skill、Git hooksによる機密情報ガードを追加します。既存ファイルやhooks設定との競合時は上書きせず停止します。
+対象はoriginを持つGitリポジトリである必要があります。空のGitリポジトリには完全な基盤を作成し、既存プロジェクトには既存のツールチェーンを維持したままAgent原則、要求入力Skill、IssueキューCLI、Git hooksによる機密情報ガードを追加します。`git`、`gh`、Codex CLI、GitHub認証とProjects権限を変更前に検査し、既存ファイルやhooks設定との競合時は上書きせず停止します。
+
+インストールは対象リポジトリ専用のLabelsとGitHub Projectを冪等に設定し、Supervisorをバックグラウンド起動します。GitHub Issueが要求と状態履歴の正本で、Projectは障害がキューを止めない可視化層です。中央キューや外部DB、OpenAI API keyは使いません。
 
 ## 要求の入力
 
@@ -20,4 +22,12 @@ Codexで `$submit-requirement` に続けて、達成したいことを自然言�
 
 > `$submit-requirement 商品を検索できるWebアプリを作って`
 
-設計上の判断は [docs/decisions/0001-minimal-foundation.md](docs/decisions/0001-minimal-foundation.md) に記録しています。
+継続処理する要求は対象リポジトリのIssueに `agent:queued` Labelを付けます。制御用CLIは次の3つだけです。
+
+```sh
+bin/agentic-loop start
+bin/agentic-loop stop
+bin/agentic-loop status
+```
+
+既定では30秒poll、最大2件を並列実行します。設定、状態遷移、lease復旧、Projectの制約、トラブルシュートは [Issueキュー運用](docs/operations/issue-queue.md)、設計上の判断は [0001](docs/decisions/0001-minimal-foundation.md) と [0002](docs/decisions/0002-github-issue-queue.md) に記録しています。
