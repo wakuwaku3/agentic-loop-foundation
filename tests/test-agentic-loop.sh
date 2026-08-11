@@ -44,7 +44,10 @@ case "${1:-} ${2:-}" in
   'issue edit')
     issue=$3 target=''
     for ((i=1; i<=$#; i++)); do [[ ${!i} == --add-label ]] && { j=$((i+1)); target=${!j#agent:}; }; done
-    awk -v n="$issue" -v s="$target" '{if ($1 == n) $2=s; print}' "$state" > "$state.tmp" && mv "$state.tmp" "$state" ;;
+    (
+      flock 9
+      awk -v n="$issue" -v s="$target" '{if ($1 == n) $2=s; print}' "$state" > "$state.$$.tmp" && mv "$state.$$.tmp" "$state"
+    ) 9> "$state.lock" ;;
   'issue view')
     issue=$3
     if [[ $* == *labels* ]]; then awk -v n="$issue" '$1 == n {print "agent:" $2}' "$state"
@@ -57,7 +60,11 @@ case "${1:-} ${2:-}" in
     issue=$3; shift 3
     printf '%s %s\n' "$issue" "$*" >> "$comments" ;;
   'issue close')
-    issue=$3; awk -v n="$issue" '{if ($1 == n) $3="closed"; print}' "$state" > "$state.tmp" && mv "$state.tmp" "$state" ;;
+    issue=$3
+    (
+      flock 9
+      awk -v n="$issue" '{if ($1 == n) $3="closed"; print}' "$state" > "$state.$$.tmp" && mv "$state.$$.tmp" "$state"
+    ) 9> "$state.lock" ;;
   *) printf 'unexpected fake gh call: %s\n' "$*" >&2; exit 1 ;;
 esac
 FAKE_GH
