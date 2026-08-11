@@ -4,6 +4,11 @@
 !.env.example
 *.pem
 *.key
+*.p12
+*.pfx
+credentials.json
+credentials.yaml
+credentials.yml
 
 # Editors and operating systems
 .DS_Store
