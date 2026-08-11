@@ -6,11 +6,13 @@ readonly TARGET="${1:-.}"
 readonly SHARED_FILES=(
   AGENTS.md .codex/config.toml docs/policies/cost.md docs/policies/testing.md docs/policies/development-environment.md
   docs/policies/github-language.md
-  docs/decisions/0002-github-issue-queue.md docs/operations/issue-queue.md
+  docs/decisions/0002-github-issue-queue.md docs/operations/issue-queue.md docs/operations/codebase-diagnosis.md
   .agents/skills/submit-requirement/SKILL.md
   .agents/skills/submit-requirement/agents/openai.yaml
-  .agentic-loop/guard-secrets.sh .agentic-loop/update-main.sh .agentic-loop/config
-  .githooks/pre-commit .githooks/pre-push bin/agentic-loop
+  .agents/skills/diagnose-codebase/SKILL.md
+  .agents/skills/diagnose-codebase/agents/openai.yaml
+  .agentic-loop/guard-secrets.sh .agentic-loop/update-main.sh .agentic-loop/diagnose-codebase.sh .agentic-loop/config
+  .githooks/pre-commit .githooks/pre-push bin/agentic-loop bin/agentic-loop-diagnose
 )
 readonly INIT_FILES=(
   README.md .editorconfig .env.example .gitignore Makefile install.sh devbox.json devbox.lock
@@ -46,11 +48,12 @@ main() {
   for file in "${files[@]}"; do
     if [[ ! -e $target/$file ]]; then mkdir -p "$target/$(dirname "$file")"; cp "$SOURCE_ROOT/$file" "$target/$file"; fi
   done
-  chmod +x "$target/bin/agentic-loop" "$target/.agentic-loop/guard-secrets.sh" "$target/.agentic-loop/update-main.sh" "$target/.githooks/pre-commit" "$target/.githooks/pre-push"
+  chmod +x "$target/bin/agentic-loop" "$target/bin/agentic-loop-diagnose" "$target/.agentic-loop/guard-secrets.sh" "$target/.agentic-loop/update-main.sh" "$target/.agentic-loop/diagnose-codebase.sh" "$target/.githooks/pre-commit" "$target/.githooks/pre-push"
   [[ $mode == init ]] && chmod +x "$target/install.sh" "$target/scripts/"*.sh "$target/tests/"*.sh
   git -C "$target" config --local core.hooksPath .githooks
   "$target/bin/agentic-loop" setup
   "$target/.agentic-loop/update-main.sh" install "$target"
+  "$target/.agentic-loop/diagnose-codebase.sh" install "$target"
   if [[ ${AGENTIC_LOOP_SKIP_START:-0} != 1 ]]; then "$target/bin/agentic-loop" start; fi
   printf 'Agentic loop installed (%s) in %s\n' "$mode" "$(cd "$target" && pwd)"
 }
