@@ -21,6 +21,7 @@
               gnugrep
               gnumake
               gnused
+              shellcheck
               util-linux
             ];
             DEV_ENVIRONMENT = "agentic-loop-foundation-v1";
