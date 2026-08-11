@@ -241,9 +241,30 @@ git -C "$publisher" commit --quiet -m update
 git -C "$publisher" push --quiet
 "$target/.agentic-loop/update-main.sh" sync "$target"
 [[ -f $target/remote.txt ]] || fail 'periodic updater did not fast-forward main'
+same_head=$(git -C "$target" rev-parse HEAD)
+"$target/.agentic-loop/update-main.sh" sync "$target"
+[[ $(git -C "$target" rev-parse HEAD) == "$same_head" ]] || fail 'periodic updater changed an already synchronized main'
 printf 'local work\n' > "$target/local.txt"
 if "$target/.agentic-loop/update-main.sh" sync "$target" >/dev/null 2>&1; then fail 'periodic updater accepted a dirty main worktree'; fi
 rm "$target/local.txt"
+printf 'local commit\n' > "$target/local.txt"
+git -C "$target" add local.txt
+git -C "$target" commit --quiet -m 'local update'
+before_head=$(git -C "$target" rev-parse HEAD)
+before_status=$(git -C "$target" status --porcelain)
+if "$target/.agentic-loop/update-main.sh" sync "$target" >/dev/null 2>&1; then fail 'periodic updater accepted a main branch ahead of origin/main'; fi
+[[ $(git -C "$target" rev-parse HEAD) == "$before_head" ]] || fail 'periodic updater changed HEAD for a main branch ahead of origin/main'
+[[ $(git -C "$target" status --porcelain) == "$before_status" ]] || fail 'periodic updater changed the worktree for a main branch ahead of origin/main'
+printf 'diverging remote update\n' > "$publisher/diverged.txt"
+git -C "$publisher" add diverged.txt
+git -C "$publisher" commit --quiet -m 'diverging update'
+git -C "$publisher" push --quiet
+before_head=$(git -C "$target" rev-parse HEAD)
+before_status=$(git -C "$target" status --porcelain)
+if "$target/.agentic-loop/update-main.sh" sync "$target" >/dev/null 2>&1; then fail 'periodic updater accepted a main branch diverged from origin/main'; fi
+[[ $(git -C "$target" rev-parse HEAD) == "$before_head" ]] || fail 'periodic updater changed HEAD for a main branch diverged from origin/main'
+[[ $(git -C "$target" status --porcelain) == "$before_status" ]] || fail 'periodic updater changed the worktree for a main branch diverged from origin/main'
+git -C "$target" reset --quiet --hard refs/remotes/origin/main
 AGENTIC_LOOP_SOURCE="$PROJECT_ROOT" AGENTIC_LOOP_TARGET="$target" AGENTIC_LOOP_SKIP_START=1 "$PROJECT_ROOT/install.sh"
 project_creates=$(grep -c $'project create' "$FAKE_GH_ROOT/calls" || true)
 [[ $project_creates -eq 1 ]] || { sed -n '1,120p' "$FAKE_GH_ROOT/calls" >&2; fail "reinstall created the Project $project_creates times"; }
