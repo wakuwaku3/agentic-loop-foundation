@@ -6,7 +6,7 @@
 
 GitHub tokenには対象リポジトリのIssue/PR操作権限と `project`、`read:project` scopeが必要である。不足時は `gh auth refresh -s project,read:project` など、利用中のGitHub認証方式に合う方法で追加する。Projectはuser/org所有のため、対象リポジトリとProjectの閲覧者が一致することを管理者が確認する。privateリポジトリの内容や秘密情報をProjectフィールドへ転記しない。
 
-Project APIが許す範囲でlink、`Agent status` single-select、Issue item追加を設定する。ビューとProject workflowのAPIが利用できない場合、Inbox、Queued、Running、Needs input、In review、Done、Failedで手動にてビューを作成できる。この障害はIssueキューを停止しない。
+Project APIでlink、`Agent status` single-select、Issue item追加に加え、`Open Issues`、`Closed Issues`、`Open PRs`、`Closed PRs` のtable viewを設定する。各viewはitem種別とOpen/Closed状態でfilterされ、`install.sh` または `bin/agentic-loop setup` の再実行時に同名viewを再利用してfilterを修復する。Project同期の障害はIssueキューの実行中にはキューを停止しない。
 
 ## 操作
 

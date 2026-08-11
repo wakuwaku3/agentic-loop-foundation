@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# shellcheck disable=SC2155
+# shellcheck disable=SC2016,SC2155
 set -euo pipefail
 
 readonly PROGRAM_NAME="${0##*/}"
@@ -100,6 +100,45 @@ setup_project() {
   gh project link "$number" --owner "$owner" --repo "$repository" >/dev/null 2>&1 || true
   gh project field-create "$number" --owner "$owner" --name 'Agent status' --data-type SINGLE_SELECT \
     --single-select-options 'Inbox,Queued,Running,Needs input,In review,Done,Failed' >/dev/null 2>&1 || true
+  setup_project_views "$number" "$owner"
+}
+
+setup_project_view() {
+  local project_id=$1 name=$2 filter=$3 view_id
+  local view_query='query($projectId: ID!) {
+    node(id: $projectId) {
+      ... on ProjectV2 {
+        views(first: 100) { nodes { id name } }
+      }
+    }
+  }'
+  view_id=$(gh api graphql -f query="$view_query" -F projectId="$project_id" \
+    --jq '.data.node.views.nodes[] | [.id, .name] | @tsv' 2>/dev/null |
+    awk -F '\t' -v name="$name" '$2 == name {print $1; exit}' || true)
+  if [[ -z $view_id ]]; then
+    local create_mutation='mutation($projectId: ID!, $name: String!) {
+      createProjectV2View(input: {projectId: $projectId, name: $name, layout: TABLE_LAYOUT}) {
+        projectV2View { id }
+      }
+    }'
+    view_id=$(gh api graphql -f query="$create_mutation" -F projectId="$project_id" -f name="$name" \
+      --jq '.data.createProjectV2View.projectV2View.id')
+  fi
+  [[ -n $view_id ]] || fail "could not create or identify Project view: $name"
+  local update_mutation='mutation($viewId: ID!, $filter: String!) {
+    updateProjectV2View(input: {viewId: $viewId, filter: $filter}) { projectV2View { id } }
+  }'
+  gh api graphql -f query="$update_mutation" -F viewId="$view_id" -f filter="$filter" >/dev/null
+}
+
+setup_project_views() {
+  local number=$1 owner=$2 project_id
+  project_id=$(gh project view "$number" --owner "$owner" --format json --jq .id)
+  [[ -n $project_id ]] || fail 'could not identify the repository Project ID'
+  setup_project_view "$project_id" 'Open Issues' 'is:issue is:open'
+  setup_project_view "$project_id" 'Closed Issues' 'is:issue is:closed'
+  setup_project_view "$project_id" 'Open PRs' 'is:pr is:open'
+  setup_project_view "$project_id" 'Closed PRs' 'is:pr is:closed'
 }
 
 cmd_setup() {
