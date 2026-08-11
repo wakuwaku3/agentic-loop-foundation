@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2155
 set -euo pipefail
 
 readonly PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -77,9 +78,24 @@ cat > "$FAKE_BIN/codex" <<'FAKE_CODEX'
 set -euo pipefail
 printf '%s\n' "$*" >> "$FAKE_GH_ROOT/codex-calls"
 [[ ${1:-} == exec && ${2:-} == --help ]] && { printf '%s\n' '      --add-dir <DIR>'; exit 0; }
-output=''
-for ((i=1; i<=$#; i++)); do [[ ${!i} == --output-last-message ]] && { j=$((i+1)); output=${!j}; }; done
+output='' worktree='' add_dir=''
+for ((i=1; i<=$#; i++)); do
+  case ${!i} in
+    --output-last-message) j=$((i+1)); output=${!j} ;;
+    -C) j=$((i+1)); worktree=${!j} ;;
+    --add-dir) j=$((i+1)); add_dir=${!j} ;;
+  esac
+done
 [[ -n $output ]] || exit 2
+if [[ ${FAKE_CODEX_GIT_OPERATIONS:-0} == 1 ]]; then
+  expected=$(git -C "$worktree" rev-parse --path-format=absolute --git-common-dir)
+  [[ $add_dir == "$expected" ]] || { printf 'unexpected add-dir: %s (expected %s)\n' "$add_dir" "$expected" >&2; exit 3; }
+  git -C "$worktree" fetch origin main
+  printf 'worker change\n' > "$worktree/worker.txt"
+  git -C "$worktree" add worker.txt
+  git -C "$worktree" commit --quiet -m 'worker change'
+  git -C "$worktree" push --quiet origin HEAD:refs/heads/agent/issue-6
+fi
 sleep "${FAKE_CODEX_SLEEP:-0}"
 printf '%s\n' "${FAKE_CODEX_RESULT:-AGENTIC_LOOP_RESULT=completed}" > "$output"
 FAKE_CODEX
@@ -164,6 +180,12 @@ assert_contains "$FAKE_GH_ROOT/codex-calls" 'GitHubのIssue、PR' 'worker prompt
 assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'のハートビートです' 'supervisor did not write its Issue comments in Japanese'
 if grep -Eq 'danger-full-access|OPENAI_API_KEY|--add-dir /($| )|--add-dir /home($| )' "$FAKE_GH_ROOT/codex-calls"; then fail 'worker used forbidden Codex configuration or a broad writable path'; fi
 [[ ! -e $state_root/worktrees ]] || fail 'worker worktrees were placed inside Git metadata'
+
+# A linked-worktree worker can fetch, commit, and push through the constructed invocation boundary.
+printf '6 queued open\n' > "$state"
+FAKE_CODEX_GIT_OPERATIONS=1 "$target/bin/agentic-loop" _worker 6 linked-worktree-worker
+git -C "$target" fetch --quiet origin agent/issue-6
+git -C "$target" show 'origin/agent/issue-6:worker.txt' | grep -Fxq 'worker change' || fail 'linked-worktree Git metadata operations did not reach the remote'
 
 # needs-input and failure are isolated state transitions; a later Issue reply requeues only that Issue.
 printf '4 running open\n5 running open\n' > "$state"

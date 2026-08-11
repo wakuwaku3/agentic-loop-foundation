@@ -58,6 +58,7 @@ while IFS= read -r -d '' file; do
   bash -n "$file"
 done < <(find bin scripts tests .agentic-loop .githooks -type f \( -name '*.sh' -o -perm -u+x \) -print0)
 bash -n bin/agentic-loop
+shellcheck bin/agentic-loop tests/test-agentic-loop.sh
 grep -Fq 'MAX_WORKERS=2' .agentic-loop/config || { printf 'Unsafe worker default.\n' >&2; exit 1; }
 grep -Fq -- '--sandbox workspace-write' bin/agentic-loop || { printf 'Unsafe Codex sandbox.\n' >&2; exit 1; }
 if grep -Eq 'danger-full-access|OPENAI_API_KEY' bin/agentic-loop install.sh scripts/install-target.sh; then

@@ -9,6 +9,7 @@
     "gnugrep@latest",
     "gnumake@latest",
     "gnused@latest",
+    "shellcheck@latest",
     "util-linux@latest"
   ],
   "env": {

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2155
 set -euo pipefail
 
 readonly PROGRAM_NAME="${0##*/}"
@@ -236,6 +237,7 @@ requeue_answered() {
   local issue answered
   while IFS= read -r issue; do
     [[ -n $issue ]] || continue
+    # shellcheck disable=SC2016 # This is a jq program, not a shell expression.
     answered=$(gh issue view "$issue" --json comments --jq '.comments as $comments | ([range(0; $comments | length) | select($comments[.].body | contains("agentic-loop:needs-input"))] | last) as $marker | if $marker == null then false else any($comments[$marker + 1:][]; (.body | contains("<!-- agentic-loop:") | not)) end' 2>/dev/null || true)
     if [[ $answered == true ]]; then
       set_issue_state "$issue" queued
@@ -302,6 +304,22 @@ Issueとそのコメントを要求として扱い、この専用worktreeだけ�
 EOF
 }
 
+resolve_worker_git_common_dir() {
+  local worktree=$1 common_dir git_dir worktree_root home_dir
+  worktree_root=$(cd "$worktree" && pwd -P) || return 1
+  common_dir=$(git -C "$worktree_root" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || return 1
+  git_dir=$(git -C "$worktree_root" rev-parse --path-format=absolute --git-dir 2>/dev/null) || return 1
+  [[ $common_dir == /* && $git_dir == /* && -d $common_dir && -d $git_dir ]] || return 1
+  common_dir=$(cd "$common_dir" && pwd -P) || return 1
+  git_dir=$(cd "$git_dir" && pwd -P) || return 1
+  [[ $(git -C "$worktree_root" rev-parse --is-inside-work-tree 2>/dev/null) == true ]] || return 1
+  [[ $git_dir == "$common_dir" || $git_dir == "$common_dir"/* ]] || return 1
+  [[ -f $common_dir/HEAD && -d $common_dir/objects && -d $common_dir/refs ]] || return 1
+  home_dir=${HOME:-}
+  [[ $common_dir != / && $common_dir != "$worktree_root" && ( -z $home_dir || $common_dir != "$home_dir" ) ]] || return 1
+  printf '%s\n' "$common_dir"
+}
+
 worker() {
   local issue=$1 worker=$2 repository default_branch branch worktree result git_common_dir exit_code=0 heartbeat_pid
   repository=$(repo_name)
@@ -329,12 +347,12 @@ worker() {
     fi
   fi
   result="$STATE_ROOT/issue-$issue-result.txt"
-  git_common_dir=$(git -C "$REPO_ROOT" rev-parse --path-format=absolute --git-common-dir) || fail 'cannot resolve the Git common directory'
-  [[ $git_common_dir == /* && -d $git_common_dir && -f $git_common_dir/HEAD && -d $git_common_dir/objects && -d $git_common_dir/refs ]] ||
-    fail 'refusing an invalid Git common directory'
-  case $git_common_dir in
-    /|"${HOME:-}"|/home|/Users) fail 'refusing a broad Git common directory' ;;
-  esac
+  if ! git_common_dir=$(resolve_worker_git_common_dir "$worktree"); then
+    set_issue_state "$issue" failed || true
+    comment_issue "$issue" "<!-- agentic-loop:failed worker=$worker -->\nCould not safely resolve the dedicated worktree Git common directory. No additional writable path was granted." || true
+    rm -f "$STATE_ROOT/workers/$issue.pid"
+    return 0
+  fi
   (
     while :; do sleep $((LEASE_SECONDS / 3 + 1)); lease_comment "$issue" "$worker" || true; done
   ) & heartbeat_pid=$!
