@@ -46,10 +46,12 @@ Supervisorはclaimの直前に、`agent:queued` のまま `STALE_DAYS` 日以上
 - running: leaseを持つworkerが処理中
 - needs-input: 不可逆・費用・重大な安全判断または解消不能な権限不足への回答待ち
 - in-review: PR確認中（workerが進捗として使用可能）
-- completed: 検証済みPRがmerge済み
+- completed: workerの完了自己申告に加え、対応branchのmerge済みPRをGitHub APIで確認済み
 - failed: mergeを証明できず終了。原因確認後にqueuedを付けて再試行する
 - stale: queuedのまま設定日数更新されず、監査コメント付きで自動closeされた
 
 Supervisorは起動時にrunning Issueの最新leaseコメントを読み、期限切れをqueuedへ戻す。Issue worktreeは対象リポジトリと同じ親ディレクトリの `<repository>-worktrees/issue-<number>` に分離する。workerは `workspace-write` を維持し、Gitが解決した対象リポジトリのcommon metadataディレクトリと、保護対象だが要求実装に必要な専用worktree内の `.agents` だけをCodex CLIの `--add-dir` で書き込み可能にする。common directoryとworktree固有Git directoryの親子関係を検証できない場合、root、home、worktree rootのような広い範囲の場合、または `.agents` がsymlinkやworktree外のpathに解決される場合はworkerを起動しない。workerの標準出力・標準エラーはGit管理外の `.git/agentic-loop/logs` に保存し、Issueへ転載しない。ログに秘密が疑われる場合は削除し、資格情報を失効する。Project同期は再実行可能であり、`bin/agentic-loop setup` で修復する。
+
+workerが `AGENTIC_LOOP_RESULT=completed` を返しても、それだけでは完了にしない。SupervisorはIssue専用branchをheadとするmerge済みPRをGitHub APIで確認してからIssueをcloseし、worktreeを削除する。確認できない場合は `failed` とし、Issueとworktreeを保持して安全な再調査を可能にする。
 
 Supervisorが停止している場合はstatus、`.git/agentic-loop/supervisor.log`、`gh auth status` を確認する。同じリポジトリを複数端末から処理しない。default branch更新後の競合やrequired checks失敗はworkerが最新branchに対して修正・再検証する。

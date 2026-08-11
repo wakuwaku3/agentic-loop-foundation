@@ -13,6 +13,8 @@ GitHub Issueと `agent:*` Labelを処理状態の正本にする。リポジト�
 
 状態は `queued`、`running`、`needs-input`、`in-review`、`completed`、`failed`、`stale` とする。runningにはworker ID、heartbeat、期限付きleaseをIssueコメントとして記録する。起動時に期限切れleaseをqueuedへ戻す。needs-input後のIssue返信は再取得対象へ戻す。Issueごとの失敗は他workerやキューを停止しない。queued Issueはpriority Labelの優先度と作成日時で決定的に並べ、設定期間更新がないものはclaim前に監査コメントを残してstaleへ移し、closeする。自動closeは無効化でき、reopenと再queueで復旧できる。
 
+`completed` はworkerの出力だけを根拠にせず、Issue専用branchに対応するPRがGitHub上でmerge済みであることをSupervisorが独立に確認した場合だけ遷移する。未mergeまたは確認不能なら `failed` とし、Issueをcloseせずworktreeを保持する。
+
 Projectはリポジトリ名を含む専用名で冪等に作成または再利用し、リポジトリへlinkする。Open/ClosedのIssueとPRを分ける4個のtable viewも名前で再利用し、filterを再同期する。setup時に既存PRを、worker終了時にそのbranchのPRをProject itemへ追加する。実行中の可視化はbest-effortで再同期可能とし、Project障害でIssueの取得・状態遷移を止めない。Projectの所有者アクセスがリポジトリより広い場合があるため、機密情報はProjectへ複製せず、管理者がアクセス境界を確認する。
 
 ## 帰結

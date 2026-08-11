@@ -429,7 +429,7 @@ resolve_worker_agents_dir() {
 }
 
 worker() {
-  local issue=$1 worker=$2 repository default_branch branch worktree result git_common_dir agents_dir exit_code=0 heartbeat_pid
+  local issue=$1 worker=$2 repository default_branch branch worktree result git_common_dir agents_dir exit_code=0 heartbeat_pid merged_pr=''
   repository=$(repo_name)
   default_branch=$(gh repo view --json defaultBranchRef --jq .defaultBranchRef.name)
   branch="agent/issue-$issue"
@@ -476,10 +476,18 @@ worker() {
   wait "$heartbeat_pid" 2>/dev/null || true
   project_add_pull_requests "$branch"
   if [[ $exit_code -eq 0 ]] && grep -Fq 'AGENTIC_LOOP_RESULT=completed' "$result"; then
-    set_issue_state "$issue" completed
-    project_sync_state "$issue" completed
-    comment_issue "$issue" "<!-- agentic-loop:completed -->\nWorker \`$worker\` が要求を完了しました。最終worker reportとPRに実装および検証の証跡があります。"
-    gh issue close "$issue" >/dev/null
+    merged_pr=$(gh pr list --repo "$repository" --head "$branch" --state merged --json url,mergedAt --jq 'map(select(.mergedAt != null)) | first | .url // empty') || true
+    if [[ -n $merged_pr ]]; then
+      set_issue_state "$issue" completed
+      project_sync_state "$issue" completed
+      comment_issue "$issue" "<!-- agentic-loop:completed pr=$merged_pr -->\nWorker \`$worker\` の完了報告に加え、対応PRのmergeをGitHubで確認しました: $merged_pr"
+      gh issue close "$issue" >/dev/null
+    else
+      exit_code=1
+      set_issue_state "$issue" failed
+      project_sync_state "$issue" failed
+      comment_issue "$issue" "<!-- agentic-loop:failed worker=$worker reason=unmerged -->\nWorkerは完了を報告しましたが、branch \`$branch\` のmerge済みPRをGitHubで確認できませんでした。Issueはcloseせず、専用worktreeを保持します。原因確認後に再試行するには \`agent:queued\` を再度付与してください。"
+    fi
   elif [[ $exit_code -eq 0 ]] && grep -Fq 'AGENTIC_LOOP_RESULT=needs-input' "$result"; then
     set_issue_state "$issue" needs-input
     project_sync_state "$issue" needs-input
@@ -490,7 +498,7 @@ worker() {
     comment_issue "$issue" "<!-- agentic-loop:failed worker=$worker exit=$exit_code -->\nWorkerは検証済みのmergeを完了せずに停止しました。Logはlocalにのみ保持され、秘密情報はここに転記されません。調査後に再試行するには \`agent:queued\` を再度付与してください。"
   fi
   rm -f "$STATE_ROOT/workers/$issue.pid"
-  if [[ $exit_code -eq 0 ]] && grep -Fq 'AGENTIC_LOOP_RESULT=completed' "$result"; then
+  if [[ $exit_code -eq 0 && -n $merged_pr ]]; then
     git -C "$REPO_ROOT" worktree remove "$worktree" >/dev/null 2>&1 || true
   fi
 }
