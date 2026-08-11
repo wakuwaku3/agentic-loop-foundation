@@ -70,7 +70,12 @@ state_label() { printf 'agent:%s' "$1"; }
 # pinned to bounded defaults to prevent accidental high-cost runs; override
 # them per environment through the AGENT_* variables. The autonomous supervisor
 # runs under systemd, so start bakes these variables into the service unit.
-AGENT_CODEX_REASONING_EFFORT="${AGENT_CODEX_REASONING_EFFORT:-medium}"
+# Each Issue runs in two stages: a flagship plan stage that only investigates
+# and a cheaper exec stage that implements it, so expensive reasoning is spent
+# on planning rather than on every edit.
+AGENT_CODEX_PLAN_REASONING_EFFORT="${AGENT_CODEX_PLAN_REASONING_EFFORT:-high}"
+AGENT_CODEX_EXEC_REASONING_EFFORT="${AGENT_CODEX_EXEC_REASONING_EFFORT:-low}"
+AGENT_PLAN_MAX_RETRIES="${AGENT_PLAN_MAX_RETRIES:-1}"
 agent_provider() { printf '%s' "${AGENT_PROVIDER:-codex}"; }
 agent_provider_valid() { case $(agent_provider) in codex | claude) return 0 ;; *) return 1 ;; esac; }
 agent_provider_command() { case $(agent_provider) in claude) printf 'claude' ;; *) printf 'codex' ;; esac; }
@@ -82,32 +87,46 @@ agent_provider_ready() {
     *) return 1 ;;
   esac
 }
-# Run one autonomous worker session confined to the dedicated worktree, granting
-# only the resolved Git common directory and protected .agents directory. Never
-# bypass secret-guard hooks. The final agent message is written to result_file,
-# where the caller reads the AGENTIC_LOOP_RESULT sentinel.
-agent_run_worker() {
-  local worktree=$1 git_common_dir=$2 agents_dir=$3 result_file=$4 usage_file=$5 prompt=$6
+# Run one worker stage confined to the dedicated worktree. stage=plan only
+# investigates and returns a plan (read-only for Codex); stage=exec implements
+# it with workspace-write, granting only the resolved Git common directory and
+# protected .agents directory. Never bypass secret-guard hooks. The final agent
+# message is written to result_file, where the caller reads the plan text or the
+# AGENTIC_LOOP_RESULT sentinel.
+agent_run_stage() {
+  local stage=$1 worktree=$2 git_common_dir=$3 agents_dir=$4 result_file=$5 usage_file=$6 prompt=$7 model effort
   : > "$usage_file"
-  printf 'provider=%s\n' "$(agent_provider)" >> "$usage_file"
+  printf 'provider=%s\nstage=%s\n' "$(agent_provider)" "$stage" >> "$usage_file"
   case $(agent_provider) in
     claude)
-      [[ -n ${AGENT_CLAUDE_MODEL:-} ]] && printf 'model=%s\n' "$AGENT_CLAUDE_MODEL" >> "$usage_file"
+      [[ $stage == plan ]] && model=${AGENT_CLAUDE_PLAN_MODEL:-} || model=${AGENT_CLAUDE_EXEC_MODEL:-}
+      [[ -n $model ]] && printf 'model=%s\n' "$model" >> "$usage_file"
+      # --output-format json returns one object; the final message (plan text or
+      # the AGENTIC_LOOP_RESULT sentinel) stays inside .result and is matched as
+      # a substring, so the raw JSON is the result file. Token/cost fields are
+      # extracted for the usage record without adding a jq dependency. Claude has
+      # no OS sandbox, so the plan stage relies on the prompt to avoid writes.
       local -a claude_args=(--print --output-format json --dangerously-skip-permissions --add-dir "$git_common_dir" --add-dir "$agents_dir")
-      [[ -n ${AGENT_CLAUDE_MODEL:-} ]] && claude_args+=(--model "$AGENT_CLAUDE_MODEL")
-      # --output-format json returns one object; the final message (with the
-      # AGENTIC_LOOP_RESULT sentinel) stays inside .result and is matched as a
-      # substring, so the raw JSON is the result file. Token/cost fields are
-      # extracted for the usage record without adding a jq dependency.
+      [[ -n $model ]] && claude_args+=(--model "$model")
       (cd "$worktree" && claude "${claude_args[@]}" "$prompt") > "$result_file"
       agent_usage_from_claude_json "$result_file" >> "$usage_file" || true
       ;;
     *)
-      [[ -n ${AGENT_CODEX_MODEL:-} ]] && printf 'model=%s\n' "$AGENT_CODEX_MODEL" >> "$usage_file"
-      printf 'reasoning_effort=%s\n' "$AGENT_CODEX_REASONING_EFFORT" >> "$usage_file"
-      local -a codex_args=(exec --sandbox workspace-write --add-dir "$git_common_dir" --add-dir "$agents_dir" -c 'approval_policy="never"' -c 'sandbox_workspace_write.network_access=true')
-      [[ -n ${AGENT_CODEX_MODEL:-} ]] && codex_args+=(-c "model=$AGENT_CODEX_MODEL")
-      [[ -n $AGENT_CODEX_REASONING_EFFORT ]] && codex_args+=(-c "model_reasoning_effort=$AGENT_CODEX_REASONING_EFFORT")
+      if [[ $stage == plan ]]; then
+        model=${AGENT_CODEX_PLAN_MODEL:-}; effort=$AGENT_CODEX_PLAN_REASONING_EFFORT
+      else
+        model=${AGENT_CODEX_EXEC_MODEL:-}; effort=$AGENT_CODEX_EXEC_REASONING_EFFORT
+      fi
+      [[ -n $model ]] && printf 'model=%s\n' "$model" >> "$usage_file"
+      printf 'reasoning_effort=%s\n' "$effort" >> "$usage_file"
+      local -a codex_args
+      if [[ $stage == plan ]]; then
+        codex_args=(exec --sandbox read-only -c 'approval_policy="never"')
+      else
+        codex_args=(exec --sandbox workspace-write --add-dir "$git_common_dir" --add-dir "$agents_dir" -c 'approval_policy="never"' -c 'sandbox_workspace_write.network_access=true')
+      fi
+      [[ -n $model ]] && codex_args+=(-c "model=$model")
+      [[ -n $effort ]] && codex_args+=(-c "model_reasoning_effort=$effort")
       codex "${codex_args[@]}" -C "$worktree" --output-last-message "$result_file" "$prompt"
       agent_usage_from_codex_sessions "$worktree" >> "$usage_file" || true
       ;;
@@ -156,6 +175,7 @@ agent_post_usage() {
   [[ -r $usage_file ]] || return 0
   while IFS='=' read -r key value; do [[ -n $key ]] && usage[$key]=$value; done < "$usage_file"
   summary="<!-- agentic-loop:usage worker=$worker -->\nToken使用量（分析用）: provider=${usage[provider]:-unknown}"
+  [[ -n ${usage[stage]:-} ]] && summary+=" stage=${usage[stage]}"
   [[ -n ${usage[model]:-} ]] && summary+=" model=${usage[model]}"
   [[ -n ${usage[reasoning_effort]:-} ]] && summary+=" reasoning_effort=${usage[reasoning_effort]}"
   [[ -n ${usage[tokens_input]:-} ]] && summary+=" 入力=${usage[tokens_input]}tok"
@@ -446,7 +466,7 @@ install_supervisor_unit() {
     printf 'Environment=PATH=%s\n' "$escaped_path"
     printf 'Environment=AGENT_PROVIDER=%s\n' "$(agent_provider)"
     local agent_var
-    for agent_var in AGENT_CODEX_MODEL AGENT_CODEX_REASONING_EFFORT AGENT_CLAUDE_MODEL; do
+    for agent_var in AGENT_CODEX_PLAN_MODEL AGENT_CODEX_EXEC_MODEL AGENT_CODEX_PLAN_REASONING_EFFORT AGENT_CODEX_EXEC_REASONING_EFFORT AGENT_CLAUDE_PLAN_MODEL AGENT_CLAUDE_EXEC_MODEL AGENT_PLAN_MAX_RETRIES; do
       [[ -n ${!agent_var:-} ]] || continue
       [[ ${!agent_var} =~ ^[A-Za-z0-9._:-]+$ ]] || fail "$agent_var contains characters unsupported in the systemd unit"
       printf 'Environment=%s=%s\n' "$agent_var" "${!agent_var}"
@@ -914,6 +934,34 @@ Issueとそのコメントを要求として扱い、この専用worktreeだけ�
 EOF
 }
 
+# plan stage prompt: investigate only and emit a concrete plan. On a retry the
+# previous exec failure is appended so the plan can address the root cause.
+plan_prompt() {
+  local issue=$1 repository=$2 failure_context=${3:-}
+  cat <<EOF
+$repository の GitHub Issue #$issue に対する実装計画を作成してください。
+Issueとそのコメントを要求として扱い、この専用worktreeとリポジトリを調査し、変更方針、影響範囲、検証手順、観測可能な受け入れ条件を日本語で具体化してください。このplan段階ではファイルの変更、commit、push、PR作成、GitHubの状態変更を行わず、最終メッセージに計画本文だけを出力してください。
+EOF
+  if [[ -n $failure_context ]]; then
+    cat <<EOF
+直前のexec段は完了条件を満たせませんでした。次の記録を踏まえ、原因に対処するよう計画を見直してください。
+$failure_context
+EOF
+  fi
+}
+
+# exec stage prompt: the full completion workflow plus the plan to follow.
+exec_prompt() {
+  local issue=$1 repository=$2 plan_file=$3
+  issue_prompt "$issue" "$repository"
+  if [[ -s $plan_file ]]; then
+    cat <<EOF
+次の実装計画（plan段階で作成）に従って作業を進め、必要に応じて安全に調整してください。
+$(cat "$plan_file")
+EOF
+  fi
+}
+
 resolve_worker_git_common_dir() {
   local worktree=$1 common_dir git_dir worktree_root home_dir
   worktree_root=$(cd "$worktree" && pwd -P) || return 1
@@ -1002,13 +1050,26 @@ worker() {
   (
     while :; do sleep $((LEASE_SECONDS / 3 + 1)); lease_comment "$issue" "$worker" || true; done
   ) & heartbeat_pid=$!
-  local usage_file="$STATE_ROOT/issue-$issue-usage.txt" started elapsed
-  started=$(date +%s)
-  agent_run_worker "$worktree" "$git_common_dir" "$agents_dir" "$result" "$usage_file" "$(issue_prompt "$issue" "$repository")" || exit_code=$?
-  elapsed=$(( $(date +%s) - started ))
+  local plan_usage="$STATE_ROOT/issue-$issue-plan-usage.txt" exec_usage="$STATE_ROOT/issue-$issue-usage.txt"
+  local plan_file="$STATE_ROOT/issue-$issue-plan.txt" attempt=0 max_retries started failure_context=''
+  max_retries=${AGENT_PLAN_MAX_RETRIES:-1}; [[ $max_retries =~ ^[0-9]+$ ]] || max_retries=1
+  while :; do
+    started=$(date +%s)
+    agent_run_stage plan "$worktree" "$git_common_dir" "$agents_dir" "$plan_file" "$plan_usage" "$(plan_prompt "$issue" "$repository" "$failure_context")" || true
+    agent_post_usage "$issue" "$worker" "$plan_usage" 0 "$(($(date +%s) - started))"
+    exit_code=0
+    started=$(date +%s)
+    agent_run_stage exec "$worktree" "$git_common_dir" "$agents_dir" "$result" "$exec_usage" "$(exec_prompt "$issue" "$repository" "$plan_file")" || exit_code=$?
+    agent_post_usage "$issue" "$worker" "$exec_usage" "$exit_code" "$(($(date +%s) - started))"
+    { [[ $exit_code -eq 0 ]] && grep -Fq 'AGENTIC_LOOP_RESULT=completed' "$result"; } && break
+    { [[ $exit_code -eq 0 ]] && grep -Fq 'AGENTIC_LOOP_RESULT=needs-input' "$result"; } && break
+    (( attempt >= max_retries )) && break
+    attempt=$((attempt + 1))
+    failure_context=$(tail -c 2000 "$result" 2>/dev/null || true)
+    comment_issue "$issue" "<!-- agentic-loop:replan worker=$worker attempt=$attempt -->\nexec段が完了条件を満たさなかったため、flagshipモデルで計画を見直して再実行します（$attempt/$max_retries）。" || true
+  done
   kill "$heartbeat_pid" 2>/dev/null || true
   wait "$heartbeat_pid" 2>/dev/null || true
-  agent_post_usage "$issue" "$worker" "$usage_file" "$exit_code" "$elapsed"
   project_add_pull_requests "$branch"
   if [[ $exit_code -eq 0 ]] && grep -Fq 'AGENTIC_LOOP_RESULT=completed' "$result"; then
     IFS=$'\t' read -r merged_pr merged_oid < <(repo_api pulls --method GET -f state=closed -f head="${repository%%/*}:$branch" -f per_page=100 --jq 'map(select(.merged_at != null and .head.ref == "'"$branch"'")) | first | [.html_url, .head.sha] | @tsv' 2>/dev/null || true) || true

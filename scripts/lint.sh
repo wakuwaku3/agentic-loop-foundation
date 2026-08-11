@@ -110,6 +110,8 @@ grep -Fq -- '--sandbox workspace-write' bin/agentic-loop || { printf 'Unsafe Cod
 grep -Fq 'AGENT_PROVIDER' bin/agentic-loop || { printf 'AI provider is not selectable.\n' >&2; exit 1; }
 grep -Fq -- '--dangerously-skip-permissions' bin/agentic-loop || { printf 'Claude worker isolation is not configured.\n' >&2; exit 1; }
 grep -Fq 'agentic-loop:usage' bin/agentic-loop || { printf 'Token usage is not recorded for analysis.\n' >&2; exit 1; }
+grep -Fq -- '--sandbox read-only' bin/agentic-loop || { printf 'Plan stage does not run read-only.\n' >&2; exit 1; }
+grep -Fq 'AGENT_CODEX_PLAN_REASONING_EFFORT' bin/agentic-loop || { printf 'Plan and exec reasoning effort is not tiered.\n' >&2; exit 1; }
 if grep -Eq 'danger-full-access|OPENAI_API_KEY' bin/agentic-loop bin/agentic-loop-diagnose .agentic-loop/diagnose-codebase.sh install.sh scripts/install-target.sh; then
   printf 'Forbidden Codex execution or API-key billing configuration.\n' >&2
   exit 1
