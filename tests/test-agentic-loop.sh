@@ -99,8 +99,19 @@ fi
 sleep "${FAKE_CODEX_SLEEP:-0}"
 printf '%s\n' "${FAKE_CODEX_RESULT:-AGENTIC_LOOP_RESULT=completed}" > "$output"
 FAKE_CODEX
-chmod +x "$FAKE_BIN/gh" "$FAKE_BIN/codex"
-export PATH="$FAKE_BIN:$PATH" FAKE_GH_ROOT
+cat > "$FAKE_BIN/systemctl" <<'FAKE_SYSTEMCTL'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >> "$FAKE_GH_ROOT/systemctl-calls"
+FAKE_SYSTEMCTL
+cat > "$FAKE_BIN/systemd-escape" <<'FAKE_SYSTEMD_ESCAPE'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ ${1:-} == --path && $# == 2 ]] || exit 2
+printf '%s\n' "${2#/}" | tr '/' '-'
+FAKE_SYSTEMD_ESCAPE
+chmod +x "$FAKE_BIN/gh" "$FAKE_BIN/codex" "$FAKE_BIN/systemctl" "$FAKE_BIN/systemd-escape"
+export PATH="$FAKE_BIN:$PATH" FAKE_GH_ROOT XDG_CONFIG_HOME="$TEST_ROOT/config"
 
 new_repository() {
   local name=$1 target bare
@@ -140,6 +151,29 @@ AGENTIC_LOOP_SOURCE="$PROJECT_ROOT" AGENTIC_LOOP_TARGET="$target" AGENTIC_LOOP_S
 [[ -f $target/docs/policies/github-language.md ]] || fail 'init did not install the GitHub language policy'
 assert_contains "$target/AGENTS.md" 'GitHub日本語運用ポリシー' 'installed agent instructions did not require Japanese GitHub content'
 assert_contains "$target/.agents/skills/submit-requirement/SKILL.md" 'in Japanese' 'installed submission skill did not require Japanese GitHub content'
+timer="$XDG_CONFIG_HOME/systemd/user/agentic-loop-main-sync-$(printf '%s' "${target#/}" | tr '/' '-').timer"
+service=${timer%.timer}.service
+[[ -f $timer && -f $service ]] || fail 'install did not create the periodic main update units'
+assert_contains "$timer" 'OnUnitActiveSec=15min' 'main update timer does not run every 15 minutes'
+assert_contains "$service" "ExecStart=\"$target/.agentic-loop/update-main.sh\" sync \"$target\"" 'main update service targets the installed main worktree'
+assert_contains "$FAKE_GH_ROOT/systemctl-calls" "enable --now $(basename "$timer")" 'install did not enable the main update timer'
+git -C "$target" add .
+git -C "$target" commit --quiet -m install
+git -C "$target" push --quiet
+
+publisher="$TEST_ROOT/publisher"
+git clone --quiet --branch main "$TEST_ROOT/installed-project.git" "$publisher"
+git -C "$publisher" config user.name Test
+git -C "$publisher" config user.email test@example.invalid
+printf 'remote update\n' > "$publisher/remote.txt"
+git -C "$publisher" add remote.txt
+git -C "$publisher" commit --quiet -m update
+git -C "$publisher" push --quiet
+"$target/.agentic-loop/update-main.sh" sync "$target"
+[[ -f $target/remote.txt ]] || fail 'periodic updater did not fast-forward main'
+printf 'local work\n' > "$target/local.txt"
+if "$target/.agentic-loop/update-main.sh" sync "$target" >/dev/null 2>&1; then fail 'periodic updater accepted a dirty main worktree'; fi
+rm "$target/local.txt"
 AGENTIC_LOOP_SOURCE="$PROJECT_ROOT" AGENTIC_LOOP_TARGET="$target" AGENTIC_LOOP_SKIP_START=1 "$PROJECT_ROOT/install.sh"
 project_creates=$(grep -c $'project create' "$FAKE_GH_ROOT/calls" || true)
 [[ $project_creates -eq 1 ]] || { sed -n '1,120p' "$FAKE_GH_ROOT/calls" >&2; fail "reinstall created the Project $project_creates times"; }
@@ -156,9 +190,9 @@ grep -Fq 'running' <<< "$status_output" || fail 'status did not show the supervi
 status_output=$("$target/bin/agentic-loop" status)
 grep -Fq 'stopped' <<< "$status_output" || fail 'stop did not drain the supervisor'
 
-# Commit the installed runtime so worker worktrees start from a realistic default branch.
+# Commit the runtime configuration so worker worktrees start from a realistic default branch.
 git -C "$target" add .
-git -C "$target" commit --quiet -m install
+git -C "$target" commit --quiet -m configure
 git -C "$target" push --quiet
 state_key=$(printf '%s' "$target" | tr '/' '_')
 state="$FAKE_GH_ROOT/$state_key.state"
