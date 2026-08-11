@@ -299,17 +299,20 @@ systemd_path_value() {
 }
 
 install_supervisor_unit() {
-  local unit_dir unit_file escaped_root escaped_program
+  local unit_dir unit_file escaped_root escaped_program service_path escaped_path
   unit_dir="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
   unit_file="$unit_dir/$(supervisor_unit_name)"
   escaped_root=$(systemd_path_value "$REPO_ROOT") || fail 'repository path cannot be encoded safely for systemd'
   escaped_program=$(systemd_path_value "$SCRIPT_ROOT") || fail 'program path cannot be encoded safely for systemd'
+  service_path="$(dirname "$(command -v codex)"):$(dirname "$(command -v gh)"):$(dirname "$(command -v git)"):/usr/local/bin:/usr/bin:/bin"
+  escaped_path=$(systemd_path_value "$service_path") || fail 'command PATH cannot be encoded safely for systemd'
   mkdir -p "$unit_dir"
   {
     printf '%s\n' '[Unit]' 'Description=Agentic Loop repository supervisor' 'After=network-online.target'
     printf '\n%s\n' '[Service]' 'Type=simple'
     printf 'WorkingDirectory=%s\n' "$escaped_root"
     printf 'ExecStart=%s/bin/agentic-loop _service\n' "$escaped_program"
+    printf 'Environment=PATH=%s\n' "$escaped_path"
     printf '%s\n' 'Restart=on-failure' 'RestartSec=5s'
     printf '\n%s\n' '[Install]' 'WantedBy=default.target'
   } > "$unit_file"
