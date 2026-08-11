@@ -34,12 +34,15 @@ Codexで `$submit-requirement` に続けて、達成したいことを自然言�
 
 > `$submit-requirement 商品を検索できるWebアプリを作って`
 
-継続処理する要求は対象リポジトリのIssueに `agent:queued` Labelを付けます。制御用CLIは次の3つだけです。
+継続処理する要求は対象リポジトリのIssueに `agent:queued` Labelを付けます。制御用CLIは次の4つです。
 
 ```sh
 bin/agentic-loop start
 bin/agentic-loop stop
 bin/agentic-loop status
+bin/agentic-loop doctor
 ```
+
+`doctor` はGitHub認証とrepository権限、origin/default branch、Codex CLI、Devbox、hooks、Supervisor、systemd service/timer、GitHub Project、設定、残存worktree/branch/logを読み取り専用で検査します。各結果を成功・警告・失敗に分類し、影響と復旧方法を日本語で表示します。必須条件の失敗がある場合だけ終了code 1、警告だけなら0です。自動監視では `bin/agentic-loop doctor --format json` を使用できます。診断はtoken本体を表示せず、修復は `setup`、`start`、install再実行などの明示的な別操作で行います。
 
 既定では30秒poll、最大2件を並列実行します。設定、状態遷移、lease復旧、Projectの制約、トラブルシュートは [Issueキュー運用](docs/operations/issue-queue.md)、設計上の判断は [0001](docs/decisions/0001-minimal-foundation.md) と [0002](docs/decisions/0002-github-issue-queue.md) に記録しています。

@@ -14,6 +14,17 @@ Project APIでlink、`Agent status` single-select、Issue item追加に加え、
 bin/agentic-loop start
 bin/agentic-loop status
 bin/agentic-loop stop
+bin/agentic-loop doctor
+```
+
+### 事前診断
+
+`bin/agentic-loop doctor` は、`status` の稼働状況表示より広い導入・復旧向けの読み取り専用診断である。GitHub認証とrepository権限、origin/default branch、Codex CLI、Devbox、hooks、Supervisor、systemd user service/timer、Project設定、設定値、残存worktree/branch/logを検査し、成功・警告・失敗、影響、復旧方法を日本語で出力する。Projectとtimerは任意の可視化・自動運用機能なので利用不能時は警告とし、GitHub Issueキュー、固定検証環境、hooks、Supervisorなど処理に必須の条件は失敗とする。
+
+通常形式と `--format json` はどちらも状態を変更せず、token本体や認証commandの詳細を表示しない。JSONの `schema_version` は1で、`summary` と `checks` を返す。必須診断に失敗がなければ終了code 0、1件以上あれば1、引数不正は2である。警告だけでは自動監視を失敗させない。修復は診断から自動実行せず、表示された `setup`、`start`、install再実行などを利用者が別途明示して実行する。
+
+```sh
+bin/agentic-loop doctor --format json
 ```
 
 利用者は要求をIssueとして登録し、`agent:queued` を付ける。取得順はcritical、high、medium、low、優先度なしで、同じ優先度では作成日時が古いIssueを先にする。複数のpriority LabelがあるIssueは最も高いものを使う。依存関係はIssue本文に明記する。回答は `agent:needs-input` のIssueへコメントする。

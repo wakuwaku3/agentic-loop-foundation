@@ -34,7 +34,7 @@ if [[ $* == *--slurp* && $* == *--jq* ]]; then
   exit 1
 fi
 case "${1:-} ${2:-}" in
-  'auth status') exit 0 ;;
+  'auth status') [[ ${FAKE_GH_AUTH_FAIL:-0} == 0 ]] ;;
   'api repos/'*)
     [[ $2 != */ ]] || { printf 'HTTP 404: Not Found\n' >&2; exit 1; }
     rest_failures="$FAKE_GH_ROOT/$key.rest-failures"
@@ -103,13 +103,16 @@ case "${1:-} ${2:-}" in
       elif [[ $* == *head=* && $* == *html_url* ]]; then printf 'https://github.example/%s/pull/6\n' "$slug"
       elif [[ $form_state == all && $* == *html_url* ]]; then printf 'https://github.example/%s/pull/1\nhttps://github.example/%s/pull/2\n' "$slug" "$slug"
       elif [[ $* == *html_url* ]]; then printf 'https://github.example/%s/pull/6\n' "$slug"; fi
-    elif [[ -z $endpoint ]]; then printf 'main\n'
+    elif [[ -z $endpoint ]]; then
+      if [[ $* == *permissions.push* ]]; then printf 'true\n'; else printf 'main\n'; fi
     fi ;;
   'api rate_limit')
     printf '%s\t%s\n' "${FAKE_GRAPHQL_REMAINING:-5000}" "${FAKE_GRAPHQL_RESET:-$(($(date +%s) + 3600))}"
     ;;
   'api graphql')
-    if [[ $* == *createProjectV2View* ]]; then
+    if [[ $* == *'fields(first: 100)'* ]]; then
+      [[ ${FAKE_PROJECT_FAIL:-0} == 0 ]] && printf 'true\n'
+    elif [[ $* == *createProjectV2View* ]]; then
       name=''
       for ((i=1; i<=$#; i++)); do [[ ${!i} == name=* ]] && name=${!i#name=}; done
       id="PV_$(printf '%s' "$name" | tr ' ' '_')"
@@ -135,7 +138,7 @@ case "${1:-} ${2:-}" in
     fi
     url=''; for ((i=1; i<=$#; i++)); do [[ ${!i} == --url ]] && { j=$((i+1)); url=${!j}; }; done
     grep -Fxq -- "$url" "$project_items" 2>/dev/null || printf '%s\n' "$url" >> "$project_items" ;;
-  'project view') printf 'PVT_fake\n' ;;
+  'project view') [[ ${FAKE_PROJECT_FAIL:-0} == 0 ]] && printf 'PVT_fake\n' ;;
   'project field-list') printf 'PVTF_fake\n' ;;
   'pr list')
     if [[ $* == *'--state merged'* ]]; then
@@ -252,7 +255,11 @@ set -euo pipefail
 [[ ${1:-} == --path && $# == 2 ]] || exit 2
 printf '%s\n' "${2#/}" | tr '/' '-'
 FAKE_SYSTEMD_ESCAPE
-chmod +x "$FAKE_BIN/gh" "$FAKE_BIN/codex" "$FAKE_BIN/systemctl" "$FAKE_BIN/systemd-escape"
+cat > "$FAKE_BIN/devbox" <<'FAKE_DEVBOX'
+#!/usr/bin/env bash
+exit 0
+FAKE_DEVBOX
+chmod +x "$FAKE_BIN/gh" "$FAKE_BIN/codex" "$FAKE_BIN/systemctl" "$FAKE_BIN/systemd-escape" "$FAKE_BIN/devbox"
 export PATH="$FAKE_BIN:$PATH" FAKE_GH_ROOT XDG_CONFIG_HOME="$TEST_ROOT/config"
 
 new_repository() {
@@ -442,9 +449,52 @@ assert_contains "$FAKE_GH_ROOT/systemctl-calls" "enable $(basename "$supervisor_
 [[ $(cat "$(git -C "$target" rev-parse --absolute-git-dir)/agentic-loop/supervisor.pid") == "$first_pid" ]] || fail 'start duplicated the supervisor'
 status_output=$("$target/bin/agentic-loop" status)
 grep -Fq 'running' <<< "$status_output" || fail 'status did not show the supervisor'
+
+# Doctor is read-only, reports a healthy installation, and provides valid JSON.
+before_doctor=$(git -C "$target" status --porcelain)
+doctor_output=$("$target/bin/agentic-loop" doctor)
+grep -Fq '[成功] GitHub認証' <<< "$doctor_output" || fail 'doctor did not report healthy GitHub authentication'
+grep -Fq '失敗=0' <<< "$doctor_output" || fail 'doctor did not report the healthy state'
+doctor_json=$("$target/bin/agentic-loop" doctor --format json)
+[[ $doctor_json == '{"schema_version":1,"summary":{"success":'*'"failure":0},"checks":['*']}' ]] || fail 'doctor JSON is not machine-readable'
+[[ $(git -C "$target" status --porcelain) == "$before_doctor" ]] || fail 'doctor modified the repository'
+
+if FAKE_GH_AUTH_FAIL=1 "$target/bin/agentic-loop" doctor >/tmp/agentic-loop-doctor-auth.$$ 2>/dev/null; then fail 'doctor accepted missing GitHub authentication'; fi
+grep -Fq '[失敗] GitHub認証' /tmp/agentic-loop-doctor-auth.$$ || fail 'doctor did not classify missing authentication'
+rm -f /tmp/agentic-loop-doctor-auth.$$
+
+FAKE_PROJECT_FAIL=1 "$target/bin/agentic-loop" doctor > /tmp/agentic-loop-doctor-project.$$ || fail 'optional Project drift failed doctor'
+grep -Fq '[警告] GitHub Project同期' /tmp/agentic-loop-doctor-project.$$ || fail 'doctor did not warn about Project drift'
+rm -f /tmp/agentic-loop-doctor-project.$$
+
+mv "$diagnosis_timer" "$diagnosis_timer.missing"
+"$target/bin/agentic-loop" doctor > /tmp/agentic-loop-doctor-timer.$$ || fail 'optional missing timer failed doctor'
+grep -Fq '[警告] 定期診断timer' /tmp/agentic-loop-doctor-timer.$$ || fail 'doctor did not warn about a missing timer'
+mv "$diagnosis_timer.missing" "$diagnosis_timer"
+rm -f /tmp/agentic-loop-doctor-timer.$$
+
+residual_root="$(dirname "$target")/$(basename "$target")-worktrees"
+git -C "$target" branch agent/issue-999
+git -C "$target" worktree add --quiet "$residual_root/issue-999" agent/issue-999
+"$target/bin/agentic-loop" doctor > /tmp/agentic-loop-doctor-residual.$$ || fail 'residual state warning failed doctor'
+grep -Fq '[警告] 残存状態' /tmp/agentic-loop-doctor-residual.$$ || fail 'doctor did not warn about a residual worktree'
+git -C "$target" worktree remove "$residual_root/issue-999"
+git -C "$target" branch -d agent/issue-999 >/dev/null
+rm -f /tmp/agentic-loop-doctor-residual.$$
+
 "$target/bin/agentic-loop" stop
 status_output=$("$target/bin/agentic-loop" status)
 grep -Fq 'stopped' <<< "$status_output" || fail 'stop did not drain the supervisor'
+if "$target/bin/agentic-loop" doctor > /tmp/agentic-loop-doctor-stopped.$$; then fail 'doctor accepted a stopped Supervisor'; fi
+grep -Fq '[失敗] Supervisor' /tmp/agentic-loop-doctor-stopped.$$ || fail 'doctor did not classify a stopped Supervisor'
+rm -f /tmp/agentic-loop-doctor-stopped.$$
+
+cp "$target/.agentic-loop/config" "$target/.agentic-loop/config.valid"
+printf 'MAX_WORKERS=invalid\n' > "$target/.agentic-loop/config"
+if "$target/bin/agentic-loop" doctor > /tmp/agentic-loop-doctor-config.$$; then fail 'doctor accepted invalid configuration'; fi
+grep -Fq '[失敗] 設定ファイル' /tmp/agentic-loop-doctor-config.$$ || fail 'doctor did not classify invalid configuration'
+mv "$target/.agentic-loop/config.valid" "$target/.agentic-loop/config"
+rm -f /tmp/agentic-loop-doctor-config.$$
 
 # A PID reused by an unrelated process cannot keep a stale supervisor lock alive.
 state_root="$(git -C "$target" rev-parse --absolute-git-dir)/agentic-loop"

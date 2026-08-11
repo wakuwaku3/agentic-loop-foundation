@@ -23,14 +23,17 @@ GRAPHQL_RESERVE=500
 RATE_LIMIT_CACHE_SECONDS=15
 API_RETRY_ATTEMPTS=3
 API_RETRY_BASE_SECONDS=1
+CONFIG_ERROR=''
 
 load_config() {
   local line key value
   [[ -r $CONFIG_FILE ]] || return 0
   while IFS= read -r line || [[ -n $line ]]; do
     [[ -z $line || $line == \#* ]] && continue
-    [[ $line =~ ^(POLL_SECONDS|MAX_WORKERS|LEASE_SECONDS|STOP_TIMEOUT|STALE_DAYS|GRAPHQL_RESERVE|RATE_LIMIT_CACHE_SECONDS|API_RETRY_ATTEMPTS|API_RETRY_BASE_SECONDS)=([0-9]+)$ ]] ||
-      fail "invalid configuration line: $line"
+    if [[ ! $line =~ ^(POLL_SECONDS|MAX_WORKERS|LEASE_SECONDS|STOP_TIMEOUT|STALE_DAYS|GRAPHQL_RESERVE|RATE_LIMIT_CACHE_SECONDS|API_RETRY_ATTEMPTS|API_RETRY_BASE_SECONDS)=([0-9]+)$ ]]; then
+      CONFIG_ERROR="invalid configuration line: $line"
+      return 1
+    fi
     key=${BASH_REMATCH[1]}; value=${BASH_REMATCH[2]}
     printf -v "$key" '%s' "$value"
   done < "$CONFIG_FILE"
@@ -60,17 +63,18 @@ repo_name() {
 }
 state_label() { printf 'agent:%s' "$1"; }
 
-load_config
+load_config || { [[ ${1:-} == doctor ]] || fail "$CONFIG_ERROR"; }
 
 usage() {
   cat >&2 <<EOF
-Usage: $PROGRAM_NAME {setup|sync-issue ISSUE|start|stop|status}
+Usage: $PROGRAM_NAME {setup|sync-issue ISSUE|start|stop|status|doctor [--format json]}
 
   setup   Create or reuse this repository's labels and Project
   sync-issue  Add one Issue to the Project now, or queue a retry
   start   Start one background supervisor for this repository
   stop    Stop claiming work and drain running workers
   status  Show the supervisor and running Issues
+  doctor  Read-only checks with remediation guidance (exit 1 on failures)
 EOF
 }
 
@@ -391,6 +395,140 @@ cmd_status() {
   local issues
   issues=$(running_issues)
   if [[ -n $issues ]]; then printf 'Running Issues:\n%s\n' "$issues"; else say 'Running Issues: none'; fi
+}
+
+doctor_json_escape() {
+  local value=$1
+  value=${value//\\/\\\\}; value=${value//\"/\\\"}
+  value=${value//$'\n'/\\n}; value=${value//$'\r'/\\r}; value=${value//$'\t'/\\t}
+  printf '%s' "$value"
+}
+
+doctor_add() {
+  local level=$1 name=$2 impact=$3 recovery=$4
+  DOCTOR_LEVELS+=("$level"); DOCTOR_NAMES+=("$name")
+  DOCTOR_IMPACTS+=("$impact"); DOCTOR_RECOVERIES+=("$recovery")
+  case $level in warning) DOCTOR_WARNINGS=$((DOCTOR_WARNINGS + 1)) ;; failure) DOCTOR_FAILURES=$((DOCTOR_FAILURES + 1)) ;; esac
+}
+
+doctor_positive_config() {
+  local name=$1 value=$2
+  [[ $value =~ ^[1-9][0-9]*$ ]] || doctor_add failure "設定値: $name" 'Supervisorを安全な値で実行できません。' "docs/operations/issue-queue.md を確認し、$name を正の整数に修正してください。"
+}
+
+doctor_non_negative_config() {
+  local name=$1 value=$2
+  [[ $value =~ ^[0-9]+$ ]] || doctor_add failure "設定値: $name" 'Supervisorを安全な値で実行できません。' "docs/operations/issue-queue.md を確認し、$name を0以上の整数に修正してください。"
+}
+
+doctor_collect() {
+  local origin='' default_branch='' hooks='' project_owner='' project_number='' project_id='' project_ok='' repository='' owner='' name='' unit_dir unit issue_worktrees='' agent_branches='' log_files=''
+  if [[ -n $CONFIG_ERROR ]]; then
+    doctor_add failure '設定ファイル' '設定を解釈できないためSupervisorを安全に起動できません。' '.agentic-loop/config を documented KEY=INTEGER 形式に修正してください。'
+  else
+    doctor_positive_config POLL_SECONDS "$POLL_SECONDS"; doctor_positive_config MAX_WORKERS "$MAX_WORKERS"
+    doctor_positive_config LEASE_SECONDS "$LEASE_SECONDS"; doctor_non_negative_config STOP_TIMEOUT "$STOP_TIMEOUT"
+    doctor_non_negative_config STALE_DAYS "$STALE_DAYS"; doctor_non_negative_config GRAPHQL_RESERVE "$GRAPHQL_RESERVE"
+    doctor_positive_config RATE_LIMIT_CACHE_SECONDS "$RATE_LIMIT_CACHE_SECONDS"; doctor_positive_config API_RETRY_ATTEMPTS "$API_RETRY_ATTEMPTS"
+    doctor_non_negative_config API_RETRY_BASE_SECONDS "$API_RETRY_BASE_SECONDS"
+    (( DOCTOR_FAILURES == 0 )) && doctor_add success '設定ファイル' '設定値を安全に解釈できます。' '対応は不要です。'
+  fi
+
+  if command -v git >/dev/null 2>&1 && git -C "$REPO_ROOT" rev-parse --git-dir >/dev/null 2>&1; then
+    doctor_add success 'Git repository' '対象repositoryを参照できます。' '対応は不要です。'
+  else doctor_add failure 'Git repository' 'origin、branch、worktreeを診断できません。' 'gitを導入し、Git repository内で実行してください。'; fi
+  if origin=$(git -C "$REPO_ROOT" remote get-url origin 2>/dev/null) && [[ -n $origin ]]; then
+    doctor_add success 'origin' 'originが設定されています。' '対応は不要です。'
+  else doctor_add failure 'origin' 'GitHub repositoryを特定できません。' 'git remote add origin <GitHub repository URL> を実行してください。'; fi
+
+  if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
+    doctor_add success 'GitHub認証' 'GitHub CLIの認証を確認しました（token本体は表示しません）。' '対応は不要です。'
+    if [[ $(gh api "repos/$(repo_name)" --jq '.permissions.push // false' 2>/dev/null) == true ]]; then
+      doctor_add success 'repository権限' '対象repositoryのREST APIをread/writeできます。' '対応は不要です。'
+    else doctor_add failure 'repository権限' 'Issue、PR、Labelを更新できません。' 'gh auth refresh で対象repositoryのread/write権限を付与してください。'; fi
+  else doctor_add failure 'GitHub認証' 'IssueキューとPR lifecycleを利用できません。' 'gh auth login を実行し、対象repositoryのread/write権限を付与してください。'; fi
+
+  default_branch=$(gh repo view --json defaultBranchRef --jq '.defaultBranchRef.name' 2>/dev/null || true)
+  if [[ -n $default_branch && $default_branch == main ]]; then doctor_add success 'default branch' 'default branchはmainです。' '対応は不要です。'
+  elif [[ -n $default_branch ]]; then doctor_add warning 'default branch' "default branchがmainではありません（$default_branch）。main前提の同期機能は利用できません。" 'repositoryのdefault branchと運用方針を確認してください。'
+  else doctor_add failure 'default branch' 'default branchを確認できません。' 'GitHubへのrepositoryアクセスとoriginを確認してください。'; fi
+
+  if command -v codex >/dev/null 2>&1 && codex exec --help 2>/dev/null | grep -Fq -- '--add-dir'; then doctor_add success 'Codex CLI' 'workspace-write workerを起動できます。' '対応は不要です。'
+  else doctor_add failure 'Codex CLI' 'Issue workerを安全なsandboxで起動できません。' 'Codex CLIを導入または更新し、codex loginを実行してください。'; fi
+  if command -v devbox >/dev/null 2>&1; then doctor_add success 'Devbox' '固定環境の共通検証入口を利用できます。' '対応は不要です。'
+  else doctor_add failure 'Devbox' '`devbox run --pure check` を実行できません。' 'https://www.jetify.com/devbox/docs/installing_devbox/ を参照してDevboxを導入してください。'; fi
+
+  hooks=$(git -C "$REPO_ROOT" config --get core.hooksPath 2>/dev/null || true)
+  if [[ $hooks == .githooks && -x $REPO_ROOT/.githooks/pre-commit && -x $REPO_ROOT/.githooks/pre-push ]]; then doctor_add success 'Git hooks' 'secret guardとpush前検証が有効です。' '対応は不要です。'
+  else doctor_add failure 'Git hooks' '秘密混入または未検証pushを防止できません。' 'git config core.hooksPath .githooks を実行し、install.shを再実行してください。'; fi
+
+  if pid_alive; then doctor_add success 'Supervisor' 'Issueキューを処理中です。' '対応は不要です。'
+  else doctor_add failure 'Supervisor' 'queued Issueが処理されません。' 'bin/agentic-loop start を実行してください。'; fi
+
+  unit_dir="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+  if command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1; then
+    unit=$(supervisor_unit_name)
+    if [[ -f $unit_dir/$unit ]]; then doctor_add success 'systemd Supervisor service' 'Supervisorの再起動設定があります。' '対応は不要です。'
+    else doctor_add warning 'systemd Supervisor service' '予期しない終了後の自動復旧がありません。' 'bin/agentic-loop start を実行してください。'; fi
+    if compgen -G "$unit_dir/agentic-loop-main-sync-*.timer" >/dev/null; then doctor_add success 'main同期timer' 'default branchの定期同期が設定されています。' '対応は不要です。'; else doctor_add warning 'main同期timer' 'local mainが自動追従しません。' 'install.shを再実行してください。'; fi
+    if compgen -G "$unit_dir/agentic-loop-diagnosis-*.timer" >/dev/null; then doctor_add success '定期診断timer' 'コードベースの定期診断が設定されています。' '対応は不要です。'; else doctor_add warning '定期診断timer' '定期的なdrift診断が実行されません。' 'install.shを再実行してください。'; fi
+  else doctor_add warning 'systemd user manager' '自動起動とtimerを利用できませんが、手動CLIは利用できます。' 'systemd user sessionを有効化するか、bin/agentic-loop startを手動実行してください。'; fi
+
+  if [[ -r $STATE_ROOT/project.env ]]; then
+    while IFS='=' read -r unit project_number; do case $unit in PROJECT_OWNER) project_owner=$project_number ;; PROJECT_NUMBER) : ;; esac; done < "$STATE_ROOT/project.env"
+    project_number=$(sed -n 's/^PROJECT_NUMBER=//p' "$STATE_ROOT/project.env" | head -n 1)
+    project_id=$(gh project view "$project_number" --owner "$project_owner" --format json --jq .id 2>/dev/null || true)
+    repository=$(repo_name 2>/dev/null || true); owner=${repository%%/*}; name=${repository#*/}
+    if [[ -n $project_id && $owner != "$repository" && -n $name ]]; then
+      project_ok=$(gh api graphql -f query='query($project: ID!, $owner: String!, $name: String!) {
+        node(id: $project) { ... on ProjectV2 {
+          fields(first: 100) { nodes { ... on ProjectV2SingleSelectField { name options { name } } } }
+          views(first: 100) { nodes { name filter } }
+        } }
+        repository(owner: $owner, name: $name) { projectsV2(first: 100) { nodes { id } } }
+      }' -F project="$project_id" -f owner="$owner" -f name="$name" --jq '
+        .data.node.id as $id |
+        (.data.repository.projectsV2.nodes | any(.id == $id)) and
+        (.data.node.fields.nodes | any(.name == "Agent status" and (([.options[].name] | sort) == (["Inbox","Queued","Running","Needs input","In review","Done","Failed","Stale"] | sort)))) and
+        (.data.node.views.nodes | any(.name == "Open Issues" and .filter == "is:issue is:open")) and
+        (.data.node.views.nodes | any(.name == "Closed Issues" and .filter == "is:issue is:closed")) and
+        (.data.node.views.nodes | any(.name == "Open PRs" and .filter == "is:pr is:open")) and
+        (.data.node.views.nodes | any(.name == "Closed PRs" and .filter == "is:pr is:closed"))
+      ' 2>/dev/null || true)
+    fi
+    if [[ $project_ok == true ]]; then
+      doctor_add success 'GitHub Project同期' 'repository link、Agent status field、4つのView filterが同期しています。' '対応は不要です。'
+    else doctor_add warning 'GitHub Project同期' '任意の可視化層を参照できません。Issue Labelキューは継続できます。' 'gh auth refresh -s project,read:project の後に bin/agentic-loop setup を実行してください。'; fi
+  else doctor_add warning 'GitHub Project同期' '任意のProject設定がありません。Issue Labelキューは継続できます。' 'bin/agentic-loop setup を実行してください。'; fi
+
+  issue_worktrees=$(git -C "$REPO_ROOT" worktree list --porcelain 2>/dev/null | awk -v root="$WORKTREE_ROOT/issue-" '$1 == "worktree" && index($2, root) == 1 {print $2}' | head -n 3)
+  agent_branches=$(git -C "$REPO_ROOT" for-each-ref --format='%(refname:short)' refs/heads/agent/ 2>/dev/null | head -n 3)
+  log_files=$(find "$STATE_ROOT/logs" -type f -size +0c -print -quit 2>/dev/null || true)
+  if [[ -n $issue_worktrees || -n $agent_branches || -n $log_files ]]; then doctor_add warning '残存状態' 'worktree、agent branch、またはlogが残っています。実行中のworker由来か確認が必要です。' 'bin/agentic-loop status と docs/operations/issue-queue.md のcleanup手順を確認してください。'
+  else doctor_add success '残存状態' '不要なworktree、agent branch、非空logは見つかりません。' '対応は不要です。'; fi
+}
+
+cmd_doctor() {
+  local format=text index separator=''
+  [[ $# -eq 1 ]] || { [[ $# -eq 3 && $2 == --format && $3 == json ]] || { usage; return 2; }; format=json; }
+  declare -ga DOCTOR_LEVELS=() DOCTOR_NAMES=() DOCTOR_IMPACTS=() DOCTOR_RECOVERIES=()
+  declare -g DOCTOR_WARNINGS=0 DOCTOR_FAILURES=0
+  doctor_collect
+  if [[ $format == json ]]; then
+    printf '{"schema_version":1,"summary":{"success":%d,"warning":%d,"failure":%d},"checks":[' "$(( ${#DOCTOR_LEVELS[@]} - DOCTOR_WARNINGS - DOCTOR_FAILURES ))" "$DOCTOR_WARNINGS" "$DOCTOR_FAILURES"
+    for index in "${!DOCTOR_LEVELS[@]}"; do
+      printf '%s{"level":"%s","name":"%s","impact":"%s","recovery":"%s"}' "$separator" "${DOCTOR_LEVELS[$index]}" "$(doctor_json_escape "${DOCTOR_NAMES[$index]}")" "$(doctor_json_escape "${DOCTOR_IMPACTS[$index]}")" "$(doctor_json_escape "${DOCTOR_RECOVERIES[$index]}")"
+      separator=,
+    done
+    printf ']}\n'
+  else
+    for index in "${!DOCTOR_LEVELS[@]}"; do
+      case ${DOCTOR_LEVELS[$index]} in success) unit='成功' ;; warning) unit='警告' ;; failure) unit='失敗' ;; esac
+      printf '[%s] %s\n  影響: %s\n  復旧: %s\n' "$unit" "${DOCTOR_NAMES[$index]}" "${DOCTOR_IMPACTS[$index]}" "${DOCTOR_RECOVERIES[$index]}"
+    done
+    printf '集計: 成功=%d 警告=%d 失敗=%d\n' "$(( ${#DOCTOR_LEVELS[@]} - DOCTOR_WARNINGS - DOCTOR_FAILURES ))" "$DOCTOR_WARNINGS" "$DOCTOR_FAILURES"
+  fi
+  (( DOCTOR_FAILURES == 0 ))
 }
 
 set_issue_state() {
@@ -726,6 +864,7 @@ main() {
     start) [[ $# -eq 1 ]] || fail 'start takes no arguments'; cmd_start ;;
     stop) [[ $# -eq 1 ]] || fail 'stop takes no arguments'; cmd_stop ;;
     status) [[ $# -eq 1 ]] || fail 'status takes no arguments'; cmd_status ;;
+    doctor) cmd_doctor "$@" ;;
     _service) [[ $# -eq 1 ]] || exit 2; cmd_service ;;
     _supervise) supervise ;;
     _worker) [[ $# -eq 3 ]] || exit 2; worker "$2" "$3" ;;
