@@ -16,6 +16,9 @@ readonly DIAGNOSIS_LABEL=diagnosis
 # Grace before a lock without a published pid is treated as stale, so two
 # concurrent starts cannot tear down each other's fresh lock and double-run.
 readonly SUPERVISOR_LOCK_GRACE_SECONDS=10
+# How long the supervisor pauses claiming after a worker hits a token/rate limit,
+# before it re-checks whether the provider budget has recovered.
+readonly EXHAUSTION_PAUSE_SECONDS=1800
 
 cd "$REPO_ROOT"
 
@@ -187,6 +190,36 @@ budget_note_pause() {
   fi
   [[ -e $marker ]] || { mkdir -p "$STATE_ROOT"; : > "$marker"; say '週次利用率がreserve閾値を超えたため、緊急枠を確保するためIssueのclaimを一時停止します。' >&2; }
   return 1
+}
+
+# Detect whether a stage failed because the provider's token/rate budget is spent
+# (a usage-limit signature, or a non-zero exit with no result), rather than the
+# task being genuinely unworkable. Such a stop must not fail the Issue.
+agent_result_is_exhausted() {
+  local result_file=$1 exit_code=$2
+  [[ -r $result_file ]] && grep -qiE 'usage limit|rate.?limit|overloaded|too many requests|(^|[^0-9])429([^0-9]|$)|insufficient_quota|quota exceeded|credit balance' "$result_file" && return 0
+  (( exit_code != 0 )) && [[ ! -s $result_file ]] && return 0
+  return 1
+}
+
+# Record that the provider budget is exhausted so the supervisor stops claiming
+# until it likely recovers, instead of burning Issues into agent:failed.
+agent_mark_exhausted() {
+  mkdir -p "$STATE_ROOT"
+  printf '%s\n' "$(( $(date +%s) + EXHAUSTION_PAUSE_SECONDS ))" > "$STATE_ROOT/agent-exhausted"
+}
+
+# Pause claiming while a recent worker reported an exhausted budget; resume once
+# the pause window elapses so recovery is automatic.
+exhaustion_note_pause() {
+  local marker="$STATE_ROOT/agent-exhausted" resume now
+  [[ -r $marker ]] || return 0
+  read -r resume < "$marker" || true
+  now=$(date +%s)
+  if [[ $resume =~ ^[0-9]+$ ]] && (( now < resume )); then return 1; fi
+  rm -f "$marker"
+  say 'token/rate limitの回復待ち時間が経過したため、Issueのclaimを再開します。' >&2
+  return 0
 }
 # Run one worker stage confined to the dedicated worktree. stage=plan only
 # investigates and returns a plan (read-only for Codex); stage=exec implements
@@ -1036,16 +1069,25 @@ attempt_cooldown_elapsed() {
 # exhausted token budget or a killed session) is retried instead of parked.
 # Only Issues tracked by claim are managed; those that reach MAX_ATTEMPTS stay
 # agent:failed for human review, and untracked/external failures are left alone.
+# Automatically manage every failed Issue: retry it (bounded by MAX_ATTEMPTS with
+# a cooldown) so a transient failure recovers without human action, and once the
+# attempts are exhausted, close it as genuinely unresolvable instead of parking
+# it in agent:failed forever. Pre-existing/untracked failures (attempt count 0)
+# are retried too.
 retry_failed() {
   local issue count
   while IFS= read -r issue; do
     [[ $issue =~ ^[0-9]+$ ]] || continue
-    [[ -r $(attempts_file "$issue") ]] || continue
     count=$(attempt_count "$issue")
-    (( count >= MAX_ATTEMPTS )) && continue
+    if (( count >= MAX_ATTEMPTS )); then
+      comment_issue "$issue" "<!-- agentic-loop:unresolved attempts=$count -->\n$count 回試行しても解決できなかったため、解決不能とみなしてIssueをcloseします。再開が必要なら \`agent:queued\` を付け直してください。" || true
+      repo_api "issues/$issue" --method PATCH -f state=closed >/dev/null 2>&1 || true
+      clear_attempts "$issue"
+      continue
+    fi
     attempt_cooldown_elapsed "$issue" || continue
     set_issue_state "$issue" queued || continue
-    comment_issue "$issue" "<!-- agentic-loop:retry attempt=$count -->\n一時的な失敗の可能性があるため自動的に再試行キューへ戻します（試行 $count/$MAX_ATTEMPTS）。上限に達した場合は agent:failed のまま保持し、人手の確認に委ねます。" || true
+    comment_issue "$issue" "<!-- agentic-loop:retry attempt=$count -->\n一時的な失敗の可能性があるため自動的に再試行キューへ戻します（試行 $count/$MAX_ATTEMPTS）。上限に達したら解決不能とみなしてcloseします。" || true
   done < <(repo_api issues --method GET -f state=open -f labels="$(state_label failed)" -f per_page=100 --paginate --jq '.[] | select(.pull_request == null) | .number' 2>/dev/null)
 }
 
@@ -1095,7 +1137,7 @@ supervise() {
       reconcile_queued_categories
       triage_stale_queued
       retry_failed
-      if budget_note_pause; then
+      if exhaustion_note_pause && budget_note_pause; then
         while [[ $(worker_count) -lt $MAX_WORKERS ]]; do
           local issue worker
           issue=$(claim_next) || break
@@ -1121,7 +1163,7 @@ issue_prompt() {
   local issue=$1 repository=$2
   cat <<EOF
 $repository の GitHub Issue #$issue を、リポジトリの submit-requirement workflow に従って完了してください。
-Issueとそのコメントを要求として扱い、この専用worktreeだけで作業します。まず調査し、安全で可逆的な判断を行い、全検証とsecret guardを実行し、commit、push、PR作成、checksとreview feedbackの確認、不具合修正、mergeまで完遂します。既存のCodex loginとworkspace-write sandboxだけを使用し、別途課金される認証情報、有料の外部service、安全でないsandbox bypass、hook bypassは使用しません。GitHubのIssue、Label、comment、PR、checkなどRESTで可能なcore操作は \`gh api\` のREST endpointを使い、GraphQLはbest-effortのProjects操作だけに限定します。GitHubのIssue、PR、それらへのコメントとレビューは、コード、ログ、識別子、固有名詞、引用の必要な原文を除き、日本語で記述します。Issueに進捗と検証証跡をコメントします。人の判断が必要な重大な決定または回復不能な権限問題がある場合に限り、正確な質問をコメントし、最終応答を AGENTIC_LOOP_RESULT=needs-input で終えます。mergeと検証が完了した場合は AGENTIC_LOOP_RESULT=completed で、それ以外は安全に再試行できる失敗理由を説明し、AGENTIC_LOOP_RESULT=failed で終えます。
+Issueとそのコメントを要求として扱い、この専用worktreeだけで作業します。まず調査し、安全で可逆的な判断を行い、全検証とsecret guardを実行し、commit、push、PR作成、checksとreview feedbackの確認、不具合修正、mergeまで完遂します。既存のCodex loginとworkspace-write sandboxだけを使用し、別途課金される認証情報、有料の外部service、安全でないsandbox bypass、hook bypassは使用しません。GitHubのIssue、Label、comment、PR、checkなどRESTで可能なcore操作は \`gh api\` のREST endpointを使い、GraphQLはbest-effortのProjects操作だけに限定します。GitHubのIssue、PR、それらへのコメントとレビューは、コード、ログ、識別子、固有名詞、引用の必要な原文を除き、日本語で記述します。Issueに進捗と検証証跡をコメントします。人の判断が必要な重大な決定または回復不能な権限問題がある場合に限り、正確な質問をコメントし、最終応答を AGENTIC_LOOP_RESULT=needs-input で終えます。mergeと検証が完了した場合は AGENTIC_LOOP_RESULT=completed で終えます。実施が不要（既に満たされている、要求が誤りや重複など）または実施すべきでないと判断した場合は、理由を説明し AGENTIC_LOOP_RESULT=declined で終えます（Issueはcloseされます）。それ以外は安全に再試行できる失敗理由を説明し、AGENTIC_LOOP_RESULT=failed で終えます（Supervisorが自動再試行し、上限到達でcloseします）。
 EOF
 }
 
@@ -1242,7 +1284,7 @@ worker() {
     while :; do sleep $((LEASE_SECONDS / 3 + 1)); lease_comment "$issue" "$worker" || true; done
   ) & heartbeat_pid=$!
   local plan_usage="$STATE_ROOT/issue-$issue-plan-usage.txt" exec_usage="$STATE_ROOT/issue-$issue-usage.txt"
-  local plan_file="$STATE_ROOT/issue-$issue-plan.txt" attempt=0 max_retries started failure_context=''
+  local plan_file="$STATE_ROOT/issue-$issue-plan.txt" attempt=0 max_retries started failure_context='' exhausted=0
   max_retries=$(agent_plan_max_retries)
   while :; do
     started=$(date +%s)
@@ -1254,6 +1296,9 @@ worker() {
     agent_post_usage "$issue" "$worker" "$exec_usage" "$exit_code" "$(($(date +%s) - started))"
     { [[ $exit_code -eq 0 ]] && grep -Fq 'AGENTIC_LOOP_RESULT=completed' "$result"; } && break
     { [[ $exit_code -eq 0 ]] && grep -Fq 'AGENTIC_LOOP_RESULT=needs-input' "$result"; } && break
+    { [[ $exit_code -eq 0 ]] && grep -Fq 'AGENTIC_LOOP_RESULT=declined' "$result"; } && break
+    # A spent token/rate budget is not a task failure: stop retrying immediately.
+    if agent_result_is_exhausted "$result" "$exit_code"; then exhausted=1; break; fi
     (( attempt >= max_retries )) && break
     attempt=$((attempt + 1))
     failure_context=$(tail -c 2000 "$result" 2>/dev/null || true)
@@ -1280,10 +1325,20 @@ worker() {
     set_issue_state "$issue" needs-input
     project_sync_state "$issue" needs-input
     comment_issue "$issue" "<!-- agentic-loop:needs-input worker=$worker -->\n重大な決定または権限が必要です。直前のworker commentを確認し、自動的に再キューするにはここへ返信してください。"
+  elif [[ $exit_code -eq 0 ]] && grep -Fq 'AGENTIC_LOOP_RESULT=declined' "$result"; then
+    clear_attempts "$issue"
+    comment_issue "$issue" "<!-- agentic-loop:declined worker=$worker -->\nWorkerはこのIssueを実施不要または実施不能と判断しました（理由は直前のcommentを参照）。Issueをcloseします。再開が必要なら \`agent:queued\` を付け直してください。"
+    repo_api "issues/$issue" --method PATCH -f state=closed >/dev/null || true
+  elif (( exhausted )); then
+    clear_attempts "$issue"
+    agent_mark_exhausted
+    set_issue_state "$issue" queued
+    project_sync_state "$issue" queued
+    comment_issue "$issue" "<!-- agentic-loop:exhausted worker=$worker -->\nprovider の利用上限（token/rate limit）に達したため、Issueを failed にせず再キューし、Supervisorのclaimを一時停止します。上限回復後に自動再開します。"
   else
     set_issue_state "$issue" failed
     project_sync_state "$issue" failed
-    comment_issue "$issue" "<!-- agentic-loop:failed worker=$worker exit=$exit_code -->\nWorkerは検証済みのmergeを完了せずに停止しました。Logはlocalにのみ保持され、秘密情報はここに転記されません。調査後に再試行するには \`agent:queued\` を再度付与してください。"
+    comment_issue "$issue" "<!-- agentic-loop:failed worker=$worker exit=$exit_code -->\nWorkerは検証済みのmergeを完了せずに停止しました。Logはlocalにのみ保持され、秘密情報はここに転記されません。Supervisorが自動的に再試行し、上限回数に達したら解決不能とみなしてcloseします。"
   fi
   rm -f "$STATE_ROOT/workers/$issue.pid"
 }
