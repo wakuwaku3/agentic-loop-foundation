@@ -58,3 +58,15 @@ api_retry_base_seconds = 1
 # attempts (with a cooldown) before the Issue stays agent:failed for review.
 max_attempts = 3
 retry_cooldown_seconds = 600
+# Change-scope conflict avoidance: an Issue may declare the paths/environments
+# it touches with an `agentic-loop:scope` marker (see docs/operations/issue-queue.md).
+# A queued Issue whose scope overlaps a running Issue's scope is not claimed
+# until it no longer overlaps. unknown_scope controls Issues that declare no
+# scope: isolated (default) lets at most one undeclared-scope Issue run at a
+# time; exclusive treats them as touching the whole repository; open skips
+# conflict avoidance for them entirely.
+unknown_scope = "isolated"
+# Comma-separated path prefixes always treated as touching the whole
+# repository (shared infrastructure, lockfiles, generated artifacts). Empty by
+# default so enabling this feature does not serialize existing Issues.
+exclusive_paths = ""
