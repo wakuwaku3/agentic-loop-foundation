@@ -383,6 +383,9 @@ assert_contains "$target/.agentic-loop.toml" 'provider = "codex"' 'installed con
 assert_contains "$target/.agentic-loop.toml" 'graphql_reserve = 500' 'installed configuration lacks the GraphQL reserve'
 assert_contains "$target/.agentic-loop.toml" 'api_retry_attempts = 3' 'installed configuration lacks bounded REST retries'
 assert_contains "$target/docs/operations/issue-queue.md" 'GraphQLの残量・reset時刻' 'installed operations documentation lacks shared rate-limit handling'
+for provider_neutral_doc in docs/operations/issue-queue.md docs/operations/codebase-diagnosis.md; do
+  assert_contains "$target/$provider_neutral_doc" 'opencode' "installed $provider_neutral_doc does not document opencode as a supported provider"
+done
 assert_contains "$target/.agents/skills/submit-requirement/SKILL.md" 'in Japanese' 'installed submission skill did not require Japanese GitHub content'
 assert_contains "$target/.agents/skills/diagnose-codebase/SKILL.md" 'without modifying' 'diagnosis skill did not prohibit code changes'
 assert_contains "$target/AGENTS.md" '通常のbuild・変更要求' 'installed AGENTS.md lacks queue-first routing'
@@ -864,6 +867,7 @@ empty=$(empty_repository empty-project)
 AGENTIC_LOOP_SOURCE="$PROJECT_ROOT" AGENTIC_LOOP_TARGET="$empty" AGENTIC_LOOP_SKIP_START=1 "$PROJECT_ROOT/install.sh"
 [[ -f $empty/devbox.json && -f $empty/devbox.lock ]] || fail 'empty repository did not get the pinned development environment'
 [[ -x $empty/scripts/check-environment.sh ]] || fail 'empty repository did not get the environment guard'
+assert_contains "$empty/README.md" 'opencode' 'installed README.md does not document opencode as a supported provider'
 
 secret_target="$TEST_ROOT/secret-project"
 mkdir -p "$secret_target"

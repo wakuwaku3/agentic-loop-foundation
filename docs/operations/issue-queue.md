@@ -2,7 +2,7 @@
 
 ## セットアップ
 
-`install.sh` は変更前に `git`、`gh`、Codex CLI、GitHubログイン、origin、リポジトリ参照、Projects API権限を検査する。既存ファイルとの競合もコピー前に検査する。検査後、7個の状態Label、4個の `priority:*` Label、6個の `category:*` Labelと `Agentic Loop - OWNER/REPOSITORY` Projectを冪等に用意し、既定ではSupervisorを起動する。Projectには同じ6選択肢の `Category` fieldを作成する。`install.sh` と `bin/agentic-loop setup` はRESTで既存のOpen/Closed IssueとPRを列挙し、Projectにないitemをbackfillする。
+`install.sh` は変更前に `git`、`gh`、設定 `agent.provider`（環境変数 `AGENT_PROVIDER` と git管理外 `.agentic-loop.local.toml` による上書きを含む）から解決したAI CLI（`codex`／`claude`／`opencode`、既定は `codex`）、GitHubログイン、origin、リポジトリ参照、Projects API権限を検査する。provider=opencodeならCodex CLIが存在しなくてもinstallは成立する。既存ファイルとの競合もコピー前に検査する。検査後、7個の状態Label、4個の `priority:*` Label、6個の `category:*` Labelと `Agentic Loop - OWNER/REPOSITORY` Projectを冪等に用意し、既定ではSupervisorを起動する。Projectには同じ6選択肢の `Category` fieldを作成する。`install.sh` と `bin/agentic-loop setup` はRESTで既存のOpen/Closed IssueとPRを列挙し、Projectにないitemをbackfillする。
 
 GitHub tokenには対象リポジトリのIssue/PR操作権限と `project`、`read:project` scopeが必要である。不足時は `gh auth refresh -s project,read:project` など、利用中のGitHub認証方式に合う方法で追加する。Projectはuser/org所有のため、対象リポジトリとProjectの閲覧者が一致することを管理者が確認する。privateリポジトリの内容や秘密情報をProjectフィールドへ転記しない。
 
@@ -19,7 +19,7 @@ bin/agentic-loop doctor
 
 ### 事前診断
 
-`bin/agentic-loop doctor` は、`status` の稼働状況表示より広い導入・復旧向けの読み取り専用診断である。GitHub認証とrepository権限、origin/default branch、Codex CLI、Devbox、hooks、Supervisor、systemd user service/timer、Project設定、設定値、残存worktree/branch/logを検査し、成功・警告・失敗、影響、復旧方法を日本語で出力する。Projectとtimerは任意の可視化・自動運用機能なので利用不能時は警告とし、GitHub Issueキュー、固定検証環境、hooks、Supervisorなど処理に必須の条件は失敗とする。
+`bin/agentic-loop doctor` は、`status` の稼働状況表示より広い導入・復旧向けの読み取り専用診断である。GitHub認証とrepository権限、origin/default branch、plan段・exec段が使用する各AI CLI（`codex`／`claude`／`opencode`、それぞれ `AI CLI (<provider>)` として個別に検査）、Devbox、hooks、Supervisor、systemd user service/timer、Project設定、設定値、残存worktree/branch/logを検査し、成功・警告・失敗、影響、復旧方法を日本語で出力する。Projectとtimerは任意の可視化・自動運用機能なので利用不能時は警告とし、GitHub Issueキュー、固定検証環境、hooks、Supervisorなど処理に必須の条件は失敗とする。
 
 通常形式と `--format json` はどちらも状態を変更せず、token本体や認証commandの詳細を表示しない。JSONの `schema_version` は1で、`summary` と `checks` を返す。必須診断に失敗がなければ終了code 0、1件以上あれば1、引数不正は2である。警告だけでは自動監視を失敗させない。修復は診断から自動実行せず、表示された `setup`、`start`、install再実行などを利用者が別途明示して実行する。
 
@@ -75,7 +75,7 @@ Supervisorはclaimの直前に、`agent:queued` のまま `STALE_DAYS` 日以上
 - failed: mergeを証明できず終了。原因確認後にqueuedを付けて再試行する
 - stale: queuedのまま設定日数更新されず、監査コメント付きで自動closeされた
 
-Supervisorは起動時にrunning Issueの最新leaseコメントを読み、期限切れをqueuedへ戻す。Issue worktreeは対象リポジトリと同じ親ディレクトリの `<repository>-worktrees/issue-<number>` に分離する。workerは `workspace-write` を維持し、Gitが解決した対象リポジトリのcommon metadataディレクトリと、保護対象だが要求実装に必要な専用worktree内の `.agents` だけをCodex CLIの `--add-dir` で書き込み可能にする。common directoryとworktree固有Git directoryの親子関係を検証できない場合、root、home、worktree rootのような広い範囲の場合、または `.agents` がsymlinkやworktree外のpathに解決される場合はworkerを起動しない。workerの標準出力・標準エラーはGit管理外の `.git/agentic-loop/logs` に保存し、Issueへ転載しない。ログに秘密が疑われる場合は削除し、資格情報を失効する。各セッション終了時には、費用分析のためprovider、model、reasoning effort、token数、判明すればコスト、所要時間、exit codeをまとめた1行を対象IssueへJapaneseコメントとして記録する。provider固有の使用量が取得できない項目は省略し、記録の失敗はworkerを止めない。秘密情報はコメントに含めない。Project同期は再実行可能であり、`bin/agentic-loop setup` で修復する。
+Supervisorは起動時にrunning Issueの最新leaseコメントを読み、期限切れをqueuedへ戻す。Issue worktreeは対象リポジトリと同じ親ディレクトリの `<repository>-worktrees/issue-<number>` に分離する。workerは専用worktreeの外へ書き込まない。Gitが解決した対象リポジトリのcommon metadataディレクトリと、保護対象だが要求実装に必要な専用worktree内の `.agents` の解決・親子関係の検証に失敗した場合はprovider共通のゲートとしてworkerを起動しない（common directoryとworktree固有Git directoryの親子関係を検証できない場合、root、home、worktree rootのような広い範囲の場合、または `.agents` がsymlinkやworktree外のpathに解決される場合を含む）。追加の書き込み許可の与え方はproviderごとに異なる。CodexとClaudeはこの2ディレクトリを `--add-dir` で明示的に書き込み可能にし、Codexはさらに `--sandbox workspace-write` によるOS levelのsandboxで隔離する。opencodeはOS levelのsandboxを持たず、`--dir <worktree>` で作業ディレクトリを専用worktreeに限定するだけで追加dirは与えないため、隔離は専用worktreeと秘密情報guard hookに依存する残余リスクがある。workerの標準出力・標準エラーはGit管理外の `.git/agentic-loop/logs` に保存し、Issueへ転載しない。ログに秘密が疑われる場合は削除し、資格情報を失効する。各セッション終了時には、費用分析のためprovider、model、reasoning effort、token数、判明すればコスト、所要時間、exit codeをまとめた1行を対象IssueへJapaneseコメントとして記録する。provider固有の使用量が取得できない項目は省略し、記録の失敗はworkerを止めない。秘密情報はコメントに含めない。Project同期は再実行可能であり、`bin/agentic-loop setup` で修復する。
 
 workerが `AGENTIC_LOOP_RESULT=completed` を返しても、それだけでは完了にしない。SupervisorはIssue専用branchをheadとするmerge済みPRをGitHub APIで確認し、PRの `headRefOid` がlocal branch先端と一致することを検証する。さらに、専用worktreeが期待pathでそのbranchを使用し、未commit変更がないことを確認してからworktreeを通常削除し、確認済みOIDとのcompare-and-deleteでlocal branchを削除する。merge未確認、別worktreeで使用中、未commit変更、想定外ref、または削除競合がある場合は `failed` とし、残っているworktreeとbranch dataを保持して安全な再調査を可能にする。
 

@@ -18,7 +18,7 @@ devbox run --pure check
 curl -fsSL https://raw.githubusercontent.com/wakuwaku3/agentic-loop-foundation/main/install.sh | bash
 ```
 
-対象はoriginを持つGitリポジトリである必要があります。空のGitリポジトリにはDevboxによる固定開発環境を含む完全な基盤を作成し、既存プロジェクトには既存のコード化済みツールチェーンを維持したままAgent原則、要求入力Skill、IssueキューCLI、Git hooksによる機密情報ガードを追加します。既存プロジェクトにコード化済み環境がない場合は、導入後の変更を完了する前に追加する必要があります。`git`、`gh`、Codex CLI、GitHub認証とProjects権限を変更前に検査し、既存ファイルやhooks設定との競合時は上書きせず停止します。
+対象はoriginを持つGitリポジトリである必要があります。空のGitリポジトリにはDevboxによる固定開発環境を含む完全な基盤を作成し、既存プロジェクトには既存のコード化済みツールチェーンを維持したままAgent原則、要求入力Skill、IssueキューCLI、Git hooksによる機密情報ガードを追加します。既存プロジェクトにコード化済み環境がない場合は、導入後の変更を完了する前に追加する必要があります。`git`、`gh`、設定 `agent.provider`（環境変数 `AGENT_PROVIDER` と git管理外 `.agentic-loop.local.toml` による上書きを含む）から解決したAI CLI（`codex`、`claude`、または `opencode`、既定は `codex`）、GitHub認証とProjects権限を変更前に検査し、既存ファイルやhooks設定との競合時は上書きせず停止します。provider=opencodeの場合はCodex CLIが存在しなくてもインストールは成立します。
 
 インストールは対象リポジトリ専用のLabelsとGitHub Projectを冪等に設定し、Supervisorをuser-level systemd serviceとして起動します。Supervisorは予期しない終了後に自動再起動し、Issueキューのcore操作にはREST APIを使うため、GraphQL quota枯渇中もProjects同期だけを抑制して処理を継続します。また、リポジトリごとのuser-level systemd timerを有効化し、15分間隔（最大2分のランダム遅延あり）でローカルの`main` worktreeを`origin/main`へ追従させます。更新はcleanかつlocal `main`が`origin/main`のancestorである場合のfast-forwardだけに限定され、ローカル変更、先行、分岐があれば何も変更せず失敗します。登録状態は`systemctl --user list-timers 'agentic-loop-main-sync-*'`、実行履歴は`journalctl --user -u 'agentic-loop-main-sync-*'`で確認できます。
 
@@ -71,6 +71,6 @@ bin/agentic-loop doctor
 
 これらは `devbox run` または `devbox shell` の中で実行してください。devboxコンテキスト外では `yq` がPATHに無く、設定読み取りや起動時検査が失敗します。`start` はSupervisorのsystemd serviceを起動時点のPATHで構成するため、Supervisorの起動もdevboxコンテキストで行う必要があります。
 
-`doctor` はGitHub認証とrepository権限、origin/default branch、選択中のAI CLI（Codex/Claude）、Devbox、hooks、Supervisor、systemd service/timer、GitHub Project、設定、残存worktree/branch/logを読み取り専用で検査します。各結果を成功・警告・失敗に分類し、影響と復旧方法を日本語で表示します。必須条件の失敗がある場合だけ終了code 1、警告だけなら0です。自動監視では `bin/agentic-loop doctor --format json` を使用できます。診断はtoken本体を表示せず、修復は `setup`、`start`、install再実行などの明示的な別操作で行います。
+`doctor` はGitHub認証とrepository権限、origin/default branch、plan段・exec段が使用する各AI CLI（`codex`／`claude`／`opencode`、それぞれ `AI CLI (<provider>)` として個別に検査）、Devbox、hooks、Supervisor、systemd service/timer、GitHub Project、設定、残存worktree/branch/logを読み取り専用で検査します。各結果を成功・警告・失敗に分類し、影響と復旧方法を日本語で表示します。必須条件の失敗がある場合だけ終了code 1、警告だけなら0です。自動監視では `bin/agentic-loop doctor --format json` を使用できます。診断はtoken本体を表示せず、修復は `setup`、`start`、install再実行などの明示的な別操作で行います。
 
 既定では30秒poll、最大4件を並列実行します。運用値は root 直下の `.agentic-loop.toml`（TOML、`yq`で読み取り）の `[queue]` セクションで設定し、個人環境の上書きは git 管理外の `.agentic-loop.local.toml` にキー単位で書けます。設定、状態遷移、lease復旧、Projectの制約、トラブルシュートは [Issueキュー運用](docs/operations/issue-queue.md)、設計上の判断は [0001](docs/decisions/0001-minimal-foundation.md) と [0002](docs/decisions/0002-github-issue-queue.md) に記録しています。
