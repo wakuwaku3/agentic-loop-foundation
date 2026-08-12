@@ -4,7 +4,7 @@
 
 ## 開発と検証
 
-Devboxを導入した `x86_64-linux` または `aarch64-linux` で、次の共通入口を使用します。`devbox.lock`によりBash、Makeその他の検証ツールが固定され、CIも同じ環境とコマンドを使用します。
+Devboxを導入した `x86_64-linux` または `aarch64-linux` で、次の共通入口を使用します。`devbox.lock`によりBash、Make、設定ファイル（`.agentic-loop.toml`）の読み取りに使う `yq`（yq-go）その他の検証ツールが固定され、CIも同じ環境とコマンドを使用します。
 
 ```sh
 devbox run --pure check
@@ -68,6 +68,8 @@ bin/agentic-loop stop
 bin/agentic-loop status
 bin/agentic-loop doctor
 ```
+
+これらは `devbox run` または `devbox shell` の中で実行してください。devboxコンテキスト外では `yq` がPATHに無く、設定読み取りや起動時検査が失敗します。`start` はSupervisorのsystemd serviceを起動時点のPATHで構成するため、Supervisorの起動もdevboxコンテキストで行う必要があります。
 
 `doctor` はGitHub認証とrepository権限、origin/default branch、選択中のAI CLI（Codex/Claude）、Devbox、hooks、Supervisor、systemd service/timer、GitHub Project、設定、残存worktree/branch/logを読み取り専用で検査します。各結果を成功・警告・失敗に分類し、影響と復旧方法を日本語で表示します。必須条件の失敗がある場合だけ終了code 1、警告だけなら0です。自動監視では `bin/agentic-loop doctor --format json` を使用できます。診断はtoken本体を表示せず、修復は `setup`、`start`、install再実行などの明示的な別操作で行います。
 
