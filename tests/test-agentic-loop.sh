@@ -839,6 +839,15 @@ AGENTIC_LOOP_SOURCE="$PROJECT_ROOT" AGENTIC_LOOP_TARGET="$second" AGENTIC_LOOP_S
 [[ -e $FAKE_GH_ROOT/$(printf '%s' "$second" | tr '/' '_').project ]] || fail 'second repository did not get its own Project'
 [[ $(git -C "$target" rev-parse --absolute-git-dir) != $(git -C "$second" rev-parse --absolute-git-dir) ]] || fail 'repository state is not isolated'
 
+# Install resolves the provider from agent.provider (config), not only from
+# AGENT_PROVIDER: with codex absent but the config selecting opencode, install
+# still succeeds because it checks the configured provider's CLI.
+provider_repo=$(new_repository provider-config)
+printf '[agent]\nprovider = "opencode"\n' > "$provider_repo/.agentic-loop.local.toml"
+mv "$FAKE_BIN/codex" "$FAKE_BIN/codex.disabled"
+AGENTIC_LOOP_SOURCE="$PROJECT_ROOT" AGENTIC_LOOP_TARGET="$provider_repo" AGENTIC_LOOP_SKIP_START=1 "$PROJECT_ROOT/install.sh" >/dev/null 2>&1 || { mv "$FAKE_BIN/codex.disabled" "$FAKE_BIN/codex"; fail 'install did not honor agent.provider=opencode from config (still required codex)'; }
+mv "$FAKE_BIN/codex.disabled" "$FAKE_BIN/codex"
+
 # Preconditions and conflicts cause no partial copy.
 bad="$TEST_ROOT/no-origin"
 git init --quiet "$bad"

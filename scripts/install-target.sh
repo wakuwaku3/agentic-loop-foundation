@@ -24,10 +24,29 @@ readonly INIT_FILES=(
 
 fail() { printf 'install-target: %s\n' "$1" >&2; exit 1; }
 
+# Resolve the AI provider the installed loop will use: the AGENT_PROVIDER
+# environment overrides (matching runtime), otherwise agent.provider from the
+# effective .agentic-loop.toml (the target's if present, else the source's),
+# overlaid by the target's git-ignored .agentic-loop.local.toml.
+effective_provider() {
+  local base local_file provider
+  [[ -n ${AGENT_PROVIDER:-} ]] && { printf '%s' "$AGENT_PROVIDER"; return; }
+  base="$TARGET/.agentic-loop.toml"; [[ -r $base ]] || base="$SOURCE_ROOT/.agentic-loop.toml"
+  local_file="$TARGET/.agentic-loop.local.toml"
+  if [[ -r $base && -r $local_file ]]; then
+    provider=$(yq -p toml -o tsv eval-all 'select(fi==0) * select(fi==1) | .agent.provider // ""' "$base" "$local_file" 2>/dev/null)
+  elif [[ -r $base ]]; then
+    provider=$(yq -p toml -o tsv '.agent.provider // ""' "$base" 2>/dev/null)
+  fi
+  printf '%s' "${provider:-codex}"
+}
+
 preflight() {
-  local command_name provider=${AGENT_PROVIDER:-codex} provider_cli
-  case $provider in codex) provider_cli=codex ;; claude) provider_cli=claude ;; opencode) provider_cli=opencode ;; *) fail 'AGENT_PROVIDER must be codex, claude, or opencode' ;; esac
-  for command_name in git gh yq "$provider_cli" systemctl systemd-escape; do command -v "$command_name" >/dev/null 2>&1 || fail "$command_name is required"; done
+  local command_name provider provider_cli
+  for command_name in git gh yq systemctl systemd-escape; do command -v "$command_name" >/dev/null 2>&1 || fail "$command_name is required"; done
+  provider=$(effective_provider)
+  case $provider in codex) provider_cli=codex ;; claude) provider_cli=claude ;; opencode) provider_cli=opencode ;; *) fail 'agent.provider must be codex, claude, or opencode' ;; esac
+  command -v "$provider_cli" >/dev/null 2>&1 || fail "$provider_cli is required"
   git -C "$TARGET" rev-parse --git-dir >/dev/null 2>&1 || fail 'target must be a Git repository'
   git -C "$TARGET" remote get-url origin >/dev/null 2>&1 || fail 'origin remote is required'
   gh auth status >/dev/null 2>&1 || fail 'GitHub authentication is required; run gh auth login'
