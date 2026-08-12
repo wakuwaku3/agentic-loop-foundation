@@ -572,6 +572,14 @@ printf '%s\n' "$$" > "$state_root/supervisor.pid"
 [[ $(cat "$state_root/supervisor.pid") != "$$" ]] || fail 'start trusted an unrelated process in a stale PID file'
 "$target/bin/agentic-loop" stop
 
+# A freshly created lock without a published pid is treated as mid-startup and
+# not stolen, so two concurrent starts cannot both begin supervising.
+rm -f "$state_root/supervisor.pid"
+mkdir -p "$state_root/supervisor.lock"
+if "$target/bin/agentic-loop" start >/dev/null 2>&1; then fail 'start stole a fresh mid-startup supervisor lock'; fi
+[[ -d $state_root/supervisor.lock ]] || fail 'a fresh mid-startup lock was removed by a racing start'
+rmdir "$state_root/supervisor.lock"
+
 # An exhausted GraphQL budget only suppresses Projects; the REST queue still completes work.
 rm -f "$(git -C "$target" rev-parse --absolute-git-dir)/agentic-loop/graphql-rate-limit"
 printf '90 queued open none 2025-01-01T00:00:00Z\n' > "$FAKE_GH_ROOT/$state_key.state"
