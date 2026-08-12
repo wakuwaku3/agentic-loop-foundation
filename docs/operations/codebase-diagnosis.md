@@ -6,7 +6,7 @@
 
 ## 実行
 
-`install.sh` はリポジトリごとのuser-level systemd timerを冪等に設定する。初回は起動後30分、その後は7日間隔、最大6時間のランダム遅延で実行する。CodexサブスクリプションのCodex CLIと既存のGitHub認証だけを使い、API keyや追加の有料サービスは使わない。
+`install.sh` はリポジトリごとのuser-level systemd timerを冪等に設定する。初回は起動後30分、その後は7日間隔、最大6時間のランダム遅延で実行する。選択中のprovider（後述）が持つ既存サブスクリプション契約のAI CLIと既存のGitHub認証だけを使い、API keyや追加の有料サービスは使わない。
 
 手動診断はリポジトリルートで実行する。
 

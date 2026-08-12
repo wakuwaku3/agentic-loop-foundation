@@ -118,6 +118,26 @@ if grep -Eq 'danger-full-access|OPENAI_API_KEY' bin/agentic-loop bin/agentic-loo
   printf 'Forbidden Codex execution or API-key billing configuration.\n' >&2
   exit 1
 fi
+
+for doc in README.md docs/operations/issue-queue.md docs/operations/codebase-diagnosis.md; do
+  grep -Fq 'opencode' "$doc" || {
+    printf 'Provider-neutrality drift: %s does not mention opencode.\n' "$doc" >&2
+    exit 1
+  }
+done
+codex_only_patterns=(
+  'Codex CLI、GitHub'
+  '選択中のAI CLI（Codex/Claude）'
+  'origin/default branch、Codex CLI、Devbox'
+  'だけをCodex CLIの'
+  'CodexサブスクリプションのCodex CLI'
+)
+for pattern in "${codex_only_patterns[@]}"; do
+  if grep -Fq "$pattern" README.md docs/operations/issue-queue.md docs/operations/codebase-diagnosis.md; then
+    printf 'Provider-neutrality drift: found Codex-only phrasing "%s".\n' "$pattern" >&2
+    exit 1
+  fi
+done
 ./.agentic-loop/guard-secrets.sh --all
 
 printf 'Lint passed.\n'
