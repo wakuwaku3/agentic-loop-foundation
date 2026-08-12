@@ -739,6 +739,52 @@ AGENTIC_LOOP_RUN_ONCE=1 FAKE_CODEX_SLEEP=1 "$target/bin/agentic-loop" _supervise
 grep -Eq '^50 completed closed' "$state" || fail 'transient failure was not auto-retried to completion'
 assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:retry' 'automatic retry was not recorded on the Issue'
 
+# A pre-existing (untracked) agent:failed Issue is auto-retried by the supervisor
+# to completion, with no manual re-queue.
+write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=3 STOP_TIMEOUT=10 STALE_DAYS=30 MAX_ATTEMPTS=3 RETRY_COOLDOWN_SECONDS=0
+rm -rf "$state_root/attempts"
+printf '70 failed open none 2026-01-01T00:00:00Z\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+AGENTIC_LOOP_RUN_ONCE=1 FAKE_CODEX_SLEEP=1 "$target/bin/agentic-loop" _supervise
+grep -Eq '^70 completed closed' "$state" || fail 'untracked failed backlog was not auto-retried to completion'
+
+# After MAX_ATTEMPTS the failed Issue is closed as unresolvable, not left parked.
+write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=3 STOP_TIMEOUT=10 STALE_DAYS=30 MAX_ATTEMPTS=1 RETRY_COOLDOWN_SECONDS=0
+printf '80 failed open none 2026-01-01T00:00:00Z\n' > "$state"
+mkdir -p "$state_root/attempts"; printf '1\t0\n' > "$state_root/attempts/issue-80"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _supervise
+grep -Eq '^80 failed closed' "$state" || fail 'retry-exhausted Issue was not closed as unresolvable'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:unresolved' 'unresolvable closure was not recorded'
+rm -f "$state_root/attempts/issue-80"
+
+# A worker that declines an Issue (unnecessary/impossible) closes it.
+write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=3 STOP_TIMEOUT=10 STALE_DAYS=30
+printf '71 queued open none 2026-01-01T00:00:00Z\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+AGENTIC_LOOP_RUN_ONCE=1 FAKE_CODEX_RESULT='AGENTIC_LOOP_RESULT=declined' "$target/bin/agentic-loop" _supervise
+grep -Eq '^71 .* closed' "$state" || fail 'declined Issue was not closed'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:declined' 'decline was not recorded'
+
+# A token/rate-limit exhaustion re-queues the Issue (never failed) and pauses the
+# supervisor; claiming resumes once the exhaustion clears.
+write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=3 STOP_TIMEOUT=10 STALE_DAYS=30
+rm -f "$state_root/agent-exhausted"
+printf '60 queued open none 2026-01-01T00:00:00Z\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+AGENTIC_LOOP_RUN_ONCE=1 FAKE_CODEX_RESULT='rate limit reached' "$target/bin/agentic-loop" _supervise
+grep -Eq '^60 queued open' "$state" || fail 'exhaustion should re-queue the Issue, not fail it'
+if grep -Eq '^60 failed' "$state"; then fail 'exhaustion must not mark the Issue failed'; fi
+[[ -r $state_root/agent-exhausted ]] || fail 'exhaustion pause marker was not written'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:exhausted' 'exhaustion was not recorded'
+# Paused: the next pass does not claim while exhausted.
+AGENTIC_LOOP_RUN_ONCE=1 FAKE_CODEX_SLEEP=1 "$target/bin/agentic-loop" _supervise
+grep -Eq '^60 queued open' "$state" || fail 'exhaustion pause did not hold the Issue in queue'
+# Recovery: clearing the marker resumes claiming to completion.
+rm -f "$state_root/agent-exhausted"
+AGENTIC_LOOP_RUN_ONCE=1 FAKE_CODEX_SLEEP=1 "$target/bin/agentic-loop" _supervise
+grep -Eq '^60 completed closed' "$state" || fail 'claiming did not resume after exhaustion cleared'
+
 # Multiple priority labels use the highest rank; setup creates all priority and stale labels idempotently.
 grep -Fq $'label create priority:critical' "$FAKE_GH_ROOT/calls" || fail 'setup did not create the critical priority label'
 grep -Fq $'label create priority:low' "$FAKE_GH_ROOT/calls" || fail 'setup did not create the low priority label'
@@ -751,12 +797,13 @@ assert_contains "$FAKE_GH_ROOT/calls" 'project field-create 7 --owner acme --nam
 # Only inactive queued Issues are closed; the audit explains safe recovery.
 old_date=$(date -u -d '40 days ago' +%Y-%m-%dT%H:%M:%SZ)
 recent_date=$(date -u -d '1 day ago' +%Y-%m-%dT%H:%M:%SZ)
-printf '20 queued open none 2025-01-01T00:00:00Z %s\n21 queued open none 2025-01-02T00:00:00Z %s\n22 running open none 2025-01-01T00:00:00Z %s\n23 needs-input open none 2025-01-01T00:00:00Z %s\n24 failed open none 2025-01-01T00:00:00Z %s\n25 in-review open none 2025-01-01T00:00:00Z %s\n26 none open none 2025-01-01T00:00:00Z %s\n' "$old_date" "$recent_date" "$old_date" "$old_date" "$old_date" "$old_date" "$old_date" > "$state"
+# agent:failed is deliberately excluded here: it is actively managed by retry_failed, not stale closure.
+printf '20 queued open none 2025-01-01T00:00:00Z %s\n21 queued open none 2025-01-02T00:00:00Z %s\n22 running open none 2025-01-01T00:00:00Z %s\n23 needs-input open none 2025-01-01T00:00:00Z %s\n25 in-review open none 2025-01-01T00:00:00Z %s\n26 none open none 2025-01-01T00:00:00Z %s\n' "$old_date" "$recent_date" "$old_date" "$old_date" "$old_date" "$old_date" > "$state"
 printf '22 <!-- agentic-loop:lease worker=active heartbeat=%s expires=%s -->\n' "$(date +%s)" "$(($(date +%s) + 3600))" > "$FAKE_GH_ROOT/$state_key.comments"
 AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _supervise
 grep -Eq '^20 stale closed' "$state" || fail 'inactive queued Issue was not marked stale and closed'
 grep -Eq '^21 completed closed' "$state" || fail 'recent queued Issue was not left available for claim'
-for issue_state in '22 running open' '23 needs-input open' '24 failed open' '25 in-review open' '26 none open'; do
+for issue_state in '22 running open' '23 needs-input open' '25 in-review open' '26 none open'; do
   grep -Eq "^$issue_state" "$state" || fail "excluded Issue changed state: $issue_state"
 done
 assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:stale days=30' 'stale audit marker was not recorded'
