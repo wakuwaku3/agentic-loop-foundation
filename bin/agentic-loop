@@ -25,6 +25,8 @@ GRAPHQL_RESERVE=500
 RATE_LIMIT_CACHE_SECONDS=15
 API_RETRY_ATTEMPTS=3
 API_RETRY_BASE_SECONDS=1
+MAX_ATTEMPTS=3
+RETRY_COOLDOWN_SECONDS=600
 CONFIG_ERROR=''
 CONFIG_PROPS=''
 
@@ -59,6 +61,8 @@ load_config() {
       queue.rate_limit_cache_seconds) key=RATE_LIMIT_CACHE_SECONDS ;;
       queue.api_retry_attempts) key=API_RETRY_ATTEMPTS ;;
       queue.api_retry_base_seconds) key=API_RETRY_BASE_SECONDS ;;
+      queue.max_attempts) key=MAX_ATTEMPTS ;;
+      queue.retry_cooldown_seconds) key=RETRY_COOLDOWN_SECONDS ;;
       *) continue ;;
     esac
     if [[ ! $value =~ ^[0-9]+$ ]]; then
@@ -360,6 +364,8 @@ validate_config() {
   [[ $RATE_LIMIT_CACHE_SECONDS =~ ^[1-9][0-9]*$ ]] || fail 'RATE_LIMIT_CACHE_SECONDS must be a positive integer'
   [[ $API_RETRY_ATTEMPTS =~ ^[1-9][0-9]*$ ]] || fail 'API_RETRY_ATTEMPTS must be a positive integer'
   [[ $API_RETRY_BASE_SECONDS =~ ^[0-9]+$ ]] || fail 'API_RETRY_BASE_SECONDS must be a non-negative integer'
+  [[ $MAX_ATTEMPTS =~ ^[1-9][0-9]*$ ]] || fail 'MAX_ATTEMPTS must be a positive integer'
+  [[ $RETRY_COOLDOWN_SECONDS =~ ^[0-9]+$ ]] || fail 'RETRY_COOLDOWN_SECONDS must be a non-negative integer'
 }
 
 graphql_budget_file() { printf '%s/graphql-rate-limit' "$STATE_ROOT"; }
@@ -696,6 +702,7 @@ doctor_collect() {
     doctor_non_negative_config STALE_DAYS "$STALE_DAYS"; doctor_non_negative_config GRAPHQL_RESERVE "$GRAPHQL_RESERVE"
     doctor_positive_config RATE_LIMIT_CACHE_SECONDS "$RATE_LIMIT_CACHE_SECONDS"; doctor_positive_config API_RETRY_ATTEMPTS "$API_RETRY_ATTEMPTS"
     doctor_non_negative_config API_RETRY_BASE_SECONDS "$API_RETRY_BASE_SECONDS"
+    doctor_positive_config MAX_ATTEMPTS "$MAX_ATTEMPTS"; doctor_non_negative_config RETRY_COOLDOWN_SECONDS "$RETRY_COOLDOWN_SECONDS"
     (( DOCTOR_FAILURES == 0 )) && doctor_add success '設定ファイル' '設定値を安全に解釈できます。' '対応は不要です。'
   fi
 
@@ -984,6 +991,46 @@ triage_stale_queued() {
   done < <(repo_api issues --method GET -f state=open -f labels="$(state_label queued)" -f per_page=100 --paginate --jq '.[] | select(.pull_request == null) | [.number, .updated_at] | @tsv' 2>/dev/null || true)
 }
 
+# Per-Issue attempt tracking (count + last-attempt timestamp) under Git-external
+# state, so a transient worker failure can be retried a bounded number of times.
+attempts_file() { printf '%s/attempts/issue-%s' "$STATE_ROOT" "$1"; }
+attempt_count() {
+  local file count; file=$(attempts_file "$1")
+  [[ -r $file ]] || { printf '0'; return; }
+  IFS=$'\t' read -r count _ < "$file"
+  [[ $count =~ ^[0-9]+$ ]] && printf '%s' "$count" || printf '0'
+}
+record_attempt() {
+  local issue=$1 count file
+  count=$(attempt_count "$issue"); file=$(attempts_file "$issue")
+  mkdir -p "$(dirname "$file")"
+  printf '%s\t%s\n' "$((count + 1))" "$(date +%s)" > "$file"
+}
+clear_attempts() { rm -f "$(attempts_file "$1")"; }
+attempt_cooldown_elapsed() {
+  local file ts now; file=$(attempts_file "$1")
+  [[ -r $file ]] || return 0
+  IFS=$'\t' read -r _ ts < "$file"
+  [[ $ts =~ ^[0-9]+$ ]] || return 0
+  now=$(date +%s); (( now - ts >= RETRY_COOLDOWN_SECONDS ))
+}
+# Re-queue failures this loop already attempted, so a transient failure (e.g. an
+# exhausted token budget or a killed session) is retried instead of parked.
+# Only Issues tracked by claim are managed; those that reach MAX_ATTEMPTS stay
+# agent:failed for human review, and untracked/external failures are left alone.
+retry_failed() {
+  local issue count
+  while IFS= read -r issue; do
+    [[ $issue =~ ^[0-9]+$ ]] || continue
+    [[ -r $(attempts_file "$issue") ]] || continue
+    count=$(attempt_count "$issue")
+    (( count >= MAX_ATTEMPTS )) && continue
+    attempt_cooldown_elapsed "$issue" || continue
+    set_issue_state "$issue" queued || continue
+    comment_issue "$issue" "<!-- agentic-loop:retry attempt=$count -->\n一時的な失敗の可能性があるため自動的に再試行キューへ戻します（試行 $count/$MAX_ATTEMPTS）。上限に達した場合は agent:failed のまま保持し、人手の確認に委ねます。" || true
+  done < <(repo_api issues --method GET -f state=open -f labels="$(state_label failed)" -f per_page=100 --paginate --jq '.[] | select(.pull_request == null) | .number' 2>/dev/null)
+}
+
 claim_next() {
   local issue pid
   # shellcheck disable=SC2016 # This is a jq program, not a shell expression.
@@ -995,6 +1042,7 @@ claim_next() {
     fi
     set_issue_state "$issue" running
     if repo_api "issues/$issue" --jq '.labels[].name' | grep -Fxq "$(state_label running)"; then
+      record_attempt "$issue"
       printf '%s\n' "$issue"
       return 0
     fi
@@ -1028,6 +1076,7 @@ supervise() {
       reconcile_pending_project
       reconcile_queued_categories
       triage_stale_queued
+      retry_failed
       if budget_note_pause; then
         while [[ $(worker_count) -lt $MAX_WORKERS ]]; do
           local issue worker
@@ -1198,6 +1247,7 @@ worker() {
   if [[ $exit_code -eq 0 ]] && grep -Fq 'AGENTIC_LOOP_RESULT=completed' "$result"; then
     IFS=$'\t' read -r merged_pr merged_oid < <(repo_api pulls --method GET -f state=closed -f head="${repository%%/*}:$branch" -f per_page=100 --jq 'map(select(.merged_at != null and .head.ref == "'"$branch"'")) | first | [.html_url, .head.sha] | @tsv' 2>/dev/null || true) || true
     if [[ -n $merged_pr && $merged_oid =~ ^[0-9a-fA-F]{40}$ ]] && cleanup_completed_worker "$worktree" "$branch" "$merged_oid"; then
+      clear_attempts "$issue"
       set_issue_state "$issue" completed
       project_sync_state "$issue" completed
       comment_issue "$issue" "<!-- agentic-loop:completed pr=$merged_pr -->\nWorker \`$worker\` の完了報告と対応PRのmergeをGitHubで確認し、専用worktreeとlocal branch \`$branch\` を削除しました: $merged_pr\nremote branchは復旧とGitHubのPR設定との責務分離のため、Supervisorからは削除しません。"

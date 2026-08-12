@@ -54,3 +54,7 @@ rate_limit_cache_seconds = 15
 # Retry only classified transient REST failures; permanent 4xx errors fail fast.
 api_retry_attempts = 3
 api_retry_base_seconds = 1
+# A worker failure is treated as transient and retried up to this many total
+# attempts (with a cooldown) before the Issue stays agent:failed for review.
+max_attempts = 3
+retry_cooldown_seconds = 600
