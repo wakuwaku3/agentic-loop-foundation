@@ -27,7 +27,7 @@ bin/agentic-loop doctor
 bin/agentic-loop doctor --format json
 ```
 
-利用者は要求をIssueとして登録し、6個の `category:*` のうち1つと `agent:queued` を付ける。取得順はcategory、同一category内のcritical、high、medium、low、優先度なし、作成日時、Issue番号の順とする。category順は `loop-continuity`、`confidentiality-incident`、`integrity-incident`、`availability-incident`、`feature`、`improvement` で固定する。複数のpriority LabelがあるIssueは最も高いものを使う。依存関係はIssue本文に明記する。回答は `agent:needs-input` のIssueへコメントする。
+利用者は要求をIssueとして登録し、6個の `category:*` のうち1つと `agent:queued` を付ける。取得順はcategory、同一category内のcritical、high、medium、low、優先度なし、作成日時、Issue番号の順とする。category順は `loop-continuity`、`confidentiality-incident`、`integrity-incident`、`availability-incident`、`feature`、`improvement` で固定する。複数のpriority LabelがあるIssueは最も高いものを使う。依存関係はIssue本文に明記する。変更が及ぶpathやexternal環境が分かる場合は、後述の「変更競合の予防」に従って本文へ `agentic-loop:scope` markerを1行記載する。不明な場合は記載を省略してよく、安全な既定動作（`unknown_scope`）にフォールバックする。回答は `agent:needs-input` のIssueへコメントする。
 
 ### 対話要求の受付
 
@@ -55,7 +55,7 @@ incident Issueには、秘密の値、攻撃手順、不要な個人情報を本
 
 読み取り専用要求と運用操作はその場で続行する。通常の変更要求は、専用branch/worktreeを利用でき、追加費用・秘密・破壊的操作に関する判断が不要な場合に限り、キューが利用不能であることを明示してworker workflowを同期実行する。それ以外は復旧方法または必要な判断を正確に提示して停止する。明示された同期・直接実行も同じworker workflowと不変条件に従う。
 
-`.agentic-loop.toml` の `[queue]` で `poll_seconds`、`max_workers`、`lease_seconds`、`stop_timeout`、`stale_days`、`graphql_reserve`、`rate_limit_cache_seconds`、`api_retry_attempts`、`api_retry_base_seconds` を変更できる。個人環境向けの上書きは git 管理外の `.agentic-loop.local.toml` に同じキーを書けば、キー単位で優先される。設定はTOMLで、読み取りには `yq` を用いる。既定の並列数は4とし、これを超えてむやみに増やさない。worker失敗の多くはtoken枯渇やセッション中断などの一時的要因であるため、失敗したIssueは即座にagent:failedへ留め置かない。Supervisorの`retry_failed`が、開いている全てのagent:failed（過去分・追跡外を含む）を`[queue].max_attempts`（既定3、総試行回数）まで`[queue].retry_cooldown_seconds`（既定600秒）のクールダウンを挟んで自動的にagent:queuedへ戻して再試行し、上限に達したら解決不能とみなしてIssueをcloseする。人手でのラベル付け替えは不要。workerが実施不要または実施不能と判断した場合は`AGENTIC_LOOP_RESULT=declined`でIssueをcloseできる。providerのtoken/rate limitに達した失敗はIssueをfailedにせずagent:queuedへ戻し、Supervisorはclaimを一定時間（`EXHAUSTION_PAUSE_SECONDS`）一時停止して上限回復後に自動再開する。`[budget].weekly_reserve_percent` は緊急枠の確保用で、週次利用率が `100 - 値` を超える間はSupervisorが新規Issueのclaimを一時停止し、回復すると再開する。利用率はheadlessで取得できるCodexのセッションログ（最新の `token_count` の `secondary.used_percent`）から読むbest-effortで、取得できない場合やCodex以外のproviderのみの場合はfail open（claim継続）とする。0で無効化できる。増加はCodex契約上の制限、Git競合、端末資源を確認してから行う。stopは新規claimを止め、workerをdrainする。`STOP_TIMEOUT=0` は完了まで待つ。
+`.agentic-loop.toml` の `[queue]` で `poll_seconds`、`max_workers`、`lease_seconds`、`stop_timeout`、`stale_days`、`graphql_reserve`、`rate_limit_cache_seconds`、`api_retry_attempts`、`api_retry_base_seconds`、`max_attempts`、`retry_cooldown_seconds`、`unknown_scope`、`exclusive_paths` を変更できる。個人環境向けの上書きは git 管理外の `.agentic-loop.local.toml` に同じキーを書けば、キー単位で優先される。設定はTOMLで、読み取りには `yq` を用いる。既定の並列数は4とし、これを超えてむやみに増やさない。worker失敗の多くはtoken枯渇やセッション中断などの一時的要因であるため、失敗したIssueは即座にagent:failedへ留め置かない。Supervisorの`retry_failed`が、開いている全てのagent:failed（過去分・追跡外を含む）を`[queue].max_attempts`（既定3、総試行回数）まで`[queue].retry_cooldown_seconds`（既定600秒）のクールダウンを挟んで自動的にagent:queuedへ戻して再試行し、上限に達したら解決不能とみなしてIssueをcloseする。人手でのラベル付け替えは不要。workerが実施不要または実施不能と判断した場合は`AGENTIC_LOOP_RESULT=declined`でIssueをcloseできる。providerのtoken/rate limitに達した失敗はIssueをfailedにせずagent:queuedへ戻し、Supervisorはclaimを一定時間（`EXHAUSTION_PAUSE_SECONDS`）一時停止して上限回復後に自動再開する。`[budget].weekly_reserve_percent` は緊急枠の確保用で、週次利用率が `100 - 値` を超える間はSupervisorが新規Issueのclaimを一時停止し、回復すると再開する。利用率はheadlessで取得できるCodexのセッションログ（最新の `token_count` の `secondary.used_percent`）から読むbest-effortで、取得できない場合やCodex以外のproviderのみの場合はfail open（claim継続）とする。0で無効化できる。増加はCodex契約上の制限、Git競合、端末資源を確認してから行う。stopは新規claimを止め、workerをdrainする。`STOP_TIMEOUT=0` は完了まで待つ。
 
 SupervisorとworkerはGit common stateにGraphQLの残量・reset時刻を短時間cacheして共有する。Issue一覧、Label、comment、heartbeat、PRのmerge確認などloopのcore操作はREST APIを使い、GraphQLはbest-effortのProjects操作だけに限定する。残量が `GRAPHQL_RESERVE` 以下ならProjects item・field同期だけを抑制し、Issue Labelを正本とするqueue処理は継続する。reset後は次のProjects操作が最新残量を再取得し、冪等な同期を再開する。既定値は500であり、0にすると残量によるProjects保護を無効化する。
 
@@ -64,6 +64,26 @@ GraphQL枯渇時もREST APIのquotaは別に確認できる。`gh api rate_limit
 REST APIはrate limit、secondary rate limit、HTTP 429/5xx、timeout、connection resetなど明示的な一時障害だけを指数backoffで既定3回まで再試行する。認証・権限・入力不正など恒久的な4xxや、冪等性を確認できない操作を無制限に再試行しない。retry回数と待機は日本語でlocal logへ記録し、秘密やresponse本文はIssueへ転載しない。上限到達後は既存のlease、worktree、branchを保持し、Supervisor再起動時のlease復旧で再調査できる。
 
 Supervisorはclaimの直前に、`agent:queued` のまま `STALE_DAYS` 日以上更新されていないIssueを `agent:stale` に遷移し、監査コメントを残してcloseする。再開時はIssueをreopenし、要求を確認・更新して `agent:queued` を付ける。`STALE_DAYS=0` は自動closeを無効にする。queued以外のrunning、needs-input、failed、in-reviewや通常の未キューIssueは対象外である。
+
+## 変更競合の予防
+
+密接に関連するIssueを複数workerが同時に処理してmerge conflictや手戻りを起こす可能性を、claim前に検出して安全に直列化する。Issue本文（または最新の `agentic-loop:scope` コメント）に次のmarkerを1行記載すると、影響が及ぶpathとexternal環境を宣言できる。
+
+```
+<!-- agentic-loop:scope paths=bin/agentic-loop,docs/operations/ env=github-project -->
+```
+
+`paths=` は対象file・directoryのカンマ区切りで、末尾に `/` を付けるとそのdirectory配下すべてを含む。`env=` は外部環境やmigrationなど、pathで表現できない対象をカンマ区切りの名前で宣言する。repository全体に及ぶ場合は `paths=*` とする。不正な文字を含むtokenや空のtokenは破棄され、有効なtokenが残らなければ後述の「scope不明」として扱われる。
+
+claim前、queued Issueのscopeはbody（一覧取得時に既に取得済みで追加API呼び出しは発生しない）から解決する。running Issueの実効scopeはGit common state（`.git/agentic-loop/scope/issue-<番号>`）にcacheし、Supervisor起動時にrunning Issue分だけ再構築する。実行中workerはplan段完了直後にscope markerを検出してcacheへ反映し、exec段完了直後には実測の変更範囲（`git diff --name-only`）でcacheを補正する。cacheは既存宣言との和集合として更新され、決して縮小しない。scopeが変化したときだけ、audit用のIssueコメントを1回記録する。
+
+実行中Issueとscopeが重なるqueued Issueはclaimせず、category・priority・created_at・Issue番号による既存の取得順を変えずに次の非競合Issueへ進む。競合が解消すれば、待機していたIssueは本来の順位で自然にclaimされる（恒久的な順位降格や飢餓は発生しない）。競合判定はworker数上限のhard constraintと既存のqueue処理（budget guard、stale triage、retry）の内側で働くfilterであり、依存関係block（未実装）はこのfilterの手前に位置づける。
+
+scopeを宣言していないIssueの既定動作は `[queue].unknown_scope`（既定 `isolated`）で制御する。`isolated` は未宣言scope同士でのみ競合し、同時に走る未宣言scope workerを常に1件に制限する一方、宣言済みの独立scope Issueとは並列に走る。`exclusive` は未宣言scopeをrepository全体として扱い、`open` は未宣言scopeの競合判定を行わない（本機能の実質無効化）。`[queue].exclusive_paths`（既定は空）にcomma区切りのpathを設定すると、宣言scopeがそのpathと重なるIssueをrepository全体として扱う（共有基盤file・生成物・migrationなど）。両設定の不正値は起動時検証と `doctor` が失敗として報告する。
+
+`bin/agentic-loop status` は running Issueの実効scopeと、競合待ちIssue・相手Issue番号・重複tokenを表示する。GitHub Projectには `Blocked by` というTEXT fieldを冪等に用意し、相手Issue番号と重複tokenだけを書き込む（Issue本文や秘密情報は転記しない）。GraphQL残量が不足する場合はProjects同期のみ既存のretry queueへ退避し、Issue Labelを正本とするqueue処理は継続する。
+
+本機能は実行中Issueの強制停止・再開（別Issueで対応）、依存関係block（別Issueで対応）、AIによるscope推定（コストポリシー順守のため行わない）を対象外とする。宣言済みscopeと未宣言scope（`isolated`）のIssueが実際には同じfileへ触れる可能性は残るが、既存のrebase・再検証経路（default branch更新後の競合はworkerが最新branchに対して修正・再検証する）で吸収する。
 
 ## 状態と復旧
 

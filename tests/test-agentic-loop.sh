@@ -23,6 +23,10 @@ write_queue_config() {
   done
 }
 
+# scope_field ARGS -> base64 of an agentic-loop:scope marker for state column 8
+# (the fake gh's simulated Issue body), e.g. scope_field 'paths=bin/agentic-loop'
+scope_field() { printf '<!-- agentic-loop:scope %s -->' "$1" | base64 -w0; }
+
 mkdir -p "$FAKE_BIN" "$FAKE_GH_ROOT"
 
 if env -u DEV_ENVIRONMENT "$PROJECT_ROOT/scripts/check-environment.sh" >/dev/null 2>&1; then
@@ -78,14 +82,16 @@ case "${1:-} ${2:-}" in
             awk '$2 == "queued" && $3 != "closed" {
               category=5; if ($7 ~ /(^|,)loop-continuity(,|$)/) category=0; else if ($7 ~ /(^|,)confidentiality-incident(,|$)/) category=1; else if ($7 ~ /(^|,)integrity-incident(,|$)/) category=2; else if ($7 ~ /(^|,)availability-incident(,|$)/) category=3; else if ($7 ~ /(^|,)feature(,|$)/) category=4
               priority=4; if ($4 ~ /(^|,)critical(,|$)/) priority=0; else if ($4 ~ /(^|,)high(,|$)/) priority=1; else if ($4 ~ /(^|,)medium(,|$)/) priority=2; else if ($4 ~ /(^|,)low(,|$)/) priority=3
-              created=($5 == "" ? $1 : $5); print category "\t" priority "\t" created "\t" $1
+              created=($5 == "" ? $1 : $5); print category "\t" priority "\t" created "\t" $1 "\t" $8
             }' "$state"
             if [[ -n ${FAKE_STALE_QUEUED_ISSUE:-} ]] && ! awk -v n="$FAKE_STALE_QUEUED_ISSUE" '$1 == n && $2 == "queued" {found=1} END {exit !found}' "$state"; then
               awk -v n="$FAKE_STALE_QUEUED_ISSUE" '$1 == n {print "0\t" ($5 == "" ? $1 : $5) "\t" $1}' "$state"
             fi
           else awk '$2 == "queued" && $3 != "closed" {print $1}' "$state"; fi ;;
         agent:running)
-          if [[ $* == *title* ]]; then awk '$2 == "running" && $3 != "closed" {print "#" $1 " Fake issue " $1}' "$state"; else awk '$2 == "running" && $3 != "closed" {print $1}' "$state"; fi ;;
+          if [[ $* == *title* ]]; then awk '$2 == "running" && $3 != "closed" {print "#" $1 " Fake issue " $1}' "$state"
+          elif [[ $* == *'.body'* ]]; then awk '$2 == "running" && $3 != "closed" {print $1 "\t" $8}' "$state"
+          else awk '$2 == "running" && $3 != "closed" {print $1}' "$state"; fi ;;
         agent:needs-input) awk '$2 == "needs-input" && $3 != "closed" {print $1}' "$state" ;;
         agent:failed) awk '$2 == "failed" && $3 != "closed" {print $1}' "$state" ;;
       esac
@@ -602,7 +608,12 @@ state="$FAKE_GH_ROOT/$state_key.state"
 state_root="$(git -C "$target" rev-parse --absolute-git-dir)/agentic-loop"
 
 # Category is the primary queue key, followed by priority, creation time, and Issue number.
+# unknown_scope=open disables change-scope conflict avoidance here: this fixture
+# declares no scope for any Issue and exercises only the ordering, which the
+# scope filter must never reorder (a dedicated set of scope tests covers
+# conflict avoidance itself, further below).
 write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=11 LEASE_SECONDS=30 STOP_TIMEOUT=10 STALE_DAYS=30
+printf 'unknown_scope = "open"\n' >> "$target/.agentic-loop.toml"
 printf '101 queued open low 2026-01-01T00:00:00Z none loop-continuity\n102 queued open critical 2026-01-01T00:00:00Z none confidentiality-incident\n103 queued open none 2026-01-01T00:00:00Z none integrity-incident\n104 queued open none 2026-01-01T00:00:00Z none availability-incident\n105 queued open none 2026-01-01T00:00:00Z none feature\n106 queued open none 2026-01-01T00:00:00Z none improvement\n107 queued open critical 2026-01-02T00:00:00Z none improvement\n108 queued open low 2025-01-01T00:00:00Z none improvement\n109 queued open critical 2026-01-02T00:00:00Z none improvement\n110 queued open none 2026-01-03T00:00:00Z none none\n111 queued open critical 2026-01-01T00:00:00Z none feature,availability-incident\n' > "$state"
 : > "$FAKE_GH_ROOT/$state_key.comments"
 AGENTIC_LOOP_RUN_ONCE=1 FAKE_CODEX_SLEEP=1 "$target/bin/agentic-loop" _supervise
@@ -613,7 +624,10 @@ grep -Eq '^111 completed closed .* availability-incident$' "$state" || fail 'mul
 assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'category-reconciled reason=missing' 'missing category repair was not audited'
 assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'category-reconciled reason=multiple selected=availability-incident' 'multiple category repair was not audited'
 
+# unknown_scope=open: this fixture also declares no scope and exercises the
+# worker limit and priority ordering, not scope conflict avoidance.
 write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=2 LEASE_SECONDS=3 STOP_TIMEOUT=10 STALE_DAYS=30
+printf 'unknown_scope = "open"\n' >> "$target/.agentic-loop.toml"
 printf '1 queued open low 2026-01-01T00:00:00Z\n2 queued open critical,low 2026-01-02T00:00:00Z\n3 queued open critical 2025-12-31T00:00:00Z\n4 queued open none 2025-01-01T00:00:00Z\n' > "$state"
 AGENTIC_LOOP_RUN_ONCE=1 FAKE_CODEX_SLEEP=1 FAKE_STALE_QUEUED_ISSUE=3 "$target/bin/agentic-loop" _supervise
 completed_count=$(awk '$2 == "completed" {count++} END {print count+0}' "$state")
@@ -785,6 +799,111 @@ rm -f "$state_root/agent-exhausted"
 AGENTIC_LOOP_RUN_ONCE=1 FAKE_CODEX_SLEEP=1 "$target/bin/agentic-loop" _supervise
 grep -Eq '^60 completed closed' "$state" || fail 'claiming did not resume after exhaustion cleared'
 
+# --- Change-scope conflict avoidance (Issue #44) ---
+
+write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=2 LEASE_SECONDS=3 STOP_TIMEOUT=10 STALE_DAYS=30
+
+# Same file: two Issues declaring the same path conflict, so only the
+# higher-priority one is claimed; an independent-scope Issue is claimed
+# alongside it in the same pass instead of waiting its turn (no unnecessary
+# whole-repository serialization).
+printf '201 queued open none 2026-01-01T00:00:00Z none none %s\n202 queued open none 2026-01-02T00:00:00Z none none %s\n203 queued open none 2026-01-03T00:00:00Z none none %s\n' \
+  "$(scope_field 'paths=bin/agentic-loop')" "$(scope_field 'paths=bin/agentic-loop')" "$(scope_field 'paths=docs/operations')" > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+AGENTIC_LOOP_RUN_ONCE=1 FAKE_CODEX_SLEEP=1 "$target/bin/agentic-loop" _supervise
+grep -Eq '^201 completed closed' "$state" || fail 'same-file scope: the first declared Issue was not claimed'
+grep -Eq '^203 completed closed' "$state" || fail 'independent-scope Issue was not claimed alongside a conflicting one'
+grep -Eq '^202 queued open' "$state" || fail 'same-file scope conflict was not detected'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:scope-conflict issue=201 token=bin/agentic-loop' 'scope conflict was not recorded with the counterpart Issue and overlapping token'
+[[ -r $state_root/conflict/issue-202 ]] || fail 'conflict-wait state was not persisted for status/Project visibility'
+
+# The conflict resolves once the blocking Issue completes: no permanent
+# demotion (starvation) of the Issue that lost the earlier race.
+AGENTIC_LOOP_RUN_ONCE=1 FAKE_CODEX_SLEEP=1 "$target/bin/agentic-loop" _supervise
+grep -Eq '^202 completed closed' "$state" || fail 'same-file scope conflict was not retried to completion once resolved'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:scope-resolved' 'conflict resolution was not recorded on the Issue'
+[[ ! -e $state_root/conflict/issue-202 ]] || fail 'resolved conflict-wait state was not cleared'
+
+# Same directory: a file nested under a declared directory scope conflicts
+# with it on a "/" path boundary, not merely a shared string prefix.
+printf '210 queued open none 2026-01-01T00:00:00Z none none %s\n211 queued open none 2026-01-02T00:00:00Z none none %s\n' \
+  "$(scope_field 'paths=docs/')" "$(scope_field 'paths=docs/operations/issue-queue.md')" > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+AGENTIC_LOOP_RUN_ONCE=1 FAKE_CODEX_SLEEP=1 "$target/bin/agentic-loop" _supervise
+grep -Eq '^210 completed closed' "$state" || fail 'same-directory scope: the directory-scoped Issue was not claimed'
+grep -Eq '^211 queued open' "$state" || fail 'same-directory scope conflict (nested file under a declared directory) was not detected'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:scope-conflict issue=210' 'directory-scope conflict was not recorded'
+
+# Unknown scope: the safe default (isolated) allows only one undeclared-scope
+# Issue to run at a time, without needing to serialize the whole repository.
+printf '220 queued open none 2026-01-01T00:00:00Z\n221 queued open none 2026-01-02T00:00:00Z\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+AGENTIC_LOOP_RUN_ONCE=1 FAKE_CODEX_SLEEP=1 "$target/bin/agentic-loop" _supervise
+grep -Eq '^220 completed closed' "$state" || fail 'unknown scope: the first undeclared-scope Issue was not claimed'
+grep -Eq '^221 queued open' "$state" || fail 'default unknown_scope=isolated did not serialize undeclared-scope Issues'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:scope-conflict issue=220 token=unknown' 'unknown-scope conflict was not recorded with its reason'
+
+# unknown_scope=open disables conflict avoidance for undeclared-scope Issues.
+{
+  printf '[queue]\npoll_seconds = 1\nmax_workers = 2\nlease_seconds = 3\nstop_timeout = 10\nstale_days = 30\n'
+  printf 'unknown_scope = "open"\n'
+} > "$target/.agentic-loop.toml"
+printf '222 queued open none 2026-01-01T00:00:00Z\n223 queued open none 2026-01-02T00:00:00Z\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+AGENTIC_LOOP_RUN_ONCE=1 FAKE_CODEX_SLEEP=1 "$target/bin/agentic-loop" _supervise
+[[ $(awk '$2 == "completed" {count++} END {print count+0}' "$state") -eq 2 ]] || fail 'unknown_scope=open did not let undeclared-scope Issues run in parallel'
+write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=2 LEASE_SECONDS=3 STOP_TIMEOUT=10 STALE_DAYS=30
+
+# Running-scope re-evaluation: a queued Issue is blocked while a currently
+# running Issue's declared scope overlaps it. rebuild_scope_cache re-derives
+# every running Issue's effective scope from GitHub at each Supervisor
+# startup, so a later change to the running Issue's declared scope (exactly
+# what a real worker drives by posting a refined agentic-loop:scope marker
+# while it runs) is picked up automatically on the next poll cycle.
+printf '999 running open none 2026-01-01T00:00:00Z none none %s\n241 queued open none 2026-01-01T00:00:00Z none none %s\n' \
+  "$(scope_field 'paths=docs')" "$(scope_field 'paths=docs/operations')" > "$state"
+printf '999 <!-- agentic-loop:lease worker=scope-running-fixture heartbeat=%s expires=%s -->\n' "$(date +%s)" "$(($(date +%s) + 3600))" > "$FAKE_GH_ROOT/$state_key.comments"
+AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _supervise
+grep -Eq '^241 queued open' "$state" || fail "queued Issue was claimed despite overlapping a running Issue's declared scope"
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:scope-conflict issue=999 token=docs' "conflict against a running Issue's declared scope was not recorded"
+printf '999 running open none 2026-01-01T00:00:00Z none none %s\n241 queued open none 2026-01-01T00:00:00Z none none %s\n' \
+  "$(scope_field 'paths=bin')" "$(scope_field 'paths=docs/operations')" > "$state"
+AGENTIC_LOOP_RUN_ONCE=1 FAKE_CODEX_SLEEP=1 "$target/bin/agentic-loop" _supervise
+grep -Eq '^241 completed closed' "$state" || fail "queued Issue was not reconsidered after the running Issue's declared scope changed"
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:scope-resolved' 'resolved running-scope conflict was not recorded'
+
+# The worker itself refines a running Issue's scope from its plan-stage
+# declaration, recording a single audit comment and clearing the cache once
+# the Issue leaves the running state.
+printf '250 running open\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+FAKE_CODEX_RESULT=$'<!-- agentic-loop:scope paths=docs/operations -->\nAGENTIC_LOOP_RESULT=completed' "$target/bin/agentic-loop" _worker 250 scope-refine-worker
+grep -Eq '^250 completed closed' "$state" || fail 'plan-stage scope declaration test Issue did not complete'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:scope tokens=path:docs/operations' 'plan-stage scope declaration was not recorded on the Issue'
+[[ ! -e $state_root/scope/issue-250 ]] || fail 'completed worker left a stale scope cache entry'
+
+# doctor rejects an invalid unknown_scope value.
+cp "$target/.agentic-loop.toml" "$target/.agentic-loop.toml.valid"
+printf '[queue]\nunknown_scope = "sometimes"\n' > "$target/.agentic-loop.toml"
+if "$target/bin/agentic-loop" doctor > /tmp/agentic-loop-doctor-scope.$$; then fail 'doctor accepted an invalid unknown_scope value'; fi
+grep -Fq '[失敗] 設定値: UNKNOWN_SCOPE' /tmp/agentic-loop-doctor-scope.$$ || fail 'doctor did not classify the invalid unknown_scope value'
+mv "$target/.agentic-loop.toml.valid" "$target/.agentic-loop.toml"
+rm -f /tmp/agentic-loop-doctor-scope.$$
+
+# status surfaces each running Issue's effective scope and any conflict wait.
+# The Supervisor is deliberately left stopped: a live start would call
+# rebuild_scope_cache and overwrite this manually seeded fixture.
+printf '260 running open\n' > "$state"
+mkdir -p "$state_root/scope" "$state_root/conflict"
+printf 'path:bin/agentic-loop' > "$state_root/scope/issue-260"
+printf '260\tbin/agentic-loop\n' > "$state_root/conflict/issue-261"
+status_output=$("$target/bin/agentic-loop" status)
+grep -Fq 'scope: path:bin/agentic-loop' <<< "$status_output" || fail 'status did not show the running Issue effective scope'
+grep -Fq '競合待ちIssue:' <<< "$status_output" || fail 'status did not show a conflict-wait section'
+grep -Fq '#261' <<< "$status_output" || fail 'status did not name the waiting Issue'
+grep -Fq 'bin/agentic-loop' <<< "$status_output" || fail 'status did not name the overlapping token'
+rm -f "$state_root/scope/issue-260" "$state_root/conflict/issue-261"
+
 # Multiple priority labels use the highest rank; setup creates all priority and stale labels idempotently.
 grep -Fq $'label create priority:critical' "$FAKE_GH_ROOT/calls" || fail 'setup did not create the critical priority label'
 grep -Fq $'label create priority:low' "$FAKE_GH_ROOT/calls" || fail 'setup did not create the low priority label'
@@ -795,6 +914,9 @@ done
 assert_contains "$FAKE_GH_ROOT/calls" 'project field-create 7 --owner acme --name Category --data-type SINGLE_SELECT' 'setup did not create the Project Category field'
 
 # Only inactive queued Issues are closed; the audit explains safe recovery.
+# unknown_scope=open: this fixture declares no scope for any Issue and
+# exercises stale triage, not scope conflict avoidance.
+printf 'unknown_scope = "open"\n' >> "$target/.agentic-loop.toml"
 old_date=$(date -u -d '40 days ago' +%Y-%m-%dT%H:%M:%SZ)
 recent_date=$(date -u -d '1 day ago' +%Y-%m-%dT%H:%M:%SZ)
 # agent:failed is deliberately excluded here: it is actively managed by retry_failed, not stale closure.
@@ -825,6 +947,7 @@ FAKE_CODEX_GIT_OPERATIONS=1 "$target/bin/agentic-loop" _worker 6 linked-worktree
 git -C "$target" fetch --quiet origin agent/issue-6
 git -C "$target" show 'origin/agent/issue-6:worker.txt' | grep -Fxq 'worker change' || fail 'linked-worktree Git metadata operations did not reach the remote'
 assert_contains "$FAKE_GH_ROOT/calls" "project item-add 7 --owner acme --url https://github.example/acme/installed-project/pull/6" 'worker PR was not added to the Project'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:scope tokens=path:worker.txt' 'measured exec-stage Git diff did not refine the change-scope cache'
 [[ ! -e $target-worktrees/issue-6 ]] || fail 'completed linked worker worktree remained'
 ! git -C "$target" show-ref --verify --quiet refs/heads/agent/issue-6 || fail 'completed linked worker local branch remained'
 git -C "$target" ls-remote --exit-code --heads origin refs/heads/agent/issue-6 >/dev/null || fail 'Supervisor deleted the remote worker branch'

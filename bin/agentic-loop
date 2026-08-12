@@ -33,6 +33,8 @@ API_RETRY_ATTEMPTS=3
 API_RETRY_BASE_SECONDS=1
 MAX_ATTEMPTS=3
 RETRY_COOLDOWN_SECONDS=600
+UNKNOWN_SCOPE=isolated
+EXCLUSIVE_PATHS=''
 CONFIG_ERROR=''
 CONFIG_PROPS=''
 
@@ -69,6 +71,8 @@ load_config() {
       queue.api_retry_base_seconds) key=API_RETRY_BASE_SECONDS ;;
       queue.max_attempts) key=MAX_ATTEMPTS ;;
       queue.retry_cooldown_seconds) key=RETRY_COOLDOWN_SECONDS ;;
+      queue.unknown_scope) UNKNOWN_SCOPE=$value; continue ;;
+      queue.exclusive_paths) EXCLUSIVE_PATHS=$value; continue ;;
       *) continue ;;
     esac
     if [[ ! $value =~ ^[0-9]+$ ]]; then
@@ -402,6 +406,7 @@ validate_config() {
   [[ $API_RETRY_BASE_SECONDS =~ ^[0-9]+$ ]] || fail 'API_RETRY_BASE_SECONDS must be a non-negative integer'
   [[ $MAX_ATTEMPTS =~ ^[1-9][0-9]*$ ]] || fail 'MAX_ATTEMPTS must be a positive integer'
   [[ $RETRY_COOLDOWN_SECONDS =~ ^[0-9]+$ ]] || fail 'RETRY_COOLDOWN_SECONDS must be a non-negative integer'
+  case $UNKNOWN_SCOPE in isolated | exclusive | open) ;; *) fail 'UNKNOWN_SCOPE must be isolated, exclusive, or open' ;; esac
 }
 
 graphql_budget_file() { printf '%s/graphql-rate-limit' "$STATE_ROOT"; }
@@ -518,6 +523,7 @@ setup_project() {
     --single-select-options 'Inbox,Queued,Running,Needs input,In review,Done,Failed,Stale' >/dev/null 2>&1 || true
   gh project field-create "$number" --owner "$owner" --name 'Category' --data-type SINGLE_SELECT \
     --single-select-options 'Loop continuity,Confidentiality incident,Integrity incident,Availability incident,Feature,Improvement' >/dev/null 2>&1 || true
+  gh project field-create "$number" --owner "$owner" --name 'Blocked by' --data-type TEXT >/dev/null 2>&1 || true
   setup_project_views "$number" "$owner"
   setup_project_content "$number" "$owner"
 }
@@ -712,11 +718,35 @@ running_issues() {
     --jq '.[] | select(.pull_request == null) | "#\(.number) \(.title)"' 2>/dev/null || true
 }
 
+status_conflict_waits() {
+  local file issue other reason
+  shopt -s nullglob
+  for file in "$STATE_ROOT"/conflict/issue-*; do
+    issue=${file##*/issue-}
+    IFS=$'\t' read -r other reason < "$file" || continue
+    printf '#%s 競合相手 #%s 理由 scope重複: %s\n' "$issue" "$other" "$reason"
+  done
+  shopt -u nullglob
+}
+
 cmd_status() {
   if pid_alive; then say "running (pid $(cat "$STATE_ROOT/supervisor.pid"), max workers $MAX_WORKERS)"; else say 'stopped'; fi
-  local issues
+  local issues line number scope
   issues=$(running_issues)
-  if [[ -n $issues ]]; then printf 'Running Issues:\n%s\n' "$issues"; else say 'Running Issues: none'; fi
+  if [[ -n $issues ]]; then
+    printf 'Running Issues:\n'
+    while IFS= read -r line; do
+      [[ -n $line ]] || continue
+      number=${line#\#}; number=${number%% *}
+      scope=$(scope_cache_read "$number")
+      if [[ -n $scope ]]; then printf '%s (scope: %s)\n' "$line" "$(paste -sd', ' - <<< "$scope")"; else printf '%s\n' "$line"; fi
+    done <<< "$issues"
+  else
+    say 'Running Issues: none'
+  fi
+  local conflicts
+  conflicts=$(status_conflict_waits)
+  if [[ -n $conflicts ]]; then printf '競合待ちIssue:\n%s\n' "$conflicts"; else say '競合待ちIssue: none'; fi
 }
 
 doctor_json_escape() {
@@ -743,6 +773,13 @@ doctor_non_negative_config() {
   [[ $value =~ ^[0-9]+$ ]] || doctor_add failure "設定値: $name" 'Supervisorを安全な値で実行できません。' "docs/operations/issue-queue.md を確認し、$name を0以上の整数に修正してください。"
 }
 
+doctor_enum_config() {
+  local name=$1 value=$2 allowed
+  shift 2
+  for allowed in "$@"; do [[ $value == "$allowed" ]] && return 0; done
+  doctor_add failure "設定値: $name" 'Supervisorを安全な値で実行できません。' "docs/operations/issue-queue.md を確認し、$name を $* のいずれかに修正してください。"
+}
+
 doctor_collect() {
   local origin='' default_branch='' hooks='' project_owner='' project_number='' project_id='' project_ok='' repository='' owner='' name='' unit_dir unit issue_worktrees='' agent_branches='' log_files=''
   if [[ -n $CONFIG_ERROR ]]; then
@@ -754,6 +791,7 @@ doctor_collect() {
     doctor_positive_config RATE_LIMIT_CACHE_SECONDS "$RATE_LIMIT_CACHE_SECONDS"; doctor_positive_config API_RETRY_ATTEMPTS "$API_RETRY_ATTEMPTS"
     doctor_non_negative_config API_RETRY_BASE_SECONDS "$API_RETRY_BASE_SECONDS"
     doctor_positive_config MAX_ATTEMPTS "$MAX_ATTEMPTS"; doctor_non_negative_config RETRY_COOLDOWN_SECONDS "$RETRY_COOLDOWN_SECONDS"
+    doctor_enum_config UNKNOWN_SCOPE "$UNKNOWN_SCOPE" isolated exclusive open
     (( DOCTOR_FAILURES == 0 )) && doctor_add success '設定ファイル' '設定値を安全に解釈できます。' '対応は不要です。'
   fi
 
@@ -945,6 +983,26 @@ project_sync_category() {
   gh project item-edit --id "$item_id" --project-id "$project_id" --field-id "$field_id" --single-select-option-id "$option_id" >/dev/null 2>&1 || true
 }
 
+# Record (or clear, for an empty note) which other Issue this one is waiting
+# on in the "Blocked by" TEXT field. Only the counterpart Issue number and the
+# overlapping token are written; Issue bodies and secrets are never copied in.
+project_sync_conflict() {
+  local issue=$1 note=$2 note_b64
+  note_b64=$(base64 -w0 <<< "$note")
+  graphql_budget_allows "$((GRAPHQL_RESERVE + 1))" || { queue_project_sync "conflict $issue $note_b64"; return 0; }
+  [[ -r $STATE_ROOT/project.env ]] || return 0
+  local PROJECT_OWNER='' PROJECT_NUMBER='' key value project_id item_id field_id
+  while IFS='=' read -r key value; do
+    case $key in PROJECT_OWNER) PROJECT_OWNER=$value ;; PROJECT_NUMBER) PROJECT_NUMBER=$value ;; esac
+  done < "$STATE_ROOT/project.env"
+  [[ -n $PROJECT_OWNER && $PROJECT_NUMBER =~ ^[0-9]+$ ]] || return 0
+  project_id=$(gh project view "$PROJECT_NUMBER" --owner "$PROJECT_OWNER" --format json --jq .id 2>/dev/null) || return 0
+  item_id=$(gh project item-list "$PROJECT_NUMBER" --owner "$PROJECT_OWNER" --format json --limit 1000 --jq ".items[] | select(.content.number == $issue) | .id" 2>/dev/null | head -n 1) || return 0
+  field_id=$(gh project field-list "$PROJECT_NUMBER" --owner "$PROJECT_OWNER" --format json --jq '.fields[] | select(.name == "Blocked by") | .id' 2>/dev/null | head -n 1) || return 0
+  [[ -n $project_id && -n $item_id && -n $field_id ]] || return 0
+  gh project item-edit --id "$item_id" --project-id "$project_id" --field-id "$field_id" --text "$note" >/dev/null 2>&1 || true
+}
+
 reconcile_pending_project() {
   [[ -s $STATE_ROOT/project-pending ]] || return 0
   graphql_budget_allows "$((GRAPHQL_RESERVE + 1))" || return 0
@@ -957,6 +1015,7 @@ reconcile_pending_project() {
       pulls) project_add_pull_requests "$first" ;;
       state) project_sync_state "$first" "$second" ;;
       category) project_sync_category "$first" "$second" ;;
+      conflict) project_sync_conflict "$first" "$(base64 -d <<< "$second" 2>/dev/null || true)" ;;
     esac
   done < "$pending"
   rm -f "$pending"
@@ -1009,6 +1068,8 @@ recover_expired() {
     expires=$(printf '%s\n' "$body" | sed -n 's/.*expires=\([0-9][0-9]*\).*/\1/p' | head -n 1)
     if [[ -z $expires || $expires -lt $now ]]; then
       set_issue_state "$issue" queued
+      scope_cache_clear "$issue"
+      clear_conflict_wait "$issue"
       comment_issue "$issue" '<!-- agentic-loop:recovered -->\n前回のリースが期限切れとなったため、Issueを安全にキューへ戻しました。'
     fi
   done < <(repo_api issues --method GET -f state=open -f labels="$(state_label running)" -f per_page=100 --paginate --jq '.[] | select(.pull_request == null) | .number' 2>/dev/null || true)
@@ -1091,22 +1152,222 @@ retry_failed() {
   done < <(repo_api issues --method GET -f state=open -f labels="$(state_label failed)" -f per_page=100 --paginate --jq '.[] | select(.pull_request == null) | .number' 2>/dev/null)
 }
 
+# --- Change-scope conflict avoidance (see docs/operations/issue-queue.md) ---
+# An Issue may declare the paths and environments it touches with a marker
+# comment `<!-- agentic-loop:scope paths=a,b env=c -->` in its body (the same
+# HTML-comment convention as agentic-loop:lease). claim_next skips a queued
+# Issue whose declared scope overlaps a running Issue's effective scope, and
+# the worker itself refines the running Issue's cached scope from its plan
+# output and, later, from the measured Git diff — so an initial under-estimate
+# only ever grows into a safer (more conservative) scope, never shrinks it.
+scope_cache_dir() { printf '%s/scope' "$STATE_ROOT"; }
+scope_cache_file() { printf '%s/scope/issue-%s' "$STATE_ROOT" "$1"; }
+scope_cache_write() { mkdir -p "$(scope_cache_dir)"; printf '%s' "$2" > "$(scope_cache_file "$1")"; }
+scope_cache_read() { [[ -r $(scope_cache_file "$1") ]] && cat "$(scope_cache_file "$1")" || true; }
+scope_cache_clear() { rm -f "$(scope_cache_file "$1")"; }
+
+# Normalize a comma-separated raw declaration (bare path tokens plus env names
+# already prefixed with "env:") into one canonical token per line: "*" (whole
+# repository), "env:NAME", or "path:VALUE". Invalid characters, empty tokens,
+# and a bare "." or "/" degrade to fewer or no tokens rather than failing the
+# worker, since an incomplete declaration must still be safe (see
+# resolve_issue_scope for the unknown-scope fallback).
+scope_tokens_normalize() {
+  local raw=$1 token trimmed
+  local -a parts result=()
+  IFS=',' read -ra parts <<< "$raw"
+  for token in "${parts[@]}"; do
+    trimmed=$(sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//' <<< "$token")
+    [[ -n $trimmed ]] || continue
+    [[ $trimmed =~ ^[A-Za-z0-9._/*:-]+$ ]] || continue
+    if [[ $trimmed == '*' ]]; then
+      result+=('*')
+    elif [[ $trimmed == env:* ]]; then
+      [[ ${#trimmed} -gt 4 ]] && result+=("$trimmed")
+    else
+      trimmed=${trimmed%%\**}
+      trimmed=${trimmed%/}
+      [[ -z $trimmed || $trimmed == '.' ]] && trimmed='*'
+      result+=("path:$trimmed")
+    fi
+  done
+  (( ${#result[@]} == 0 )) && return 0
+  printf '%s\n' "${result[@]}" | sort -u
+}
+
+# Extract the last agentic-loop:scope marker from an Issue body or comment and
+# return its tokens as one bare (pre-normalization) comma-joined string:
+# path tokens verbatim, env= names prefixed with "env:".
+scope_marker_from_body() {
+  local body=$1 marker paths env_val combined e
+  local -a envs
+  marker=$(grep -oE 'agentic-loop:scope[^>]*' <<< "$body" | tail -n 1) || true
+  [[ -n $marker ]] || return 0
+  paths=$(grep -oE '(^|[[:space:]])paths=[^[:space:]]*' <<< "$marker" | tail -n 1); paths=${paths#*paths=}
+  env_val=$(grep -oE '(^|[[:space:]])env=[^[:space:]]*' <<< "$marker" | tail -n 1); env_val=${env_val#*env=}
+  combined=$paths
+  if [[ -n $env_val ]]; then
+    IFS=',' read -ra envs <<< "$env_val"
+    for e in "${envs[@]}"; do [[ -n $e ]] && combined+="${combined:+,}env:$e"; done
+  fi
+  printf '%s\n' "$combined"
+}
+
+# Escalate a normalized token set to "*" when it overlaps a configured
+# exclusive_paths entry (shared infrastructure that must serialize with
+# everything, even Issues that only declare a narrower scope).
+scope_apply_exclusive_paths() {
+  local tokens=$1 excl t e pt pe
+  [[ -n $tokens ]] || return 0
+  if [[ -n $EXCLUSIVE_PATHS ]]; then
+    excl=$(scope_tokens_normalize "$EXCLUSIVE_PATHS")
+    while IFS= read -r t; do
+      [[ $t == path:* ]] || continue
+      pt=${t#path:}
+      while IFS= read -r e; do
+        [[ $e == path:* ]] || continue
+        pe=${e#path:}
+        if [[ $pt == "$pe" || $pt == "$pe"/* || $pe == "$pt"/* ]]; then printf '*\n'; return 0; fi
+      done <<< "$excl"
+    done <<< "$tokens"
+  fi
+  printf '%s\n' "$tokens"
+}
+
+# Resolve an Issue's effective scope tokens from its body, falling back to
+# UNKNOWN_SCOPE when no valid marker is present: open scope resolves to no
+# tokens at all (this Issue is never blocked and never blocks anyone),
+# exclusive resolves to "*" (touches the whole repository), and the default
+# isolated resolves to the "unknown" sentinel, which only conflicts with other
+# unresolved Issues so declared, independent scopes stay unaffected.
+resolve_issue_scope() {
+  local body=$1 raw tokens
+  raw=$(scope_marker_from_body "$body")
+  [[ -n $raw ]] && tokens=$(scope_tokens_normalize "$raw")
+  if [[ -n ${tokens:-} ]]; then
+    scope_apply_exclusive_paths "$tokens"
+    return 0
+  fi
+  case $UNKNOWN_SCOPE in
+    open) return 0 ;;
+    exclusive) printf '*\n' ;;
+    *) printf 'unknown\n' ;;
+  esac
+}
+
+# Print the first token shared between two normalized token sets (one per
+# line), or nothing if they do not overlap. "*" overlaps everything; two
+# "unknown" sentinels overlap each other; env: tokens overlap only on an exact
+# name match; path tokens overlap when one is a "/"-boundary prefix of the
+# other (or equal). The shorter of the two overlapping paths is reported since
+# it names the shared (blocking) scope.
+scope_overlap_token() {
+  local -a a b
+  local ta tb pa pb
+  readarray -t a <<< "$1"
+  readarray -t b <<< "$2"
+  for ta in "${a[@]}"; do
+    [[ -n $ta ]] || continue
+    for tb in "${b[@]}"; do
+      [[ -n $tb ]] || continue
+      if [[ $ta == '*' || $tb == '*' ]]; then printf '*\n'; return 0; fi
+      if [[ $ta == unknown && $tb == unknown ]]; then printf 'unknown\n'; return 0; fi
+      if [[ $ta == env:* && $ta == "$tb" ]]; then printf '%s\n' "$ta"; return 0; fi
+      if [[ $ta == path:* && $tb == path:* ]]; then
+        pa=${ta#path:}; pb=${tb#path:}
+        if [[ $pa == "$pb" || $pb == "$pa"/* || $pa == "$pb"/* ]]; then
+          if [[ ${#pa} -le ${#pb} ]]; then printf '%s\n' "$pa"; else printf '%s\n' "$pb"; fi
+          return 0
+        fi
+      fi
+    done
+  done
+  return 1
+}
+scope_conflicts() { scope_overlap_token "$1" "$2" >/dev/null; }
+
+# The number of a currently cached (running) Issue whose scope conflicts with
+# the given tokens, or nothing if none does.
+scope_conflicting_issue() {
+  local tokens=$1 file other
+  shopt -s nullglob
+  for file in "$(scope_cache_dir)"/issue-*; do
+    other=${file##*/issue-}
+    if scope_conflicts "$tokens" "$(cat "$file" 2>/dev/null || true)"; then
+      printf '%s\n' "$other"
+      shopt -u nullglob
+      return 0
+    fi
+  done
+  shopt -u nullglob
+  return 1
+}
+
+conflict_wait_file() { printf '%s/conflict/issue-%s' "$STATE_ROOT" "$1"; }
+
+# Record that an Issue is waiting for another Issue's change-scope to stop
+# overlapping, and comment only on the transition into (or a change of) the
+# wait, so a 30-second poll does not repost the same notice every cycle.
+record_conflict_wait() {
+  local issue=$1 other=$2 tokens=$3 file reason note
+  reason=$(scope_overlap_token "$tokens" "$(scope_cache_read "$other")") || reason=unknown
+  file=$(conflict_wait_file "$issue")
+  note=$(printf '%s\t%s' "$other" "$reason")
+  [[ -r $file && $(cat "$file") == "$note" ]] && return 0
+  mkdir -p "$(dirname "$file")"
+  printf '%s\n' "$note" > "$file"
+  comment_issue "$issue" "<!-- agentic-loop:scope-conflict issue=$other token=$reason -->\n#$other と変更scopeが重なる（重複: $reason）ため、claimを待機します。相手Issueが完了するか、scopeが重ならなくなれば自動的にclaimされます。" || true
+  project_sync_conflict "$issue" "#$other scope重複: $reason"
+}
+
+# Clear a conflict-wait once it no longer applies, commenting only when a wait
+# was actually recorded (idempotent for Issues that never conflicted).
+clear_conflict_wait() {
+  local issue=$1 file
+  file=$(conflict_wait_file "$issue")
+  [[ -r $file ]] || return 0
+  rm -f "$file"
+  comment_issue "$issue" '<!-- agentic-loop:scope-resolved -->\n変更scopeの重複が解消したため、claim待機を解除しました。' || true
+  project_sync_conflict "$issue" ''
+}
+
+# Rebuild the running-Issue scope cache from GitHub at supervisor startup,
+# since the local cache lives under Git-external state and may not survive a
+# restart. Bounded by the number of currently running Issues.
+rebuild_scope_cache() {
+  local issue body
+  rm -rf "$(scope_cache_dir)"
+  while IFS=$'\t' read -r issue body; do
+    [[ -n $issue ]] || continue
+    body=$(base64 -d <<< "$body" 2>/dev/null || true)
+    scope_cache_write "$issue" "$(resolve_issue_scope "$body")"
+  done < <(repo_api issues --method GET -f state=open -f labels="$(state_label running)" -f per_page=100 --paginate --jq '.[] | select(.pull_request == null) | [.number, (.body // "" | @base64)] | @tsv' 2>/dev/null || true)
+}
+
 claim_next() {
-  local issue pid
+  local issue pid body body_b64 tokens conflict_with
   # shellcheck disable=SC2016 # This is a jq program, not a shell expression.
-  while IFS= read -r issue; do
+  while IFS=$'\t' read -r issue body_b64; do
     [[ -n $issue ]] || continue
     if [[ -r $STATE_ROOT/workers/$issue.pid ]]; then
       read -r pid < "$STATE_ROOT/workers/$issue.pid" || true
       [[ $pid =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null && continue
     fi
+    body=$(base64 -d <<< "$body_b64" 2>/dev/null || true)
+    tokens=$(resolve_issue_scope "$body")
+    if [[ -n $tokens ]] && conflict_with=$(scope_conflicting_issue "$tokens"); then
+      record_conflict_wait "$issue" "$conflict_with" "$tokens"
+      continue
+    fi
+    clear_conflict_wait "$issue"
     set_issue_state "$issue" running
     if repo_api "issues/$issue" --jq '.labels[].name' | grep -Fxq "$(state_label running)"; then
       record_attempt "$issue"
+      scope_cache_write "$issue" "$tokens"
       printf '%s\n' "$issue"
       return 0
     fi
-  done < <(repo_api issues --method GET -f state=open -f labels="$(state_label queued)" -f per_page=100 --paginate --jq '.[] | select(.pull_request == null) | [(if any(.labels[]; .name == "category:loop-continuity") then 0 elif any(.labels[]; .name == "category:confidentiality-incident") then 1 elif any(.labels[]; .name == "category:integrity-incident") then 2 elif any(.labels[]; .name == "category:availability-incident") then 3 elif any(.labels[]; .name == "category:feature") then 4 else 5 end), (if any(.labels[]; .name == "priority:critical") then 0 elif any(.labels[]; .name == "priority:high") then 1 elif any(.labels[]; .name == "priority:medium") then 2 elif any(.labels[]; .name == "priority:low") then 3 else 4 end), .created_at, .number] | @tsv' 2>/dev/null | sort -k1,1n -k2,2n -k3,3 -k4,4n | awk -F '\t' '{print $4}')
+  done < <(repo_api issues --method GET -f state=open -f labels="$(state_label queued)" -f per_page=100 --paginate --jq '.[] | select(.pull_request == null) | [(if any(.labels[]; .name == "category:loop-continuity") then 0 elif any(.labels[]; .name == "category:confidentiality-incident") then 1 elif any(.labels[]; .name == "category:integrity-incident") then 2 elif any(.labels[]; .name == "category:availability-incident") then 3 elif any(.labels[]; .name == "category:feature") then 4 else 5 end), (if any(.labels[]; .name == "priority:critical") then 0 elif any(.labels[]; .name == "priority:high") then 1 elif any(.labels[]; .name == "priority:medium") then 2 elif any(.labels[]; .name == "priority:low") then 3 else 4 end), .created_at, .number, (.body // "" | @base64)] | @tsv' 2>/dev/null | sort -k1,1n -k2,2n -k3,3 -k4,4n | awk -F '\t' '{print $4 "\t" $5}')
   return 1
 }
 
@@ -1126,6 +1387,7 @@ supervise() {
   mkdir -p "$STATE_ROOT/workers"
   printf '%s\n' "$$" > "$STATE_ROOT/supervisor.pid"
   recover_expired
+  rebuild_scope_cache
   while :; do
     requeue_answered
     if [[ -e $STATE_ROOT/stop.requested ]]; then
@@ -1174,6 +1436,7 @@ plan_prompt() {
   cat <<EOF
 $repository の GitHub Issue #$issue に対する実装計画を作成してください。
 Issueとそのコメントを要求として扱い、この専用worktreeとリポジトリを調査し、変更方針、影響範囲、検証手順、観測可能な受け入れ条件を日本語で具体化してください。このplan段階ではファイルの変更、commit、push、PR作成、GitHubの状態変更を行わず、最終メッセージに計画本文だけを出力してください。
+計画本文の最後の行に、変更が触れる見込みのpathとexternal環境を示すmarkerを1行だけ出力してください: \`<!-- agentic-loop:scope paths=path1,path2 env=name1,name2 -->\`。repository全体に及ぶ場合は \`paths=*\` としてください。見積もれない場合はこの行を省略してください（安全な既定動作にフォールバックします）。このmarkerはSupervisorが並列worker間の変更scope競合を避けるための機械可読情報であり、実装の一部ではありません。
 EOF
   if [[ -n $failure_context ]]; then
     cat <<EOF
@@ -1241,6 +1504,37 @@ cleanup_completed_worker() {
   ! git -C "$REPO_ROOT" show-ref --verify --quiet "$branch_ref"
 }
 
+# Merge freshly observed scope tokens into a running Issue's cache, commenting
+# only when the effective (merged) scope actually changes so re-planning
+# passes and repeated diffs do not spam the Issue. The merge only ever grows
+# the cached scope, so an early under-estimate cannot let a later, larger
+# conflict go undetected.
+worker_update_scope() {
+  local issue=$1 new_tokens=$2 current merged
+  [[ -n $new_tokens ]] || return 0
+  current=$(scope_cache_read "$issue")
+  merged=$(sort -u <<< "$(printf '%s\n%s\n' "$current" "$new_tokens" | sed '/^$/d')")
+  [[ $merged == "$current" ]] && return 0
+  scope_cache_write "$issue" "$merged"
+  comment_issue "$issue" "<!-- agentic-loop:scope tokens=$(paste -sd, - <<< "$merged") -->\nこのIssueが影響する変更scopeを更新しました: $(paste -sd', ' - <<< "$merged")" || true
+}
+
+worker_refine_scope_from_plan() {
+  local issue=$1 plan_file=$2 raw tokens
+  raw=$(scope_marker_from_body "$(cat "$plan_file" 2>/dev/null || true)")
+  [[ -n $raw ]] || return 0
+  tokens=$(scope_tokens_normalize "$raw")
+  [[ -n $tokens ]] || return 0
+  worker_update_scope "$issue" "$(scope_apply_exclusive_paths "$tokens")"
+}
+
+worker_refine_scope_from_diff() {
+  local issue=$1 worktree=$2 default_branch=$3 measured
+  measured=$(git -C "$worktree" diff --name-only "origin/$default_branch" HEAD 2>/dev/null | sed 's#^#path:#' | sort -u)
+  [[ -n $measured ]] || return 0
+  worker_update_scope "$issue" "$(scope_apply_exclusive_paths "$measured")"
+}
+
 worker() {
   local issue=$1 worker=$2 repository default_branch branch worktree result git_common_dir agents_dir exit_code=0 heartbeat_pid merged_pr='' merged_oid=''
   repository=$(repo_name)
@@ -1290,10 +1584,12 @@ worker() {
     started=$(date +%s)
     agent_run_stage plan "$worktree" "$git_common_dir" "$agents_dir" "$plan_file" "$plan_usage" "$(plan_prompt "$issue" "$repository" "$failure_context")" || true
     agent_post_usage "$issue" "$worker" "$plan_usage" 0 "$(($(date +%s) - started))"
+    worker_refine_scope_from_plan "$issue" "$plan_file"
     exit_code=0
     started=$(date +%s)
     agent_run_stage exec "$worktree" "$git_common_dir" "$agents_dir" "$result" "$exec_usage" "$(exec_prompt "$issue" "$repository" "$plan_file")" || exit_code=$?
     agent_post_usage "$issue" "$worker" "$exec_usage" "$exit_code" "$(($(date +%s) - started))"
+    worker_refine_scope_from_diff "$issue" "$worktree" "$default_branch"
     { [[ $exit_code -eq 0 ]] && grep -Fq 'AGENTIC_LOOP_RESULT=completed' "$result"; } && break
     { [[ $exit_code -eq 0 ]] && grep -Fq 'AGENTIC_LOOP_RESULT=needs-input' "$result"; } && break
     { [[ $exit_code -eq 0 ]] && grep -Fq 'AGENTIC_LOOP_RESULT=declined' "$result"; } && break
@@ -1340,6 +1636,8 @@ worker() {
     project_sync_state "$issue" failed
     comment_issue "$issue" "<!-- agentic-loop:failed worker=$worker exit=$exit_code -->\nWorkerは検証済みのmergeを完了せずに停止しました。Logはlocalにのみ保持され、秘密情報はここに転記されません。Supervisorが自動的に再試行し、上限回数に達したら解決不能とみなしてcloseします。"
   fi
+  scope_cache_clear "$issue"
+  clear_conflict_wait "$issue"
   rm -f "$STATE_ROOT/workers/$issue.pid"
 }
 
