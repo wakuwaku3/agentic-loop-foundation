@@ -13,6 +13,9 @@ readonly LABELS=(queued running needs-input in-review completed failed stale)
 readonly PRIORITY_LABELS=(critical high medium low)
 readonly CATEGORY_LABELS=(loop-continuity confidentiality-incident integrity-incident availability-incident feature improvement)
 readonly DIAGNOSIS_LABEL=diagnosis
+# Grace before a lock without a published pid is treated as stale, so two
+# concurrent starts cannot tear down each other's fresh lock and double-run.
+readonly SUPERVISOR_LOCK_GRACE_SECONDS=10
 
 cd "$REPO_ROOT"
 
@@ -565,6 +568,18 @@ pid_alive() {
 clear_stale_lock() {
   [[ -d $STATE_ROOT/supervisor.lock ]] || return 0
   pid_alive && return 1
+  # No live supervisor pid: the lock is stale or still mid-startup. A lock that
+  # has not yet published a pid may belong to a supervisor that just acquired it
+  # and is about to write its pid; leave such a fresh lock alone until a grace
+  # period passes, so two concurrent starts do not tear down each other's lock
+  # and both begin supervising. A lock whose pid is published but not a live
+  # supervisor (crashed or PID reused) is reclaimed immediately.
+  if [[ ! -e $STATE_ROOT/supervisor.pid ]]; then
+    local now mtime
+    now=$(date +%s)
+    mtime=$(stat -c %Y "$STATE_ROOT/supervisor.lock" 2>/dev/null || printf '%s' "$now")
+    (( now - mtime < SUPERVISOR_LOCK_GRACE_SECONDS )) && return 1
+  fi
   rmdir "$STATE_ROOT/supervisor.lock" 2>/dev/null || return 1
   rm -f "$STATE_ROOT/supervisor.pid"
 }
@@ -608,6 +623,9 @@ cmd_service() {
   mkdir -p "$STATE_ROOT/logs" "$WORKTREE_ROOT"
   clear_stale_lock || return 0
   mkdir "$STATE_ROOT/supervisor.lock" 2>/dev/null || return 0
+  # Publish identity immediately so a racing starter sees a live supervisor and
+  # backs off instead of reclaiming the lock during startup.
+  printf '%s\n' "$$" > "$STATE_ROOT/supervisor.pid"
   supervise
 }
 
