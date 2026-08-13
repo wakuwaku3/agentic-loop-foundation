@@ -2150,6 +2150,7 @@ AGENTIC_LOOP_SOURCE="$PROJECT_ROOT" AGENTIC_LOOP_TARGET="$empty" AGENTIC_LOOP_SK
 [[ -f $empty/devbox.json && -f $empty/devbox.lock ]] || fail 'empty repository did not get the pinned development environment'
 [[ -x $empty/scripts/check-environment.sh ]] || fail 'empty repository did not get the environment guard'
 assert_contains "$empty/README.md" 'opencode' 'installed README.md does not document opencode as a supported provider'
+assert_contains "$empty/README.md" 'category:improvement' 'installed README.md does not document the diagnosis category label'
 
 # The documented one-command install bootstraps yq through the downloaded
 # Devbox definition instead of requiring an unpinned host installation.
