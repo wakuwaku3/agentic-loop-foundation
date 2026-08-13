@@ -12,6 +12,6 @@ lint:
 	./scripts/lint.sh
 
 test:
-	./tests/test-agentic-loop.sh
+	./tests/run-e2e.sh
 
 check: environment lint test

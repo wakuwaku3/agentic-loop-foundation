@@ -7,7 +7,10 @@ readonly TEST_ROOT="$(mktemp -d)"
 readonly FAKE_BIN="$TEST_ROOT/bin"
 readonly FAKE_GH_ROOT="$TEST_ROOT/gh"
 readonly TEST_HOST_PATH="$PATH"
+readonly TEST_GROUP="${AGENTIC_LOOP_TEST_GROUP:-all}"
 trap 'rm -rf "$TEST_ROOT"' EXIT
+
+case "$TEST_GROUP" in all|queue|lifecycle|auxiliary|upgrade) ;; *) printf 'Unknown test group: %s\n' "$TEST_GROUP" >&2; exit 2 ;; esac
 
 fail() { printf 'FAIL: %s\n' "$1" >&2; exit 1; }
 assert_contains() { grep -Fq -- "$2" "$1" || fail "$3"; }
@@ -879,6 +882,8 @@ git -C "$target" push --quiet
 state="$FAKE_GH_ROOT/$state_key.state"
 state_root="$(git -C "$target" rev-parse --absolute-git-dir)/agentic-loop"
 
+if [[ $TEST_GROUP == all || $TEST_GROUP == queue ]]; then
+
 # Category is the primary queue key, followed by priority, creation time, and Issue number.
 # unknown_scope=open disables change-scope conflict avoidance here: this fixture
 # declares no scope for any Issue and exercises only the ordering, which the
@@ -1441,6 +1446,10 @@ assert_contains "$FAKE_GH_ROOT/$state_key.comments" '保護対象のrepository p
 assert_contains "$FAKE_GH_ROOT/$state_key.comments" '.agents directoryを安全な通常directoryとして復旧した後、このIssueを安全に再キューしてください' '.agents resolver failure did not explain recovery in Japanese'
 git -C "$target" worktree remove --force "$target-worktrees/issue-12"
 git -C "$target" branch -D agent/issue-12 >/dev/null
+
+fi
+
+if [[ $TEST_GROUP == all || $TEST_GROUP == lifecycle ]]; then
 
 # --- Worker resume from existing artifacts (see docs/decisions/0004) ---
 
@@ -2036,6 +2045,10 @@ grep -Fq 'residual-worktree' <<< "$status_output" && fail 'status kept flagging 
 : > "$FAKE_GH_ROOT/$state_key.comments"
 rm -rf "$state_root/workers"
 
+fi
+
+if [[ $TEST_GROUP == all || $TEST_GROUP == auxiliary ]]; then
+
 # Repositories use separate gh/project state and Git state directories.
 second=$(new_repository second-project)
 AGENTIC_LOOP_SOURCE="$PROJECT_ROOT" AGENTIC_LOOP_TARGET="$second" AGENTIC_LOOP_SKIP_START=1 "$PROJECT_ROOT/install.sh"
@@ -2291,6 +2304,10 @@ metrics_text=$("$target/bin/agentic-loop" metrics --days "$days" --as-of "$as_of
 [[ $metrics_text == *'転帰:'* ]] || fail 'metrics text format did not render a summary'
 [[ $metrics_text != *'Fake issue'* && $metrics_text != *'worker=w'* ]] || fail 'metrics text format leaked private data'
 
+fi
+
+if [[ $TEST_GROUP == all || $TEST_GROUP == upgrade ]]; then
+
 # --- Foundation upgrade (bin/agentic-loop upgrade, scripts/upgrade-target.sh) ---
 # See docs/operations/upgrade.md / docs/decisions/0009-foundation-upgrade.md.
 
@@ -2448,4 +2465,6 @@ git -C "$verify_target" diff --quiet -- AGENTS.md || fail 'rollback did not rest
 interrupted_check_after=$( ("$verify_target/bin/agentic-loop" doctor --format json || true) | yq -p json '.checks[] | select(.name == "中断したupgrade") | .level')
 [[ $interrupted_check_after == success ]] || fail 'doctor should report the upgrade record cleared after rollback'
 
-printf 'Tests passed.\n'
+fi
+
+printf 'Tests passed (%s).\n' "$TEST_GROUP"
