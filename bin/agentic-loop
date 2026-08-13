@@ -3788,7 +3788,7 @@ worker() {
     # A clean provider exit without a terminal marker is a protocol violation,
     # not an implementation failure. Retry exec once with the same plan before
     # spending a flagship replan; a second violation deterministically fails.
-    if [[ $exit_code -eq 0 ]] && ! agent_result_terminal_marker "$result" >/dev/null; then
+    if [[ $exit_code -eq 0 ]] && ! agent_result_is_exhausted "$result" "$exit_code" && ! agent_result_terminal_marker "$result" >/dev/null; then
       if (( protocol_retry == 0 )); then
         protocol_retry=1
         comment_issue "$issue" "<!-- agentic-loop:protocol-retry worker=$worker attempt=1 -->\nexec段が終了markerなしで正常終了しました。再計画せず同じ計画でexecを1回だけ再実行し、同一turn内の待機完遂と終了marker返却を求めます。" || true
