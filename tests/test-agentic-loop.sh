@@ -27,6 +27,10 @@ write_queue_config() {
 # (the fake gh's simulated Issue body), e.g. scope_field 'paths=bin/agentic-loop'
 scope_field() { printf '<!-- agentic-loop:scope %s -->' "$1" | base64 -w0; }
 
+# dependency_field REFS -> base64 of a "Blocked by:" body line for state column
+# 8, e.g. dependency_field '#12, #34'
+dependency_field() { printf 'Blocked by: %s' "$1" | base64 -w0; }
+
 mkdir -p "$FAKE_BIN" "$FAKE_GH_ROOT"
 
 if env -u DEV_ENVIRONMENT "$PROJECT_ROOT/scripts/check-environment.sh" >/dev/null 2>&1; then
@@ -94,6 +98,7 @@ case "${1:-} ${2:-}" in
           else awk '$2 == "running" && $3 != "closed" {print $1}' "$state"; fi ;;
         agent:needs-input) awk '$2 == "needs-input" && $3 != "closed" {print $1}' "$state" ;;
         agent:failed) awk '$2 == "failed" && $3 != "closed" {print $1}' "$state" ;;
+        agent:blocked) awk '$2 == "blocked" && $3 != "closed" {print $1 "\t" $8}' "$state" ;;
       esac
     elif [[ $endpoint =~ ^issues/([0-9]+)/labels$ && $method == PUT ]]; then
       issue=${BASH_REMATCH[1]}; payload=$(if [[ -n $input_file && $input_file != - ]]; then cat "$input_file"; else cat; fi); target=$(sed -n 's/.*"agent:\([^"]*\)".*/\1/p' <<< "$payload"); category=$(grep -o 'category:[a-z-]*' <<< "$payload" | head -n 1 | cut -d: -f2 || true)
@@ -106,10 +111,31 @@ case "${1:-} ${2:-}" in
       elif [[ $* == *needs-input* ]]; then
         if tail -n 1 "$comments" 2>/dev/null | grep -Fq USER_REPLY; then printf 'true\n'; else printf 'false\n'; fi
       else tail -n 1 "$comments" 2>/dev/null || true; fi
+    elif [[ $endpoint =~ ^issues/([0-9]+)/dependencies/blocked_by$ && $method == GET ]]; then
+      issue=${BASH_REMATCH[1]}
+      if [[ ${FAKE_DEPENDENCIES_FORBIDDEN:-0} == 1 ]]; then printf 'HTTP 403: Forbidden\n' >&2; exit 1; fi
+      if [[ ${FAKE_DEPENDENCIES_UNAVAILABLE:-0} == 1 ]]; then printf 'HTTP 404: Not Found\n' >&2; exit 1; fi
+      if [[ ${FAKE_DEPENDENCIES_TRANSIENT_FAIL:-0} == 1 ]]; then printf 'HTTP 503: Service Unavailable\n' >&2; exit 1; fi
+      links=$(awk -v n="$issue" '$1 == n {print $2}' "$FAKE_GH_ROOT/$key.dep-links" 2>/dev/null || true)
+      [[ -n $links ]] && tr ',' '\n' <<< "$links"
+      true
     elif [[ $endpoint =~ ^issues/([0-9]+)$ ]]; then
       issue=${BASH_REMATCH[1]}
       if [[ $method == PATCH && $form_state == closed ]]; then
         ( flock 9; awk -v n="$issue" '{if ($1 == n) $3="closed"; print}' "$state" > "$state.$$.tmp" && mv "$state.$$.tmp" "$state" ) 9> "$state.lock"
+      elif [[ $* == *'.state_reason // ""'* ]]; then
+        if ! awk -v n="$issue" '$1 == n {found=1} END{exit !found}' "$state" 2>/dev/null; then
+          printf 'HTTP 404: Not Found\n' >&2; exit 1
+        fi
+        awk -v n="$issue" '$1 == n {
+          labels = ($2 == "none" ? "" : "agent:" $2)
+          printf "%s\037%s\037%s\n", $3, ($9 == "" ? "" : $9), labels
+        }' "$state"
+      elif [[ $* == *'.body // ""'* ]]; then
+        if ! awk -v n="$issue" '$1 == n {found=1} END{exit !found}' "$state" 2>/dev/null; then
+          printf 'HTTP 404: Not Found\n' >&2; exit 1
+        fi
+        awk -v n="$issue" '$1 == n {print $8}' "$state" | base64 -d 2>/dev/null || true
       elif [[ $* == *'join(",")'* ]]; then
         awk -v n="$issue" '$1 == n {split($7,c,","); out=""; for(i in c) if(c[i] != "" && c[i] != "none") out=out (out=="" ? "" : ",") "category:" c[i]; print out}' "$state"
       elif [[ $* == *'startswith("category:") | not'* ]]; then
@@ -903,6 +929,139 @@ grep -Fq '競合待ちIssue:' <<< "$status_output" || fail 'status did not show 
 grep -Fq '#261' <<< "$status_output" || fail 'status did not name the waiting Issue'
 grep -Fq 'bin/agentic-loop' <<< "$status_output" || fail 'status did not name the overlapping token'
 rm -f "$state_root/scope/issue-260" "$state_root/conflict/issue-261"
+
+# --- Issue dependency gating (Issue #41) ---
+
+write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=3 LEASE_SECONDS=3 STOP_TIMEOUT=10 STALE_DAYS=30
+printf 'unknown_scope = "open"\n' >> "$target/.agentic-loop.toml"
+rm -f "$FAKE_GH_ROOT/$state_key.dep-links"
+
+# A dependency verified complete (agent:completed, closed) lets the Issue be
+# claimed alongside it in the same pass; a dependency merely closed without
+# agent:completed (here, agent:failed) does not count as complete and blocks
+# claiming with a reason code instead of silently starving the Issue.
+printf '300 completed closed\n301 failed closed\n310 queued open none 2026-01-01T00:00:00Z none none %s\n311 queued open none 2026-01-02T00:00:00Z none none %s\n' \
+  "$(dependency_field '#300')" "$(dependency_field '#301')" > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+AGENTIC_LOOP_RUN_ONCE=1 FAKE_CODEX_SLEEP=1 "$target/bin/agentic-loop" _supervise
+grep -Eq '^310 completed closed' "$state" || fail 'dependency satisfied by agent:completed did not let the Issue be claimed'
+grep -Eq '^311 blocked open' "$state" || fail 'a dependency closed without agent:completed was accepted as satisfied'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:dependency-blocked reason=incomplete' 'incomplete-dependency block was not recorded with its reason'
+[[ -r $state_root/dependency/blocked-311 ]] || fail 'dependency block state was not persisted for status/Project visibility'
+assert_contains "$FAKE_GH_ROOT/calls" 'select(.name == "Blocked") | .id' 'blocked state was not synchronized to the Project Agent status field'
+assert_contains "$FAKE_GH_ROOT/calls" 'select(.name == "Blocked by") | .id' 'blocked reason was not written to the Project Blocked by field'
+
+# Once the blocking dependency itself completes, the blocked Issue is
+# automatically requeued and claimed in the same poll, with no manual Label edit.
+printf '300 completed closed\n301 completed closed\n310 completed closed none 2026-01-01T00:00:00Z none none %s\n311 blocked open none 2026-01-02T00:00:00Z none none %s\n' \
+  "$(dependency_field '#300')" "$(dependency_field '#301')" > "$state"
+AGENTIC_LOOP_RUN_ONCE=1 FAKE_CODEX_SLEEP=1 "$target/bin/agentic-loop" _supervise
+grep -Eq '^311 completed closed' "$state" || fail 'a resolved dependency did not auto-requeue and claim the blocked Issue'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:dependency-ready' 'dependency resolution was not recorded on the Issue'
+[[ ! -e $state_root/dependency/blocked-311 ]] || fail 'resolved dependency block state was not cleared'
+
+# A dependency referencing a nonexistent Issue, another repository, or an
+# invalid `Blocked by:` token (a bad reference, or more than one such line)
+# each block with a distinct, correct reason code.
+multi_line_body=$(printf 'Blocked by: #1\nBlocked by: #2' | base64 -w0)
+printf '370 queued open none 2026-01-01T00:00:00Z none none %s\n371 queued open none 2026-01-02T00:00:00Z none none %s\n372 queued open none 2026-01-03T00:00:00Z none none %s\n373 queued open none 2026-01-04T00:00:00Z none none %s\n' \
+  "$(dependency_field '#9999')" "$(dependency_field 'other/repo#5')" "$(dependency_field 'abc')" "$multi_line_body" > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _supervise
+grep -Eq '^370 blocked open' "$state" || fail 'a dependency referencing a nonexistent Issue was not blocked'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:dependency-blocked reason=missing' 'missing-dependency reason was not recorded'
+grep -Eq '^371 blocked open' "$state" || fail 'a cross-repository dependency reference was not blocked'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:dependency-blocked reason=cross-repo' 'cross-repository reason was not recorded'
+grep -Eq '^372 blocked open' "$state" || fail 'an invalid Blocked by: token was not blocked'
+grep -Eq '^373 blocked open' "$state" || fail 'more than one Blocked by: line was not blocked'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:dependency-blocked reason=syntax' 'invalid-syntax reason was not recorded'
+
+# A circular dependency (A blocked by B, B blocked by A) is reported with its
+# own reason code rather than the generic "incomplete", since it can never
+# resolve automatically and needs a human to break the cycle.
+printf '330 queued open none 2026-01-01T00:00:00Z none none %s\n331 queued open none 2026-01-02T00:00:00Z none none %s\n' \
+  "$(dependency_field '#331')" "$(dependency_field '#330')" > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _supervise
+grep -Eq '^330 blocked open' "$state" || fail 'circularly dependent Issue 330 was not blocked'
+grep -Eq '^331 blocked open' "$state" || fail 'circularly dependent Issue 331 was not blocked'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:dependency-blocked reason=cycle' 'circular-dependency reason was not recorded'
+
+# Native GitHub issue dependencies and the body's `Blocked by:` line are
+# unioned: an Issue blocks if EITHER source names an unmet dependency, so
+# both are consulted even when only one of them is declared.
+printf '350 completed closed\n351 queued open\n352 queued open\n360 queued open none 2026-01-01T00:00:00Z none none %s\n361 queued open none 2026-01-02T00:00:00Z\n' \
+  "$(dependency_field '#351')" > "$state"
+printf '360 350\n361 352\n' > "$FAKE_GH_ROOT/$state_key.dep-links"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _supervise
+grep -Eq '^360 blocked open' "$state" || fail 'a body-declared dependency was not consulted alongside a satisfied native dependency'
+grep -Eq '^361 blocked open' "$state" || fail 'a native-declared dependency was not consulted when no body dependency exists'
+
+# When the native dependency endpoint itself is unavailable (404, e.g. an
+# older GitHub Enterprise or a repository without the feature enabled), the
+# body syntax alone still gates claiming correctly, both for a satisfied and
+# an unsatisfied dependency.
+rm -f "$FAKE_GH_ROOT/$state_key.dep-links"
+printf '353 completed closed\n354 queued open\n362 queued open none 2026-01-01T00:00:00Z none none %s\n363 queued open none 2026-01-02T00:00:00Z none none %s\n' \
+  "$(dependency_field '#353')" "$(dependency_field '#354')" > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+FAKE_DEPENDENCIES_UNAVAILABLE=1 AGENTIC_LOOP_RUN_ONCE=1 FAKE_CODEX_SLEEP=1 "$target/bin/agentic-loop" _supervise
+grep -Eq '^362 completed closed' "$state" || fail 'native-unavailable fallback did not let a satisfied body dependency claim'
+grep -Eq '^363 blocked open' "$state" || fail 'native-unavailable fallback did not block on an unsatisfied body dependency'
+
+# A dependency-check API failure withholds claiming from the very first poll,
+# but only moves the Issue to agent:blocked once it persists across
+# DEPENDENCY_FAILURE_TOLERANCE consecutive polls, so a single blip does not
+# flap the Label; the Issue recovers automatically once the API does.
+write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=3 LEASE_SECONDS=3 STOP_TIMEOUT=10 STALE_DAYS=30 API_RETRY_ATTEMPTS=1
+printf 'unknown_scope = "open"\n' >> "$target/.agentic-loop.toml"
+printf '380 queued open\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+FAKE_DEPENDENCIES_TRANSIENT_FAIL=1 AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _supervise
+grep -Eq '^380 queued open' "$state" || fail 'the first dependency-check API failure moved the Issue to agent:blocked too eagerly'
+FAKE_DEPENDENCIES_TRANSIENT_FAIL=1 AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _supervise
+grep -Eq '^380 queued open' "$state" || fail 'a second consecutive dependency-check API failure moved the Issue to agent:blocked too eagerly'
+FAKE_DEPENDENCIES_TRANSIENT_FAIL=1 AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _supervise
+grep -Eq '^380 blocked open' "$state" || fail 'a persistent dependency-check API failure did not move the Issue to agent:blocked'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:dependency-blocked reason=api' 'persistent API-failure reason was not recorded'
+AGENTIC_LOOP_RUN_ONCE=1 FAKE_CODEX_SLEEP=1 "$target/bin/agentic-loop" _supervise
+grep -Eq '^380 completed closed' "$state" || fail 'the Issue did not auto-recover once the dependency-check API stopped failing'
+[[ ! -e $state_root/dependency/failures-380 ]] || fail 'the dependency-check failure counter was not cleared on recovery'
+
+# A permission error against the dependency API (401/403) is a distinct,
+# tolerated-then-blocked reason from a generic API failure.
+printf '381 queued open\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+FAKE_DEPENDENCIES_FORBIDDEN=1 AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _supervise
+FAKE_DEPENDENCIES_FORBIDDEN=1 AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _supervise
+FAKE_DEPENDENCIES_FORBIDDEN=1 AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _supervise
+grep -Eq '^381 blocked open' "$state" || fail 'a persistent dependency-API permission error did not move the Issue to agent:blocked'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:dependency-blocked reason=permission' 'persistent permission-failure reason was not recorded'
+
+# The dependency gate runs before change-scope conflict avoidance: an Issue
+# that is both dependency-incomplete and scope-conflicted with a running
+# Issue is reported only as dependency-blocked, never as scope-conflicted.
+combined_body=$(printf '<!-- agentic-loop:scope paths=bin/agentic-loop -->\nBlocked by: #401' | base64 -w0)
+printf '401 queued open\n402 running open none 2026-01-01T00:00:00Z none none %s\n400 queued open none 2026-01-02T00:00:00Z none none %s\n' \
+  "$(scope_field 'paths=bin/agentic-loop')" "$combined_body" > "$state"
+printf '402 <!-- agentic-loop:lease worker=dep-order-fixture heartbeat=%s expires=%s -->\n' "$(date +%s)" "$(($(date +%s) + 3600))" > "$FAKE_GH_ROOT/$state_key.comments"
+AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _supervise
+grep -Eq '^400 blocked open' "$state" || fail 'a dependency-incomplete, scope-conflicted Issue was not blocked by the dependency gate'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:dependency-blocked' 'the dependency gate did not record its block'
+if grep -Fq 'agentic-loop:scope-conflict' "$FAKE_GH_ROOT/$state_key.comments"; then fail 'the dependency gate did not run before the scope-conflict check'; fi
+
+# status surfaces dependency-blocked Issues with their reason code.
+rm -rf "$state_root/dependency"
+mkdir -p "$state_root/dependency"
+printf 'incomplete\t依存Issue #501 が未完了です。\n' > "$state_root/dependency/blocked-500"
+status_output=$("$target/bin/agentic-loop" status)
+grep -Fq '依存待ちIssue:' <<< "$status_output" || fail 'status did not show a dependency-wait section'
+grep -Fq '#500' <<< "$status_output" || fail 'status did not name the dependency-blocked Issue'
+grep -Fq 'incomplete' <<< "$status_output" || fail 'status did not show the dependency-block reason code'
+rm -f "$state_root/dependency/blocked-500"
+rm -f "$FAKE_GH_ROOT/$state_key.dep-links"
+write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=2 LEASE_SECONDS=3 STOP_TIMEOUT=10 STALE_DAYS=30
 
 # Multiple priority labels use the highest rank; setup creates all priority and stale labels idempotently.
 grep -Fq $'label create priority:critical' "$FAKE_GH_ROOT/calls" || fail 'setup did not create the critical priority label'

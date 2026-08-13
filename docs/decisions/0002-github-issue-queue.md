@@ -11,7 +11,9 @@
 
 GitHub Issueと `agent:*` Labelを処理状態の正本にする。リポジトリごとに一つのSupervisorだけをローカルで起動し、既定4 workerをIssue専用branch/worktreeで動かす。worktreeは `.git` 配下を避けてリポジトリ隣接の専用ディレクトリに置く。workerは公式の非対話モード `codex exec` を `workspace-write` sandboxと承認待ちなしで使い、検証済みのGit common metadataと専用worktree内の `.agents` だけを `--add-dir` で追加する。OpenAI API keyとdanger-full-accessは使わない。
 
-状態は `queued`、`running`、`needs-input`、`in-review`、`completed`、`failed`、`stale` とする。runningにはworker ID、heartbeat、期限付きleaseをIssueコメントとして記録する。起動時に期限切れleaseをqueuedへ戻す。needs-input後のIssue返信は再取得対象へ戻す。Issueごとの失敗は他workerやキューを停止しない。queued Issueはpriority Labelの優先度と作成日時で決定的に並べ、設定期間更新がないものはclaim前に監査コメントを残してstaleへ移し、closeする。自動closeは無効化でき、reopenと再queueで復旧できる。
+状態は `queued`、`running`、`needs-input`、`in-review`、`completed`、`failed`、`stale`、`blocked` とする。runningにはworker ID、heartbeat、期限付きleaseをIssueコメントとして記録する。起動時に期限切れleaseをqueuedへ戻す。needs-input後のIssue返信は再取得対象へ戻す。Issueごとの失敗は他workerやキューを停止しない。queued Issueはpriority Labelの優先度と作成日時で決定的に並べ、設定期間更新がないものはclaim前に監査コメントを残してstaleへ移し、closeする。自動closeは無効化でき、reopenと再queueで復旧できる。
+
+claim前、queued Issueの依存関係（GitHub標準のissue dependenciesとIssue本文 `Blocked by:` 行の和集合）を検査する。依存Issueが「closedかつ検証済み完了」（`agent:completed`、または人手管理Issueなら`state_reason=completed`）でなければblockedへ遷移し、理由code付きの監査コメントを残す。close済みだが未検証、循環依存、欠損、別repository参照、構文不正、権限・API障害は、いずれも黙って着手せずfail closedとする。依存が解消すれば人手操作なしに自動でqueuedへ戻る。この判定はscope競合判定より前に働き、blocked Issueの存在は他の着手可能Issueのclaimを妨げない。
 
 `completed` はworkerの出力だけを根拠にせず、Issue専用branchに対応するPRがGitHub上でmerge済みであることをSupervisorが独立に確認した場合だけ遷移する。未mergeまたは確認不能なら `failed` とし、Issueをcloseせずworktreeを保持する。
 
