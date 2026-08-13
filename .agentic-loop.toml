@@ -49,6 +49,10 @@ stale_days = 30
 # Keep enough GraphQL capacity for Issue state transitions and worker recovery.
 # Best-effort Projects synchronization pauses below this remaining budget.
 graphql_reserve = 500
+# Keep a REST(core) reserve for lease heartbeats, restart recovery and in-flight
+# worker writes: claiming new Issues pauses while remaining core quota is at or
+# below this. Zero disables the guard.
+core_reserve = 500
 # Processes share the latest rate-limit observation through Git common state.
 rate_limit_cache_seconds = 15
 # Retry only classified transient REST failures; permanent 4xx errors fail fast.
