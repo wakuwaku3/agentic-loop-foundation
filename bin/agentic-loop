@@ -3448,6 +3448,11 @@ worker() {
   done
   kill "$heartbeat_pid" 2>/dev/null || true
   wait "$heartbeat_pid" 2>/dev/null || true
+  # Provider execution is over. Release durable ownership before the terminal
+  # Label transition so a failed/requeued Issue can be claimed immediately on
+  # another host instead of waiting for the last heartbeat to expire. While
+  # the Label is still running, new contenders still fail their queued check.
+  lease_release "$issue" "$worker"
   project_add_pull_requests "$branch"
   if [[ $exit_code -eq 0 ]] && grep -Fq 'AGENTIC_LOOP_RESULT=completed' "$result"; then
     IFS=$'\t' read -r merged_pr merged_oid < <(repo_api pulls --method GET -f state=closed -f head="${repository%%/*}:$branch" -f per_page=100 --jq 'map(select(.merged_at != null and .head.ref == "'"$branch"'")) | first | [.html_url, .head.sha] | @tsv' 2>/dev/null || true) || true
