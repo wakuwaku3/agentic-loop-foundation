@@ -83,3 +83,14 @@ unknown_scope = "isolated"
 # repository (shared infrastructure, lockfiles, generated artifacts). Empty by
 # default so enabling this feature does not serialize existing Issues.
 exclusive_paths = ""
+
+[foundation]
+# Foundationの配布元repository。`agentic-loop upgrade` はここを基準に新しいrevisionを取得する。
+repository = "wakuwaku3/agentic-loop-foundation"
+# 適用済み・pin対象のrevision(40桁SHA)。空のままだとupgradeは未検証のrevisionへ
+# 暗黙追従せず、明示的な --revision または --source を要求する。最初のupgrade適用
+# 成功時にここへ実際に適用したrevisionが自動で書き込まれる。
+revision = ""
+# upgrade適用後に実行する完全検証コマンド。失敗時は自動rollbackせず、
+# `agentic-loop upgrade --rollback` の案内を提示したまま適用状態を保持する。
+verify_command = "devbox run --pure check"

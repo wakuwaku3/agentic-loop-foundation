@@ -401,7 +401,7 @@ load_config || { [[ ${1:-} == doctor ]] || fail "$CONFIG_ERROR"; }
 
 usage() {
   cat >&2 <<EOF
-Usage: $PROGRAM_NAME {setup|sync-issue ISSUE|start|stop|status [--format json]|doctor [--format json]|metrics [--days N] [--as-of EPOCH] [--format json]}
+Usage: $PROGRAM_NAME {setup|sync-issue ISSUE|start|stop|status [--format json]|doctor [--format json]|metrics [--days N] [--as-of EPOCH] [--format json]|upgrade [--source PATH|--revision SHA] [--apply] [--approve] [--rollback] [--skip-verify] [--overwrite PATH]... [--format json]}
 
   setup   Create or reuse this repository's labels and Project
   sync-issue  Add one Issue to the Project now, or queue a retry
@@ -410,6 +410,7 @@ Usage: $PROGRAM_NAME {setup|sync-issue ISSUE|start|stop|status [--format json]|d
   status  Show what is running, queued, waiting, and any anomalies (always exit 0)
   doctor  Read-only checks with remediation guidance (exit 1 on failures)
   metrics Read-only queue/lifecycle metrics over recent history (always exit 0)
+  upgrade Preview (default) or apply a Foundation update; see docs/operations/upgrade.md
 EOF
 }
 
@@ -1508,6 +1509,34 @@ doctor_collect() {
       doctor_add warning '残存状態' 'agent:runningに対応しないworktree、agent branch、またはlogが残っています。実行中のworker由来か確認が必要です。' 'bin/agentic-loop status でrunning Issueの有無を確認してください。対応するIssueが無ければ、そのIssueのagentic-loop:handoffコメント（無ければ本文と直近のcomment）を確認した上で、docs/operations/issue-queue.md のcleanup手順に従って復旧してください。'
     fi
   else doctor_add success '残存状態' '不要なworktree、agent branch、非空logは見つかりません。' '対応は不要です。'; fi
+
+  local manifest_path="$REPO_ROOT/.agentic-loop/manifest.json" foundation_revision drift_count=0 mpath mhash
+  if [[ -r $manifest_path ]] && command -v yq >/dev/null 2>&1; then
+    while IFS=$'\t' read -r mpath mhash; do
+      [[ -n $mpath && -f $REPO_ROOT/$mpath ]] || continue
+      [[ "$(sha256sum "$REPO_ROOT/$mpath" | cut -d' ' -f1)" == "$mhash" ]] || drift_count=$((drift_count + 1))
+    done < <(yq -p json -o tsv '.files[] | select(.class == "shared") | [.path, .sha256] | @tsv' "$manifest_path" 2>/dev/null)
+    if (( drift_count > 0 )); then
+      doctor_add warning 'Foundation管理fileの変更' "Foundationが管理する${drift_count}件のfileが導入時から変更されています。" 'bin/agentic-loop upgrade（既定はdry-run）で差分を確認してください。意図した変更であれば対応不要です。'
+    else
+      doctor_add success 'Foundation manifest' '導入版数・適用履歴・管理fileの整合性を確認できます。' '対応は不要です。'
+    fi
+  else
+    doctor_add warning 'Foundation manifest' '導入版数を追跡できないため、初回のupgradeは全fileの競合として報告されます。' 'bin/agentic-loop upgrade を実行し、報告される内容を確認してください。'
+  fi
+
+  foundation_revision=$(config_value 'foundation.revision')
+  if [[ -z $foundation_revision ]]; then
+    doctor_add warning 'Foundation revision pin' '未設定です。upgradeは未検証のrevisionへ暗黙追従しません（意図した安全動作です）。' '.agentic-loop.toml の [foundation].revision を固定revisionに設定するか、upgrade実行時に --revision を指定してください。'
+  else
+    doctor_add success 'Foundation revision pin' 'upgradeは明示されたrevisionとのみ比較します。' '対応は不要です。'
+  fi
+
+  if [[ -e $STATE_ROOT/upgrade-last-apply.json ]]; then
+    doctor_add failure '中断したupgrade' '直前のupgrade適用が検証を完了せず中断しています。' 'bin/agentic-loop upgrade --rollback を実行するか、原因を解消して bin/agentic-loop upgrade --apply を再実行してください。'
+  else
+    doctor_add success '中断したupgrade' '未完了のupgrade適用はありません。' '対応は不要です。'
+  fi
 }
 
 cmd_doctor() {
@@ -1531,6 +1560,69 @@ cmd_doctor() {
     printf '集計: 成功=%d 警告=%d 失敗=%d\n' "$(( ${#DOCTOR_LEVELS[@]} - DOCTOR_WARNINGS - DOCTOR_FAILURES ))" "$DOCTOR_WARNINGS" "$DOCTOR_FAILURES"
   fi
   (( DOCTOR_FAILURES == 0 ))
+}
+
+# --- Foundation upgrade (see docs/operations/upgrade.md, docs/decisions/0008) ---
+# This front-end only resolves which revision to compare/apply against and
+# then delegates to that revision's own scripts/upgrade-target.sh, so the
+# script that rewrites this repository's files is never the one currently
+# executing (see scripts/upgrade-target.sh's header for why that matters).
+# --rollback is the one exception: it only needs local Git state, so it is
+# handled here directly without fetching any source tree.
+upgrade_rollback() {
+  local last_apply="$STATE_ROOT/upgrade-last-apply.json" path
+  [[ -r $last_apply ]] || fail 'rollback対象がありません（未完了のupgrade適用が記録されていません）。'
+  command -v yq >/dev/null 2>&1 || fail 'yq is required'
+  while IFS= read -r path; do [[ -n $path ]] && rm -f "$REPO_ROOT/$path"; done < <(yq -p json -o tsv '.added[]' "$last_apply" 2>/dev/null)
+  while IFS= read -r path; do
+    [[ -n $path ]] || continue
+    git -C "$REPO_ROOT" checkout -q HEAD -- "$path" 2>/dev/null || rm -f "$REPO_ROOT/$path"
+  done < <(yq -p json -o tsv '.changed[]' "$last_apply" 2>/dev/null)
+  rm -f "$last_apply"
+  say 'upgrade適用前の状態にrollbackしました。git status で内容を確認してください。'
+}
+
+cmd_upgrade() {
+  shift
+  local -a passthrough=("$@")
+  local source_path='' revision='' repository='' arg i=0 tmp=''
+  # Argument/precondition errors here exit 2 (matching scripts/upgrade-target.sh's
+  # own exit code for the same class of failure), not the generic fail()'s exit 1.
+  arg_fail() { printf '%s: %s\n' "$PROGRAM_NAME" "$1" >&2; exit 2; }
+  while (( i < ${#passthrough[@]} )); do
+    arg=${passthrough[$i]}
+    case $arg in
+      --rollback) [[ ${#passthrough[@]} -eq 1 ]] || arg_fail '--rollback は他の引数と併用できません'; upgrade_rollback; return 0 ;;
+      --source) source_path=${passthrough[$((i + 1))]:-}; i=$((i + 2)) ;;
+      --revision) revision=${passthrough[$((i + 1))]:-}; i=$((i + 2)) ;;
+      --repository) repository=${passthrough[$((i + 1))]:-}; i=$((i + 2)) ;;
+      *) i=$((i + 1)) ;;
+    esac
+  done
+  [[ -n $repository ]] || repository=$(config_value 'foundation.repository')
+  [[ -n $repository ]] || repository=wakuwaku3/agentic-loop-foundation
+  if [[ -n $source_path ]]; then
+    [[ -d $source_path ]] || arg_fail "--source のpathが存在しません: $source_path"
+    [[ -n $revision ]] || revision=$(git -C "$source_path" rev-parse HEAD 2>/dev/null || printf 'unknown')
+  else
+    [[ -n $revision ]] || revision=$(config_value 'foundation.revision')
+    [[ -n $revision ]] || arg_fail 'upgrade対象のrevisionが指定されていません。--revision <40桁SHA>、--source <path>、または .agentic-loop.toml の [foundation].revision を設定してください（mainへの暗黙追従は行いません）。'
+    [[ $revision =~ ^[0-9a-fA-F]{40}$ ]] || arg_fail 'revisionは40桁のcommit SHAで指定してください（branch名やtagは受け付けません）。'
+    require_command git
+    tmp=$(mktemp -d)
+    if ! git init -q "$tmp" ||
+      ! git -C "$tmp" fetch -q --depth 1 "https://github.com/$repository" "$revision" ||
+      ! (cd "$tmp" && git archive --format=tar FETCH_HEAD | tar -x); then
+      rm -rf "$tmp"
+      arg_fail "revision $revision を $repository から取得できませんでした。"
+    fi
+    source_path=$tmp
+  fi
+  [[ -x $source_path/scripts/upgrade-target.sh ]] || arg_fail "取得したFoundation source ($source_path) に scripts/upgrade-target.sh がありません。"
+  local rc=0
+  AGENTIC_LOOP_REPOSITORY="$repository" AGENTIC_LOOP_RESOLVED_REVISION="$revision" "$source_path/scripts/upgrade-target.sh" "$REPO_ROOT" "${passthrough[@]}" || rc=$?
+  [[ -z $tmp ]] || rm -rf "$tmp"
+  return $rc
 }
 
 # --- Loop metrics (see docs/decisions/0007, docs/operations/loop-metrics.md) ---
@@ -3694,6 +3786,7 @@ main() {
     status) cmd_status "$@" ;;
     doctor) cmd_doctor "$@" ;;
     metrics) cmd_metrics "$@" ;;
+    upgrade) cmd_upgrade "$@" ;;
     _service) [[ $# -eq 1 ]] || exit 2; cmd_service ;;
     _supervise) supervise ;;
     _worker) [[ $# -eq 3 ]] || exit 2; worker "$2" "$3" ;;
