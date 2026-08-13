@@ -60,13 +60,14 @@ Claudeとopencodeは（Codexと異なり）OS levelのsandboxを持たないた�
 
 > `$submit-requirement 商品を検索できるWebアプリを作って`
 
-継続処理する要求は対象リポジトリのIssueに `agent:queued` Labelを付けます。制御用CLIは次の4つです。
+継続処理する要求は対象リポジトリのIssueに `agent:queued` Labelを付けます。制御用CLIは次の5つです。
 
 ```sh
 bin/agentic-loop start
 bin/agentic-loop stop
 bin/agentic-loop status
 bin/agentic-loop doctor
+bin/agentic-loop metrics
 ```
 
 これらは `devbox run` または `devbox shell` の中で実行してください。devboxコンテキスト外では `yq` がPATHに無く、設定読み取りや起動時検査が失敗します。`start` はSupervisorのsystemd serviceを起動時点のPATHで構成するため、Supervisorの起動もdevboxコンテキストで行う必要があります。
@@ -74,5 +75,7 @@ bin/agentic-loop doctor
 `status` はSupervisorの稼働状態に加え、running Issueごとの経過時間・最終heartbeat・lease期限・worktree・関連PR、queuedの件数と次のclaim候補、needs-input/failed/in-review/blocked/staleの件数とURL、staleなsupervisor pidや期限切れleaseなどの運用上の異常を1つの入口にまとめます（[0005](docs/decisions/0005-status-observability.md)）。常に読み取り専用で、GitHub呼び出しは1回の実行あたり最大2回に抑え、異常があっても終了code 0のままです（合否判定は `doctor` の責務）。自動化からは `bin/agentic-loop status --format json` を使用できます。詳細は [Issueキュー運用](docs/operations/issue-queue.md) を参照してください。
 
 `doctor` はGitHub認証とrepository権限、origin/default branch、plan段・exec段が使用する各AI CLI（`codex`／`claude`／`opencode`、それぞれ `AI CLI (<provider>)` として個別に検査）、Devbox、hooks、Supervisor、systemd service/timer、GitHub Project、設定、残存worktree/branch/logを読み取り専用で検査します。各結果を成功・警告・失敗に分類し、影響と復旧方法を日本語で表示します。必須条件の失敗がある場合だけ終了code 1、警告だけなら0です。自動監視では `bin/agentic-loop doctor --format json` を使用できます。診断はtoken本体を表示せず、修復は `setup`、`start`、install再実行などの明示的な別操作で行います。
+
+`metrics` は既存のIssue/PR/comment履歴だけから、queue待ち時間・処理時間・失敗率・手戻り・worker稼働率などの傾向を再現可能に集計する読み取り専用コマンドです（[ADR 0007](docs/decisions/0007-loop-metrics.md)）。GitHub REST(core)読み取りは1回の実行あたり最大3回に固定し、Actions/CI・GraphQL・Projects APIは呼びません。追加の外部DB・有料monitoring・API課金は一切発生しません。Issue title・コメント本文・worker識別子は取得・出力せず、worker単位の内訳やランキングも出しません。`--as-of EPOCH`で窓の終端を固定すれば、同じ入力から常に同一の出力が得られます。詳細は [運用ドキュメント](docs/operations/loop-metrics.md) を参照してください。
 
 既定では30秒poll、最大4件を並列実行します。運用値は root 直下の `.agentic-loop.toml`（TOML、`yq`で読み取り）の `[queue]` セクションで設定し、個人環境の上書きは git 管理外の `.agentic-loop.local.toml` にキー単位で書けます。lease heartbeatが生きたままworkerが内部でハングした場合に備え、`[queue].worker_timeout_seconds`（既定4時間、`0`で無効化）を超えて実行中のworkerはプロセスグループごと停止され、失敗として自動的に境界付き再試行キューへ戻ります（[0006](docs/decisions/0006-worker-hang-timeout.md)）。設定、状態遷移、lease復旧、Projectの制約、トラブルシュートは [Issueキュー運用](docs/operations/issue-queue.md)、設計上の判断は [0001](docs/decisions/0001-minimal-foundation.md) と [0002](docs/decisions/0002-github-issue-queue.md) に記録しています。

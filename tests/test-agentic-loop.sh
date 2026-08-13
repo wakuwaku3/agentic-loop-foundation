@@ -48,6 +48,9 @@ project_items="$FAKE_GH_ROOT/$key.project-items"
 comments="$FAKE_GH_ROOT/$key.comments"
 views="$FAKE_GH_ROOT/$key.views"
 diagnosis_issues="$FAKE_GH_ROOT/$key.diagnosis-issues"
+metrics_issues="$FAKE_GH_ROOT/$key.metrics-issues"
+metrics_events="$FAKE_GH_ROOT/$key.metrics-events"
+metrics_pulls="$FAKE_GH_ROOT/$key.metrics-pulls"
 printf '%s\t%s\n' "$PWD" "$*" >> "$FAKE_GH_ROOT/calls"
 if [[ $* == *--slurp* && $* == *--jq* ]]; then
   printf 'the `--slurp` option is not supported with `--jq`\n' >&2
@@ -75,7 +78,22 @@ case "${1:-} ${2:-}" in
         --input) j=$((i+1)); input_file=${!j} ;;
       esac
     done
-    if [[ $endpoint == issues && $method == GET && $form_state == all && $wanted == agent:stale ]]; then
+    if [[ $endpoint == issues && $method == GET && $* == *fromdateiso8601* ]]; then
+      # bin/agentic-loop metrics collection A: hand-authored fixture rows are
+      # returned verbatim (the fake gh never runs real jq), keyed off the
+      # fromdateiso8601 call that only this query makes.
+      [[ ${FAKE_METRICS_ISSUES_FAIL:-0} == 0 ]] || { printf 'HTTP 503: Service Unavailable\n' >&2; exit 1; }
+      cat "$metrics_issues" 2>/dev/null || true
+    elif [[ $endpoint == issues/comments ]]; then
+      # bin/agentic-loop metrics collection B (repo-wide comments): distinct
+      # from the per-Issue issues/N/comments endpoint matched further below.
+      [[ ${FAKE_METRICS_EVENTS_FAIL:-0} == 0 ]] || { printf 'HTTP 503: Service Unavailable\n' >&2; exit 1; }
+      cat "$metrics_events" 2>/dev/null || true
+    elif [[ $endpoint == pulls && $* == *fromdateiso8601* ]]; then
+      # bin/agentic-loop metrics collection C.
+      [[ ${FAKE_METRICS_PULLS_FAIL:-0} == 0 ]] || { printf 'HTTP 503: Service Unavailable\n' >&2; exit 1; }
+      cat "$metrics_pulls" 2>/dev/null || true
+    elif [[ $endpoint == issues && $method == GET && $form_state == all && $wanted == agent:stale ]]; then
       awk '$2 == "stale" {print $1 "\t" "Fake issue " $1}' "$state" 2>/dev/null || true
     elif [[ $endpoint == issues && $method == GET && $form_state == all ]]; then
       awk -v slug="$slug" '{print "https://github.example/" slug "/issues/" $1}' "$state" 2>/dev/null || true
@@ -1860,5 +1878,192 @@ cp "$PROJECT_ROOT/.agentic-loop/guard-secrets.sh" "$secret_target/guard-secrets.
 printf 'token=ghp_%s%s\n' '123456789012345678' '901234567890123456' > "$secret_target/leak.txt"
 git -C "$secret_target" add leak.txt
 if (cd "$secret_target" && ./guard-secrets.sh --staged) >/dev/null 2>&1; then fail 'secret guard accepted a credential-like value'; fi
+
+# --- bin/agentic-loop metrics (see docs/decisions/0007, docs/operations/loop-metrics.md) ---
+write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=2 LEASE_SECONDS=30 STOP_TIMEOUT=10 STALE_DAYS=30
+metrics_issues="$FAKE_GH_ROOT/$state_key.metrics-issues"
+metrics_events="$FAKE_GH_ROOT/$state_key.metrics-events"
+metrics_pulls="$FAKE_GH_ROOT/$state_key.metrics-pulls"
+rm -f "$metrics_issues" "$metrics_events" "$metrics_pulls"
+
+as_of=1700000000
+days=30
+window_start=$((as_of - days * 86400))
+t0=$((window_start + 100000))   # 501: normal completion, plus a merged PR
+t0b=$((window_start + 110000))  # 502: transient failure then retry then completion
+t0c=$((window_start + 120000))  # 503: needs-input left open, plus an unmerged PR
+t0d=$((window_start + 130000))  # 504: worker-timeout, retry, then a silent-crash recovery
+t0e=$((window_start + 140000))  # 505: closed+completed with zero marker history
+t0f=$((window_start + 150000))  # 506: claimed but never closed (still running)
+t0g=$((window_start + 160000))  # 507: closed with a stale agent:running label and no marker (mismatch)
+t0h=$((window_start + 170000))  # 508: closed with a stale agent:running label but a real declined marker
+t0i=$((window_start + 180000))  # 509: scope-conflict left open
+t0j=$((window_start + 190000))  # 510: dependency-blocked left open
+t0k=$((window_start + 200000))  # 511: needs-input answered, then completed
+
+t0l=$((window_start + 210000)) # 512: closed+completed but missing a priority: label (jq TSV null-field regression)
+t0m=$((window_start + 220000)) # 513: open, but its only lease event and its only PR postdate --as-of (out-of-window event/PR regression)
+
+cat > "$metrics_issues" <<TSV
+501	$t0	$((t0 + 400))	closed	category:feature	priority:high	agent:completed
+502	$t0b	$((t0b + 500))	closed	category:improvement	priority:medium	agent:completed
+503	$t0c	0	open	category:improvement	priority:low	agent:needs-input
+504	$t0d	0	open	category:feature	priority:high	agent:running
+505	$t0e	$((t0e + 50))	closed	category:improvement	priority:medium	agent:completed
+506	$t0f	0	open	category:improvement	priority:low	agent:running
+507	$t0g	$((t0g + 30))	closed	category:feature	priority:high	agent:running
+508	$t0h	$((t0h + 100))	closed	category:feature	priority:high	agent:running
+509	$t0i	0	open	category:improvement	priority:low	agent:queued
+510	$t0j	0	open	category:improvement	priority:low	agent:blocked
+511	$t0k	$((t0k + 7300))	closed	category:feature	priority:medium	agent:completed
+512	$t0l	$((t0l + 40))	closed	category:feature	none	agent:completed
+513	$t0m	0	open	category:improvement	priority:low	agent:queued
+TSV
+
+cat > "$metrics_events" <<TSV
+501	$((t0 + 100))	lease worker=w
+501	$((t0 + 150))	usage worker=w stage=plan provider=codex seconds=50 exit=0
+501	$((t0 + 300))	usage worker=w stage=exec provider=codex seconds=120 exit=0
+501	$((t0 + 310))	handoff schema=1 phase=fresh branch=agent/issue-501 head=none remote=none pr=none pr_state=none checks=none dirty=0 diverged=0 updated=$((t0 + 310))
+501	$((t0 + 400))	completed pr=https://github.example/acme/x/pull/9
+502	$((t0b + 10))	lease worker=w
+502	$((t0b + 200))	failed worker=w exit=1
+502	$((t0b + 250))	retry attempt=2
+502	$((t0b + 300))	lease worker=w
+502	$((t0b + 500))	completed pr=https://github.example/acme/x/pull/10
+503	$((t0c + 10))	lease worker=w
+503	$((t0c + 500))	needs-input worker=w
+504	$((t0d + 10))	lease worker=w
+504	$((t0d + 900))	worker-timeout issue=504 elapsed=890s limit=14400s
+504	$((t0d + 950))	retry attempt=1
+504	$((t0d + 1000))	lease worker=w
+504	$((t0d + 1400))	recovered
+504	$((t0d + 1450))	lease worker=w
+506	$((t0f + 10))	lease worker=w
+508	$((t0h + 50))	declined worker=w
+509	$((t0i + 10))	scope-conflict issue=999 token=path:bin
+510	$((t0j + 10))	dependency-blocked reason=unresolved
+511	$((t0k + 5))	lease worker=w
+511	$((t0k + 10))	needs-input worker=w
+511	$((t0k + 7210))	answer-detected
+511	$((t0k + 7250))	lease worker=w
+511	$((t0k + 7300))	completed pr=https://github.example/acme/x/pull/11
+513	$((as_of + 100))	lease worker=w
+TSV
+
+cat > "$metrics_pulls" <<TSV
+9	$((t0 + 120))	$((t0 + 400))	agent/issue-501
+10	$((t0c + 20))	0	agent/issue-503
+11	$((t0k + 20))	$((t0k + 7300))	agent/issue-511
+12	$((as_of + 20))	0	agent/issue-513
+TSV
+
+metrics_json=$("$target/bin/agentic-loop" metrics --format json --days "$days" --as-of "$as_of")
+printf '%s' "$metrics_json" | yq -p json -o json >/dev/null || fail 'metrics --format json did not produce valid JSON'
+mj() { printf '%s' "$metrics_json" | yq -p json "$1"; }
+
+[[ $(mj '.schema_version') == 1 ]] || fail 'metrics --format json did not report schema_version 1'
+[[ $(mj '.github_available') == true ]] || fail 'metrics --format json did not report github_available'
+[[ $(mj '.window.start') -eq $window_start && $(mj '.window.end') -eq $as_of && $(mj '.window.days') -eq $days ]] || fail 'metrics --format json computed the wrong window'
+
+# Dispositions: label is authoritative except when a `declined` marker is
+# present (the worker never relabels on decline), which must still resolve to
+# "declined" rather than being misread from the stale agent:running label.
+[[ $(mj '.dispositions.completed') -eq 5 ]] || fail 'metrics miscounted completed dispositions (501, 502, 505 by label alone despite zero marker history, 511, 512 with a missing priority label)'
+[[ $(mj '.dispositions.declined') -eq 1 ]] || fail 'metrics did not detect a declined Issue behind a stale agent:running label'
+[[ $(mj '.dispositions.other') -eq 1 ]] || fail 'metrics did not flag the genuinely unclassifiable closed Issue (507) as other, or a missing priority: label on 512 shifted a later TSV column and corrupted its agent-label disposition'
+[[ $(mj '.dispositions.open') -eq 6 ]] || fail 'metrics miscounted still-open Issues'
+[[ $(mj '.dispositions.unresolved') -eq 0 && $(mj '.dispositions.stale') -eq 0 ]] || fail 'metrics fabricated an unresolved or stale disposition'
+[[ $(mj '.warnings[]') == *label_marker_mismatch* ]] || fail 'metrics did not warn about the label/marker mismatch'
+
+[[ $(mj '.counters.attempts') -eq 10 ]] || fail 'metrics miscounted attempts (one per lease marker; the lease for Issue 513 postdates --as-of and must not count)'
+[[ $(mj '.counters.retry') -eq 2 && $(mj '.counters.recovered') -eq 1 && $(mj '.counters.worker_timeout') -eq 1 ]] || fail 'metrics miscounted the retry/recovered/worker-timeout requeue path (Issue 504)'
+[[ $(mj '.counters.scope_conflict') -eq 1 && $(mj '.counters.dependency_block') -eq 1 ]] || fail 'metrics miscounted the still-open scope-conflict/dependency-blocked waits (509, 510)'
+[[ $(mj '.counters.needs_input_round') -eq 2 ]] || fail 'metrics miscounted needs-input rounds (503 open, 511 answered)'
+[[ $(mj '.counters.requeue') -eq 4 ]] || fail 'metrics miscounted total requeues (2 retry + 1 recovered + 1 answer-detected)'
+[[ $(mj '.counters.open_attempts') -eq 2 ]] || fail 'metrics miscounted attempts with no terminal marker yet (504 attempt 3, 506; an out-of-window lease must not open an attempt for 513)'
+[[ $(mj '.counters.unmerged_pr') -eq 1 ]] || fail 'metrics miscounted unmerged pull requests (PR 10; PR 12 postdates --as-of and must not count)'
+[[ $(mj '.counters.exhausted') -eq 0 && $(mj '.counters.replan') -eq 0 && $(mj '.counters.resume') -eq 0 ]] || fail 'metrics fabricated an exhausted, replan, or resume count'
+
+[[ $(mj '.failures.unspecified') -eq 1 ]] || fail 'metrics did not classify the reasonless failed marker (502) as unspecified'
+[[ $(mj '."failures"."worker-timeout"') -eq 1 ]] || fail 'metrics did not tally the worker-timeout failure reason (504)'
+
+[[ $(mj '.durations.queue_wait.n') -eq 10 && $(mj '.durations.queue_wait.max') -eq 100 ]] || fail 'metrics computed the wrong queue_wait distribution'
+[[ $(mj '.durations.attempt_duration.n') -eq 8 && $(mj '.durations.attempt_duration.max') -eq 890 ]] || fail 'metrics computed the wrong attempt_duration distribution'
+[[ $(mj '.durations.open_queue_wait.n') -eq 0 ]] || fail 'metrics fabricated an open_queue_wait sample'
+[[ $(mj '.durations.open_needs_input_wait.n') -eq 1 ]] || fail 'metrics did not report the still-open needs-input wait (503)'
+[[ $(mj '.durations.open_conflict_wait.n') -eq 1 ]] || fail 'metrics did not report the still-open scope-conflict wait (509)'
+[[ $(mj '.durations.open_dependency_wait.n') -eq 1 ]] || fail 'metrics did not report the still-open dependency-blocked wait (510)'
+[[ $(mj '.durations.needs_input_wait.n') -eq 1 && $(mj '.durations.needs_input_wait.max') -eq 7200 ]] || fail 'metrics computed the wrong closed needs_input_wait sample (511: 7200s)'
+[[ $(mj '.durations.plan_seconds.n') -eq 1 && $(mj '.durations.plan_seconds.max') -eq 50 ]] || fail 'metrics did not read plan_seconds from the enriched usage marker'
+[[ $(mj '.durations.exec_seconds.n') -eq 1 && $(mj '.durations.exec_seconds.max') -eq 120 ]] || fail 'metrics did not read exec_seconds from the enriched usage marker'
+[[ $(mj '.durations.pr_review_wait.n') -eq 2 && $(mj '.durations.pr_review_wait.max') -eq 7280 ]] || fail 'metrics computed the wrong pr_review_wait distribution (PR 9: 400-120=280, PR 11: 7300-20=7280; PR 10 is unmerged and excluded)'
+[[ $(mj '.durations.lead_time.n') -eq 3 && $(mj '.durations.lead_time.max') -eq 7300 ]] || fail 'metrics computed the wrong lead_time distribution (505 is excluded: no completed marker despite the label)'
+
+[[ $(mj '.by_category.feature') -eq 6 && $(mj '.by_category.improvement') -eq 7 ]] || fail 'metrics miscounted by_category'
+[[ $(mj '.by_priority.high') -eq 4 && $(mj '.by_priority.medium') -eq 3 && $(mj '.by_priority.low') -eq 5 ]] || fail 'metrics miscounted by_priority'
+[[ $(mj '.utilization.busy_seconds') -eq 2525 && $(mj '.utilization.max_workers') -eq 2 ]] || fail 'metrics computed the wrong worker-utilization busy_seconds'
+
+# Privacy: only enum/numeric marker fields, Issue numbers, and label names may
+# ever reach the output -- never a title, a comment body, or a worker id.
+[[ $metrics_json != *'Fake issue'* ]] || fail 'metrics output leaked an Issue title'
+[[ $metrics_json != *'worker=w'* ]] || fail 'metrics output leaked a worker identifier'
+grep -Fq '"by_worker"' <<< "$metrics_json" && fail 'metrics output exposes a per-worker breakdown'
+true
+
+# Determinism: the same --as-of over the same GitHub state reproduces the same
+# report, since metrics is a pure read that never mutates state. generated_at
+# records real wall-clock time (when the aggregation ran, not the --as-of
+# window), so it is excluded from the comparison to avoid a flaky failure when
+# the two runs straddle a second boundary.
+metrics_json_again=$("$target/bin/agentic-loop" metrics --format json --days "$days" --as-of "$as_of")
+strip_generated_at() { printf '%s' "$1" | yq -p json 'del(.generated_at)' -o json; }
+# The right-hand side of `[[ == ]]`/`!=` is matched as a glob pattern when
+# unquoted, and this JSON output always contains a `[...]` array (e.g. an
+# empty "warnings":[]), so both sides must be quoted here to force a literal
+# string comparison instead.
+[[ "$(strip_generated_at "$metrics_json")" == "$(strip_generated_at "$metrics_json_again")" ]] || fail 'metrics --as-of is not reproducible across repeated runs'
+
+# Argument validation.
+"$target/bin/agentic-loop" metrics --format xml >/dev/null 2>&1 && fail 'metrics accepted an invalid --format'
+"$target/bin/agentic-loop" metrics --days 0 >/dev/null 2>&1 && fail 'metrics accepted a non-positive --days'
+"$target/bin/agentic-loop" metrics --as-of not-a-number >/dev/null 2>&1 && fail 'metrics accepted a non-numeric --as-of'
+
+# metrics is read-only: it must never write an Issue/PR/label/comment, and must
+# never call GraphQL or Projects, regardless of format.
+calls_before=$(wc -l < "$FAKE_GH_ROOT/calls")
+# The working tree itself must be untouched by a read-only report command. An
+# earlier write_queue_config call in this section already left the tree with
+# uncommitted changes of its own, so compare a before/after snapshot around
+# this one invocation rather than asserting a globally clean tree.
+worktree_before=$(git -C "$target" status --porcelain)
+"$target/bin/agentic-loop" metrics --days "$days" --as-of "$as_of" >/dev/null
+[[ $(git -C "$target" status --porcelain) == "$worktree_before" ]] || fail 'metrics modified the working tree'
+tail -n "+$((calls_before + 1))" "$FAKE_GH_ROOT/calls" > "$TEST_ROOT/metrics-calls.log"
+grep -Eq $'\t(api graphql|project |issue (create|close|comment)|--method (POST|PATCH|PUT|DELETE))' "$TEST_ROOT/metrics-calls.log" && fail 'metrics performed a write, GraphQL, or Projects call'
+
+# REST(core) budget guard: below core_reserve, metrics must not spend a single
+# request on its own collections, and must say so plainly (never a crash or a
+# silent empty report indistinguishable from "no history"). read_graphql_budget
+# caches the rate_limit snapshot for RATE_LIMIT_CACHE_SECONDS, so the cache must
+# be cleared immediately before (a stale high remaining would mask the guard)
+# and immediately after (a stale low remaining would poison later collections).
+rm -f "$state_root/graphql-rate-limit"
+calls_before=$(wc -l < "$FAKE_GH_ROOT/calls")
+low_budget_json=$(FAKE_CORE_REMAINING=10 "$target/bin/agentic-loop" metrics --format json --days "$days" --as-of "$as_of")
+[[ $(printf '%s' "$low_budget_json" | yq -p json '.github_available') == false ]] || fail 'metrics did not report github_available:false under a REST(core) budget shortfall'
+tail -n "+$((calls_before + 1))" "$FAKE_GH_ROOT/calls" > "$TEST_ROOT/metrics-budget-calls.log"
+grep -Fq 'fromdateiso8601' "$TEST_ROOT/metrics-budget-calls.log" && fail 'metrics queried GitHub despite an insufficient REST(core) reserve'
+rm -f "$state_root/graphql-rate-limit"
+
+# Degraded collection: a comment-fetch failure must not abort the whole report.
+degraded_json=$(FAKE_METRICS_EVENTS_FAIL=1 "$target/bin/agentic-loop" metrics --format json --days "$days" --as-of "$as_of")
+[[ $(printf '%s' "$degraded_json" | yq -p json '.github_available') == true ]] || fail 'a degraded comment collection should not fail the whole report'
+[[ $(printf '%s' "$degraded_json" | yq -p json '.warnings | length') -gt 0 ]] || fail 'a degraded comment collection was not reported as a warning'
+
+# Text format renders without error and stays free of the same private data.
+metrics_text=$("$target/bin/agentic-loop" metrics --days "$days" --as-of "$as_of")
+[[ $metrics_text == *'転帰:'* ]] || fail 'metrics text format did not render a summary'
+[[ $metrics_text != *'Fake issue'* && $metrics_text != *'worker=w'* ]] || fail 'metrics text format leaked private data'
 
 printf 'Tests passed.\n'
