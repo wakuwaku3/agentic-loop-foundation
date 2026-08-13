@@ -29,6 +29,7 @@ readonly DEPENDENCY_MAX_DEPTH=10
 cd "$REPO_ROOT"
 
 POLL_SECONDS=30
+POLL_MAX_SECONDS=120
 MAX_WORKERS=4
 LEASE_SECONDS=300
 STOP_TIMEOUT=0
@@ -68,6 +69,7 @@ load_config() {
     key=${line%% = *}; value=${line#* = }
     case $key in
       queue.poll_seconds) key=POLL_SECONDS ;;
+      queue.poll_max_seconds) key=POLL_MAX_SECONDS ;;
       queue.max_workers) key=MAX_WORKERS ;;
       queue.lease_seconds) key=LEASE_SECONDS ;;
       queue.stop_timeout) key=STOP_TIMEOUT ;;
@@ -418,6 +420,7 @@ repo_api() {
 
 validate_config() {
   [[ $POLL_SECONDS =~ ^[1-9][0-9]*$ ]] || fail 'POLL_SECONDS must be a positive integer'
+  [[ $POLL_MAX_SECONDS =~ ^[1-9][0-9]*$ ]] || fail 'POLL_MAX_SECONDS must be a positive integer'
   [[ $MAX_WORKERS =~ ^[1-9][0-9]*$ ]] || fail 'MAX_WORKERS must be a positive integer'
   [[ $LEASE_SECONDS =~ ^[1-9][0-9]*$ ]] || fail 'LEASE_SECONDS must be a positive integer'
   [[ $STOP_TIMEOUT =~ ^[0-9]+$ ]] || fail 'STOP_TIMEOUT must be a non-negative integer'
@@ -868,7 +871,7 @@ doctor_collect() {
   if [[ -n $CONFIG_ERROR ]]; then
     doctor_add failure '設定ファイル' '設定を解釈できないためSupervisorを安全に起動できません。' '.agentic-loop.toml（および任意の .agentic-loop.local.toml）を有効なTOMLに修正し、yqを導入してください。'
   else
-    doctor_positive_config POLL_SECONDS "$POLL_SECONDS"; doctor_positive_config MAX_WORKERS "$MAX_WORKERS"
+    doctor_positive_config POLL_SECONDS "$POLL_SECONDS"; doctor_positive_config POLL_MAX_SECONDS "$POLL_MAX_SECONDS"; doctor_positive_config MAX_WORKERS "$MAX_WORKERS"
     doctor_positive_config LEASE_SECONDS "$LEASE_SECONDS"; doctor_non_negative_config STOP_TIMEOUT "$STOP_TIMEOUT"
     doctor_non_negative_config STALE_DAYS "$STALE_DAYS"; doctor_non_negative_config GRAPHQL_RESERVE "$GRAPHQL_RESERVE"; doctor_non_negative_config CORE_RESERVE "$CORE_RESERVE"
     doctor_positive_config RATE_LIMIT_CACHE_SECONDS "$RATE_LIMIT_CACHE_SECONDS"; doctor_positive_config API_RETRY_ATTEMPTS "$API_RETRY_ATTEMPTS"
@@ -1791,6 +1794,19 @@ supervisor_graceful_shutdown() {
   shopt -u nullglob
 }
 
+# Exponential idle backoff (see docs/decisions/0003): the next poll interval
+# doubles from POLL_SECONDS toward POLL_MAX_SECONDS for each consecutive idle
+# poll, cutting GitHub API reads while the queue is empty. Backoff is disabled
+# when POLL_MAX_SECONDS <= POLL_SECONDS.
+next_poll_interval() {
+  local streak=$1 interval=$POLL_SECONDS b
+  if (( POLL_MAX_SECONDS > POLL_SECONDS )); then
+    for ((b = 0; b < streak && interval < POLL_MAX_SECONDS; b++)); do interval=$((interval * 2)); done
+    (( interval > POLL_MAX_SECONDS )) && interval=$POLL_MAX_SECONDS
+  fi
+  printf '%s\n' "$interval"
+}
+
 supervise() {
   trap 'rm -f "$STATE_ROOT/supervisor.pid"; rmdir "$STATE_ROOT/supervisor.lock" 2>/dev/null || true' EXIT
   # Graceful shutdown (see docs/decisions/0003): on SIGTERM/SIGINT (systemctl
@@ -1799,6 +1815,7 @@ supervise() {
   trap 'supervisor_graceful_shutdown; exit 0' TERM INT
   mkdir -p "$STATE_ROOT/workers"
   printf '%s\n' "$$" > "$STATE_ROOT/supervisor.pid"
+  local idle_streak=0 poll_interval=$POLL_SECONDS
   # Best-effort maintenance must never crash the supervisor (see docs/decisions/
   # 0003): a transient GitHub error (secondary rate limit / HTTP 403 / 5xx)
   # should skip this cycle and be retried next poll, not kill the loop under
@@ -1837,9 +1854,17 @@ supervise() {
         break
       fi
     fi
-    sleep "$POLL_SECONDS"
+    # Reset to the base interval while work is in flight; otherwise back off.
+    if [[ $(worker_count) -gt 0 ]]; then
+      idle_streak=0
+    elif (( idle_streak < 32 )); then
+      idle_streak=$((idle_streak + 1))
+    fi
+    poll_interval=$(next_poll_interval "$idle_streak")
+    printf '%s\n' "$poll_interval" > "$STATE_ROOT/poll-interval"
+    sleep "$poll_interval"
   done
-  rm -f "$STATE_ROOT/stop.requested"
+  rm -f "$STATE_ROOT/stop.requested" "$STATE_ROOT/poll-interval"
 }
 
 issue_prompt() {
