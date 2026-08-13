@@ -1212,6 +1212,20 @@ grep -Eq '^15 queued' "$state" || fail 'graceful shutdown did not requeue the in
 [[ ! -e $state_root/workers/15.pid ]] || fail 'graceful shutdown left a worker pidfile'
 assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:shutdown' 'graceful shutdown was not recorded on the Issue'
 
+# Restart recovery fast path: a running Issue whose LOCAL worker has died is
+# requeued immediately from local state and reprocessed, without depending on the
+# GitHub lease.
+write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=30 STOP_TIMEOUT=10 STALE_DAYS=30
+printf '16 running open none 2026-01-01T00:00:00Z\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+rm -f "$state_root/stop.requested"
+mkdir -p "$state_root/workers"
+sh -c 'exit 0' & deadpid=$!
+wait "$deadpid" 2>/dev/null || true
+printf '%s\n' "$deadpid" > "$state_root/workers/16.pid"
+AGENTIC_LOOP_RUN_ONCE=1 FAKE_CODEX_SLEEP=1 "$target/bin/agentic-loop" _supervise
+grep -Eq '^16 completed closed' "$state" || fail 'a dead local worker Issue was not recovered and reprocessed'
+
 # Repositories use separate gh/project state and Git state directories.
 second=$(new_repository second-project)
 AGENTIC_LOOP_SOURCE="$PROJECT_ROOT" AGENTIC_LOOP_TARGET="$second" AGENTIC_LOOP_SKIP_START=1 "$PROJECT_ROOT/install.sh"

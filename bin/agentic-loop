@@ -1110,19 +1110,45 @@ lease_comment() {
   comment_issue "$issue" "<!-- agentic-loop:lease worker=$worker heartbeat=$now expires=$expires -->\nAgentic Loop worker \`$worker\` のハートビートです。リースは epoch $expires に期限切れとなります。"
 }
 
+# Whether the local worker recorded for this Issue is still running: its pid is
+# alive and its command line is this repository's worker for this Issue (a cmdline
+# check defends against pid reuse). Used to adopt in-flight work and to recover
+# fast when a local worker has died.
+worker_alive() {
+  local issue=$1 pidfile pid command_line
+  pidfile="$STATE_ROOT/workers/$issue.pid"
+  [[ -r $pidfile ]] || return 1
+  read -r pid < "$pidfile" || return 1
+  [[ $pid =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null || return 1
+  [[ -r /proc/$pid/cmdline ]] || return 1
+  command_line=$(tr '\0' ' ' < "/proc/$pid/cmdline") || return 1
+  [[ $command_line == *"$SCRIPT_ROOT/bin/agentic-loop"* && $command_line == *" _worker $issue "* ]]
+}
+
+# Return agent:running Issues whose worker is gone to the queue (see ADR 0003).
+# Local-first: a live local worker is adopted; a dead local worker's Issue is
+# recovered immediately without any GitHub call. When no local worker exists the
+# Issue may belong to another machine, so the GitHub lease is honored and only an
+# expired (or missing) lease is recovered. Reading the lease only for Issues
+# without a local worker also cuts API usage.
 recover_expired() {
-  local issue body expires now
+  local issue body expires now pidfile
   now=$(date +%s)
   while IFS= read -r issue; do
     [[ -n $issue ]] || continue
-    body=$(repo_api "issues/$issue/comments" --method GET -f per_page=100 --paginate --jq '[.[].body | select(contains("agentic-loop:lease"))] | last // ""' 2>/dev/null | tail -n 1 || true)
-    expires=$(printf '%s\n' "$body" | sed -n 's/.*expires=\([0-9][0-9]*\).*/\1/p' | head -n 1)
-    if [[ -z $expires || $expires -lt $now ]]; then
-      set_issue_state "$issue" queued
-      scope_cache_clear "$issue"
-      clear_conflict_wait "$issue"
-      comment_issue "$issue" '<!-- agentic-loop:recovered -->\n前回のリースが期限切れとなったため、Issueを安全にキューへ戻しました。'
+    worker_alive "$issue" && continue
+    pidfile="$STATE_ROOT/workers/$issue.pid"
+    if [[ -e $pidfile ]]; then
+      rm -f "$pidfile"
+    else
+      body=$(repo_api "issues/$issue/comments" --method GET -f per_page=100 --paginate --jq '[.[].body | select(contains("agentic-loop:lease"))] | last // ""' 2>/dev/null | tail -n 1 || true)
+      expires=$(printf '%s\n' "$body" | sed -n 's/.*expires=\([0-9][0-9]*\).*/\1/p' | head -n 1)
+      [[ -n $expires && $expires -ge $now ]] && continue
     fi
+    set_issue_state "$issue" queued
+    scope_cache_clear "$issue"
+    clear_conflict_wait "$issue"
+    comment_issue "$issue" '<!-- agentic-loop:recovered -->\n担当workerの終了、またはリース期限切れを検出したため、Issueを安全にキューへ戻しました。'
   done < <(repo_api issues --method GET -f state=open -f labels="$(state_label running)" -f per_page=100 --paginate --jq '.[] | select(.pull_request == null) | .number' 2>/dev/null || true)
 }
 
