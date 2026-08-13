@@ -12,7 +12,7 @@ devbox run --pure check
 
 ## インストール
 
-導入したいディレクトリへ移動し、次の1コマンドを実行します。
+Devboxを導入した上で、導入したいディレクトリへ移動し、次の1コマンドを実行します。ホストへ`yq`を別途インストールする必要はありません。インストーラーは`yq`がPATHにない場合、取得した`devbox.json`と`devbox.lock`を使って固定環境内でpreflight、setup、Supervisor起動までを続行します。
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/wakuwaku3/agentic-loop-foundation/main/install.sh | bash

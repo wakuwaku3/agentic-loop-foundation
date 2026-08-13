@@ -6,6 +6,7 @@ readonly PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 readonly TEST_ROOT="$(mktemp -d)"
 readonly FAKE_BIN="$TEST_ROOT/bin"
 readonly FAKE_GH_ROOT="$TEST_ROOT/gh"
+readonly TEST_HOST_PATH="$PATH"
 trap 'rm -rf "$TEST_ROOT"' EXIT
 
 fail() { printf 'FAIL: %s\n' "$1" >&2; exit 1; }
@@ -232,6 +233,8 @@ case "${1:-} ${2:-}" in
       printf '%s\n' "$id"
     elif [[ $* == *'views(first: 100)'* ]]; then
       cat "$views" 2>/dev/null || true
+    elif [[ $* == *updateProjectV2View* && ${FAKE_PROJECT_VIEW_UPDATE_FAILURE:-0} == 1 ]]; then
+      exit 1
     fi ;;
   'repo view')
     if [[ $* == *defaultBranchRef* ]]; then printf 'main\n'; else printf '%s\n' "$slug"; fi ;;
@@ -416,6 +419,12 @@ printf '%s\n' "${2#/}" | tr '/' '-'
 FAKE_SYSTEMD_ESCAPE
 cat > "$FAKE_BIN/devbox" <<'FAKE_DEVBOX'
 #!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >> "$FAKE_GH_ROOT/devbox-calls"
+if [[ ${1:-} == run && ${2:-} == --config && ${4:-} == -- ]]; then
+  shift 4
+  PATH="$FAKE_BIN:$TEST_HOST_PATH" exec "$@"
+fi
 exit 0
 FAKE_DEVBOX
 chmod +x "$FAKE_BIN/gh" "$FAKE_BIN/codex" "$FAKE_BIN/claude" "$FAKE_BIN/opencode" "$FAKE_BIN/systemctl" "$FAKE_BIN/systemd-escape" "$FAKE_BIN/devbox"
@@ -589,14 +598,20 @@ AGENTIC_LOOP_SOURCE="$PROJECT_ROOT" AGENTIC_LOOP_TARGET="$target" AGENTIC_LOOP_S
 project_creates=$(grep -c $'project create' "$FAKE_GH_ROOT/calls" || true)
 [[ $project_creates -eq 1 ]] || { sed -n '1,120p' "$FAKE_GH_ROOT/calls" >&2; fail "reinstall created the Project $project_creates times"; }
 view_creates=$(grep -c $'\tapi graphql -f query=mutation($projectId: ID!, $name: String!)' "$FAKE_GH_ROOT/calls" || true)
-[[ $view_creates -eq 4 ]] || { sed -n '1,160p' "$FAKE_GH_ROOT/calls" >&2; fail "reinstall created the Project views $view_creates times"; }
-for view in 'Open Issues' 'Closed Issues' 'Open PRs' 'Closed PRs'; do
+[[ $view_creates -eq 10 ]] || { sed -n '1,220p' "$FAKE_GH_ROOT/calls" >&2; fail "reinstall created the Project views $view_creates times"; }
+for view in 'Triage' 'Queue' 'Active' 'Needs input' 'Recovery' 'Recently completed' 'Open PRs' 'Closed PRs' 'All open issues' 'All closed issues'; do
   [[ $(awk -F '\t' -v name="$view" '$2 == name {count++} END {print count+0}' "$FAKE_GH_ROOT/$state_key.views") -eq 1 ]] || fail "Project view is not idempotent: $view"
 done
-assert_contains "$FAKE_GH_ROOT/calls" 'filter=is:issue is:open' 'Open Issues view filter was not configured'
-assert_contains "$FAKE_GH_ROOT/calls" 'filter=is:issue is:closed' 'Closed Issues view filter was not configured'
+assert_contains "$FAKE_GH_ROOT/calls" 'filter=is:issue is:open no:category' 'Triage view filter was not configured'
+assert_contains "$FAKE_GH_ROOT/calls" 'filter=is:issue is:open label:"agent:queued"' 'Queue view filter was not configured'
+assert_contains "$FAKE_GH_ROOT/calls" 'filter=is:issue is:open label:"agent:running","agent:in-review"' 'Active view filter was not configured'
+assert_contains "$FAKE_GH_ROOT/calls" 'filter=is:issue is:open label:"agent:needs-input"' 'Needs input view filter was not configured'
+assert_contains "$FAKE_GH_ROOT/calls" 'filter=is:issue label:"agent:failed","agent:stale"' 'Recovery view filter was not configured'
+assert_contains "$FAKE_GH_ROOT/calls" 'filter=is:issue label:"agent:completed" updated:@today-30d' 'Recently completed view filter was not configured'
 assert_contains "$FAKE_GH_ROOT/calls" 'filter=is:pr is:open' 'Open PRs view filter was not configured'
 assert_contains "$FAKE_GH_ROOT/calls" 'filter=is:pr is:closed' 'Closed PRs view filter was not configured'
+assert_contains "$FAKE_GH_ROOT/calls" 'filter=is:issue is:open' 'All open issues view filter was not configured'
+assert_contains "$FAKE_GH_ROOT/calls" 'filter=is:issue is:closed' 'All closed issues view filter was not configured'
 assert_contains "$FAKE_GH_ROOT/calls" "project item-add 7 --owner acme --url https://github.example/acme/installed-project/pull/1" 'existing PR was not added to the Project'
 assert_contains "$FAKE_GH_ROOT/calls" "project item-add 7 --owner acme --url https://github.example/acme/installed-project/issues/88" 'existing open Issue was not added to the Project'
 assert_contains "$FAKE_GH_ROOT/calls" "project item-add 7 --owner acme --url https://github.example/acme/installed-project/issues/89" 'existing closed Issue was not added to the Project'
@@ -611,6 +626,9 @@ FAKE_PROJECT_FAILURES=1 "$target/bin/agentic-loop" sync-issue 91 >/dev/null
 printf '91 inbox open none 2026-01-01T00:00:00Z\n' > "$FAKE_GH_ROOT/$state_key.state"
 AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _supervise
 [[ ! -e $pending_project ]] || fail 'successful reconciliation did not clear the Project retry queue'
+
+# Projects APIの一時的または権限制約による失敗はIssueキューのsetupを停止しない。
+FAKE_PROJECT_VIEW_UPDATE_FAILURE=1 AGENTIC_LOOP_SKIP_START=1 "$target/bin/agentic-loop" setup >/dev/null
 
 write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=2 LEASE_SECONDS=3 STOP_TIMEOUT=10 STALE_DAYS=30
 "$target/bin/agentic-loop" start
@@ -1889,6 +1907,28 @@ AGENTIC_LOOP_SOURCE="$PROJECT_ROOT" AGENTIC_LOOP_TARGET="$empty" AGENTIC_LOOP_SK
 [[ -f $empty/devbox.json && -f $empty/devbox.lock ]] || fail 'empty repository did not get the pinned development environment'
 [[ -x $empty/scripts/check-environment.sh ]] || fail 'empty repository did not get the environment guard'
 assert_contains "$empty/README.md" 'opencode' 'installed README.md does not document opencode as a supported provider'
+
+# The documented one-command install bootstraps yq through the downloaded
+# Devbox definition instead of requiring an unpinned host installation.
+bootstrap_bin="$TEST_ROOT/bootstrap-bin"
+mkdir -p "$bootstrap_bin"
+for command_name in bash git devbox mktemp rm; do ln -s "$(command -v "$command_name")" "$bootstrap_bin/$command_name"; done
+bootstrap=$(new_repository bootstrap-project)
+env PATH="$bootstrap_bin" FAKE_BIN="$FAKE_BIN" TEST_HOST_PATH="$TEST_HOST_PATH" FAKE_GH_ROOT="$FAKE_GH_ROOT" \
+  AGENTIC_LOOP_SOURCE="$PROJECT_ROOT" AGENTIC_LOOP_TARGET="$bootstrap" AGENTIC_LOOP_SKIP_START=1 \
+  "$PROJECT_ROOT/install.sh"
+assert_contains "$FAKE_GH_ROOT/devbox-calls" "run --config $PROJECT_ROOT -- $PROJECT_ROOT/scripts/install-target.sh $bootstrap" 'install did not bootstrap missing yq through the pinned Devbox environment'
+[[ -x $bootstrap/bin/agentic-loop ]] || fail 'Devbox bootstrap did not complete installation'
+
+no_devbox_bin="$TEST_ROOT/no-devbox-bin"
+mkdir -p "$no_devbox_bin"
+for command_name in bash git mktemp rm; do ln -s "$(command -v "$command_name")" "$no_devbox_bin/$command_name"; done
+missing_devbox=$(new_repository missing-devbox-project)
+if env PATH="$no_devbox_bin" AGENTIC_LOOP_SOURCE="$PROJECT_ROOT" AGENTIC_LOOP_TARGET="$missing_devbox" AGENTIC_LOOP_SKIP_START=1 \
+  "$PROJECT_ROOT/install.sh" >"$TEST_ROOT/missing-devbox.out" 2>&1; then
+  fail 'install succeeded without either yq or Devbox'
+fi
+assert_contains "$TEST_ROOT/missing-devbox.out" 'devbox is required to bootstrap' 'missing Devbox error does not explain the bootstrap requirement'
 
 secret_target="$TEST_ROOT/secret-project"
 mkdir -p "$secret_target"
