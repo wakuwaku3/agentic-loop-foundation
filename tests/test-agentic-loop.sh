@@ -48,6 +48,7 @@ project="$FAKE_GH_ROOT/$key.project"
 project_items="$FAKE_GH_ROOT/$key.project-items"
 comments="$FAKE_GH_ROOT/$key.comments"
 views="$FAKE_GH_ROOT/$key.views"
+labels="$FAKE_GH_ROOT/$key.labels"
 diagnosis_issues="$FAKE_GH_ROOT/$key.diagnosis-issues"
 metrics_issues="$FAKE_GH_ROOT/$key.metrics-issues"
 metrics_events="$FAKE_GH_ROOT/$key.metrics-events"
@@ -79,7 +80,9 @@ case "${1:-} ${2:-}" in
         --input) j=$((i+1)); input_file=${!j} ;;
       esac
     done
-    if [[ $endpoint == issues && $method == GET && $* == *fromdateiso8601* ]]; then
+    if [[ $endpoint == labels && $method == GET ]]; then
+      cat "$labels" 2>/dev/null || true
+    elif [[ $endpoint == issues && $method == GET && $* == *fromdateiso8601* ]]; then
       # bin/agentic-loop metrics collection A: hand-authored fixture rows are
       # returned verbatim (the fake gh never runs real jq), keyed off the
       # fromdateiso8601 call that only this query makes.
@@ -98,6 +101,16 @@ case "${1:-} ${2:-}" in
       awk '$2 == "stale" {print $1 "\t" "Fake issue " $1}' "$state" 2>/dev/null || true
     elif [[ $endpoint == issues && $method == GET && $form_state == all ]]; then
       awk -v slug="$slug" '{print "https://github.example/" slug "/issues/" $1}' "$state" 2>/dev/null || true
+    elif [[ $endpoint == issues && $method == GET && $form_state == open && $* == *html_url* ]]; then
+      awk -v slug="$slug" '$3 != "closed" {print "https://github.example/" slug "/issues/" $1}' "$state" 2>/dev/null || true
+    elif [[ $endpoint == issues && $method == GET && -z $wanted && $* == *'then "-" else'* ]]; then
+      awk '$3 != "closed" {
+        category=5; if ($7 ~ /(^|,)loop-continuity(,|$)/) category=0; else if ($7 ~ /(^|,)confidentiality-incident(,|$)/) category=1; else if ($7 ~ /(^|,)integrity-incident(,|$)/) category=2; else if ($7 ~ /(^|,)availability-incident(,|$)/) category=3; else if ($7 ~ /(^|,)feature(,|$)/) category=4
+        priority=4; if ($4 ~ /(^|,)critical(,|$)/) priority=0; else if ($4 ~ /(^|,)high(,|$)/) priority=1; else if ($4 ~ /(^|,)medium(,|$)/) priority=2; else if ($4 ~ /(^|,)low(,|$)/) priority=3
+        created=($5 == "" ? $1 : $5); updated=($6 == "" ? "-" : $6)
+        body=($8 == "" ? "-" : $8); categories=($7 == "" || $7 == "none" ? "-" : "category:" $7)
+        print $1 "\t" $2 "\t" updated "\t" created "\t" body "\t" categories "\t" category "\t" priority
+      }' "$state" 2>/dev/null || true
     elif [[ $endpoint == issues && $method == GET && -z $wanted ]]; then
       # status-snapshot: every open Issue, classified purely by its own state
       # word (see bin/agentic-loop's status_snapshot_fetch), with the same
@@ -215,6 +228,7 @@ case "${1:-} ${2:-}" in
         fi
       elif [[ $* == *head=* && $* == *html_url* ]]; then printf 'https://github.example/%s/pull/6\n' "$slug"
       elif [[ $form_state == all && $* == *html_url* ]]; then printf 'https://github.example/%s/pull/1\nhttps://github.example/%s/pull/2\n' "$slug" "$slug"
+      elif [[ $form_state == open && $* == *html_url* ]]; then printf 'https://github.example/%s/pull/1\n' "$slug"
       elif [[ $* == *html_url* ]]; then printf 'https://github.example/%s/pull/6\n' "$slug"; fi
     elif [[ -z $endpoint ]]; then
       if [[ $* == *permissions.push* ]]; then printf 'true\n'; else printf 'main\n'; fi
@@ -229,22 +243,43 @@ case "${1:-} ${2:-}" in
       name=''
       for ((i=1; i<=$#; i++)); do [[ ${!i} == name=* ]] && name=${!i#name=}; done
       id="PV_$(printf '%s' "$name" | tr ' ' '_')"
-      printf '%s\t%s\n' "$id" "$name" >> "$views"
+      printf '%s\t%s\t\n' "$id" "$name" >> "$views"
       printf '%s\n' "$id"
     elif [[ $* == *'views(first: 100)'* ]]; then
       cat "$views" 2>/dev/null || true
     elif [[ $* == *updateProjectV2View* && ${FAKE_PROJECT_VIEW_UPDATE_FAILURE:-0} == 1 ]]; then
       exit 1
+    elif [[ $* == *updateProjectV2View* ]]; then
+      view_id=''; filter=''
+      for ((i=1; i<=$#; i++)); do
+        [[ ${!i} == viewId=* ]] && view_id=${!i#viewId=}
+        [[ ${!i} == filter=* ]] && filter=${!i#filter=}
+      done
+      awk -F '\t' -v id="$view_id" -v filter="$filter" 'BEGIN{OFS="\t"} $1 == id {$3=filter} {print}' "$views" > "$views.$$.tmp" && mv "$views.$$.tmp" "$views"
     fi ;;
   'repo view')
     if [[ $* == *defaultBranchRef* ]]; then printf 'main\n'; else printf '%s\n' "$slug"; fi ;;
-  'label create') exit 0 ;;
+  'label create')
+    label_name=${3:-}; color=''; description=''
+    for ((i=1; i<=$#; i++)); do
+      [[ ${!i} == --color ]] && { j=$((i+1)); color=${!j}; }
+      [[ ${!i} == --description ]] && { j=$((i+1)); description=${!j}; }
+    done
+    awk -F '\t' -v name="$label_name" '$1 != name' "$labels" 2>/dev/null > "$labels.$$.tmp" || true
+    printf '%s\t%s\t%s\n' "$label_name" "$color" "$description" >> "$labels.$$.tmp"
+    mv "$labels.$$.tmp" "$labels" ;;
   'project list')
     if [[ -e $project ]]; then printf '7\n'; fi ;;
   'project create') touch "$project"; printf '{"number":7}\n' ;;
   'project link'|'project field-create'|'project item-edit') exit 0 ;;
   'project item-list')
-    if [[ $* == *content.number* ]]; then printf 'PVTI_fake\n'; else cat "$project_items" 2>/dev/null || true; fi ;;
+    if [[ $* == *'.items[] | [('* ]]; then
+      while IFS= read -r item_url; do
+        [[ -n $item_url ]] || continue
+        item_number=${item_url##*/}
+        printf '%s\t%s\tPVTI_%s\n' "$item_number" "$item_url" "$item_number"
+      done < <(cat "$project_items" 2>/dev/null || true)
+    elif [[ $* == *content.number* ]]; then printf 'PVTI_fake\n'; else cat "$project_items" 2>/dev/null || true; fi ;;
   'project item-add')
     if (( ${FAKE_PROJECT_FAILURES:-0} > 0 )); then
       failure_file="$FAKE_GH_ROOT/$key.project-failures"
@@ -252,9 +287,25 @@ case "${1:-} ${2:-}" in
       if (( failures < FAKE_PROJECT_FAILURES )); then printf '%s\n' "$((failures + 1))" > "$failure_file"; exit 1; fi
     fi
     url=''; for ((i=1; i<=$#; i++)); do [[ ${!i} == --url ]] && { j=$((i+1)); url=${!j}; }; done
-    grep -Fxq -- "$url" "$project_items" 2>/dev/null || printf '%s\n' "$url" >> "$project_items" ;;
+    grep -Fxq -- "$url" "$project_items" 2>/dev/null || printf '%s\n' "$url" >> "$project_items"
+    [[ $* == *'--jq .id'* ]] && printf 'PVTI_%s\n' "${url##*/}" ;;
   'project view') [[ ${FAKE_PROJECT_FAIL:-0} == 0 ]] && printf 'PVT_fake\n' ;;
-  'project field-list') printf 'PVTF_fake\n' ;;
+  'project field-list')
+    if [[ $* == *'$field.name'* ]]; then
+      printf 'Agent status\tPVTF_status\tQueued\tPVTFO_queued\n'
+      printf 'Agent status\tPVTF_status\tRunning\tPVTFO_running\n'
+      printf 'Agent status\tPVTF_status\tNeeds input\tPVTFO_needs_input\n'
+      printf 'Agent status\tPVTF_status\tIn review\tPVTFO_in_review\n'
+      printf 'Agent status\tPVTF_status\tDone\tPVTFO_done\n'
+      printf 'Agent status\tPVTF_status\tFailed\tPVTFO_failed\n'
+      printf 'Agent status\tPVTF_status\tStale\tPVTFO_stale\n'
+      printf 'Agent status\tPVTF_status\tBlocked\tPVTFO_blocked\n'
+      printf 'Category\tPVTF_category\tImprovement\tPVTFO_improvement\n'
+      printf 'Category\tPVTF_category\tFeature\tPVTFO_feature\n'
+      printf 'Blocked by\tPVTF_blocked_by\t\t\n'
+    else
+      printf 'PVTF_fake\n'
+    fi ;;
   'pr list')
     if [[ $* == *'--state merged'* ]]; then
       if [[ ${FAKE_PR_MERGED:-1} == 1 ]]; then
@@ -614,11 +665,28 @@ assert_contains "$FAKE_GH_ROOT/calls" 'filter=is:issue is:open' 'All open issues
 assert_contains "$FAKE_GH_ROOT/calls" 'filter=is:issue is:closed' 'All closed issues view filter was not configured'
 assert_contains "$FAKE_GH_ROOT/calls" "project item-add 7 --owner acme --url https://github.example/acme/installed-project/pull/1" 'existing PR was not added to the Project'
 assert_contains "$FAKE_GH_ROOT/calls" "project item-add 7 --owner acme --url https://github.example/acme/installed-project/issues/88" 'existing open Issue was not added to the Project'
-assert_contains "$FAKE_GH_ROOT/calls" "project item-add 7 --owner acme --url https://github.example/acme/installed-project/issues/89" 'existing closed Issue was not added to the Project'
+if grep -Fq "project item-add 7 --owner acme --url https://github.example/acme/installed-project/issues/89" "$FAKE_GH_ROOT/calls"; then
+  fail 'setup backfilled an already-closed Issue'
+fi
+
+# A converged setup reads all views once, performs no filter mutation, and
+# backfills only open content.
+calls_before=$(wc -l < "$FAKE_GH_ROOT/calls")
+AGENTIC_LOOP_SKIP_START=1 "$target/bin/agentic-loop" setup >/dev/null
+tail -n "+$((calls_before + 1))" "$FAKE_GH_ROOT/calls" > "$TEST_ROOT/converged-setup-calls.log"
+[[ $(grep -c 'views(first: 100)' "$TEST_ROOT/converged-setup-calls.log" || true) -eq 1 ]] || fail 'converged setup did not consolidate the Project view query'
+[[ $(grep -c 'updateProjectV2View' "$TEST_ROOT/converged-setup-calls.log" || true) -eq 0 ]] || fail 'converged setup rewrote unchanged Project view filters'
+[[ $(grep -c $'\tlabel create ' "$TEST_ROOT/converged-setup-calls.log" || true) -eq 0 ]] || fail 'converged setup rewrote unchanged Labels'
+grep -Fq $'state=open' "$TEST_ROOT/converged-setup-calls.log" || fail 'setup did not backfill open content'
+if grep -Eq $'api repos/.+/(issues|pulls).*state=all' "$TEST_ROOT/converged-setup-calls.log"; then fail 'setup scanned closed Issue or PR history'; fi
 
 # Intake synchronization is immediate, idempotent, and persists temporary Projects failures for reconciliation.
 rm -f "$FAKE_GH_ROOT/$state_key.project-failures" "$(git -C "$target" rev-parse --absolute-git-dir)/agentic-loop/graphql-rate-limit"
+calls_before=$(wc -l < "$FAKE_GH_ROOT/calls")
 FAKE_PROJECT_FAILURES=1 FAKE_GRAPHQL_REMAINING=5000 "$target/bin/agentic-loop" sync-issue 91 >/dev/null
+tail -n "+$((calls_before + 1))" "$FAKE_GH_ROOT/calls" > "$TEST_ROOT/sync-issue-project-calls.log"
+[[ $(grep -c $'\tproject item-list ' "$TEST_ROOT/sync-issue-project-calls.log" || true) -le 1 ]] || fail 'one Issue sync fetched the complete Project item list repeatedly'
+[[ $(grep -c $'\tproject field-list ' "$TEST_ROOT/sync-issue-project-calls.log" || true) -le 1 ]] || fail 'one Issue sync fetched Project fields repeatedly'
 pending_project="$(git -C "$target" rev-parse --absolute-git-dir)/agentic-loop/project-pending"
 assert_contains "$pending_project" 'content https://github.com/acme/installed-project/issues/91' 'temporary Project failure was not persisted'
 FAKE_PROJECT_FAILURES=1 "$target/bin/agentic-loop" sync-issue 91 >/dev/null
@@ -713,7 +781,11 @@ printf '90 queued open none 2025-01-01T00:00:00Z\n' > "$FAKE_GH_ROOT/$state_key.
 before_project_adds=$(grep -c $'\tproject item-add' "$FAKE_GH_ROOT/calls" || true)
 FAKE_GRAPHQL_REMAINING=499 FAKE_GRAPHQL_RESET=$(date +%s) FAKE_REST_FAILURES=1 AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _supervise
 after_project_adds=$(grep -c $'\tproject item-add' "$FAKE_GH_ROOT/calls" || true)
-grep -Eq '^90 completed closed' "$FAKE_GH_ROOT/$state_key.state" || fail 'GraphQL exhaustion stopped the REST Issue loop'
+if ! grep -Eq '^90 completed closed' "$FAKE_GH_ROOT/$state_key.state"; then
+  tail -n 80 "$FAKE_GH_ROOT/calls" >&2
+  cat "$FAKE_GH_ROOT/$state_key.state" >&2
+  fail 'GraphQL exhaustion stopped the REST Issue loop'
+fi
 [[ $after_project_adds -eq $before_project_adds ]] || fail 'GraphQL exhaustion did not suppress Projects synchronization'
 pending_project="$(git -C "$target" rev-parse --absolute-git-dir)/agentic-loop/project-pending"
 [[ -s $pending_project ]] || fail 'suppressed Projects synchronization was not persisted'
@@ -1074,8 +1146,8 @@ grep -Eq '^310 completed closed' "$state" || fail 'dependency satisfied by agent
 grep -Eq '^311 blocked open' "$state" || fail 'a dependency closed without agent:completed was accepted as satisfied'
 assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:dependency-blocked reason=incomplete' 'incomplete-dependency block was not recorded with its reason'
 [[ -r $state_root/dependency/blocked-311 ]] || fail 'dependency block state was not persisted for status/Project visibility'
-assert_contains "$FAKE_GH_ROOT/calls" 'select(.name == "Blocked") | .id' 'blocked state was not synchronized to the Project Agent status field'
-assert_contains "$FAKE_GH_ROOT/calls" 'select(.name == "Blocked by") | .id' 'blocked reason was not written to the Project Blocked by field'
+assert_contains "$FAKE_GH_ROOT/calls" '--single-select-option-id PVTFO_blocked' 'blocked state was not synchronized to the Project Agent status field'
+assert_contains "$FAKE_GH_ROOT/calls" '--field-id PVTF_blocked_by' 'blocked reason was not written to the Project Blocked by field'
 
 # Once the blocking dependency itself completes, the blocked Issue is
 # automatically requeued and claimed in the same poll, with no manual Label edit.

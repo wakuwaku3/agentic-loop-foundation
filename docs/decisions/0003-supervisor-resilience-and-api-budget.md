@@ -26,6 +26,9 @@
 ### API削減
 
 - **アイドル時backoff**（実装済み）: queuedが空でworkerも居ない間はpoll間隔を `poll_seconds` から `poll_max_seconds` まで指数的に延ばし、workerが動き出したら通常間隔へ戻す。アイドル時のpoll読み取り回数を大きく削減する。
+- **poll snapshotの共有**: maintenance前と、状態遷移を反映するclaim直前にOpen Issueを最大2回取得し、running、queued、needs-input、failed、blockedの状態別処理で共有する。状態Labelごとの全件取得を各pollで反復しない。
+- **Project metadataのprocess cache**: Project ID、field/option ID、item対応をSupervisor process内で一度だけ取得し、状態・Category・競合fieldの更新ごとに最大1,000 itemとfield一覧を再取得しない。
+- **履歴取得の時間境界**: claim・lease復旧のcommentは現在のleaseに関係する期間だけを取得し、native dependencyは短時間cacheする。任意実行のmetricsも指定期間より古いPRへ到達した時点でpaginationを止める。
 - **ETag条件付き取得**（保留）: 取得に `If-None-Match` を付け304（rate limit非消費）を狙う案。`gh` CLIは条件付きリクエストとETag/304の受け渡しを素直に扱えず実装が脆くなるため見送る。安いlease（C）・APIバジェット・ガバナー（E）・アイドルbackoff（F）でAPI消費は十分に抑えられており、必要になれば専用HTTPクライアントで再検討する。
 
 ### 安全弁

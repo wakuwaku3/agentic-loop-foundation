@@ -2,11 +2,11 @@
 
 ## セットアップ
 
-`install.sh` は変更前に `git`、`gh`、設定 `agent.provider`（環境変数 `AGENT_PROVIDER` と git管理外 `.agentic-loop.local.toml` による上書きを含む）から解決したAI CLI（`codex`／`claude`／`opencode`、既定は `codex`）、GitHubログイン、origin、リポジトリ参照、Projects API権限を検査する。provider=opencodeならCodex CLIが存在しなくてもinstallは成立する。既存ファイルとの競合もコピー前に検査する。検査後、8個の状態Label、4個の `priority:*` Label、6個の `category:*` Labelと `Agentic Loop - OWNER/REPOSITORY` Projectを冪等に用意し、既定ではSupervisorを起動する。Projectには同じ6選択肢の `Category` fieldを作成する。`install.sh` と `bin/agentic-loop setup` はRESTで既存のOpen/Closed IssueとPRを列挙し、Projectにないitemをbackfillする。
+`install.sh` は変更前に `git`、`gh`、設定 `agent.provider`（環境変数 `AGENT_PROVIDER` と git管理外 `.agentic-loop.local.toml` による上書きを含む）から解決したAI CLI（`codex`／`claude`／`opencode`、既定は `codex`）、GitHubログイン、origin、リポジトリ参照、Projects API権限を検査する。provider=opencodeならCodex CLIが存在しなくてもinstallは成立する。既存ファイルとの競合もコピー前に検査する。検査後、8個の状態Label、4個の `priority:*` Label、6個の `category:*` Labelと `Agentic Loop - OWNER/REPOSITORY` Projectを冪等に用意し、既定ではSupervisorを起動する。Projectには同じ6選択肢の `Category` fieldを作成する。`install.sh` と `bin/agentic-loop setup` はRESTで既存のOpen IssueとOpen PRだけを列挙し、Projectにないitemをbackfillする。setup以前にclose済みの履歴は取り込まず、導入後に登録したitemはclose後もProjectに残す。
 
 GitHub tokenには対象リポジトリのIssue/PR操作権限と `project`、`read:project` scopeが必要である。不足時は `gh auth refresh -s project,read:project` など、利用中のGitHub認証方式に合う方法で追加する。Projectはuser/org所有のため、対象リポジトリとProjectの閲覧者が一致することを管理者が確認する。privateリポジトリの内容や秘密情報をProjectフィールドへ転記しない。
 
-Project APIでlink、`Agent status` single-select、Issue item追加に加え、次のtable viewをdesired stateとして設定する。`install.sh` または `bin/agentic-loop setup` の再実行は同名viewを再利用し、filter driftを修復して、既存のOpen/Closed PRをProjectへ追加する。workerが作成したPRも処理終了時に追加する。
+Project APIでlink、`Agent status` single-select、Issue item追加に加え、次のtable viewをdesired stateとして設定する。`install.sh` または `bin/agentic-loop setup` の再実行はview一覧を1回だけ取得して同名viewを再利用し、filterにdriftがあるものだけを修復して、既存のOpen PRをProjectへ追加する。workerが作成したPRも処理終了時に追加する。
 
 | View | 自動適用するfilter | 目的と表示順 |
 | --- | --- | --- |
@@ -17,7 +17,7 @@ Project APIでlink、`Agent status` single-select、Issue item追加に加え、
 | `Recovery` | `is:issue label:"agent:failed","agent:stale"` | Agent statusでgroupし、Updated at昇順。期限切れleaseはSupervisorがqueuedへ復旧するまでrunningとしてIssue commentで検査する |
 | `Recently completed` | `is:issue label:"agent:completed" updated:@today-30d` | Updated at降順。対応Pull requestと完了証跡を追跡する |
 | `Open PRs` / `Closed PRs` | `is:pr is:open` / `is:pr is:closed` | Updated at降順。Title、Status、Updated at、Repositoryを表示する |
-| `All open issues` / `All closed issues` | `is:issue is:open` / `is:issue is:closed` | Updated at降順の完全な監査一覧 |
+| `All open issues` / `All closed issues` | `is:issue is:open` / `is:issue is:closed` | Updated at降順の運用一覧。Closed側はsetup以前の全履歴ではなく、Project導入後に登録されたitemを表示する |
 
 Issue状態の正本は `agent:*` Labelであり、Project fieldは表示用の複製である。このため状態別ViewのfilterもLabelを使用し、回答後にLabelが遷移すると `Needs input` から自動的に外れる。private repositoryの本文やcomment、秘密情報をProject custom fieldへ複製しない。
 
@@ -103,6 +103,8 @@ incident Issueには、秘密の値、攻撃手順、不要な個人情報を本
 `.agentic-loop.toml` の `[queue]` で `poll_seconds`、`max_workers`、`lease_seconds`、`stop_timeout`、`stale_days`、`graphql_reserve`、`rate_limit_cache_seconds`、`api_retry_attempts`、`api_retry_base_seconds`、`max_attempts`、`retry_cooldown_seconds`、`worker_timeout_seconds`、`unknown_scope`、`exclusive_paths` を変更できる。個人環境向けの上書きは git 管理外の `.agentic-loop.local.toml` に同じキーを書けば、キー単位で優先される。設定はTOMLで、読み取りには `yq` を用いる。既定の並列数は4とし、これを超えてむやみに増やさない。worker失敗の多くはtoken枯渇やセッション中断などの一時的要因であるため、失敗したIssueは即座にagent:failedへ留め置かない。Supervisorの`retry_failed`が、開いている全てのagent:failed（過去分・追跡外を含む）を`[queue].max_attempts`（既定3、総試行回数）まで`[queue].retry_cooldown_seconds`（既定600秒）のクールダウンを挟んで自動的にagent:queuedへ戻して再試行し、上限に達したら解決不能とみなしてIssueをcloseする。人手でのラベル付け替えは不要。workerが実施不要または実施不能と判断した場合は`AGENTIC_LOOP_RESULT=declined`でIssueをcloseできる。providerのtoken/rate limitに達した失敗はIssueをfailedにせずagent:queuedへ戻し、Supervisorはclaimを一定時間（`EXHAUSTION_PAUSE_SECONDS`）一時停止して上限回復後に自動再開する。`[budget].weekly_reserve_percent` は緊急枠の確保用で、週次利用率が `100 - 値` を超える間はSupervisorが新規Issueのclaimを一時停止し、回復すると再開する。利用率はheadlessで取得できるCodexのセッションログ（最新の `token_count` の `secondary.used_percent`）から読むbest-effortで、取得できない場合やCodex以外のproviderのみの場合はfail open（claim継続）とする。0で無効化できる。増加はCodex契約上の制限、Git競合、端末資源を確認してから行う。stopは新規claimを止め、workerをdrainする。`STOP_TIMEOUT=0` は完了まで待つ。
 
 SupervisorとworkerはGit common stateにGraphQLの残量・reset時刻を短時間cacheして共有する。Issue一覧、Label、comment、heartbeat、PRのmerge確認などloopのcore操作はREST APIを使い、GraphQLはbest-effortのProjects操作だけに限定する。残量が `GRAPHQL_RESERVE` 以下ならProjects item・field同期だけを抑制し、Issue Labelを正本とするqueue処理は継続する。reset後は次のProjects操作が最新残量を再取得し、冪等な同期を再開する。既定値は500であり、0にすると残量によるProjects保護を無効化する。
+
+Supervisorは1 poll内の状態別処理をOpen Issue snapshot最大2回（maintenance前と、状態遷移を反映するclaim直前）で共有する。Project ID・field/option ID・最大1,000件のitem対応はSupervisor process内で1回取得して再利用し、field更新ごとに全item・fieldを取り直さない。claimとlease復旧が読むcommentは現在のlease期限に関係する更新期間へ限定し、native dependencyの結果は120秒cacheする。
 
 GraphQL枯渇時もREST APIのquotaは別に確認できる。`gh api rate_limit --jq '.resources | {graphql,core}'` で現在値を確認する。GraphQLのreset前にSupervisorを繰り返し再起動したり、`gh issue list --limit 1000` や `gh project item-list --limit 1000` を手動で反復したりしない。
 
