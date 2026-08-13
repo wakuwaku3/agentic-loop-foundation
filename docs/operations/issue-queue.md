@@ -85,12 +85,15 @@ bin/agentic-loop doctor --format json
 通常のbuild・変更要求を受けた対話中のAgentは、次の順序で経路を決める。
 
 1. 読み取り専用の質問、診断、status確認、`start`・`stop`などの運用操作はIssue化しない。同期実行または直接実装を利用者が明示した場合も受付を省略する。
-2. `.agentic-loop.toml` と実行可能な `bin/agentic-loop` があり、`bin/agentic-loop status` の先頭行が `running` で、`gh`が対象repositoryのIssueを参照・更新できることを確認する。
-3. open Issueのtitleとbodyを検索し、要求の目的と対象範囲が同じIssueがないか確認する。候補の本文とコメントを読み、同じ利用者結果を求めるなら再利用して新規作成しない。
+2. `.agentic-loop.toml` と実行可能な `bin/agentic-loop` があり、`gh`が対象repositoryとIssueを参照・更新できることを確認する。`bin/agentic-loop status` でSupervisorの状態を観測するが、`running` は受付条件にしない。Supervisorはclaim開始条件であり、Issue永続化の条件ではない。
+3. API呼び出し前に、要求経路ごとの重複確認範囲を決める。
+   - 利用者が「Issueを作って」のように新規Issue作成を明示した場合は、open Issue一覧・候補本文・コメントの重複検索を呼ばず、新規作成する。ただし同じ指示に「既存Issueがあれば再利用」「重複確認して」も含まれる場合は検索する。
+   - 通常の自然言語build・変更要求を自動的にキューへ送る場合は、`agent:*` 状態Labelを持つopen Issueだけをactive Issueとして確認する。titleとbodyを検索し、目的と対象範囲が近い候補だけcommentsを確認して、同じ利用者結果なら再利用する。
+   - コード診断・定期監査は従来どおりopen・closed Issueを検索し、同じ所見を重複作成しない。
 4. 要求を `loop-continuity`、`confidentiality-incident`、`integrity-incident`、`availability-incident`、`feature`、`improvement` の順に評価し、該当する最上位の `category:*` を1個選ぶ。incidentはCIAへの実害で分類し、単なる重要度では選ばない。分類不能時は `category:improvement` を安全な既定値として使い、queued中に再トリアージする旨を記録する。
 5. 重複Issueが `agent:running` ならURLと状態を報告して終了し、`agent:queued` なら選択カテゴリが1個だけになるよう確認して再利用する。それ以外は他の `agent:*` 状態Labelを外し、カテゴリ1個と `agent:queued` を付ける。重複がなければ要求・制約・完了条件を本文にしたIssueを作り、カテゴリと `agent:queued` を同時に付ける。
 6. 新規作成、再キュー、または再分類の直後に `bin/agentic-loop sync-issue ISSUE_NUMBER` を実行する。Supervisorのclaimを待たずProjectへ追加し、一時障害時は再試行queueへ永続化する。Project障害はIssue受付を停止しない。
-7. Issueを再取得し、open、カテゴリが1個、かつ `agent:queued` または `agent:running` であることを確認する。URL、カテゴリ、状態を報告し、直接実装せず終了する。
+7. Issueを再取得し、open、カテゴリが1個、かつ `agent:queued` または `agent:running` であることを確認する。URL、カテゴリ、状態を報告し、直接実装せず終了する。手順2でSupervisorが停止中だった場合は、Issueを登録済みであること、Supervisorが停止中であること、処理開始にはSupervisorの起動が必要であることも報告する。
 
 Supervisorがclaimした `agent:running` Issueのworkerは受付を再実行しない。元Issueとコメントを要求として、専用branch/worktree、全検証、secret guard、commit、push、PR、required checks、review対応、merge、default branch確認、branch/worktree cleanupまで進め、再帰的な代替Issueを作らない。
 
@@ -102,7 +105,9 @@ incident Issueには、秘密の値、攻撃手順、不要な個人情報を本
 
 ### 安全なfallback
 
-キューのファイル、GitHub権限、Supervisorの正常性、またはqueued/running状態を確認できない場合、失敗した確認項目を明示する。確認できないIssueを追加作成したり、queued Issueと並行して同じ変更を実装したりしない。
+Supervisor停止中でも、キューのファイル、対象repositoryとIssueのread/write、作成・更新後のopen・カテゴリ1個・queued状態を確認できれば受付は成功である。`sync-issue` がProject同期失敗を永続的な再試行queueへ保存できた場合も受付を成功として扱う。
+
+キューのファイル、GitHub repositoryまたはIssueのread/write、作成・更新後のopen・カテゴリ1個・queued/running状態を確認できない場合は安全なfallbackとし、失敗した確認項目を明示して成功扱いしない。確認目的の追加Issueを作成せず、登録された可能性のあるIssueと並行して同じ変更を実装しない。Supervisor停止はこのfallbackと区別する。
 
 読み取り専用要求と運用操作はその場で続行する。通常の変更要求は、専用branch/worktreeを利用でき、追加費用・秘密・破壊的操作に関する判断が不要な場合に限り、キューが利用不能であることを明示してworker workflowを同期実行する。それ以外は復旧方法または必要な判断を正確に提示して停止する。明示された同期・直接実行も同じworker workflowと不変条件に従う。
 
