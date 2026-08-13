@@ -1395,6 +1395,7 @@ supervise() {
       sleep "$POLL_SECONDS"
       continue
     else
+      recover_expired
       reconcile_pending_project
       reconcile_queued_categories
       triage_stale_queued

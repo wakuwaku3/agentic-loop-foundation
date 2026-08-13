@@ -1026,6 +1026,16 @@ mkdir -p "$state_root"
 "$target/bin/agentic-loop" _supervise
 grep -Eq '^9 queued open$' "$state" || fail 'expired running Issue was not recovered'
 
+# Recovery also runs inside the poll loop, not only at startup: a running Issue
+# whose worker died (expired lease) is recovered and processed while the
+# supervisor keeps running, instead of remaining stuck at agent:running forever.
+write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=3 STOP_TIMEOUT=10 STALE_DAYS=30
+printf '19 running open none 2026-01-01T00:00:00Z\n' > "$state"
+printf '19 <!-- agentic-loop:lease worker=dead heartbeat=1 expires=1 -->\n' > "$FAKE_GH_ROOT/$state_key.comments"
+rm -f "$state_root/stop.requested"
+AGENTIC_LOOP_RUN_ONCE=1 FAKE_CODEX_SLEEP=1 "$target/bin/agentic-loop" _supervise
+grep -Eq '^19 completed closed' "$state" || fail 'stuck running Issue was not recovered and processed by the active loop'
+
 # Repositories use separate gh/project state and Git state directories.
 second=$(new_repository second-project)
 AGENTIC_LOOP_SOURCE="$PROJECT_ROOT" AGENTIC_LOOP_TARGET="$second" AGENTIC_LOOP_SKIP_START=1 "$PROJECT_ROOT/install.sh"
