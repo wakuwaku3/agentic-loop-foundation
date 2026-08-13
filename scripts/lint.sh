@@ -3,7 +3,7 @@ set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
-required=(AGENTS.md README.md Makefile .editorconfig .gitignore .codex/config.toml install.sh devbox.json devbox.lock docs/policies/cost.md docs/policies/testing.md docs/policies/external-environment.md docs/policies/development-environment.md docs/policies/ai-tool-neutrality.md docs/policies/github-language.md docs/policies/validation-harness.md docs/policies/continuous-delivery.md docs/decisions/0002-github-issue-queue.md docs/decisions/0003-supervisor-resilience-and-api-budget.md docs/decisions/0004-worker-resume-and-handoff.md docs/decisions/0005-status-observability.md docs/operations/issue-queue.md docs/operations/codebase-diagnosis.md .agentic-loop.toml .agentic-loop/guard-secrets.sh .agentic-loop/update-main.sh .agentic-loop/diagnose-codebase.sh .githooks/pre-commit .githooks/pre-push .agents/skills/submit-requirement/SKILL.md .agents/skills/diagnose-codebase/SKILL.md .claude/skills/submit-requirement/SKILL.md .claude/skills/diagnose-codebase/SKILL.md bin/agentic-loop bin/agentic-loop-diagnose scripts/check-environment.sh scripts/install-target.sh)
+required=(AGENTS.md README.md Makefile .editorconfig .gitignore .codex/config.toml install.sh devbox.json devbox.lock docs/policies/cost.md docs/policies/testing.md docs/policies/external-environment.md docs/policies/development-environment.md docs/policies/ai-tool-neutrality.md docs/policies/github-language.md docs/policies/validation-harness.md docs/policies/continuous-delivery.md docs/decisions/0002-github-issue-queue.md docs/decisions/0003-supervisor-resilience-and-api-budget.md docs/decisions/0004-worker-resume-and-handoff.md docs/decisions/0005-status-observability.md docs/decisions/0006-worker-hang-timeout.md docs/operations/issue-queue.md docs/operations/codebase-diagnosis.md .agentic-loop.toml .agentic-loop/guard-secrets.sh .agentic-loop/update-main.sh .agentic-loop/diagnose-codebase.sh .githooks/pre-commit .githooks/pre-push .agents/skills/submit-requirement/SKILL.md .agents/skills/diagnose-codebase/SKILL.md .claude/skills/submit-requirement/SKILL.md .claude/skills/diagnose-codebase/SKILL.md bin/agentic-loop bin/agentic-loop-diagnose scripts/check-environment.sh scripts/install-target.sh)
 for file in "${required[@]}"; do
   [[ -f $file ]] || { printf 'Missing required file: %s\n' "$file" >&2; exit 1; }
 done
@@ -145,6 +145,10 @@ grep -Fq 'resume_probe() {' bin/agentic-loop || { printf 'Worker resume phase de
 grep -Fq 'agentic-loop:handoff' bin/agentic-loop || { printf 'Worker resume handoff comment is missing.\n' >&2; exit 1; }
 grep -Fq 'worker_confirm_running_label' bin/agentic-loop || { printf 'Worker resume ownership re-check is missing.\n' >&2; exit 1; }
 grep -Fq '中断からの再開' docs/operations/issue-queue.md || { printf 'Worker resume documentation is missing.\n' >&2; exit 1; }
+grep -Fq 'enforce_worker_timeout' bin/agentic-loop || { printf 'Per-worker hang timeout enforcement is missing.\n' >&2; exit 1; }
+grep -Eq '^worker_timeout_seconds[[:space:]]*=[[:space:]]*14400$' .agentic-loop.toml || { printf 'Unsafe worker_timeout_seconds default.\n' >&2; exit 1; }
+grep -Fq 'agentic-loop:worker-timeout' bin/agentic-loop || { printf 'Worker-timeout audit comment marker is missing.\n' >&2; exit 1; }
+grep -Fq 'ハング' docs/operations/issue-queue.md || { printf 'Worker hang timeout documentation is missing.\n' >&2; exit 1; }
 if grep -Eq 'danger-full-access|OPENAI_API_KEY' bin/agentic-loop bin/agentic-loop-diagnose .agentic-loop/diagnose-codebase.sh install.sh scripts/install-target.sh; then
   printf 'Forbidden Codex execution or API-key billing configuration.\n' >&2
   exit 1

@@ -25,6 +25,10 @@ readonly EXHAUSTION_PAUSE_SECONDS=1800
 readonly DEPENDENCY_FAILURE_TOLERANCE=3
 # Bound on how far dependency cycle detection walks the blocked_by graph.
 readonly DEPENDENCY_MAX_DEPTH=10
+# Below this, worker_timeout_seconds risks killing a worker still doing
+# legitimate work (plan+exec+PR review can easily take an hour); doctor warns
+# but does not fail, since some deployments may accept the risk deliberately.
+readonly WORKER_TIMEOUT_MIN_SAFE_SECONDS=1800
 
 cd "$REPO_ROOT"
 
@@ -41,6 +45,7 @@ API_RETRY_ATTEMPTS=3
 API_RETRY_BASE_SECONDS=1
 MAX_ATTEMPTS=3
 RETRY_COOLDOWN_SECONDS=600
+WORKER_TIMEOUT_SECONDS=14400
 UNKNOWN_SCOPE=isolated
 EXCLUSIVE_PATHS=''
 CONFIG_ERROR=''
@@ -81,6 +86,7 @@ load_config() {
       queue.api_retry_base_seconds) key=API_RETRY_BASE_SECONDS ;;
       queue.max_attempts) key=MAX_ATTEMPTS ;;
       queue.retry_cooldown_seconds) key=RETRY_COOLDOWN_SECONDS ;;
+      queue.worker_timeout_seconds) key=WORKER_TIMEOUT_SECONDS ;;
       queue.unknown_scope) UNKNOWN_SCOPE=$value; continue ;;
       queue.exclusive_paths) EXCLUSIVE_PATHS=$value; continue ;;
       *) continue ;;
@@ -432,6 +438,7 @@ validate_config() {
   [[ $API_RETRY_BASE_SECONDS =~ ^[0-9]+$ ]] || fail 'API_RETRY_BASE_SECONDS must be a non-negative integer'
   [[ $MAX_ATTEMPTS =~ ^[1-9][0-9]*$ ]] || fail 'MAX_ATTEMPTS must be a positive integer'
   [[ $RETRY_COOLDOWN_SECONDS =~ ^[0-9]+$ ]] || fail 'RETRY_COOLDOWN_SECONDS must be a non-negative integer'
+  [[ $WORKER_TIMEOUT_SECONDS =~ ^[0-9]+$ ]] || fail 'WORKER_TIMEOUT_SECONDS must be a non-negative integer'
   case $UNKNOWN_SCOPE in isolated | exclusive | open) ;; *) fail 'UNKNOWN_SCOPE must be isolated, exclusive, or open' ;; esac
 }
 
@@ -891,6 +898,11 @@ status_running_detail() {
   fi
   STATUS_RUN_ELAPSED=''
   [[ -n $STATUS_RUN_STARTED ]] && STATUS_RUN_ELAPSED=$((now - STATUS_RUN_STARTED))
+  STATUS_RUN_TIMEOUT_AT='' STATUS_RUN_TIMEOUT_EXCEEDED=0
+  if (( WORKER_TIMEOUT_SECONDS > 0 )) && [[ -n $STATUS_RUN_STARTED ]]; then
+    STATUS_RUN_TIMEOUT_AT=$((STATUS_RUN_STARTED + WORKER_TIMEOUT_SECONDS))
+    (( now >= STATUS_RUN_TIMEOUT_AT )) && STATUS_RUN_TIMEOUT_EXCEEDED=1
+  fi
   LEASE_ID='' LEASE_EXPIRES='' LEASE_HEARTBEAT=''
   lease_read "$issue" || true
   STATUS_RUN_LEASE_EXPIRES=$LEASE_EXPIRES
@@ -965,6 +977,12 @@ status_collect_anomalies() {
     if [[ -r $(worker_started_file "$issue") ]]; then
       read -r started < "$(worker_started_file "$issue")" || started=''
       [[ $started =~ ^[0-9]+$ ]] || anomaly_add warning local-state-corrupt "#$issue" "workers/$issue.started の内容が不正です。"
+    fi
+    if (( WORKER_TIMEOUT_SECONDS > 0 )) && worker_pid_live "$issue"; then
+      local elapsed
+      elapsed=$(worker_elapsed_seconds "$issue" 2>/dev/null || true)
+      [[ $elapsed =~ ^[0-9]+$ ]] && (( elapsed >= WORKER_TIMEOUT_SECONDS )) && \
+        anomaly_add warning worker-timeout "#$issue" "実行時間上限（${WORKER_TIMEOUT_SECONDS}秒）を超過しています（経過 ${elapsed}秒）。次回pollで停止し自動的に再試行します。"
     fi
     LEASE_ID='' LEASE_EXPIRES='' LEASE_HEARTBEAT=''
     if lease_read "$issue"; then
@@ -1082,6 +1100,10 @@ status_render_text() {
       [[ -n $STATUS_RUN_PHASE ]] && suffix+=" (phase: $STATUS_RUN_PHASE)"
       [[ -n $STATUS_RUN_SCOPE ]] && suffix+=" (scope: $(paste -sd', ' - <<< "$STATUS_RUN_SCOPE"))"
       [[ -n $STATUS_RUN_STARTED ]] && suffix+=" (started: $STATUS_RUN_STARTED, elapsed: ${STATUS_RUN_ELAPSED}s)"
+      if [[ -n $STATUS_RUN_TIMEOUT_AT ]]; then
+        if (( STATUS_RUN_TIMEOUT_EXCEEDED )); then suffix+=" (timeout_at: $STATUS_RUN_TIMEOUT_AT 超過)"
+        else suffix+=" (timeout_at: $STATUS_RUN_TIMEOUT_AT)"; fi
+      fi
       [[ -n $STATUS_RUN_HEARTBEAT ]] && suffix+=" (heartbeat: $STATUS_RUN_HEARTBEAT)"
       if [[ -n $STATUS_RUN_LEASE_EXPIRES ]]; then
         if (( STATUS_RUN_LEASE_EXPIRED )); then suffix+=" (lease_expires: $STATUS_RUN_LEASE_EXPIRES 期限切れ)"
@@ -1183,8 +1205,10 @@ status_render_json() {
         scope_sep=','
       done <<< "$STATUS_RUN_SCOPE"
     fi
-    printf '],"started_at":%s,"elapsed_seconds":%s,"heartbeat_at":%s,"lease_expires_at":%s,"lease_expired":%s,"worktree":"%s","worktree_exists":%s,"dirty":%s,"diverged":%s,"branch":"%s","pr":%s,"pr_url":"%s","pr_state":"%s","checks":"%s","local_state":%s}' \
-      "${STATUS_RUN_STARTED:-null}" "${STATUS_RUN_ELAPSED:-null}" "${STATUS_RUN_HEARTBEAT:-null}" "${STATUS_RUN_LEASE_EXPIRES:-null}" \
+    printf '],"started_at":%s,"elapsed_seconds":%s,"timeout_at":%s,"timeout_exceeded":%s,"heartbeat_at":%s,"lease_expires_at":%s,"lease_expired":%s,"worktree":"%s","worktree_exists":%s,"dirty":%s,"diverged":%s,"branch":"%s","pr":%s,"pr_url":"%s","pr_state":"%s","checks":"%s","local_state":%s}' \
+      "${STATUS_RUN_STARTED:-null}" "${STATUS_RUN_ELAPSED:-null}" "${STATUS_RUN_TIMEOUT_AT:-null}" \
+      "$( ((STATUS_RUN_TIMEOUT_EXCEEDED)) && printf true || printf false )" \
+      "${STATUS_RUN_HEARTBEAT:-null}" "${STATUS_RUN_LEASE_EXPIRES:-null}" \
       "$( ((STATUS_RUN_LEASE_EXPIRED)) && printf true || printf false )" "$(json_escape "$STATUS_RUN_WORKTREE")" \
       "$( ((STATUS_RUN_WORKTREE_EXISTS)) && printf true || printf false )" \
       "$( ((STATUS_RUN_DIRTY)) && printf true || printf false )" "$( ((STATUS_RUN_DIVERGED)) && printf true || printf false )" \
@@ -1347,6 +1371,10 @@ doctor_collect() {
     doctor_positive_config RATE_LIMIT_CACHE_SECONDS "$RATE_LIMIT_CACHE_SECONDS"; doctor_positive_config API_RETRY_ATTEMPTS "$API_RETRY_ATTEMPTS"
     doctor_non_negative_config API_RETRY_BASE_SECONDS "$API_RETRY_BASE_SECONDS"
     doctor_positive_config MAX_ATTEMPTS "$MAX_ATTEMPTS"; doctor_non_negative_config RETRY_COOLDOWN_SECONDS "$RETRY_COOLDOWN_SECONDS"
+    doctor_non_negative_config WORKER_TIMEOUT_SECONDS "$WORKER_TIMEOUT_SECONDS"
+    if (( WORKER_TIMEOUT_SECONDS > 0 && WORKER_TIMEOUT_SECONDS < WORKER_TIMEOUT_MIN_SAFE_SECONDS )); then
+      doctor_add warning '設定値: WORKER_TIMEOUT_SECONDS' '正常に進行中のworkerを誤って停止する恐れがあります。' "docs/operations/issue-queue.md を確認し、worker_timeout_seconds を ${WORKER_TIMEOUT_MIN_SAFE_SECONDS}秒以上、または実測の所要時間に基づく値へ見直してください。"
+    fi
     doctor_enum_config UNKNOWN_SCOPE "$UNKNOWN_SCOPE" isolated exclusive open
     (( DOCTOR_FAILURES == 0 )) && doctor_add success '設定ファイル' '設定値を安全に解釈できます。' '対応は不要です。'
   fi
@@ -1624,6 +1652,26 @@ lease_file() { printf '%s\n' "$STATE_ROOT/workers/$1.lease"; }
 worker_started_file() { printf '%s/workers/%s.started' "$STATE_ROOT" "$1"; }
 worker_resume_file() { printf '%s/workers/%s.resume' "$STATE_ROOT" "$1"; }
 
+# Seconds since this Issue's local worker began: prefers the .started marker
+# (written right after claim), falling back to the pidfile's mtime when
+# .started is missing or corrupt so a worker claimed moments ago is never
+# misjudged as already over the timeout. Fails only when neither source is
+# available (no local worker for this Issue).
+worker_elapsed_seconds() {
+  local issue=$1 started now pidfile mtime
+  now=$(date +%s)
+  if [[ -r $(worker_started_file "$issue") ]]; then
+    read -r started < "$(worker_started_file "$issue")" || started=''
+    if [[ $started =~ ^[0-9]+$ ]]; then
+      printf '%s\n' "$((now - started))"
+      return 0
+    fi
+  fi
+  pidfile="$STATE_ROOT/workers/$issue.pid"
+  mtime=$(stat -c %Y "$pidfile" 2>/dev/null) || return 1
+  printf '%s\n' "$((now - mtime))"
+}
+
 # Remove a worker's local bookkeeping (pid + lease + phase + started + resume
 # caches) together. The handoff-comment id mapping is intentionally not
 # cleared here: it must survive across worker lifecycles so the next worker
@@ -1727,6 +1775,43 @@ recover_expired() {
     clear_conflict_wait "$issue"
     comment_issue "$issue" '<!-- agentic-loop:recovered -->\n担当workerの終了、またはリース期限切れを検出したため、Issueを安全にキューへ戻しました。'
   done < <(repo_api issues --method GET -f state=open -f labels="$(state_label running)" -f per_page=100 --paginate --jq '.[] | select(.pull_request == null) | .number' 2>/dev/null || true)
+}
+
+# A lease heartbeat only proves the worker process is alive, not that it is
+# making progress (see docs/decisions/0006): a worker hung on an unresponsive
+# API call or an infinite retry keeps heartbeating forever and recover_expired
+# never reclaims it, permanently occupying a slot. Kill this host's own
+# workers (a live pidfile) that have run longer than WORKER_TIMEOUT_SECONDS,
+# process-group-wide so no provider CLI child is orphaned, then fail the Issue
+# so the bounded retry_failed cooldown/requeue takes over. Only pidfile-owning
+# workers are touched, so a multi-host deployment never interferes with
+# another host's Issue. Every step is best-effort: a transient GitHub failure
+# here must not crash the supervisor (see docs/decisions/0003); the next poll
+# retries.
+enforce_worker_timeout() {
+  (( WORKER_TIMEOUT_SECONDS > 0 )) || return 0
+  local pidfile issue pid elapsed waited
+  shopt -s nullglob
+  for pidfile in "$STATE_ROOT"/workers/*.pid; do
+    issue=$(basename "$pidfile" .pid)
+    [[ $issue =~ ^[0-9]+$ ]] || continue
+    worker_pid_live "$issue" || continue
+    elapsed=$(worker_elapsed_seconds "$issue") || continue
+    (( elapsed >= WORKER_TIMEOUT_SECONDS )) || continue
+    read -r pid < "$pidfile" || continue
+    [[ $pid =~ ^[0-9]+$ ]] || continue
+    kill -TERM "-$pid" 2>/dev/null || true
+    waited=0
+    while (( waited < 5 )) && kill -0 "$pid" 2>/dev/null; do sleep 1; waited=$((waited + 1)); done
+    kill -0 "$pid" 2>/dev/null && kill -KILL "-$pid" 2>/dev/null || true
+    clear_worker_local "$issue"
+    scope_cache_clear "$issue"
+    clear_conflict_wait "$issue"
+    comment_issue "$issue" "<!-- agentic-loop:worker-timeout issue=$issue elapsed=${elapsed}s limit=${WORKER_TIMEOUT_SECONDS}s -->\nこのIssueのworkerはlease heartbeatが有効なまま実行時間上限（${WORKER_TIMEOUT_SECONDS}秒）を超えたため、ハングしたと判断してプロセスグループごと停止しました（経過 ${elapsed}秒）。自動的な再試行キューへ戻します。誤検知が疑われる場合は \`.agentic-loop.toml\` の \`queue.worker_timeout_seconds\` を見直してください。" || true
+    set_issue_state "$issue" failed || true
+    project_sync_state "$issue" failed || true
+  done
+  shopt -u nullglob
 }
 
 requeue_answered() {
@@ -2356,16 +2441,19 @@ supervise() {
   # should skip this cycle and be retried next poll, not kill the loop under
   # set -e.
   recover_expired || true
+  enforce_worker_timeout || true
   rebuild_scope_cache || true
   while :; do
     requeue_answered || true
     requeue_dependency_ready || true
     if [[ -e $STATE_ROOT/stop.requested ]]; then
+      enforce_worker_timeout || true
       [[ $(worker_count) -eq 0 ]] && break
       sleep "$POLL_SECONDS"
       continue
     else
       recover_expired || true
+      enforce_worker_timeout || true
       reconcile_pending_project || true
       reconcile_queued_categories || true
       triage_stale_queued || true

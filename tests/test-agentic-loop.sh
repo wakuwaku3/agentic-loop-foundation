@@ -335,7 +335,16 @@ if [[ ${FAKE_CODEX_COMMIT_ALL:-0} == 1 ]]; then
   git -C "$worktree" add -A
   git -C "$worktree" commit --quiet --allow-empty -m 'exec committed pending changes'
 fi
-sleep "${FAKE_CODEX_SLEEP:-0}"
+# Per-Issue sleep override (FAKE_CODEX_SLEEP_ISSUE_<n>, keyed by the worktree's
+# "issue-<n>" suffix) lets a test give one Issue a short sleep while another
+# Issue claimed by the same supervisor process keeps the long FAKE_CODEX_SLEEP,
+# without changing default behavior for tests that never set the override.
+sleep_value=${FAKE_CODEX_SLEEP:-0}
+if [[ $worktree =~ /issue-([0-9]+)$ ]]; then
+  override_var="FAKE_CODEX_SLEEP_ISSUE_${BASH_REMATCH[1]}"
+  sleep_value=${!override_var:-$sleep_value}
+fi
+sleep "$sleep_value"
 printf '%s\n' "${FAKE_CODEX_RESULT:-AGENTIC_LOOP_RESULT=completed}" > "$output"
 FAKE_CODEX
 cat > "$FAKE_BIN/claude" <<'FAKE_CLAUDE'
@@ -459,6 +468,8 @@ assert_contains "$target/.agentic-loop.toml" 'graphql_reserve = 500' 'installed 
 assert_contains "$target/.agentic-loop.toml" 'core_reserve = 500' 'installed configuration lacks the REST(core) reserve'
 assert_contains "$target/.agentic-loop.toml" 'poll_max_seconds = 120' 'installed configuration lacks the idle poll backoff ceiling'
 assert_contains "$target/.agentic-loop.toml" 'api_retry_attempts = 3' 'installed configuration lacks bounded REST retries'
+assert_contains "$target/.agentic-loop.toml" 'worker_timeout_seconds = 14400' 'installed configuration lacks the worker hang-timeout default'
+[[ -f $target/docs/decisions/0006-worker-hang-timeout.md ]] || fail 'installed repository lacks the worker hang-timeout ADR'
 assert_contains "$target/docs/operations/issue-queue.md" 'GraphQLの残量・reset時刻' 'installed operations documentation lacks shared rate-limit handling'
 for provider_neutral_doc in docs/operations/issue-queue.md docs/operations/codebase-diagnosis.md; do
   assert_contains "$target/$provider_neutral_doc" 'opencode' "installed $provider_neutral_doc does not document opencode as a supported provider"
@@ -1512,6 +1523,114 @@ rm -f "$state_root/stop.requested"
 (( backoff_val > 1 )) || fail "idle backoff did not lengthen the poll interval (got $backoff_val)"
 (( backoff_val <= 8 )) || fail "idle backoff exceeded the configured ceiling (got $backoff_val)"
 
+# --- per-worker hang timeout (Issue #108, ADR 0006) ---
+# A lease heartbeat only proves the worker process is alive; it does not prove
+# the work is progressing. A worker that hangs internally (e.g. an unresponsive
+# API call) is killed process-group-wide once it exceeds worker_timeout_seconds,
+# even though its lease is still valid, and the freed max_workers=1 slot lets
+# the rest of the queue keep moving instead of stalling behind the hang.
+write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=300 STOP_TIMEOUT=10 STALE_DAYS=30 MAX_ATTEMPTS=3 RETRY_COOLDOWN_SECONDS=600 WORKER_TIMEOUT_SECONDS=3
+printf '50 queued open none 2026-01-01T00:00:00Z\n51 queued open none 2026-01-01T00:00:01Z\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+rm -f "$state_root/stop.requested"
+FAKE_CODEX_SLEEP=60 FAKE_CODEX_SLEEP_ISSUE_51=1 "$target/bin/agentic-loop" _supervise &
+hang_sup_pid=$!
+hang_worker_pid=''
+for _ in $(seq 1 40); do
+  if [[ -r $state_root/workers/50.pid ]]; then hang_worker_pid=$(cat "$state_root/workers/50.pid"); break; fi
+  sleep 0.5
+done
+[[ -n $hang_worker_pid ]] || { kill "$hang_sup_pid" 2>/dev/null; wait "$hang_sup_pid" 2>/dev/null; fail 'hung worker was not claimed before the timeout test'; }
+hang_timed_out=0
+for _ in $(seq 1 40); do
+  grep -Eq '^50 failed' "$state" && { hang_timed_out=1; break; }
+  sleep 0.5
+done
+[[ $hang_timed_out == 1 ]] || { kill "$hang_sup_pid" 2>/dev/null; wait "$hang_sup_pid" 2>/dev/null; fail 'a hung worker was not detected and failed within the configured timeout'; }
+[[ ! -e $state_root/workers/50.pid ]] || fail 'a timed-out worker pidfile was not cleared'
+# kill -0 also succeeds against a not-yet-reaped zombie, so poll briefly
+# instead of asserting on a single sample right after the state flip.
+hang_worker_gone=0
+for _ in $(seq 1 20); do
+  kill -0 "$hang_worker_pid" 2>/dev/null || { hang_worker_gone=1; break; }
+  sleep 0.5
+done
+[[ $hang_worker_gone == 1 ]] || { kill "$hang_sup_pid" 2>/dev/null; wait "$hang_sup_pid" 2>/dev/null; fail 'a timed-out worker process group left an orphan process behind'; }
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:worker-timeout' 'the worker-timeout disposition was not audited on the Issue'
+hang_queue_progressed=0
+for _ in $(seq 1 60); do
+  grep -Eq '^51 completed closed' "$state" && { hang_queue_progressed=1; break; }
+  sleep 0.5
+done
+kill -TERM "$hang_sup_pid" 2>/dev/null || true
+wait "$hang_sup_pid" 2>/dev/null || true
+rm -f "$state_root/stop.requested"
+[[ $hang_queue_progressed == 1 ]] || fail 'a hung worker under max_workers=1 blocked the rest of the queue instead of freeing the slot'
+grep -Eq '^50 failed' "$state" || fail 'the hung Issue was reclaimed before its retry cooldown elapsed'
+
+# A worker that legitimately completes within the timeout is never flagged or
+# killed: a large default must not misfire on ordinary work.
+write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=30 STOP_TIMEOUT=10 STALE_DAYS=30 WORKER_TIMEOUT_SECONDS=3600
+printf '52 queued open none 2026-01-01T00:00:00Z\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+rm -f "$state_root/stop.requested"
+AGENTIC_LOOP_RUN_ONCE=1 FAKE_CODEX_SLEEP=1 "$target/bin/agentic-loop" _supervise
+grep -Eq '^52 completed closed' "$state" || fail 'a normally completing worker was blocked by the hang-timeout feature'
+if grep -Fq 'agentic-loop:worker-timeout' "$FAKE_GH_ROOT/$state_key.comments"; then fail 'a normally completing worker was falsely flagged as hung'; fi
+
+# worker_timeout_seconds=0 disables enforcement entirely, even for a worker
+# whose recorded start time is far in the past. This must be observed while
+# the supervisor is still running: supervisor_graceful_shutdown
+# unconditionally requeues every pidfile-owning Issue on SIGTERM (see the
+# graceful shutdown scenario above), so asserting after stopping the
+# supervisor would conflate "timeout enforcement" with "shutdown requeue"
+# and fail regardless of whether the timeout is actually disabled. The
+# worker is started via setsid, mirroring production (see supervise()), so
+# its pid is a process group leader and cleanup below can terminate it the
+# same way enforce_worker_timeout would if it (incorrectly) fired.
+write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=300 STOP_TIMEOUT=10 STALE_DAYS=30 WORKER_TIMEOUT_SECONDS=0
+printf '53 running open none 2026-01-01T00:00:00Z\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+rm -f "$state_root/stop.requested"
+mkdir -p "$state_root/workers"
+FAKE_CODEX_SLEEP=30 setsid "$target/bin/agentic-loop" _worker 53 disabled-timeout-worker &
+disabled_worker_pid=$!
+disabled_started_seen=0
+for _ in $(seq 1 40); do [[ -r $state_root/workers/53.started ]] && { disabled_started_seen=1; break; }; sleep 0.2; done
+[[ $disabled_started_seen == 1 ]] || { kill -TERM "-$disabled_worker_pid" 2>/dev/null; wait "$disabled_worker_pid" 2>/dev/null; fail 'test setup did not observe the worker start marker'; }
+printf '%s\n' "$disabled_worker_pid" > "$state_root/workers/53.pid"
+printf '%s\n' "$(($(date +%s) - 100000))" > "$state_root/workers/53.started"
+"$target/bin/agentic-loop" _supervise &
+disabled_sup_pid=$!
+sleep 3
+disabled_still_alive=0
+kill -0 "$disabled_worker_pid" 2>/dev/null && disabled_still_alive=1
+disabled_still_running=0
+grep -Eq '^53 running' "$state" && disabled_still_running=1
+disabled_no_timeout_comment=1
+grep -Fq 'agentic-loop:worker-timeout' "$FAKE_GH_ROOT/$state_key.comments" 2>/dev/null && disabled_no_timeout_comment=0
+kill -TERM "$disabled_sup_pid" 2>/dev/null || true
+wait "$disabled_sup_pid" 2>/dev/null || true
+rm -f "$state_root/stop.requested"
+kill -TERM "-$disabled_worker_pid" 2>/dev/null || true
+wait "$disabled_worker_pid" 2>/dev/null || true
+rm -f "$state_root/workers/53.pid" "$state_root/workers/53.started"
+[[ $disabled_still_alive == 1 ]] || fail 'worker_timeout_seconds=0 did not disable the hang timeout (process was killed)'
+[[ $disabled_still_running == 1 ]] || fail 'worker_timeout_seconds=0 did not disable the hang timeout (Issue state changed)'
+[[ $disabled_no_timeout_comment == 1 ]] || fail 'worker_timeout_seconds=0 did not disable the hang timeout (worker-timeout comment was posted)'
+
+# doctor classifies an unsafely small worker_timeout_seconds as a warning, not
+# a failure, since it only risks killing a still-legitimately-running worker
+# rather than making the Supervisor unsafe to run. The Supervisor is left
+# stopped at this point in the suite (see below), so doctor's overall exit
+# code is not asserted here -- only the classification of this specific check.
+cp "$target/.agentic-loop.toml" "$target/.agentic-loop.toml.valid"
+write_queue_config "$target/.agentic-loop.toml" WORKER_TIMEOUT_SECONDS=60
+doctor_small_timeout=$("$target/bin/agentic-loop" doctor || true)
+grep -Fq '[警告] 設定値: WORKER_TIMEOUT_SECONDS' <<< "$doctor_small_timeout" || fail 'doctor did not warn about an unsafely small worker_timeout_seconds'
+if grep -Fq '[失敗] 設定値: WORKER_TIMEOUT_SECONDS' <<< "$doctor_small_timeout"; then fail 'an unsafely small worker_timeout_seconds was misclassified as a failure'; fi
+mv "$target/.agentic-loop.toml.valid" "$target/.agentic-loop.toml"
+
 # --- status observability (Issue #42) ---
 # The Supervisor is deliberately left stopped for the manual-state scenarios
 # below: a live start would call rebuild_scope_cache/recover_expired and
@@ -1587,9 +1706,12 @@ grep -Fq 'phase: worktree-ready' <<< "$status_output" || fail 'multi-worker stat
 grep -Fq 'pr: #6 state=open checks=success' <<< "$status_output" || fail 'multi-worker status did not show the cached PR info'
 grep -Fq 'elapsed:' <<< "$status_output" || fail 'multi-worker status did not show elapsed time since worker start'
 grep -Fq 'heartbeat:' <<< "$status_output" || fail 'multi-worker status did not show the last heartbeat'
+grep -Fq 'timeout_at:' <<< "$status_output" || fail 'multi-worker status did not show the worker-timeout deadline'
 multi_json=$("$target/bin/agentic-loop" status --format json)
 [[ $(printf '%s' "$multi_json" | yq -p json '.workers | length') -eq 2 ]] || fail 'multi-worker status --format json did not list both running Issues'
 [[ $(printf '%s' "$multi_json" | yq -p json '.workers[] | select(.issue == 30) | .pr') -eq 6 ]] || fail 'multi-worker status --format json did not report the cached PR number'
+[[ $(printf '%s' "$multi_json" | yq -p json '.workers[] | select(.issue == 30) | .timeout_at') -eq $((now - 120 + 14400)) ]] || fail 'multi-worker status --format json did not compute the worker-timeout deadline from the default worker_timeout_seconds'
+[[ $(printf '%s' "$multi_json" | yq -p json '.workers[] | select(.issue == 30) | .timeout_exceeded') == false ]] || fail 'multi-worker status --format json falsely reported the worker-timeout deadline as exceeded'
 rm -rf "$state_root/workers"
 
 # Scenario: queued Issues are counted, ordered exactly like claim_next

@@ -6,7 +6,7 @@ readonly TARGET="${1:-.}"
 readonly SHARED_FILES=(
   AGENTS.md .codex/config.toml docs/policies/cost.md docs/policies/testing.md docs/policies/external-environment.md docs/policies/development-environment.md docs/policies/ai-tool-neutrality.md
   docs/policies/github-language.md docs/policies/validation-harness.md docs/policies/continuous-delivery.md
-  docs/decisions/0002-github-issue-queue.md docs/decisions/0003-supervisor-resilience-and-api-budget.md docs/decisions/0004-worker-resume-and-handoff.md docs/decisions/0005-status-observability.md docs/operations/issue-queue.md docs/operations/codebase-diagnosis.md
+  docs/decisions/0002-github-issue-queue.md docs/decisions/0003-supervisor-resilience-and-api-budget.md docs/decisions/0004-worker-resume-and-handoff.md docs/decisions/0005-status-observability.md docs/decisions/0006-worker-hang-timeout.md docs/operations/issue-queue.md docs/operations/codebase-diagnosis.md
   .agents/skills/submit-requirement/SKILL.md
   .agents/skills/submit-requirement/agents/openai.yaml
   .agents/skills/diagnose-codebase/SKILL.md

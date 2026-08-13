@@ -66,6 +66,11 @@ api_retry_base_seconds = 1
 # attempts (with a cooldown) before the Issue stays agent:failed for review.
 max_attempts = 3
 retry_cooldown_seconds = 600
+# Lease heartbeat proves the worker process is alive, not that work is
+# progressing. Terminate a worker (process group) that has run longer than
+# this and fail its Issue so the bounded retry above resumes it. Zero
+# disables it. Tune from each Issue's agentic-loop:usage comment (所要=Ns).
+worker_timeout_seconds = 14400
 # Change-scope conflict avoidance: an Issue may declare the paths/environments
 # it touches with an `agentic-loop:scope` marker (see docs/operations/issue-queue.md).
 # A queued Issue whose scope overlaps a running Issue's scope is not claimed
