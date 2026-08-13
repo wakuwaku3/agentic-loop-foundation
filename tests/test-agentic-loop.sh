@@ -1555,7 +1555,7 @@ rm -f "$state_root/stop.requested"
 # API call) is killed process-group-wide once it exceeds worker_timeout_seconds,
 # even though its lease is still valid, and the freed max_workers=1 slot lets
 # the rest of the queue keep moving instead of stalling behind the hang.
-write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=300 STOP_TIMEOUT=10 STALE_DAYS=30 MAX_ATTEMPTS=3 RETRY_COOLDOWN_SECONDS=600 WORKER_TIMEOUT_SECONDS=3
+write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=300 STOP_TIMEOUT=10 STALE_DAYS=30 MAX_ATTEMPTS=3 RETRY_COOLDOWN_SECONDS=600 WORKER_TIMEOUT_SECONDS=8
 printf '50 queued open none 2026-01-01T00:00:00Z\n51 queued open none 2026-01-01T00:00:01Z\n' > "$state"
 : > "$FAKE_GH_ROOT/$state_key.comments"
 rm -f "$state_root/stop.requested"
@@ -1584,7 +1584,7 @@ done
 [[ $hang_worker_gone == 1 ]] || { kill "$hang_sup_pid" 2>/dev/null; wait "$hang_sup_pid" 2>/dev/null; fail 'a timed-out worker process group left an orphan process behind'; }
 assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:worker-timeout' 'the worker-timeout disposition was not audited on the Issue'
 hang_queue_progressed=0
-for _ in $(seq 1 60); do
+for _ in $(seq 1 40); do
   grep -Eq '^51 completed closed' "$state" && { hang_queue_progressed=1; break; }
   sleep 0.5
 done
