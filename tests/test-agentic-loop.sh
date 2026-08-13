@@ -480,7 +480,14 @@ sleep "$sleep_value"
 # without making plan calls observable implementation details.  Number only
 # workspace-write calls; unset slots retain the ordinary default response.
 result_var=FAKE_CODEX_RESULT
-if [[ $* == *'--sandbox workspace-write'* ]]; then
+workspace_write=0
+for ((i=1; i<=$#; i++)); do
+  if [[ ${!i} == --sandbox ]] && (( i < $# )); then
+    j=$((i + 1))
+    [[ ${!j} == workspace-write ]] && workspace_write=1
+  fi
+done
+if (( workspace_write )); then
   exec_count_file="$FAKE_GH_ROOT/codex-exec-count"
   exec_count=$(($(cat "$exec_count_file" 2>/dev/null || printf 0) + 1))
   printf '%s\n' "$exec_count" > "$exec_count_file"
