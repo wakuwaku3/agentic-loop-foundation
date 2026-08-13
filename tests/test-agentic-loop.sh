@@ -6,6 +6,7 @@ readonly PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 readonly TEST_ROOT="$(mktemp -d)"
 readonly FAKE_BIN="$TEST_ROOT/bin"
 readonly FAKE_GH_ROOT="$TEST_ROOT/gh"
+readonly TEST_HOST_PATH="$PATH"
 trap 'rm -rf "$TEST_ROOT"' EXIT
 
 fail() { printf 'FAIL: %s\n' "$1" >&2; exit 1; }
@@ -414,6 +415,12 @@ printf '%s\n' "${2#/}" | tr '/' '-'
 FAKE_SYSTEMD_ESCAPE
 cat > "$FAKE_BIN/devbox" <<'FAKE_DEVBOX'
 #!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >> "$FAKE_GH_ROOT/devbox-calls"
+if [[ ${1:-} == run && ${2:-} == --config && ${4:-} == -- ]]; then
+  shift 4
+  PATH="$FAKE_BIN:$TEST_HOST_PATH" exec "$@"
+fi
 exit 0
 FAKE_DEVBOX
 chmod +x "$FAKE_BIN/gh" "$FAKE_BIN/codex" "$FAKE_BIN/claude" "$FAKE_BIN/opencode" "$FAKE_BIN/systemctl" "$FAKE_BIN/systemd-escape" "$FAKE_BIN/devbox"
@@ -1881,6 +1888,28 @@ AGENTIC_LOOP_SOURCE="$PROJECT_ROOT" AGENTIC_LOOP_TARGET="$empty" AGENTIC_LOOP_SK
 [[ -f $empty/devbox.json && -f $empty/devbox.lock ]] || fail 'empty repository did not get the pinned development environment'
 [[ -x $empty/scripts/check-environment.sh ]] || fail 'empty repository did not get the environment guard'
 assert_contains "$empty/README.md" 'opencode' 'installed README.md does not document opencode as a supported provider'
+
+# The documented one-command install bootstraps yq through the downloaded
+# Devbox definition instead of requiring an unpinned host installation.
+bootstrap_bin="$TEST_ROOT/bootstrap-bin"
+mkdir -p "$bootstrap_bin"
+for command_name in bash git devbox mktemp rm; do ln -s "$(command -v "$command_name")" "$bootstrap_bin/$command_name"; done
+bootstrap=$(new_repository bootstrap-project)
+env PATH="$bootstrap_bin" FAKE_BIN="$FAKE_BIN" TEST_HOST_PATH="$TEST_HOST_PATH" FAKE_GH_ROOT="$FAKE_GH_ROOT" \
+  AGENTIC_LOOP_SOURCE="$PROJECT_ROOT" AGENTIC_LOOP_TARGET="$bootstrap" AGENTIC_LOOP_SKIP_START=1 \
+  "$PROJECT_ROOT/install.sh"
+assert_contains "$FAKE_GH_ROOT/devbox-calls" "run --config $PROJECT_ROOT -- $PROJECT_ROOT/scripts/install-target.sh $bootstrap" 'install did not bootstrap missing yq through the pinned Devbox environment'
+[[ -x $bootstrap/bin/agentic-loop ]] || fail 'Devbox bootstrap did not complete installation'
+
+no_devbox_bin="$TEST_ROOT/no-devbox-bin"
+mkdir -p "$no_devbox_bin"
+for command_name in bash git mktemp rm; do ln -s "$(command -v "$command_name")" "$no_devbox_bin/$command_name"; done
+missing_devbox=$(new_repository missing-devbox-project)
+if env PATH="$no_devbox_bin" AGENTIC_LOOP_SOURCE="$PROJECT_ROOT" AGENTIC_LOOP_TARGET="$missing_devbox" AGENTIC_LOOP_SKIP_START=1 \
+  "$PROJECT_ROOT/install.sh" >"$TEST_ROOT/missing-devbox.out" 2>&1; then
+  fail 'install succeeded without either yq or Devbox'
+fi
+assert_contains "$TEST_ROOT/missing-devbox.out" 'devbox is required to bootstrap' 'missing Devbox error does not explain the bootstrap requirement'
 
 secret_target="$TEST_ROOT/secret-project"
 mkdir -p "$secret_target"
