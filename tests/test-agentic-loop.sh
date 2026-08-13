@@ -879,6 +879,23 @@ grep -Eq '^202 completed closed' "$state" || fail 'same-file scope conflict was 
 assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:scope-resolved' 'conflict resolution was not recorded on the Issue'
 [[ ! -e $state_root/conflict/issue-202 ]] || fail 'resolved conflict-wait state was not cleared'
 
+# A stale scope cache entry with no live local worker must never block claiming.
+# Regression: after recover_expired requeued Issues, REST reflection lag made
+# rebuild_scope_cache cache a phantom scope for them; since undeclared Issues all
+# resolve to "unknown" (which self-conflicts), every queued Issue conflict-waited
+# on the phantom and the whole queue deadlocked. The cache is local-worker state,
+# so an entry with no live worker is purged instead of causing a conflict.
+# (Inherits the section's queue config so it does not disturb later tests.)
+printf '70 queued open none 2026-01-01T00:00:00Z\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+rm -f "$state_root/stop.requested" "$state_root/conflict/issue-70"
+mkdir -p "$state_root/scope"
+printf 'unknown' > "$state_root/scope/issue-71"
+AGENTIC_LOOP_RUN_ONCE=1 FAKE_CODEX_SLEEP=1 "$target/bin/agentic-loop" _supervise
+grep -Eq '^70 completed closed' "$state" || fail 'a stale scope cache entry deadlocked claiming'
+[[ ! -e $state_root/conflict/issue-70 ]] || fail 'an undeclared Issue was wrongly held in conflict-wait by a phantom entry'
+[[ ! -e $state_root/scope/issue-71 ]] || fail 'a stale scope cache entry was not purged'
+
 # Same directory: a file nested under a declared directory scope conflicts
 # with it on a "/" path boundary, not merely a shared string prefix.
 printf '210 queued open none 2026-01-01T00:00:00Z none none %s\n211 queued open none 2026-01-02T00:00:00Z none none %s\n' \
