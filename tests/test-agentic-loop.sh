@@ -172,7 +172,7 @@ case "${1:-} ${2:-}" in
       if [[ $* == *permissions.push* ]]; then printf 'true\n'; else printf 'main\n'; fi
     fi ;;
   'api rate_limit')
-    printf '%s\t%s\n' "${FAKE_GRAPHQL_REMAINING:-5000}" "${FAKE_GRAPHQL_RESET:-$(($(date +%s) + 3600))}"
+    printf '%s\t%s\t%s\n' "${FAKE_GRAPHQL_REMAINING:-5000}" "${FAKE_GRAPHQL_RESET:-$(($(date +%s) + 3600))}" "${FAKE_CORE_REMAINING:-5000}"
     ;;
   'api graphql')
     if [[ $* == *'fields(first: 100)'* ]]; then
@@ -427,6 +427,7 @@ assert_contains "$target/docs/policies/continuous-delivery.md" '監査証跡' 'i
 assert_contains "$target/docs/policies/continuous-delivery.md" '空のpipelineを要求しない' 'installed delivery policy lacks the no-op exception'
 assert_contains "$target/.agentic-loop.toml" 'provider = "codex"' 'installed configuration lacks the default AI provider'
 assert_contains "$target/.agentic-loop.toml" 'graphql_reserve = 500' 'installed configuration lacks the GraphQL reserve'
+assert_contains "$target/.agentic-loop.toml" 'core_reserve = 500' 'installed configuration lacks the REST(core) reserve'
 assert_contains "$target/.agentic-loop.toml" 'api_retry_attempts = 3' 'installed configuration lacks bounded REST retries'
 assert_contains "$target/docs/operations/issue-queue.md" 'GraphQLの残量・reset時刻' 'installed operations documentation lacks shared rate-limit handling'
 for provider_neutral_doc in docs/operations/issue-queue.md docs/operations/codebase-diagnosis.md; do
@@ -837,6 +838,20 @@ grep -Eq '^60 queued open' "$state" || fail 'exhaustion pause did not hold the I
 rm -f "$state_root/agent-exhausted"
 AGENTIC_LOOP_RUN_ONCE=1 FAKE_CODEX_SLEEP=1 "$target/bin/agentic-loop" _supervise
 grep -Eq '^60 completed closed' "$state" || fail 'claiming did not resume after exhaustion cleared'
+
+# API budget governor: while remaining REST(core) quota is below the reserve,
+# claiming pauses (keeping budget for heartbeats/recovery); it resumes on recovery.
+write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=30 STOP_TIMEOUT=10 STALE_DAYS=30
+printf '61 queued open none 2026-01-01T00:00:00Z\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+rm -f "$state_root/stop.requested" "$state_root/core-budget-paused" "$state_root/graphql-rate-limit"
+FAKE_CORE_REMAINING=100 AGENTIC_LOOP_RUN_ONCE=1 FAKE_CODEX_SLEEP=1 "$target/bin/agentic-loop" _supervise
+grep -Eq '^61 queued open' "$state" || fail 'low REST(core) budget did not pause claiming'
+[[ -e $state_root/core-budget-paused ]] || fail 'core budget pause marker was not written'
+rm -f "$state_root/graphql-rate-limit"
+FAKE_CORE_REMAINING=5000 AGENTIC_LOOP_RUN_ONCE=1 FAKE_CODEX_SLEEP=1 "$target/bin/agentic-loop" _supervise
+grep -Eq '^61 completed closed' "$state" || fail 'claiming did not resume after REST(core) budget recovered'
+[[ ! -e $state_root/core-budget-paused ]] || fail 'core budget pause marker was not cleared on recovery'
 
 # --- Change-scope conflict avoidance (Issue #44) ---
 

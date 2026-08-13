@@ -34,6 +34,7 @@ LEASE_SECONDS=300
 STOP_TIMEOUT=0
 STALE_DAYS=30
 GRAPHQL_RESERVE=500
+CORE_RESERVE=500
 RATE_LIMIT_CACHE_SECONDS=15
 API_RETRY_ATTEMPTS=3
 API_RETRY_BASE_SECONDS=1
@@ -72,6 +73,7 @@ load_config() {
       queue.stop_timeout) key=STOP_TIMEOUT ;;
       queue.stale_days) key=STALE_DAYS ;;
       queue.graphql_reserve) key=GRAPHQL_RESERVE ;;
+      queue.core_reserve) key=CORE_RESERVE ;;
       queue.rate_limit_cache_seconds) key=RATE_LIMIT_CACHE_SECONDS ;;
       queue.api_retry_attempts) key=API_RETRY_ATTEMPTS ;;
       queue.api_retry_base_seconds) key=API_RETRY_BASE_SECONDS ;;
@@ -199,6 +201,20 @@ budget_note_pause() {
     return 0
   fi
   [[ -e $marker ]] || { mkdir -p "$STATE_ROOT"; : > "$marker"; say '週次利用率がreserve閾値を超えたため、緊急枠を確保するためIssueのclaimを一時停止します。' >&2; }
+  return 1
+}
+
+# Pause claiming while remaining REST(core) quota is at/below CORE_RESERVE, so a
+# reserve is kept for lease heartbeats, restart recovery and in-flight worker
+# writes (see docs/decisions/0003). Logs the transition once. CORE_RESERVE <= 0
+# disables the guard.
+core_budget_note_pause() {
+  local marker="$STATE_ROOT/core-budget-paused"
+  if (( CORE_RESERVE <= 0 )) || core_budget_allows "$((CORE_RESERVE + 1))"; then
+    [[ -e $marker ]] && { rm -f "$marker"; say 'GitHub REST APIの残量が回復したため、Issueのclaimを再開します。' >&2; }
+    return 0
+  fi
+  [[ -e $marker ]] || { mkdir -p "$STATE_ROOT"; : > "$marker"; say 'GitHub REST APIの残量がreserve閾値を下回ったため、必須操作の枠を確保するためIssueのclaimを一時停止します。' >&2; }
   return 1
 }
 
@@ -407,6 +423,7 @@ validate_config() {
   [[ $STOP_TIMEOUT =~ ^[0-9]+$ ]] || fail 'STOP_TIMEOUT must be a non-negative integer'
   [[ $STALE_DAYS =~ ^[0-9]+$ ]] || fail 'STALE_DAYS must be a non-negative integer'
   [[ $GRAPHQL_RESERVE =~ ^[0-9]+$ ]] || fail 'GRAPHQL_RESERVE must be a non-negative integer'
+  [[ $CORE_RESERVE =~ ^[0-9]+$ ]] || fail 'CORE_RESERVE must be a non-negative integer'
   [[ $RATE_LIMIT_CACHE_SECONDS =~ ^[1-9][0-9]*$ ]] || fail 'RATE_LIMIT_CACHE_SECONDS must be a positive integer'
   [[ $API_RETRY_ATTEMPTS =~ ^[1-9][0-9]*$ ]] || fail 'API_RETRY_ATTEMPTS must be a positive integer'
   [[ $API_RETRY_BASE_SECONDS =~ ^[0-9]+$ ]] || fail 'API_RETRY_BASE_SECONDS must be a non-negative integer'
@@ -417,36 +434,52 @@ validate_config() {
 
 graphql_budget_file() { printf '%s/graphql-rate-limit' "$STATE_ROOT"; }
 
+# One cached snapshot of GitHub API budget backs both the GraphQL guard (Projects
+# writes) and the REST(core) guard (claiming). rate_limit does not itself consume
+# core quota, and caching for RATE_LIMIT_CACHE_SECONDS keeps the poll cheap.
+# Stored as: fetched<TAB>graphql_remaining<TAB>graphql_reset<TAB>core_remaining.
 refresh_graphql_budget() {
-  local snapshot remaining reset now tmp
+  local snapshot remaining reset core now tmp
   mkdir -p "$STATE_ROOT"
-  snapshot=$(gh api rate_limit --jq '[.resources.graphql.remaining, .resources.graphql.reset] | @tsv' 2>/dev/null) || return 1
-  IFS=$'\t' read -r remaining reset <<< "$snapshot"
-  [[ $remaining =~ ^[0-9]+$ && $reset =~ ^[0-9]+$ ]] || return 1
+  snapshot=$(gh api rate_limit --jq '[.resources.graphql.remaining, .resources.graphql.reset, .resources.core.remaining] | @tsv' 2>/dev/null) || return 1
+  IFS=$'\t' read -r remaining reset core <<< "$snapshot"
+  [[ $remaining =~ ^[0-9]+$ && $reset =~ ^[0-9]+$ && $core =~ ^[0-9]+$ ]] || return 1
   now=$(date +%s)
   tmp="$(graphql_budget_file).$$"
-  printf '%s\t%s\t%s\n' "$now" "$remaining" "$reset" > "$tmp"
+  printf '%s\t%s\t%s\t%s\n' "$now" "$remaining" "$reset" "$core" > "$tmp"
   mv "$tmp" "$(graphql_budget_file)"
 }
 
 read_graphql_budget() {
-  local fetched remaining reset now
+  local fetched remaining reset core now
   if [[ -r $(graphql_budget_file) ]]; then
-    IFS=$'\t' read -r fetched remaining reset < "$(graphql_budget_file)" || true
+    IFS=$'\t' read -r fetched remaining reset core < "$(graphql_budget_file)" || true
   fi
   now=$(date +%s)
-  if [[ ! ${fetched:-} =~ ^[0-9]+$ || ! ${remaining:-} =~ ^[0-9]+$ || ! ${reset:-} =~ ^[0-9]+$ || $((now - fetched)) -ge $RATE_LIMIT_CACHE_SECONDS ]]; then
+  if [[ ! ${fetched:-} =~ ^[0-9]+$ || ! ${remaining:-} =~ ^[0-9]+$ || ! ${reset:-} =~ ^[0-9]+$ || ! ${core:-} =~ ^[0-9]+$ || $((now - fetched)) -ge $RATE_LIMIT_CACHE_SECONDS ]]; then
     refresh_graphql_budget || return 1
-    IFS=$'\t' read -r fetched remaining reset < "$(graphql_budget_file)"
+    IFS=$'\t' read -r fetched remaining reset core < "$(graphql_budget_file)"
   fi
-  printf '%s\t%s\n' "$remaining" "$reset"
+  printf '%s\t%s\t%s\n' "$remaining" "$reset" "$core"
 }
 
 graphql_budget_allows() {
-  local minimum=${1:-1} budget remaining reset
+  local minimum=${1:-1} budget remaining reset core
   budget=$(read_graphql_budget) || return 1
-  IFS=$'\t' read -r remaining reset <<< "$budget"
+  IFS=$'\t' read -r remaining reset core <<< "$budget"
   (( remaining >= minimum ))
+}
+
+# Whether the remaining REST(core) quota is at least `minimum`. Claiming and its
+# worker burn core quota (labels, comments, PR calls), so this gates claiming to
+# keep a reserve for heartbeats, recovery and in-flight writes. Fails open (the
+# caller treats an unreadable budget as "allowed") to avoid stalling on API blips.
+core_budget_allows() {
+  local minimum=${1:-1} budget remaining reset core
+  budget=$(read_graphql_budget) || return 0
+  IFS=$'\t' read -r remaining reset core <<< "$budget"
+  [[ $core =~ ^[0-9]+$ ]] || return 0
+  (( core >= minimum ))
 }
 
 preflight() {
@@ -837,7 +870,7 @@ doctor_collect() {
   else
     doctor_positive_config POLL_SECONDS "$POLL_SECONDS"; doctor_positive_config MAX_WORKERS "$MAX_WORKERS"
     doctor_positive_config LEASE_SECONDS "$LEASE_SECONDS"; doctor_non_negative_config STOP_TIMEOUT "$STOP_TIMEOUT"
-    doctor_non_negative_config STALE_DAYS "$STALE_DAYS"; doctor_non_negative_config GRAPHQL_RESERVE "$GRAPHQL_RESERVE"
+    doctor_non_negative_config STALE_DAYS "$STALE_DAYS"; doctor_non_negative_config GRAPHQL_RESERVE "$GRAPHQL_RESERVE"; doctor_non_negative_config CORE_RESERVE "$CORE_RESERVE"
     doctor_positive_config RATE_LIMIT_CACHE_SECONDS "$RATE_LIMIT_CACHE_SECONDS"; doctor_positive_config API_RETRY_ATTEMPTS "$API_RETRY_ATTEMPTS"
     doctor_non_negative_config API_RETRY_BASE_SECONDS "$API_RETRY_BASE_SECONDS"
     doctor_positive_config MAX_ATTEMPTS "$MAX_ATTEMPTS"; doctor_non_negative_config RETRY_COOLDOWN_SECONDS "$RETRY_COOLDOWN_SECONDS"
@@ -1785,7 +1818,7 @@ supervise() {
       reconcile_queued_categories || true
       triage_stale_queued || true
       retry_failed || true
-      if exhaustion_note_pause && budget_note_pause; then
+      if exhaustion_note_pause && budget_note_pause && core_budget_note_pause; then
         while [[ $(worker_count) -lt $MAX_WORKERS ]]; do
           local issue worker
           issue=$(claim_next) || break

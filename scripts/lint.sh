@@ -122,6 +122,7 @@ grep -Fq 'supervisor_graceful_shutdown' bin/agentic-loop || { printf 'Graceful s
 grep -Fq 'setsid "$0" _worker' bin/agentic-loop || { printf 'Workers are not started in their own process group.\n' >&2; exit 1; }
 grep -Fq 'worker_alive "$issue" && continue' bin/agentic-loop || { printf 'Restart recovery lacks the local worker fast path.\n' >&2; exit 1; }
 grep -Fq 'issues/comments/$id" --method PATCH' bin/agentic-loop || { printf 'Lease heartbeat does not update a single comment in place.\n' >&2; exit 1; }
+grep -Fq 'core_budget_note_pause' bin/agentic-loop || { printf 'REST(core) budget governor is missing from the claim gate.\n' >&2; exit 1; }
 grep -Fq 'agentic-loop:dependency-blocked' bin/agentic-loop || { printf 'Issue dependency gating is missing.\n' >&2; exit 1; }
 if grep -Eq 'danger-full-access|OPENAI_API_KEY' bin/agentic-loop bin/agentic-loop-diagnose .agentic-loop/diagnose-codebase.sh install.sh scripts/install-target.sh; then
   printf 'Forbidden Codex execution or API-key billing configuration.\n' >&2
