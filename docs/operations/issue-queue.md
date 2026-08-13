@@ -145,6 +145,8 @@ Supervisorはclaimの直前に、`agent:queued` のまま `STALE_DAYS` 日以上
 
 claim前、queued Issueのscopeはbody（一覧取得時に既に取得済みで追加API呼び出しは発生しない）から解決する。running Issueの実効scopeはGit common state（`.git/agentic-loop/scope/issue-<番号>`）にcacheし、Supervisor起動時にrunning Issue分だけ再構築する。実行中workerはplan段完了直後にscope markerを検出してcacheへ反映し、exec段完了直後には実測の変更範囲（`git diff --name-only`）でcacheを補正する。cacheは既存宣言との和集合として更新され、決して縮小しない。scopeが変化したときだけ、audit用のIssueコメントを1回記録する。
 
+Supervisorは各pollで取得済みのOpen Issue snapshotを正本としてlocal scope/conflict cacheを照合する。`agent:running`でなくなったIssueのscope cacheと、待機側が`agent:queued`でない、または競合相手が`agent:running`でないconflict cacheはlocal stale stateとして除去し、Projectの`Blocked by`投影も空へ収束させる。これにより、別hostがIssueをclaim・完了した場合も、停止中でないSupervisorが再起動を待たず次のpollで追随する。照合用のIssue単位API呼び出しは追加せず、別hostのworker、lease、worktree、branchには触れない。
+
 実行中Issueとscopeが重なるqueued Issueはclaimせず、category・priority・created_at・Issue番号による既存の取得順を変えずに次の非競合Issueへ進む。競合が解消すれば、待機していたIssueは本来の順位で自然にclaimされる（恒久的な順位降格や飢餓は発生しない）。競合判定はworker数上限のhard constraintと既存のqueue処理（budget guard、stale triage、retry）の内側で働くfilterであり、後述の「Issue間の依存関係」によるclaim前block判定はこのfilterの手前に位置づける。
 
 scopeを宣言していないIssueの既定動作は `[queue].unknown_scope`（既定 `isolated`）で制御する。`isolated` は未宣言scope同士でのみ競合し、同時に走る未宣言scope workerを常に1件に制限する一方、宣言済みの独立scope Issueとは並列に走る。`exclusive` は未宣言scopeをrepository全体として扱い、`open` は未宣言scopeの競合判定を行わない（本機能の実質無効化）。`[queue].exclusive_paths`（既定は空）にcomma区切りのpathを設定すると、宣言scopeがそのpathと重なるIssueをrepository全体として扱う（共有基盤file・生成物・migrationなど）。両設定の不正値は起動時検証と `doctor` が失敗として報告する。
@@ -233,7 +235,7 @@ lease切れ、Supervisor再起動、端末再起動、worker異常終了の後�
 
 Providerを起動する直前に `worker_confirm_running_label()` がGitHub上のLabelが依然 `agent:running` であることを再確認する。claimからworker起動までの間にIssueの状態が変わっていた場合（stale/duplicateな起動など）、Label・comment・Git状態のいずれも変更せず静かに終了する。
 
-`bin/agentic-loop status` はrunning Issueごとにこのphaseを追加API呼び出しなしで表示する（worker実行中のlocal cacheから読む）。`doctor` の残存状態チェックは、残存worktree/branch/logがGitHub上のagent:running Issueに対応していれば成功、対応しなければ警告として区別する。
+`bin/agentic-loop status` はrunning Issueごとにこのphaseを追加API呼び出しなしで表示する（worker実行中のlocal cacheから読む）。競合待ちは同じ呼び出しで取得した現在のqueued/running集合とlocal conflict cacheの両方が一致する場合だけ表示し、stale cacheを表示やclaim可能件数へ反映しない。`doctor` の残存状態チェックは、残存worktree/branch/logがGitHub上のagent:running Issueに対応していれば成功、対応しなければ警告として区別する。
 
 ### 失敗の分類
 

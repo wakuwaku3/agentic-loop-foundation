@@ -908,9 +908,18 @@ status_conflict_waits() {
   for file in "$STATE_ROOT"/conflict/issue-*; do
     issue=${file##*/issue-}
     IFS=$'\t' read -r other reason < "$file" || continue
+    status_array_contains "$issue" QUEUE_NUM || continue
+    status_array_contains "$other" RUN_NUM || continue
     printf '#%s 競合相手 #%s 理由 scope重複: %s\n' "$issue" "$other" "$reason"
   done
   shopt -u nullglob
+}
+
+status_array_contains() {
+  local wanted=$1 array_name=$2 item
+  local -n values=$array_name
+  for item in "${values[@]}"; do [[ $item == "$wanted" ]] && return 0; done
+  return 1
 }
 
 status_dependency_waits() {
@@ -1042,9 +1051,11 @@ status_queue_candidate_reason() {
   if [[ -r $file ]]; then
     local other reason
     IFS=$'\t' read -r other reason < "$file" || true
-    STATUS_CANDIDATE_REASON='scope-conflict'
-    STATUS_CANDIDATE_DETAIL="#$other と重複: $reason"
-    return 0
+    if status_array_contains "$other" RUN_NUM; then
+      STATUS_CANDIDATE_REASON='scope-conflict'
+      STATUS_CANDIDATE_DETAIL="#$other と重複: $reason"
+      return 0
+    fi
   fi
   if [[ -r $(attempts_file "$issue") ]] && ! attempt_cooldown_elapsed "$issue"; then
     STATUS_CANDIDATE_REASON='retry-cooldown'
@@ -2376,6 +2387,12 @@ snapshot_state_rows() {
   awk -F '\t' -v state="$state" '$2 == state' "$SUPERVISOR_SNAPSHOT"
 }
 
+snapshot_issue_has_state() {
+  local issue=$1 state=$2
+  [[ -n $SUPERVISOR_SNAPSHOT && -r $SUPERVISOR_SNAPSHOT ]] || return 2
+  awk -F '\t' -v issue="$issue" -v state="$state" '$1 == issue && $2 == state { found=1; exit } END { exit !found }' "$SUPERVISOR_SNAPSHOT"
+}
+
 clear_supervisor_snapshot() {
   [[ -z $SUPERVISOR_SNAPSHOT ]] || rm -f "$SUPERVISOR_SNAPSHOT"
   SUPERVISOR_SNAPSHOT=''
@@ -3269,6 +3286,32 @@ clear_conflict_wait() {
   project_sync_conflict "$issue" ''
 }
 
+# Reconcile machine-local scope/conflict caches with the successful Open Issue
+# snapshot on every poll. GitHub Labels are the queue source of truth: a scope
+# cache for a non-running Issue must never serialize queued work, and a wait
+# file for a non-queued Issue or non-running counterpart is stale. This is
+# local-only and therefore cannot delete another host's worker artifacts.
+reconcile_scope_conflict_cache() {
+  [[ -n $SUPERVISOR_SNAPSHOT && -r $SUPERVISOR_SNAPSHOT ]] || return 0
+  local file issue other
+  shopt -s nullglob
+  for file in "$(scope_cache_dir)"/issue-*; do
+    issue=${file##*/issue-}
+    snapshot_issue_has_state "$issue" running || rm -f "$file"
+  done
+  for file in "$STATE_ROOT"/conflict/issue-*; do
+    issue=${file##*/issue-}
+    IFS=$'\t' read -r other _ < "$file" || { rm -f "$file"; continue; }
+    if ! snapshot_issue_has_state "$issue" queued; then
+      rm -f "$file"
+      project_sync_conflict "$issue" '' || true
+    elif ! snapshot_issue_has_state "$other" running; then
+      clear_conflict_wait "$issue"
+    fi
+  done
+  shopt -u nullglob
+}
+
 # Rebuild the running-Issue scope cache from GitHub at supervisor startup,
 # since the local cache lives under Git-external state and may not survive a
 # restart. Bounded by the number of currently running Issues.
@@ -3417,6 +3460,7 @@ supervise() {
   while :; do
     clear_supervisor_snapshot
     refresh_supervisor_snapshot || true
+    reconcile_scope_conflict_cache || true
     requeue_answered || true
     requeue_dependency_ready || true
     if [[ -e $STATE_ROOT/stop.requested ]]; then
@@ -3438,6 +3482,7 @@ supervise() {
         # with at most two consolidated snapshots.
         clear_supervisor_snapshot
         refresh_supervisor_snapshot || true
+        reconcile_scope_conflict_cache || true
         while [[ $(worker_count) -lt $MAX_WORKERS ]]; do
           local issue worker claim
           claim=$(claim_next) || break
