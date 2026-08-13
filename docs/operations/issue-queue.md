@@ -2,7 +2,7 @@
 
 ## セットアップ
 
-`install.sh` は変更前に `git`、`gh`、設定 `agent.provider`（環境変数 `AGENT_PROVIDER` と git管理外 `.agentic-loop.local.toml` による上書きを含む）から解決したAI CLI（`codex`／`claude`／`opencode`、既定は `codex`）、GitHubログイン、origin、リポジトリ参照、Projects API権限を検査する。provider=opencodeならCodex CLIが存在しなくてもinstallは成立する。既存ファイルとの競合もコピー前に検査する。検査後、7個の状態Label、4個の `priority:*` Label、6個の `category:*` Labelと `Agentic Loop - OWNER/REPOSITORY` Projectを冪等に用意し、既定ではSupervisorを起動する。Projectには同じ6選択肢の `Category` fieldを作成する。`install.sh` と `bin/agentic-loop setup` はRESTで既存のOpen/Closed IssueとPRを列挙し、Projectにないitemをbackfillする。
+`install.sh` は変更前に `git`、`gh`、設定 `agent.provider`（環境変数 `AGENT_PROVIDER` と git管理外 `.agentic-loop.local.toml` による上書きを含む）から解決したAI CLI（`codex`／`claude`／`opencode`、既定は `codex`）、GitHubログイン、origin、リポジトリ参照、Projects API権限を検査する。provider=opencodeならCodex CLIが存在しなくてもinstallは成立する。既存ファイルとの競合もコピー前に検査する。検査後、8個の状態Label、4個の `priority:*` Label、6個の `category:*` Labelと `Agentic Loop - OWNER/REPOSITORY` Projectを冪等に用意し、既定ではSupervisorを起動する。Projectには同じ6選択肢の `Category` fieldを作成する。`install.sh` と `bin/agentic-loop setup` はRESTで既存のOpen/Closed IssueとPRを列挙し、Projectにないitemをbackfillする。
 
 GitHub tokenには対象リポジトリのIssue/PR操作権限と `project`、`read:project` scopeが必要である。不足時は `gh auth refresh -s project,read:project` など、利用中のGitHub認証方式に合う方法で追加する。Projectはuser/org所有のため、対象リポジトリとProjectの閲覧者が一致することを管理者が確認する。privateリポジトリの内容や秘密情報をProjectフィールドへ転記しない。
 
@@ -27,7 +27,7 @@ bin/agentic-loop doctor
 bin/agentic-loop doctor --format json
 ```
 
-利用者は要求をIssueとして登録し、6個の `category:*` のうち1つと `agent:queued` を付ける。取得順はcategory、同一category内のcritical、high、medium、low、優先度なし、作成日時、Issue番号の順とする。category順は `loop-continuity`、`confidentiality-incident`、`integrity-incident`、`availability-incident`、`feature`、`improvement` で固定する。複数のpriority LabelがあるIssueは最も高いものを使う。依存関係はIssue本文に明記する。変更が及ぶpathやexternal環境が分かる場合は、後述の「変更競合の予防」に従って本文へ `agentic-loop:scope` markerを1行記載する。不明な場合は記載を省略してよく、安全な既定動作（`unknown_scope`）にフォールバックする。回答は `agent:needs-input` のIssueへコメントする。
+利用者は要求をIssueとして登録し、6個の `category:*` のうち1つと `agent:queued` を付ける。取得順はcategory、同一category内のcritical、high、medium、low、優先度なし、作成日時、Issue番号の順とする。category順は `loop-continuity`、`confidentiality-incident`、`integrity-incident`、`availability-incident`、`feature`、`improvement` で固定する。複数のpriority LabelがあるIssueは最も高いものを使う。依存関係は後述の「Issue間の依存関係」に従ってGitHub標準機能またはIssue本文に明記する。変更が及ぶpathやexternal環境が分かる場合は、後述の「変更競合の予防」に従って本文へ `agentic-loop:scope` markerを1行記載する。不明な場合は記載を省略してよく、安全な既定動作（`unknown_scope`）にフォールバックする。回答は `agent:needs-input` のIssueへコメントする。
 
 ### 対話要求の受付
 
@@ -77,13 +77,31 @@ Supervisorはclaimの直前に、`agent:queued` のまま `STALE_DAYS` 日以上
 
 claim前、queued Issueのscopeはbody（一覧取得時に既に取得済みで追加API呼び出しは発生しない）から解決する。running Issueの実効scopeはGit common state（`.git/agentic-loop/scope/issue-<番号>`）にcacheし、Supervisor起動時にrunning Issue分だけ再構築する。実行中workerはplan段完了直後にscope markerを検出してcacheへ反映し、exec段完了直後には実測の変更範囲（`git diff --name-only`）でcacheを補正する。cacheは既存宣言との和集合として更新され、決して縮小しない。scopeが変化したときだけ、audit用のIssueコメントを1回記録する。
 
-実行中Issueとscopeが重なるqueued Issueはclaimせず、category・priority・created_at・Issue番号による既存の取得順を変えずに次の非競合Issueへ進む。競合が解消すれば、待機していたIssueは本来の順位で自然にclaimされる（恒久的な順位降格や飢餓は発生しない）。競合判定はworker数上限のhard constraintと既存のqueue処理（budget guard、stale triage、retry）の内側で働くfilterであり、依存関係block（未実装）はこのfilterの手前に位置づける。
+実行中Issueとscopeが重なるqueued Issueはclaimせず、category・priority・created_at・Issue番号による既存の取得順を変えずに次の非競合Issueへ進む。競合が解消すれば、待機していたIssueは本来の順位で自然にclaimされる（恒久的な順位降格や飢餓は発生しない）。競合判定はworker数上限のhard constraintと既存のqueue処理（budget guard、stale triage、retry）の内側で働くfilterであり、後述の「Issue間の依存関係」によるclaim前block判定はこのfilterの手前に位置づける。
 
 scopeを宣言していないIssueの既定動作は `[queue].unknown_scope`（既定 `isolated`）で制御する。`isolated` は未宣言scope同士でのみ競合し、同時に走る未宣言scope workerを常に1件に制限する一方、宣言済みの独立scope Issueとは並列に走る。`exclusive` は未宣言scopeをrepository全体として扱い、`open` は未宣言scopeの競合判定を行わない（本機能の実質無効化）。`[queue].exclusive_paths`（既定は空）にcomma区切りのpathを設定すると、宣言scopeがそのpathと重なるIssueをrepository全体として扱う（共有基盤file・生成物・migrationなど）。両設定の不正値は起動時検証と `doctor` が失敗として報告する。
 
 `bin/agentic-loop status` は running Issueの実効scopeと、競合待ちIssue・相手Issue番号・重複tokenを表示する。GitHub Projectには `Blocked by` というTEXT fieldを冪等に用意し、相手Issue番号と重複tokenだけを書き込む（Issue本文や秘密情報は転記しない）。GraphQL残量が不足する場合はProjects同期のみ既存のretry queueへ退避し、Issue Labelを正本とするqueue処理は継続する。
 
-本機能は実行中Issueの強制停止・再開（別Issueで対応）、依存関係block（別Issueで対応）、AIによるscope推定（コストポリシー順守のため行わない）を対象外とする。宣言済みscopeと未宣言scope（`isolated`）のIssueが実際には同じfileへ触れる可能性は残るが、既存のrebase・再検証経路（default branch更新後の競合はworkerが最新branchに対して修正・再検証する）で吸収する。
+本機能は実行中Issueの強制停止・再開（別Issueで対応）、AIによるscope推定（コストポリシー順守のため行わない）を対象外とする。宣言済みscopeと未宣言scope（`isolated`）のIssueが実際には同じfileへ触れる可能性は残るが、既存のrebase・再検証経路（default branch更新後の競合はworkerが最新branchに対して修正・再検証する）で吸収する。
+
+## Issue間の依存関係
+
+前提Issueが未完了のまま依存先をclaimすることを防ぐ。実効依存の正本は次の2つの和集合（どちらか一方でも依存を主張すれば依存とみなす、fail closed）とする。
+
+1. GitHub標準のissue dependencies（`blocked_by`）。GitHub UI上でそのまま確認・編集できる。
+2. Issue本文の1行構文 `Blocked by: #12, #34`（`#`+同一repositoryの正整数を、カンマまたは空白区切りで並べる）。この行は1つのIssue本文に1行だけ許可する。`Blocks: #56` は逆向きの人間向け記述として書いてもよいが、claim判定には使わない。複数行、別repository参照（`owner/repo#1`やURLを含む）、その他の不正なtokenは構文不正として扱う。
+
+native issue dependencies APIが利用できない環境（404）では、本文構文だけで同じ判定が成立する。
+
+依存Issueが「完了」とみなされるのは、closedであることに加えて次のいずれかを満たす場合だけである。closenだけでは完了にしない。
+
+- Supervisorが管理するIssue（`agent:*` Labelを持つ）: `agent:completed` を持つこと（Supervisorがmerge検証済みである証跡）。`agent:failed`・`agent:stale` など他の `agent:*` で閉じられたものは未完了として扱う。
+- 人手管理のIssue（`agent:*` Labelを持たない）: `state_reason` が `completed` であること（`not_planned` は未完了）。
+
+claim前、queued Issueは（scope競合判定より前に）依存を検査し、すべて完了していなければ `agent:blocked` へ遷移し、理由code（`incomplete`、`missing`、`cross-repo`、`syntax`、`cycle`、`permission`、`api`）付きの監査コメントを1回記録する。循環依存（AがBに、BがAに依存）は自動解決できないため専用の理由codeで報告し、人手での解消を要求する。API接続や権限の一時障害は即座にlabelを動かさず、claimだけを最初の1回目から抑止したうえで、連続して問題が続いた場合だけ `agent:blocked` へ遷移する（30秒pollごとのblipでlabelが往復しないようにするため）。`agent:blocked` は毎pollで依存の充足を再評価し、すべて解消すれば人手のLabel操作なしに自動的に `agent:queued` へ戻り、以後は通常の取得順で扱われる。`agent:blocked` はcategory reconcileとstale triageの対象外である。
+
+GitHub Projectには `Agent status` に `Blocked` を追加し、`Blocked by` TEXT fieldへ相手Issue番号と理由の短い要約を書く（scope競合待ちと同じfieldを再利用し、両者は状態が異なるため書き込みが競合しない）。既存Projectは `bin/agentic-loop setup` の再実行でoptionを追記する。`bin/agentic-loop status` は依存待ちIssueと理由codeを表示する。
 
 ## 状態と復旧
 
@@ -94,6 +112,7 @@ scopeを宣言していないIssueの既定動作は `[queue].unknown_scope`（�
 - completed: workerの完了自己申告に加え、対応branchのmerge済みPRをGitHub APIで確認済み
 - failed: mergeを証明できず終了。原因確認後にqueuedを付けて再試行する
 - stale: queuedのまま設定日数更新されず、監査コメント付きで自動closeされた
+- blocked: 依存Issueが未完了のためclaimを保留中。依存が解消すると自動的にqueuedへ戻る
 
 Supervisorは起動時に加えて各pollでもrunning Issueの最新leaseコメントを読み、期限切れをqueuedへ戻す。これにより、workerがクラッシュしてリースが切れたIssueは長時間稼働中でも自動でキューへ復帰し、agent:runningのまま滞留しない。Issue worktreeは対象リポジトリと同じ親ディレクトリの `<repository>-worktrees/issue-<number>` に分離する。workerは専用worktreeの外へ書き込まない。Gitが解決した対象リポジトリのcommon metadataディレクトリと、保護対象だが要求実装に必要な専用worktree内の `.agents` の解決・親子関係の検証に失敗した場合はprovider共通のゲートとしてworkerを起動しない（common directoryとworktree固有Git directoryの親子関係を検証できない場合、root、home、worktree rootのような広い範囲の場合、または `.agents` がsymlinkやworktree外のpathに解決される場合を含む）。追加の書き込み許可の与え方はproviderごとに異なる。CodexとClaudeはこの2ディレクトリを `--add-dir` で明示的に書き込み可能にし、Codexはさらに `--sandbox workspace-write` によるOS levelのsandboxで隔離する。opencodeはOS levelのsandboxを持たず、`--dir <worktree>` で作業ディレクトリを専用worktreeに限定するだけで追加dirは与えないため、隔離は専用worktreeと秘密情報guard hookに依存する残余リスクがある。workerの標準出力・標準エラーはGit管理外の `.git/agentic-loop/logs` に保存し、Issueへ転載しない。ログに秘密が疑われる場合は削除し、資格情報を失効する。各セッション終了時には、費用分析のためprovider、model、reasoning effort、token数、判明すればコスト、所要時間、exit codeをまとめた1行を対象IssueへJapaneseコメントとして記録する。provider固有の使用量が取得できない項目は省略し、記録の失敗はworkerを止めない。秘密情報はコメントに含めない。Project同期は再実行可能であり、`bin/agentic-loop setup` で修復する。
 
