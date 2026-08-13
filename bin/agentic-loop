@@ -1104,10 +1104,43 @@ cmd_sync_issue() {
   say "Issue #$1 のProject同期を実行しました（障害時は再試行queueへ保存済みです）。"
 }
 
-lease_comment() {
-  local issue=$1 worker=$2 now expires
+lease_body() {
+  local worker=$1 now=$2 expires=$3
+  printf '<!-- agentic-loop:lease worker=%s heartbeat=%s expires=%s -->\\nAgentic Loop worker `%s` のハートビートです。リースは epoch %s に期限切れとなります。' "$worker" "$now" "$expires" "$worker" "$expires"
+}
+
+lease_file() { printf '%s\n' "$STATE_ROOT/workers/$1.lease"; }
+
+# Remove a worker's local bookkeeping (pid + lease-comment id) together.
+clear_worker_local() { rm -f "$STATE_ROOT/workers/$1.pid" "$STATE_ROOT/workers/$1.lease"; }
+
+# Create the single lease comment for this Issue and remember its id so later
+# heartbeats update it in place. See docs/decisions/0003: one comment per Issue
+# updated via PATCH keeps the Issue clean and is gentle on the secondary rate
+# limit (bursty comment creation is what trips abuse detection).
+lease_start() {
+  local issue=$1 worker=$2 now expires id
   now=$(date +%s); expires=$((now + LEASE_SECONDS))
-  comment_issue "$issue" "<!-- agentic-loop:lease worker=$worker heartbeat=$now expires=$expires -->\nAgentic Loop worker \`$worker\` のハートビートです。リースは epoch $expires に期限切れとなります。"
+  id=$(repo_api "issues/$issue/comments" --method POST -f body="$(lease_body "$worker" "$now" "$expires")" --jq '.id' 2>/dev/null | tr -d '[:space:]' || true)
+  if [[ $id =~ ^[0-9]+$ ]]; then
+    mkdir -p "$STATE_ROOT/workers"
+    printf '%s\n' "$id" > "$(lease_file "$issue")"
+  fi
+}
+
+# Refresh the lease by editing the existing comment (a single PATCH). Fall back
+# to creating a fresh comment if we have no id yet, or the stored comment is gone.
+lease_heartbeat() {
+  local issue=$1 worker=$2 now expires id file
+  file="$(lease_file "$issue")"
+  now=$(date +%s); expires=$((now + LEASE_SECONDS))
+  if [[ -r $file ]]; then
+    read -r id < "$file" || id=''
+    if [[ $id =~ ^[0-9]+$ ]] && repo_api "issues/comments/$id" --method PATCH -f body="$(lease_body "$worker" "$now" "$expires")" >/dev/null 2>&1; then
+      return 0
+    fi
+  fi
+  lease_start "$issue" "$worker"
 }
 
 # Whether the local worker recorded for this Issue is still running: its pid is
@@ -1139,7 +1172,7 @@ recover_expired() {
     worker_alive "$issue" && continue
     pidfile="$STATE_ROOT/workers/$issue.pid"
     if [[ -e $pidfile ]]; then
-      rm -f "$pidfile"
+      clear_worker_local "$issue"
     else
       body=$(repo_api "issues/$issue/comments" --method GET -f per_page=100 --paginate --jq '[.[].body | select(contains("agentic-loop:lease"))] | last // ""' 2>/dev/null | tail -n 1 || true)
       expires=$(printf '%s\n' "$body" | sed -n 's/.*expires=\([0-9][0-9]*\).*/\1/p' | head -n 1)
@@ -1715,7 +1748,7 @@ supervisor_graceful_shutdown() {
   for pidfile in "$STATE_ROOT"/workers/*.pid; do
     issue=$(basename "$pidfile" .pid)
     read -r pid < "$pidfile" 2>/dev/null || true
-    rm -f "$pidfile"
+    clear_worker_local "$issue"
     if [[ $pid =~ ^[0-9]+$ ]]; then kill -TERM "-$pid" 2>/dev/null || true; fi
     if [[ $issue =~ ^[0-9]+$ ]]; then
       set_issue_state "$issue" queued 2>/dev/null || true
@@ -1757,7 +1790,7 @@ supervise() {
           local issue worker
           issue=$(claim_next) || break
           worker="$(repo_name | tr '/.' '-')-$issue-$(date +%s)-$$"
-          lease_comment "$issue" "$worker" || true
+          lease_start "$issue" "$worker" || true
           project_add_issue "$issue" || true
           project_sync_state "$issue" running || true
           # setsid gives each worker its own process group so shutdown can
@@ -1899,7 +1932,7 @@ worker() {
   if ! git -C "$REPO_ROOT" fetch origin "$default_branch"; then
     set_issue_state "$issue" failed || true
     comment_issue "$issue" "<!-- agentic-loop:failed worker=$worker -->\n最新のdefault branchをfetchできませんでした。リポジトリへのアクセスが復旧した後、このIssueは安全に再キューできます。" || true
-    rm -f "$STATE_ROOT/workers/$issue.pid"
+    clear_worker_local "$issue"
     return 0
   fi
   if [[ ! -e $worktree ]]; then
@@ -1912,7 +1945,7 @@ worker() {
     if [[ $exit_code -ne 0 ]]; then
       set_issue_state "$issue" failed || true
       comment_issue "$issue" "<!-- agentic-loop:failed worker=$worker -->\n専用worktreeを準備できませんでした。調査できるように既存のbranch dataは保持しています。" || true
-      rm -f "$STATE_ROOT/workers/$issue.pid"
+      clear_worker_local "$issue"
       return 0
     fi
   fi
@@ -1920,17 +1953,17 @@ worker() {
   if ! git_common_dir=$(resolve_worker_git_common_dir "$worktree"); then
     set_issue_state "$issue" failed || true
     comment_issue "$issue" "<!-- agentic-loop:failed worker=$worker -->\n専用worktreeのGit common directoryを安全に解決できなかったため、workerを起動しませんでした。追加の書き込み可能pathは許可していません。Git metadataとworktreeの整合性を確認・復旧した後、このIssueを安全に再キューしてください。" || true
-    rm -f "$STATE_ROOT/workers/$issue.pid"
+    clear_worker_local "$issue"
     return 0
   fi
   if ! agents_dir=$(resolve_worker_agents_dir "$worktree"); then
     set_issue_state "$issue" failed || true
     comment_issue "$issue" "<!-- agentic-loop:failed worker=$worker -->\n専用worktreeの.agents directoryを安全に解決できなかったため、workerを起動しませんでした。保護対象のrepository pathは書き込み可能にしていません。.agents directoryを安全な通常directoryとして復旧した後、このIssueを安全に再キューしてください。" || true
-    rm -f "$STATE_ROOT/workers/$issue.pid"
+    clear_worker_local "$issue"
     return 0
   fi
   (
-    while :; do sleep $((LEASE_SECONDS / 3 + 1)); lease_comment "$issue" "$worker" || true; done
+    while :; do sleep $((LEASE_SECONDS / 3 + 1)); lease_heartbeat "$issue" "$worker" || true; done
   ) & heartbeat_pid=$!
   local plan_usage="$STATE_ROOT/issue-$issue-plan-usage.txt" exec_usage="$STATE_ROOT/issue-$issue-usage.txt"
   local plan_file="$STATE_ROOT/issue-$issue-plan.txt" attempt=0 max_retries started failure_context='' exhausted=0
@@ -1993,7 +2026,7 @@ worker() {
   fi
   scope_cache_clear "$issue"
   clear_conflict_wait "$issue"
-  rm -f "$STATE_ROOT/workers/$issue.pid"
+  clear_worker_local "$issue"
 }
 
 main() {
