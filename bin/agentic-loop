@@ -3343,12 +3343,30 @@ exec_prompt() {
   local issue=$1 repository=$2 plan_file=$3 resume_context=${4:-}
   [[ -n $resume_context ]] && printf '%s\n' "$resume_context"
   issue_prompt "$issue" "$repository"
+  cat <<'EOF'
+CI・required checks・AI reviewなどの外部完了待ちは、このturn内で前景実行してください。`gh pr checks --watch` 等にはtimeoutを付け、未確定なら状態を再確認して同じturn内で繰り返します。background process、別agent、別sessionへ待機を委譲してはいけません。checksがpending、review feedbackが未対応、またはmergeとdefault branch上の検証が未完了のまま最終応答を書いてはいけません。「待機中です」などの待機報告で終了してはいけません。
+正当な終端に到達した最終応答は、最後の非空行を `AGENTIC_LOOP_RESULT=completed`、`AGENTIC_LOOP_RESULT=failed`、`AGENTIC_LOOP_RESULT=needs-input`、`AGENTIC_LOOP_RESULT=declined` のいずれか一行だけにしてください。markerの後に説明、コードフェンス、または別の非空行を置いてはいけません。
+EOF
   if [[ -s $plan_file ]]; then
     cat <<EOF
 次の実装計画（plan段階で作成）に従って作業を進め、必要に応じて安全に調整してください。
 $(cat "$plan_file")
 EOF
   fi
+}
+
+# The provider adapters preserve their native output format (some wrap the final
+# message in JSON), so validate a bounded terminal marker rather than treating a
+# successful process exit or free-form status text as a completion result.
+agent_result_has_marker() {
+  local result=$1 marker=$2
+  grep -Eq "(^|[^[:alnum:]_])AGENTIC_LOOP_RESULT=${marker}([^[:alnum:]_-]|$)" "$result" 2>/dev/null
+}
+
+agent_result_has_terminal_marker() {
+  local result=$1
+  agent_result_has_marker "$result" completed || agent_result_has_marker "$result" failed || \
+    agent_result_has_marker "$result" needs-input || agent_result_has_marker "$result" declined
 }
 
 resolve_worker_git_common_dir() {
@@ -3729,7 +3747,7 @@ worker() {
     while :; do sleep $((LEASE_SECONDS / 3 + 1)); lease_heartbeat "$issue" "$worker" || true; done
   ) & heartbeat_pid=$!
   local plan_usage="$STATE_ROOT/issue-$issue-plan-usage.txt" exec_usage="$STATE_ROOT/issue-$issue-usage.txt"
-  local plan_file="$STATE_ROOT/issue-$issue-plan.txt" attempt=0 max_retries started failure_context='' exhausted=0
+  local plan_file="$STATE_ROOT/issue-$issue-plan.txt" attempt=0 protocol_retry=0 max_retries started failure_context='' exhausted=0
   local resume_context; resume_context=$(resume_context_block "$branch")
   max_retries=$(agent_plan_max_retries)
   while :; do
@@ -3742,9 +3760,27 @@ worker() {
     agent_run_stage exec "$worktree" "$git_common_dir" "$agents_dir" "$result" "$exec_usage" "$(exec_prompt "$issue" "$repository" "$plan_file" "$resume_context")" || exit_code=$?
     agent_post_usage "$issue" "$worker" "$exec_usage" "$exit_code" "$(($(date +%s) - started))"
     worker_refine_scope_from_diff "$issue" "$worktree" "$default_branch"
-    { [[ $exit_code -eq 0 ]] && grep -Fq 'AGENTIC_LOOP_RESULT=completed' "$result"; } && break
-    { [[ $exit_code -eq 0 ]] && grep -Fq 'AGENTIC_LOOP_RESULT=needs-input' "$result"; } && break
-    { [[ $exit_code -eq 0 ]] && grep -Fq 'AGENTIC_LOOP_RESULT=declined' "$result"; } && break
+    # A clean provider exit without a terminal marker is a protocol violation,
+    # not an implementation failure. Retry exec once with the same plan before
+    # spending a flagship replan; a second violation deterministically fails.
+    if [[ $exit_code -eq 0 ]] && ! agent_result_has_terminal_marker "$result"; then
+      if (( protocol_retry == 0 )); then
+        protocol_retry=1
+        comment_issue "$issue" "<!-- agentic-loop:protocol-retry worker=$worker attempt=1 -->\nexec段が終了markerなしで正常終了しました。再計画せず同じ計画でexecを1回だけ再実行し、同一turn内の待機完遂と終了marker返却を求めます。" || true
+        started=$(date +%s)
+        exit_code=0
+        agent_run_stage exec "$worktree" "$git_common_dir" "$agents_dir" "$result" "$exec_usage" "$(exec_prompt "$issue" "$repository" "$plan_file" "$resume_context")
+前回のexecは有効な終了markerなしで終了しました。同じ計画を継続し、外部待機をこのturn内で完遂したうえで、指定された終了markerを最後の非空行として必ず返してください。" || exit_code=$?
+        agent_post_usage "$issue" "$worker" "$exec_usage" "$exit_code" "$(($(date +%s) - started))"
+        worker_refine_scope_from_diff "$issue" "$worktree" "$default_branch"
+      fi
+      if [[ $exit_code -eq 0 ]] && ! agent_result_has_terminal_marker "$result"; then
+        break
+      fi
+    fi
+    { [[ $exit_code -eq 0 ]] && agent_result_has_marker "$result" completed; } && break
+    { [[ $exit_code -eq 0 ]] && agent_result_has_marker "$result" needs-input; } && break
+    { [[ $exit_code -eq 0 ]] && agent_result_has_marker "$result" declined; } && break
     # A spent token/rate budget is not a task failure: stop retrying immediately.
     if agent_result_is_exhausted "$result" "$exit_code"; then exhausted=1; break; fi
     (( attempt >= max_retries )) && break
@@ -3760,7 +3796,7 @@ worker() {
   # the Label is still running, new contenders still fail their queued check.
   lease_release "$issue" "$worker"
   project_add_pull_requests "$branch"
-  if [[ $exit_code -eq 0 ]] && grep -Fq 'AGENTIC_LOOP_RESULT=completed' "$result"; then
+  if [[ $exit_code -eq 0 ]] && agent_result_has_marker "$result" completed; then
     IFS=$'\t' read -r merged_pr merged_oid < <(repo_api pulls --method GET -f state=closed -f head="${repository%%/*}:$branch" -f per_page=100 --jq 'map(select(.merged_at != null and .head.ref == "'"$branch"'")) | first | [.html_url, .head.sha] | @tsv' 2>/dev/null || true) || true
     if [[ -n $merged_pr && $merged_oid =~ ^[0-9a-fA-F]{40}$ ]] && cleanup_completed_worker "$worktree" "$branch" "$merged_oid"; then
       clear_attempts "$issue"
@@ -3774,11 +3810,11 @@ worker() {
       project_sync_state "$issue" failed
       comment_issue "$issue" "<!-- agentic-loop:failed worker=$worker reason=merge-or-cleanup -->\nWorkerは完了を報告しましたが、branch \`$branch\` のmerge済みPRと一致するcommitを確認できないか、安全なcleanupを完了できませんでした。Issueはcloseせず、残っているworktreeまたはbranch dataを保持します。原因確認後に再試行するには \`agent:queued\` を再度付与してください。"
     fi
-  elif [[ $exit_code -eq 0 ]] && grep -Fq 'AGENTIC_LOOP_RESULT=needs-input' "$result"; then
+  elif [[ $exit_code -eq 0 ]] && agent_result_has_marker "$result" needs-input; then
     set_issue_state "$issue" needs-input
     project_sync_state "$issue" needs-input
     comment_issue "$issue" "<!-- agentic-loop:needs-input worker=$worker -->\n重大な決定または権限が必要です。直前のworker commentを確認し、自動的に再キューするにはここへ返信してください。"
-  elif [[ $exit_code -eq 0 ]] && grep -Fq 'AGENTIC_LOOP_RESULT=declined' "$result"; then
+  elif [[ $exit_code -eq 0 ]] && agent_result_has_marker "$result" declined; then
     clear_attempts "$issue"
     comment_issue "$issue" "<!-- agentic-loop:declined worker=$worker -->\nWorkerはこのIssueを実施不要または実施不能と判断しました（理由は直前のcommentを参照）。Issueをcloseします。再開が必要なら \`agent:queued\` を付け直してください。"
     repo_api "issues/$issue" --method PATCH -f state=closed >/dev/null || true
