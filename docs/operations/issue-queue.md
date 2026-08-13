@@ -15,6 +15,7 @@ bin/agentic-loop start
 bin/agentic-loop status
 bin/agentic-loop stop
 bin/agentic-loop doctor
+bin/agentic-loop metrics
 ```
 
 ### status: いま何が動き、何を待ち、次に何が来るか
@@ -35,12 +36,13 @@ bin/agentic-loop status --format json
 
 `--format json`は`schema_version: 1`の単一JSONを1行で出す。主なキーは`supervisor`、`workers`（running Issueごとの詳細）、`queue`（`queued`・`claimable`・`candidates`）、`waits`（scope/dependency待ち）、`states`（needs-input/failed/in-review/blocked/staleの件数とIssue一覧）、`anomalies`（`level`/`code`/`subject`/`detail`）、`github_available`（GitHub取得に失敗した場合は`false`になり、それ以外のフィールドはlocalの情報のみを反映する）。
 
-#### `status` / `doctor` / Projects Viewの責務分担
+#### `status` / `doctor` / `metrics` / Projects Viewの責務分担
 
 | 入口 | 目的 | 実行頻度・コスト | 合否判定 |
 | --- | --- | --- | --- |
 | `status` | いま何が動き、何を待ち、次に何が来るかの運用snapshot | 対話Agentの受付手順からも毎回呼べる（REST(core)読み取り最大2回、GraphQL/Projects 0回、書き込み0回） | 常に終了code 0（異常はwarning/infoとして列挙するのみ） |
 | `doctor` | 導入・復旧のための環境健全性診断（認証・権限・CLI・Devbox・hooks・systemd・Project設定・設定値・残存状態） | 導入時・障害時に実行 | 必須項目の失敗で終了code 1 |
+| `metrics` | 過去の傾向（待ち時間・失敗率・手戻り・稼働率）の再現可能な集計（[運用ドキュメント](loop-metrics.md)） | 利用者が任意の頻度で実行（REST(core)読み取り最大3回、GraphQL/Projects 0回、書き込み0回） | 常に終了code 0（合否判定は`doctor`の責務） |
 | GitHub Project View | 人向けのIssue/PR一覧の可視化層（best-effort、障害はキューを止めない） | GitHub UI上で確認 | 判定には使わない |
 
 ### 事前診断
