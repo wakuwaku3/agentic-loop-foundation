@@ -22,7 +22,8 @@ fi
 readonly WORKTREE_ROOT="$(dirname "$REPO_ROOT")/$(basename "$REPO_ROOT")-worktrees"
 readonly CONFIG_FILE="$REPO_ROOT/.agentic-loop.toml"
 readonly CONFIG_LOCAL="$REPO_ROOT/.agentic-loop.local.toml"
-readonly LABELS=(queued running needs-input in-review completed failed stale blocked)
+readonly LABELS=(queued running needs-input in-review stopping completed failed stale blocked cancelled superseded duplicate merged)
+readonly DISPOSITION_LABELS=(cancelled superseded duplicate merged)
 readonly PRIORITY_LABELS=(critical high medium low)
 readonly CATEGORY_LABELS=(loop-continuity confidentiality-incident integrity-incident availability-incident feature improvement)
 readonly DIAGNOSIS_LABEL=diagnosis
@@ -416,10 +417,12 @@ load_config || { [[ ${1:-} == doctor ]] || fail "$CONFIG_ERROR"; }
 
 usage() {
   cat >&2 <<EOF
-Usage: $PROGRAM_NAME {setup|sync-issue ISSUE|start|stop|status [--format json]|doctor [--format json]|metrics [--days N] [--as-of EPOCH] [--format json]|upgrade [--source PATH|--revision SHA] [--apply] [--approve] [--rollback] [--skip-verify] [--overwrite PATH]... [--format json]}
+Usage: $PROGRAM_NAME {setup|sync-issue ISSUE|dispose ISSUE --reason cancelled|superseded|duplicate|merged [--target ISSUE]|resume ISSUE|start|stop|status [--format json]|doctor [--format json]|metrics [--days N] [--as-of EPOCH] [--format json]|upgrade [--source PATH|--revision SHA] [--apply] [--approve] [--rollback] [--skip-verify] [--overwrite PATH]... [--format json]}
 
   setup   Create or reuse this repository's labels and Project
   sync-issue  Add one Issue to the Project now, or queue a retry
+  dispose     Authorized, auditable cancellation or consolidation of an Issue
+  resume      Authorized reopening of a disposed Issue
   start   Start one background supervisor for this repository
   stop    Stop claiming work and drain running workers
   status  Show what is running, queued, waiting, and any anomalies (always exit 0)
@@ -568,6 +571,11 @@ setup_labels() {
       failed) color=B60205; description='Worker failed; safe to inspect or retry' ;;
       stale) color=6E7781; description='Queued work closed after the configured inactivity period' ;;
       blocked) color=C5DEF5; description='Waiting for verified Issue dependencies' ;;
+      stopping) color=FBCA04; description='Authorized disposal is draining an active worker' ;;
+      cancelled) color=6E7781; description='Requirement was withdrawn by an authorized operator' ;;
+      superseded) color=5319E7; description='Requirement is continued by a successor Issue' ;;
+      duplicate) color=C5DEF5; description='Requirement duplicates another Issue' ;;
+      merged) color=0E8A16; description='Requirement is consolidated into another Issue' ;;
     esac
     setup_label "$(state_label "$name")" "$color" "$description" "$current"
   done
@@ -622,7 +630,7 @@ setup_project() {
   fields=$(gh project field-list "$number" --owner "$owner" --format json --jq '.fields[].name' 2>/dev/null || true)
   if ! grep -Fxq 'Agent status' <<< "$fields"; then
     gh project field-create "$number" --owner "$owner" --name 'Agent status' --data-type SINGLE_SELECT \
-      --single-select-options 'Inbox,Queued,Running,Needs input,In review,Done,Failed,Stale,Blocked' >/dev/null 2>&1 || true
+      --single-select-options 'Inbox,Queued,Running,Needs input,In review,Stopping,Done,Failed,Stale,Blocked,Cancelled,Superseded,Duplicate,Merged' >/dev/null 2>&1 || true
   fi
   if ! grep -Fxq 'Category' <<< "$fields"; then
     gh project field-create "$number" --owner "$owner" --name 'Category' --data-type SINGLE_SELECT \
@@ -651,13 +659,26 @@ setup_project_migrate_status_options() {
     node(id: $field) { ... on ProjectV2SingleSelectField { options { name color description } } }
   }' -F field="$field_id" --jq '.data.node.options[] | [.name, .color, .description] | @tsv' 2>/dev/null) || return 0
   [[ -n $options_tsv ]] || return 0
-  grep -Fq $'Blocked\t' <<< "$options_tsv" && return 0
+  local required_statuses=(Stopping Blocked Cancelled Superseded Duplicate Merged) required missing=''
+  for required in "${required_statuses[@]}"; do grep -Fq "${required}"$'\t' <<< "$options_tsv" || missing+=" $required"; done
+  [[ -z $missing ]] && return 0
   mutation_options=''
   while IFS=$'\t' read -r name color description; do
     [[ -n $name ]] || continue
     mutation_options+="{name: \"$name\", color: $color, description: \"$description\"}, "
   done <<< "$options_tsv"
-  mutation_options+='{name: "Blocked", color: GRAY, description: "Waiting on unresolved Issue dependencies"}'
+  for required in "${required_statuses[@]}"; do
+    grep -Fq "${required}"$'\t' <<< "$options_tsv" && continue
+    case $required in
+      Stopping) mutation_options+='{name: "Stopping", color: YELLOW, description: "Authorized disposal is draining an active worker"}, ' ;;
+      Blocked) mutation_options+='{name: "Blocked", color: GRAY, description: "Waiting on unresolved Issue dependencies"}, ' ;;
+      Cancelled) mutation_options+='{name: "Cancelled", color: GRAY, description: "Requirement was withdrawn"}, ' ;;
+      Superseded) mutation_options+='{name: "Superseded", color: PURPLE, description: "Continued by a successor Issue"}, ' ;;
+      Duplicate) mutation_options+='{name: "Duplicate", color: BLUE, description: "Duplicates another Issue"}, ' ;;
+      Merged) mutation_options+='{name: "Merged", color: GREEN, description: "Consolidated into another Issue"}' ;;
+    esac
+  done
+  mutation_options=${mutation_options%, }
   gh api graphql -f query="mutation(\$field: ID!) {
     updateProjectV2SingleSelectField(input: {fieldId: \$field, options: [$mutation_options]}) { projectV2SingleSelectField { id } }
   }" -F field="$field_id" >/dev/null 2>&1 || true
@@ -702,9 +723,11 @@ setup_project_views() {
   setup_project_view "$project_id" 'Triage' 'is:issue is:open no:category' "$views_tsv"
   setup_project_view "$project_id" 'Queue' 'is:issue is:open label:"agent:queued"' "$views_tsv"
   setup_project_view "$project_id" 'Active' 'is:issue is:open label:"agent:running","agent:in-review"' "$views_tsv"
+  setup_project_view "$project_id" 'Stopping' 'is:issue is:open label:"agent:stopping"' "$views_tsv"
   setup_project_view "$project_id" 'Needs input' 'is:issue is:open label:"agent:needs-input"' "$views_tsv"
   setup_project_view "$project_id" 'Recovery' 'is:issue label:"agent:failed","agent:stale"' "$views_tsv"
   setup_project_view "$project_id" 'Recently completed' 'is:issue label:"agent:completed" updated:@today-30d' "$views_tsv"
+  setup_project_view "$project_id" 'Disposed' 'is:issue label:"agent:cancelled","agent:superseded","agent:duplicate","agent:merged" updated:@today-30d' "$views_tsv"
   setup_project_view "$project_id" 'Open PRs' 'is:pr is:open' "$views_tsv"
   setup_project_view "$project_id" 'Closed PRs' 'is:pr is:closed' "$views_tsv"
   setup_project_view "$project_id" 'All open issues' 'is:issue is:open' "$views_tsv"
@@ -1876,8 +1899,8 @@ metrics_render_unavailable() {
 metrics_render_text() {
   local key
   say "対象期間: $(date -u -d "@$WINDOW_START" '+%Y-%m-%d') 〜 $(date -u -d "@$WINDOW_END" '+%Y-%m-%d')（${DAYS}日間、as-of epoch=$WINDOW_END)"
-  printf '転帰: completed=%s unresolved=%s stale=%s declined=%s open=%s other=%s\n' \
-    "${DISP_COUNT[completed]}" "${DISP_COUNT[unresolved]}" "${DISP_COUNT[stale]}" "${DISP_COUNT[declined]}" "${DISP_COUNT[open]}" "${DISP_COUNT[other]}"
+  printf '転帰: completed=%s unresolved=%s stale=%s declined=%s cancelled=%s superseded=%s duplicate=%s merged=%s open=%s other=%s\n' \
+    "${DISP_COUNT[completed]}" "${DISP_COUNT[unresolved]}" "${DISP_COUNT[stale]}" "${DISP_COUNT[declined]}" "${DISP_COUNT[cancelled]}" "${DISP_COUNT[superseded]}" "${DISP_COUNT[duplicate]}" "${DISP_COUNT[merged]}" "${DISP_COUNT[open]}" "${DISP_COUNT[other]}"
   printf '待ち時間・所要時間:\n'
   metrics_dist_text queue_wait "$DIST_QUEUE"
   metrics_dist_text open_queue_wait "$DIST_OPENQUEUE"
@@ -1919,8 +1942,8 @@ metrics_render_json() {
   local sep='' key
   printf '{"schema_version":1,"generated_at":%s,"window":{"start":%s,"end":%s,"days":%s},"github_available":true,' \
     "$(date +%s)" "$WINDOW_START" "$WINDOW_END" "$DAYS"
-  printf '"dispositions":{"completed":%s,"unresolved":%s,"stale":%s,"declined":%s,"open":%s,"other":%s},' \
-    "${DISP_COUNT[completed]}" "${DISP_COUNT[unresolved]}" "${DISP_COUNT[stale]}" "${DISP_COUNT[declined]}" "${DISP_COUNT[open]}" "${DISP_COUNT[other]}"
+  printf '"dispositions":{"completed":%s,"unresolved":%s,"stale":%s,"declined":%s,"cancelled":%s,"superseded":%s,"duplicate":%s,"merged":%s,"open":%s,"other":%s},' \
+    "${DISP_COUNT[completed]}" "${DISP_COUNT[unresolved]}" "${DISP_COUNT[stale]}" "${DISP_COUNT[declined]}" "${DISP_COUNT[cancelled]}" "${DISP_COUNT[superseded]}" "${DISP_COUNT[duplicate]}" "${DISP_COUNT[merged]}" "${DISP_COUNT[open]}" "${DISP_COUNT[other]}"
   printf '"durations":{"queue_wait":%s,"open_queue_wait":%s,"attempt_duration":%s,"needs_input_wait":%s,"open_needs_input_wait":%s,"conflict_wait":%s,"open_conflict_wait":%s,"dependency_wait":%s,"open_dependency_wait":%s,"lead_time":%s,"plan_seconds":%s,"exec_seconds":%s,"pr_review_wait":%s},' \
     "$(metrics_dist_json "$DIST_QUEUE")" "$(metrics_dist_json "$DIST_OPENQUEUE")" "$(metrics_dist_json "$DIST_ATTEMPT")" \
     "$(metrics_dist_json "$DIST_NEEDSINPUT")" "$(metrics_dist_json "$DIST_OPENNEEDSINPUT")" \
@@ -1974,7 +1997,7 @@ cmd_metrics() {
 
   declare -gA ISSUE_CREATED=() ISSUE_CLOSED=() ISSUE_STATE=() ISSUE_CATEGORY=() ISSUE_PRIORITY=() ISSUE_AGENT=()
   declare -gA QSTART=() ATTOPEN=() NISTART=() CONFLSTART=() DEPSTART=() LAST_COMPLETED_AT=() HAS_DECLINED=() FAILREASON=()
-  declare -gA DISP_COUNT=([completed]=0 [unresolved]=0 [stale]=0 [declined]=0 [open]=0 [other]=0)
+  declare -gA DISP_COUNT=([completed]=0 [unresolved]=0 [stale]=0 [declined]=0 [cancelled]=0 [superseded]=0 [duplicate]=0 [merged]=0 [open]=0 [other]=0)
   declare -gA CATCOUNT=() PRICOUNT=()
   local label
   for label in "${CATEGORY_LABELS[@]}"; do CATCOUNT[$label]=0; done
@@ -2035,6 +2058,10 @@ cmd_metrics() {
       # 転帰は close時刻で窓に帰属させる（作成が古くても、この窓でcloseしたIssueだけを数える）。
       if (( ${ISSUE_CLOSED[$n]} > 0 )) && metrics_in_window "${ISSUE_CLOSED[$n]}"; then
         if [[ -n ${HAS_DECLINED[$n]:-} ]]; then disposition=declined
+        elif [[ ,${ISSUE_AGENT[$n]}, == *,agent:cancelled,* ]]; then disposition=cancelled
+        elif [[ ,${ISSUE_AGENT[$n]}, == *,agent:superseded,* ]]; then disposition=superseded
+        elif [[ ,${ISSUE_AGENT[$n]}, == *,agent:duplicate,* ]]; then disposition=duplicate
+        elif [[ ,${ISSUE_AGENT[$n]}, == *,agent:merged,* ]]; then disposition=merged
         elif [[ ,${ISSUE_AGENT[$n]}, == *,agent:stale,* ]]; then disposition=stale
         elif [[ ,${ISSUE_AGENT[$n]}, == *,agent:completed,* ]]; then disposition=completed
         elif [[ ,${ISSUE_AGENT[$n]}, == *,agent:failed,* ]]; then disposition=unresolved
@@ -2193,7 +2220,8 @@ project_sync_state() {
   case $state in
     queued) option=Queued ;; running) option=Running ;; needs-input) option='Needs input' ;;
     in-review) option='In review' ;; completed) option=Done ;; failed) option=Failed ;; stale) option=Stale ;;
-    blocked) option=Blocked ;; *) option=Inbox ;;
+    blocked) option=Blocked ;; stopping) option=Stopping ;; cancelled) option=Cancelled ;;
+    superseded) option=Superseded ;; duplicate) option=Duplicate ;; merged) option=Merged ;; *) option=Inbox ;;
   esac
   url=$(repo_issue_url "$issue")
   project_add_content "$url"
@@ -2357,6 +2385,116 @@ cmd_sync_issue() {
   project_add_issue "$1"
   project_sync_state "$1" queued
   say "Issue #$1 のProject同期を実行しました（障害時は再試行queueへ保存済みです）。"
+}
+
+# Disposal is deliberately a separate state machine.  A worker result is never
+# accepted as authority: only the identity authenticated to gh with repository
+# write-or-better permission may close, replace, or consolidate a requirement.
+authorized_operator() {
+  local login permission
+  login=$(gh api user --jq .login 2>/dev/null | tr -d '[:space:]') || return 1
+  [[ -n $login ]] || return 1
+  permission=$(gh api "repos/$(repo_name)/collaborators/$login/permission" --jq .permission 2>/dev/null | tr -d '[:space:]') || return 1
+  case $permission in write|maintain|admin) printf '%s\n' "$login" ;; *) return 1 ;; esac
+}
+
+issue_agent_state() {
+  repo_api "issues/$1" --jq '[.state, ([.labels[].name | select(startswith("agent:"))] | join(","))] | @tsv'
+}
+
+dispose_marker() { printf '<!-- agentic-loop:dispose schema=1 actor=%s reason=%s issue=%s target=%s at=%s -->' "$1" "$2" "$3" "${4:-none}" "$5"; }
+
+dispose_stop_local_worker() {
+  local issue=$1 pidfile="$STATE_ROOT/workers/$1.pid" pid waited=0
+  [[ -r $pidfile ]] || return 0
+  read -r pid < "$pidfile" || return 0
+  [[ $pid =~ ^[0-9]+$ ]] || return 0
+  kill -TERM "-$pid" 2>/dev/null || true
+  while kill -0 "$pid" 2>/dev/null && (( waited < STOP_TIMEOUT )); do sleep 1; waited=$((waited + 1)); done
+  kill -0 "$pid" 2>/dev/null && kill -KILL "-$pid" 2>/dev/null || true
+  lease_release "$issue" stopping
+  scope_cache_clear "$issue"; clear_conflict_wait "$issue"; clear_worker_local "$issue"
+}
+
+dispose_validate_target() {
+  local issue=$1 reason=$2 target=$3 state labels
+  [[ $reason == cancelled ]] && [[ -z $target ]] && return 0
+  [[ $target =~ ^[1-9][0-9]*$ && $target != "$issue" ]] || return 1
+  IFS=$'\t' read -r state labels < <(issue_agent_state "$target" 2>/dev/null) || return 1
+  [[ $state == open ]] || return 1
+  case ,$labels, in *,agent:cancelled,*|*,agent:superseded,*|*,agent:duplicate,*|*,agent:merged,*) return 1 ;; esac
+}
+
+# Native dependency transfer is fail-closed: consolidation must never make a
+# previously blocked requirement claimable merely because its source was closed.
+dispose_transfer_dependencies() {
+  local source=$1 target=$2 dependency target_dependencies
+  [[ -n $target ]] || return 0
+  # GitHub's issue-dependencies REST API returns the Issues blocking source.
+  # An unavailable endpoint/scope is not treated as an empty list.
+  dependencies=$(repo_api "issues/$source/dependencies/blocked_by" --method GET -f per_page=100 --paginate --jq '.[].number' 2>/dev/null) || return 1
+  while IFS= read -r dependency; do
+    [[ -z $dependency ]] && continue
+    [[ $dependency =~ ^[1-9][0-9]*$ && $dependency != "$target" ]] || return 1
+    repo_api "issues/$target/dependencies/blocked_by" --method POST -f issue_id="$dependency" >/dev/null 2>&1 || return 1
+  done <<< "$dependencies"
+  target_dependencies=$(repo_api "issues/$target/dependencies/blocked_by" --method GET -f per_page=100 --paginate --jq '.[].number' 2>/dev/null) || return 1
+  while IFS= read -r dependency; do
+    [[ -z $dependency ]] && continue
+    grep -Fxq "$dependency" <<< "$target_dependencies" || return 1
+  done <<< "$dependencies"
+}
+
+cmd_dispose() {
+  local issue=${1:-} reason='' target='' actor state labels now marker existing
+  [[ $issue =~ ^[1-9][0-9]*$ ]] || fail 'dispose requires a positive Issue number'
+  shift
+  while (( $# > 0 )); do case $1 in --reason) reason=${2:-}; shift 2 ;; --target) target=${2:-}; shift 2 ;; *) fail 'dispose accepts only --reason and --target' ;; esac; done
+  case $reason in cancelled) [[ -z $target ]] || fail 'cancelled does not accept --target' ;; superseded|duplicate|merged) ;; *) fail 'invalid disposal reason' ;; esac
+  actor=$(authorized_operator) || fail 'dispose requires authenticated repository write, maintain, or admin permission'
+  IFS=$'\t' read -r state labels < <(issue_agent_state "$issue") || fail "cannot read Issue #$issue"
+  [[ $state == open ]] || fail "Issue #$issue is already closed; use resume only for an authorized disposition"
+  # Existing terminal labels are immutable evidence. Repeating the same exact
+  # operation is harmless; changing its reason/target requires a new Issue.
+  for existing in "${DISPOSITION_LABELS[@]}"; do
+    if [[ ,$labels, == *",agent:$existing,"* ]]; then
+      [[ $existing == "$reason" ]] && { say "Issue #$issue は既に $reason です。"; return 0; }
+      fail "Issue #$issue already has an immutable disposition: $existing"
+    fi
+  done
+  dispose_validate_target "$issue" "$reason" "$target" || fail 'target must be a distinct, open, non-disposed Issue in this repository'
+  # A merged implementation is never silently discarded.
+  if [[ $labels == *agent:completed* ]] && repo_api pulls --method GET -f state=closed -f head="$(repo_name | cut -d/ -f1):agent/issue-$issue" --jq 'any(.[]; .merged_at != null)' 2>/dev/null | grep -Fxq true; then
+    fail 'a completed Issue with a merged pull request cannot be disposed; create a revert/follow-up Issue instead'
+  fi
+  now=$(date +%s); marker=$(dispose_marker "$actor" "$reason" "$issue" "$target" "$now")
+  case ,$labels, in *,agent:running,*|*,agent:in-review,*)
+    set_issue_state "$issue" stopping; project_sync_state "$issue" stopping
+    comment_issue "$issue" "$marker\n認可済みの終了操作を受け付け、workerとPRの安全な停止を開始しました。未保存または未pushの成果物は削除しません。"
+    dispose_stop_local_worker "$issue"
+    ;;
+  esac
+  if [[ -n $target ]]; then
+    dispose_transfer_dependencies "$issue" "$target" || fail 'dependency transfer could not be verified; Issue remains stopping/open for safe recovery'
+    comment_issue "$target" "$marker\nIssue #$issue をこのIssueへ統合します。元Issueの本文・全コメント・依存関係も要求として確認してください。出典は $(repo_issue_url "$issue") に保持します。" || fail 'could not write the required target audit record'
+  fi
+  set_issue_state "$issue" "$reason"; project_sync_state "$issue" "$reason"
+  comment_issue "$issue" "$marker\n認可済みの操作により Issue を \`agent:$reason\` として終了します。${target:+統合先: $(repo_issue_url "$target")。} Issue本文・コメント・既存成果物は保持します。"
+  repo_api "issues/$issue" --method PATCH -f state=closed -f state_reason=not_planned >/dev/null || fail 'could not close disposed Issue with state_reason=not_planned'
+  say "Issue #$issue を $reason として終了しました。"
+}
+
+cmd_resume() {
+  local issue=${1:-} actor state labels
+  [[ $issue =~ ^[1-9][0-9]*$ ]] || fail 'resume requires a positive Issue number'
+  actor=$(authorized_operator) || fail 'resume requires authenticated repository write, maintain, or admin permission'
+  IFS=$'\t' read -r state labels < <(issue_agent_state "$issue") || fail "cannot read Issue #$issue"
+  [[ $state == closed ]] || fail 'resume is only for a closed disposed Issue'
+  case ,$labels, in *,agent:cancelled,*|*,agent:superseded,*|*,agent:duplicate,*|*,agent:merged,*) ;; *) fail 'resume requires a disposition label' ;; esac
+  repo_api "issues/$issue" --method PATCH -f state=open >/dev/null || fail 'could not reopen Issue'
+  set_issue_state "$issue" queued; project_sync_state "$issue" queued
+  comment_issue "$issue" "<!-- agentic-loop:resume schema=1 actor=$actor issue=$issue at=$(date +%s) -->\n認可済みの再開操作により、終了履歴を保持したままIssueを \`agent:queued\` として再開しました。"
+  say "Issue #$issue を再開しました。"
 }
 
 lease_body() {
@@ -3780,8 +3918,9 @@ worker() {
     comment_issue "$issue" "<!-- agentic-loop:needs-input worker=$worker -->\n重大な決定または権限が必要です。直前のworker commentを確認し、自動的に再キューするにはここへ返信してください。"
   elif [[ $exit_code -eq 0 ]] && grep -Fq 'AGENTIC_LOOP_RESULT=declined' "$result"; then
     clear_attempts "$issue"
-    comment_issue "$issue" "<!-- agentic-loop:declined worker=$worker -->\nWorkerはこのIssueを実施不要または実施不能と判断しました（理由は直前のcommentを参照）。Issueをcloseします。再開が必要なら \`agent:queued\` を付け直してください。"
-    repo_api "issues/$issue" --method PATCH -f state=closed >/dev/null || true
+    set_issue_state "$issue" needs-input
+    project_sync_state "$issue" needs-input
+    comment_issue "$issue" "<!-- agentic-loop:declined worker=$worker -->\nWorkerはこのIssueを実施不要または実施不能と提案しました（理由は直前のcommentを参照）。worker自身はcloseしません。認可済みの運用者が確認し、必要なら \`bin/agentic-loop dispose $issue --reason cancelled\` 等で終了してください。"
   elif (( exhausted )); then
     clear_attempts "$issue"
     agent_mark_exhausted
@@ -3802,6 +3941,8 @@ main() {
   case ${1:-} in
     setup) [[ $# -eq 1 ]] || fail 'setup takes no arguments'; cmd_setup ;;
     sync-issue) [[ $# -eq 2 ]] || fail 'sync-issue requires one Issue number'; cmd_sync_issue "$2" ;;
+    dispose) cmd_dispose "${@:2}" ;;
+    resume) [[ $# -eq 2 ]] || fail 'resume requires one Issue number'; cmd_resume "$2" ;;
     start) [[ $# -eq 1 ]] || fail 'start takes no arguments'; cmd_start ;;
     stop) [[ $# -eq 1 ]] || fail 'stop takes no arguments'; cmd_stop ;;
     status) cmd_status "$@" ;;
