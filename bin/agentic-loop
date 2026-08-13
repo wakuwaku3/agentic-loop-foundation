@@ -506,6 +506,7 @@ preflight() {
   require_command git
   require_command gh
   require_command yq
+  require_command devbox
   git -C "$REPO_ROOT" rev-parse --git-dir >/dev/null 2>&1 || fail 'target is not a Git repository'
   git -C "$REPO_ROOT" remote get-url origin >/dev/null 2>&1 || fail 'origin remote is required'
   gh auth status >/dev/null 2>&1 || fail 'GitHub authentication is required; run gh auth login'
@@ -719,11 +720,12 @@ systemd_path_value() {
 }
 
 install_supervisor_unit() {
-  local unit_dir unit_file escaped_root escaped_program service_path escaped_path provider provider_dirs=''
+  local unit_dir unit_file escaped_root escaped_program escaped_devbox service_path escaped_path provider provider_dirs=''
   unit_dir="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
   unit_file="$unit_dir/$(supervisor_unit_name)"
   escaped_root=$(systemd_path_value "$REPO_ROOT") || fail 'repository path cannot be encoded safely for systemd'
   escaped_program=$(systemd_path_value "$SCRIPT_ROOT") || fail 'program path cannot be encoded safely for systemd'
+  escaped_devbox=$(systemd_path_value "$(command -v devbox)") || fail 'devbox path cannot be encoded safely for systemd'
   for provider in $(agent_used_providers); do provider_dirs+="$(dirname "$(command -v "$(provider_command "$provider")")"):"; done
   service_path="${provider_dirs}$(dirname "$(command -v gh)"):$(dirname "$(command -v git)"):$(dirname "$(command -v yq)"):/usr/local/bin:/usr/bin:/bin"
   escaped_path=$(systemd_path_value "$service_path") || fail 'command PATH cannot be encoded safely for systemd'
@@ -732,7 +734,10 @@ install_supervisor_unit() {
     printf '%s\n' '[Unit]' 'Description=Agentic Loop repository supervisor' 'After=network-online.target'
     printf '\n%s\n' '[Service]' 'Type=simple'
     printf 'WorkingDirectory=%s\n' "$escaped_root"
-    printf 'ExecStart=%s/bin/agentic-loop _service\n' "$escaped_program"
+    # Resolve pinned tools (notably yq) at service start instead of baking a
+    # transient Nix-store profile path into the unit. This survives Devbox
+    # garbage collection and host reboot while preserving provider/gh PATH.
+    printf 'ExecStart=%s run -- %s/bin/agentic-loop _service\n' "$escaped_devbox" "$escaped_program"
     printf 'Environment=PATH=%s\n' "$escaped_path"
     printf '%s\n' 'Restart=on-failure' 'RestartSec=5s'
     printf '\n%s\n' '[Install]' 'WantedBy=default.target'
@@ -942,18 +947,18 @@ status_queue_candidate_reason() {
   if [[ -r $file ]]; then
     local other reason
     IFS=$'\t' read -r other reason < "$file" || true
-    STATUS_CANDIDATE_REASON=scope-conflict
+    STATUS_CANDIDATE_REASON='scope-conflict'
     STATUS_CANDIDATE_DETAIL="#$other と重複: $reason"
     return 0
   fi
   if [[ -r $(attempts_file "$issue") ]] && ! attempt_cooldown_elapsed "$issue"; then
-    STATUS_CANDIDATE_REASON=retry-cooldown
+    STATUS_CANDIDATE_REASON='retry-cooldown'
     STATUS_CANDIDATE_DETAIL='直前の失敗からの再試行待機時間内です。'
     return 0
   fi
   pause=$(status_claim_pause_reasons)
   if [[ -n $pause ]]; then
-    STATUS_CANDIDATE_REASON=claim-paused
+    STATUS_CANDIDATE_REASON='claim-paused'
     STATUS_CANDIDATE_DETAIL="$pause"
     return 0
   fi
@@ -2088,7 +2093,7 @@ cmd_sync_issue() {
 
 lease_body() {
   local worker=$1 now=$2 expires=$3
-  printf '<!-- agentic-loop:lease worker=%s heartbeat=%s expires=%s -->\\nAgentic Loop worker `%s` のハートビートです。リースは epoch %s に期限切れとなります。' "$worker" "$now" "$expires" "$worker" "$expires"
+  printf '<!-- agentic-loop:claim worker=%s created=%s expires=%s -->\\n<!-- agentic-loop:lease worker=%s heartbeat=%s expires=%s -->\\nAgentic Loop worker `%s` の排他的claimとハートビートです。リースは epoch %s に期限切れとなります。' "$worker" "$now" "$expires" "$worker" "$now" "$expires" "$worker" "$expires"
 }
 
 lease_file() { printf '%s\n' "$STATE_ROOT/workers/$1.lease"; }
@@ -2139,6 +2144,55 @@ lease_start() {
     mkdir -p "$STATE_ROOT/workers"
     printf '%s\t%s\t%s\n' "$id" "$expires" "$now" > "$(lease_file "$issue")"
   fi
+}
+
+# Acquire a repository-wide Issue claim before changing its Label. GitHub
+# Label replacement is not compare-and-swap: two Supervisors can read the same
+# queued snapshot and both otherwise conclude that they won. Claim comments
+# have a repository-global, monotonically increasing id, so contenders publish
+# a short lease and deterministically elect the lowest still-valid comment id.
+# A loser never changes Labels or starts a worker. The winning comment is then
+# reused as the ordinary heartbeat lease, avoiding an extra durable object.
+claim_acquire() {
+  local issue=$1 worker=$2 now expires id row cid body winner='' current state labels candidate_expires
+  now=$(date +%s); expires=$((now + LEASE_SECONDS))
+  current=$(repo_api "issues/$issue" --jq '[.state, ([.labels[].name] | join(","))] | @tsv' 2>/dev/null) || return 1
+  IFS=$'\t' read -r state labels <<< "$current"
+  [[ $state == open && ,$labels, == *,agent:queued,* ]] || return 1
+  id=$(repo_api "issues/$issue/comments" --method POST -f body="$(lease_body "$worker" "$now" "$expires")" --jq '.id' 2>/dev/null | tr -d '[:space:]' || true)
+  [[ $id =~ ^[0-9]+$ ]] || return 1
+  # Give a concurrent POST a bounded opportunity to become visible. The total
+  # ordering by comment id decides ownership; no wall-clock ordering is used.
+  sleep 1
+  while IFS= read -r row; do
+    [[ -n $row ]] || continue
+    cid=$(base64 -d <<< "$row" 2>/dev/null | cut -f1)
+    body=$(base64 -d <<< "$row" 2>/dev/null | cut -f2-)
+    [[ $cid =~ ^[0-9]+$ ]] || continue
+    [[ $body == *"agentic-loop:claim"* ]] || continue
+    candidate_expires=$(sed -n 's/.*agentic-loop:claim[^>]*expires=\([0-9][0-9]*\).*/\1/p' <<< "$body" | head -n 1)
+    [[ $candidate_expires =~ ^[0-9]+$ && $candidate_expires -ge $now ]] || continue
+    [[ -z $winner || $cid -lt $winner ]] && winner=$cid
+  done < <(repo_api "issues/$issue/comments" --method GET -f per_page=100 --paginate --jq '.[] | select(.body | contains("agentic-loop:claim")) | [.id, .body] | @tsv | @base64' 2>/dev/null || true)
+  if [[ $winner != "$id" ]]; then
+    repo_api "issues/comments/$id" --method PATCH -f body="<!-- agentic-loop:claim worker=$worker created=$now expires=0 -->\\nclaim競合に敗れたため解放しました。" >/dev/null 2>&1 || true
+    return 1
+  fi
+  mkdir -p "$STATE_ROOT/workers"
+  printf '%s\t%s\t%s\n' "$id" "$expires" "$now" > "$(lease_file "$issue")"
+}
+
+# End this host's durable ownership before deliberately re-queueing an Issue.
+# The comment remains as audit history but cannot delay takeover by another
+# host until the original lease timeout.
+lease_release() {
+  local issue=$1 worker=${2:-released} file id now
+  file=$(lease_file "$issue")
+  [[ -r $file ]] || return 0
+  IFS=$'\t' read -r id _ < "$file" || return 0
+  [[ $id =~ ^[0-9]+$ ]] || return 0
+  now=$(date +%s)
+  repo_api "issues/comments/$id" --method PATCH -f body="<!-- agentic-loop:claim worker=$worker created=$now expires=0 -->\\n<!-- agentic-loop:lease worker=$worker heartbeat=$now expires=0 -->\\nこのホストはclaimを解放しました。" >/dev/null 2>&1 || true
 }
 
 # Refresh the lease by editing the existing comment (a single PATCH). Fall back
@@ -2259,6 +2313,7 @@ enforce_worker_timeout() {
     waited=0
     while (( waited < 5 )) && kill -0 "$pid" 2>/dev/null; do sleep 1; waited=$((waited + 1)); done
     kill -0 "$pid" 2>/dev/null && kill -KILL "-$pid" 2>/dev/null || true
+    lease_release "$issue" timeout
     clear_worker_local "$issue"
     scope_cache_clear "$issue"
     clear_conflict_wait "$issue"
@@ -2807,7 +2862,7 @@ queue_rank_jq() {
 }
 
 claim_next() {
-  local issue pid body body_b64 tokens conflict_with
+  local issue pid body body_b64 tokens conflict_with worker
   # shellcheck disable=SC2016 # This is a jq program, not a shell expression.
   while IFS=$'\t' read -r issue body_b64; do
     [[ -n $issue ]] || continue
@@ -2826,13 +2881,17 @@ claim_next() {
       continue
     fi
     clear_conflict_wait "$issue"
+    worker="$(repo_name | tr '/.' '-')-$issue-$(date +%s)-$$-$RANDOM"
+    claim_acquire "$issue" "$worker" || continue
     set_issue_state "$issue" running
     if repo_api "issues/$issue" --jq '.labels[].name' | grep -Fxq "$(state_label running)"; then
       record_attempt "$issue"
       scope_cache_write "$issue" "$tokens"
-      printf '%s\n' "$issue"
+      printf '%s\t%s\n' "$issue" "$worker"
       return 0
     fi
+    lease_release "$issue" "$worker"
+    clear_worker_local "$issue"
   done < <(repo_api issues --method GET -f state=open -f labels="$(state_label queued)" -f per_page=100 --paginate --jq '.[] | select(.pull_request == null) | ['"$(queue_rank_jq)"', .created_at, .number, (.body // "" | @base64)] | @tsv' 2>/dev/null | sort -k1,1n -k2,2n -k3,3 -k4,4n | awk -F '\t' '{print $4 "\t" $5}')
   return 1
 }
@@ -2859,6 +2918,7 @@ supervisor_graceful_shutdown() {
   for pidfile in "$STATE_ROOT"/workers/*.pid; do
     issue=$(basename "$pidfile" .pid)
     read -r pid < "$pidfile" 2>/dev/null || true
+    lease_release "$issue" shutdown
     clear_worker_local "$issue"
     if [[ $pid =~ ^[0-9]+$ ]]; then kill -TERM "-$pid" 2>/dev/null || true; fi
     if [[ $issue =~ ^[0-9]+$ ]]; then
@@ -2915,10 +2975,9 @@ supervise() {
       retry_failed || true
       if exhaustion_note_pause && budget_note_pause && core_budget_note_pause; then
         while [[ $(worker_count) -lt $MAX_WORKERS ]]; do
-          local issue worker
-          issue=$(claim_next) || break
-          worker="$(repo_name | tr '/.' '-')-$issue-$(date +%s)-$$"
-          lease_start "$issue" "$worker" || true
+          local issue worker claim
+          claim=$(claim_next) || break
+          IFS=$'\t' read -r issue worker <<< "$claim"
           project_add_issue "$issue" || true
           project_sync_state "$issue" running || true
           # setsid gives each worker its own process group so shutdown can

@@ -158,6 +158,8 @@ case "${1:-} ${2:-}" in
           printf '%s %s\n' "$issue" "$body" >> "$comments"
           if [[ $* == *"--jq .id"* ]]; then wc -l < "$comments" | tr -d '[:space:]'; printf '\n'; fi
         ) 9> "$comments.lock"
+      elif [[ $* == *agentic-loop:claim* ]]; then
+        awk -v n="$issue" '$1 == n && index($0, "agentic-loop:claim") {body=$0; sub(/^[^ ]+ /, "", body); printf "%s\t%s", NR, body | "base64 -w0"; close("base64 -w0"); printf "\n"}' "$comments" 2>/dev/null || true
       elif [[ $* == *needs-input* ]]; then
         if tail -n 1 "$comments" 2>/dev/null | grep -Fq USER_REPLY; then printf 'true\n'; else printf 'false\n'; fi
       else tail -n 1 "$comments" 2>/dev/null || true; fi
@@ -173,6 +175,8 @@ case "${1:-} ${2:-}" in
       issue=${BASH_REMATCH[1]}
       if [[ $method == PATCH && $form_state == closed ]]; then
         ( flock 9; awk -v n="$issue" '{if ($1 == n) $3="closed"; print}' "$state" > "$state.$$.tmp" && mv "$state.$$.tmp" "$state" ) 9> "$state.lock"
+      elif [[ $* == *'[.state, ([.labels[].name]'* ]]; then
+        awk -v n="$issue" '$1 == n {printf "%s\tagent:%s\n", $3, $2}' "$state"
       elif [[ $* == *'.state_reason // ""'* ]]; then
         if ! awk -v n="$issue" '$1 == n {found=1} END{exit !found}' "$state" 2>/dev/null; then
           printf 'HTTP 404: Not Found\n' >&2; exit 1
@@ -615,7 +619,7 @@ first_pid=$(cat "$first_pid")
 supervisor_service="$XDG_CONFIG_HOME/systemd/user/agentic-loop-supervisor-$(printf '%s' "${target#/}" | tr '/' '-').service"
 [[ -f $supervisor_service ]] || fail 'start did not install the repository supervisor service'
 assert_contains "$supervisor_service" 'Restart=on-failure' 'supervisor service does not restart after an unexpected exit'
-assert_contains "$supervisor_service" "ExecStart=$target/bin/agentic-loop _service" 'supervisor service does not target the repository CLI'
+assert_contains "$supervisor_service" "ExecStart=$FAKE_BIN/devbox run -- $target/bin/agentic-loop _service" 'supervisor service does not enter the pinned Devbox environment'
 assert_contains "$supervisor_service" "Environment=PATH=$FAKE_BIN:" 'supervisor service PATH does not include the verified Codex directory'
 assert_contains "$FAKE_GH_ROOT/systemctl-calls" "enable $(basename "$supervisor_service")" 'supervisor service was not enabled'
 "$target/bin/agentic-loop" start
@@ -1546,6 +1550,21 @@ AGENTIC_LOOP_RUN_ONCE=1 FAKE_CODEX_SLEEP=3 "$target/bin/agentic-loop" _supervise
 lease_lines=$(grep -c 'agentic-loop:lease' "$FAKE_GH_ROOT/$state_key.comments" || true)
 [[ ${lease_lines:-0} -eq 1 ]] || fail "lease heartbeat should keep a single comment, found ${lease_lines:-0}"
 assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'のハートビートです' 'lease comment was not written'
+
+# Two hosts may observe the same queued snapshot. A still-valid claim created
+# by the other host wins by comment id, so this Supervisor must neither change
+# the Label nor start a duplicate worker. Once that claim expires, the Issue is
+# claimable and completes normally.
+write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=3 STOP_TIMEOUT=10 STALE_DAYS=30
+printf '21 queued open none 2026-01-01T00:00:00Z\n' > "$state"
+now=$(date +%s)
+printf '21 <!-- agentic-loop:claim worker=other-host created=%s expires=%s -->\\n<!-- agentic-loop:lease worker=other-host heartbeat=%s expires=%s -->\n' "$now" "$((now + 30))" "$now" "$((now + 30))" > "$FAKE_GH_ROOT/$state_key.comments"
+rm -f "$state_root/stop.requested"
+AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _supervise
+grep -Eq '^21 queued open' "$state" || fail 'a second host stole an Issue with a valid distributed claim'
+sed -i 's/expires=[0-9][0-9]*/expires=1/g' "$FAKE_GH_ROOT/$state_key.comments"
+AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _supervise
+grep -Eq '^21 completed closed' "$state" || fail 'an Issue did not become claimable after the other host claim expired'
 
 # Adaptive idle backoff: with an empty queue the poll interval grows beyond the
 # base toward the ceiling, cutting idle GitHub API reads; a live worker resets it.
