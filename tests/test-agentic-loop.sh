@@ -1912,13 +1912,18 @@ assert_contains "$empty/README.md" 'opencode' 'installed README.md does not docu
 # Devbox definition instead of requiring an unpinned host installation.
 bootstrap_bin="$TEST_ROOT/bootstrap-bin"
 mkdir -p "$bootstrap_bin"
-for command_name in bash git devbox mktemp rm; do ln -s "$(command -v "$command_name")" "$bootstrap_bin/$command_name"; done
+for command_name in bash dirname git devbox mktemp rm; do ln -s "$(command -v "$command_name")" "$bootstrap_bin/$command_name"; done
 bootstrap=$(new_repository bootstrap-project)
 env PATH="$bootstrap_bin" FAKE_BIN="$FAKE_BIN" TEST_HOST_PATH="$TEST_HOST_PATH" FAKE_GH_ROOT="$FAKE_GH_ROOT" \
-  AGENTIC_LOOP_SOURCE="$PROJECT_ROOT" AGENTIC_LOOP_TARGET="$bootstrap" AGENTIC_LOOP_SKIP_START=1 \
+AGENTIC_LOOP_SOURCE="$PROJECT_ROOT" AGENTIC_LOOP_TARGET="$bootstrap" AGENTIC_LOOP_SKIP_START=1 \
   "$PROJECT_ROOT/install.sh"
 assert_contains "$FAKE_GH_ROOT/devbox-calls" "run --config $PROJECT_ROOT -- $PROJECT_ROOT/scripts/install-target.sh $bootstrap" 'install did not bootstrap missing yq through the pinned Devbox environment'
 [[ -x $bootstrap/bin/agentic-loop ]] || fail 'Devbox bootstrap did not complete installation'
+bootstrap_state="$(git -C "$bootstrap" rev-parse --absolute-git-dir)/agentic-loop"
+[[ -s $bootstrap_state/runtime.path ]] || fail 'install did not record the verified runtime PATH'
+bootstrap_status=$(env PATH="$bootstrap_bin" FAKE_BIN="$FAKE_BIN" TEST_HOST_PATH="$TEST_HOST_PATH" FAKE_GH_ROOT="$FAKE_GH_ROOT" \
+  XDG_CONFIG_HOME="$XDG_CONFIG_HOME" "$bootstrap/bin/agentic-loop" status)
+grep -Eq '^(running|stopped)$' <<< "$bootstrap_status" || fail 'installed CLI did not restore its runtime dependencies from an ordinary shell'
 
 no_devbox_bin="$TEST_ROOT/no-devbox-bin"
 mkdir -p "$no_devbox_bin"

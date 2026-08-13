@@ -6,6 +6,19 @@ readonly PROGRAM_NAME="${0##*/}"
 readonly SCRIPT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 readonly REPO_ROOT="$(git -C "$SCRIPT_ROOT" rev-parse --show-toplevel 2>/dev/null || printf '%s' "$SCRIPT_ROOT")"
 readonly STATE_ROOT="$(git -C "$REPO_ROOT" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || printf '%s/.git' "$REPO_ROOT")/agentic-loop"
+readonly RUNTIME_PATH_FILE="$STATE_ROOT/runtime.path"
+
+# Installation records the verified tool directories outside the worktree.
+# Restore them before configuration parsing so public commands work from an
+# ordinary shell without requiring devbox shell, direnv, or a host yq package.
+if [[ -r $RUNTIME_PATH_FILE ]]; then
+  runtime_path=''
+  IFS= read -r runtime_path < "$RUNTIME_PATH_FILE" || true
+  if [[ -n $runtime_path && $runtime_path != *$'\n'* && $runtime_path != *$'\r'* ]]; then
+    export PATH="$runtime_path:$PATH"
+  fi
+  unset runtime_path
+fi
 readonly WORKTREE_ROOT="$(dirname "$REPO_ROOT")/$(basename "$REPO_ROOT")-worktrees"
 readonly CONFIG_FILE="$REPO_ROOT/.agentic-loop.toml"
 readonly CONFIG_LOCAL="$REPO_ROOT/.agentic-loop.local.toml"
