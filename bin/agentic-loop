@@ -1682,29 +1682,33 @@ supervise() {
   trap 'rm -f "$STATE_ROOT/supervisor.pid"; rmdir "$STATE_ROOT/supervisor.lock" 2>/dev/null || true' EXIT
   mkdir -p "$STATE_ROOT/workers"
   printf '%s\n' "$$" > "$STATE_ROOT/supervisor.pid"
-  recover_expired
-  rebuild_scope_cache
+  # Best-effort maintenance must never crash the supervisor (see docs/decisions/
+  # 0003): a transient GitHub error (secondary rate limit / HTTP 403 / 5xx)
+  # should skip this cycle and be retried next poll, not kill the loop under
+  # set -e.
+  recover_expired || true
+  rebuild_scope_cache || true
   while :; do
-    requeue_answered
-    requeue_dependency_ready
+    requeue_answered || true
+    requeue_dependency_ready || true
     if [[ -e $STATE_ROOT/stop.requested ]]; then
       [[ $(worker_count) -eq 0 ]] && break
       sleep "$POLL_SECONDS"
       continue
     else
-      recover_expired
-      reconcile_pending_project
-      reconcile_queued_categories
-      triage_stale_queued
-      retry_failed
+      recover_expired || true
+      reconcile_pending_project || true
+      reconcile_queued_categories || true
+      triage_stale_queued || true
+      retry_failed || true
       if exhaustion_note_pause && budget_note_pause; then
         while [[ $(worker_count) -lt $MAX_WORKERS ]]; do
           local issue worker
           issue=$(claim_next) || break
           worker="$(repo_name | tr '/.' '-')-$issue-$(date +%s)-$$"
-          lease_comment "$issue" "$worker"
-          project_add_issue "$issue"
-          project_sync_state "$issue" running
+          lease_comment "$issue" "$worker" || true
+          project_add_issue "$issue" || true
+          project_sync_state "$issue" running || true
           "$0" _worker "$issue" "$worker" >> "$STATE_ROOT/logs/issue-$issue.log" 2>&1 &
           printf '%s\n' "$!" > "$STATE_ROOT/workers/$issue.pid"
         done
