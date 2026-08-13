@@ -6,7 +6,24 @@
 
 GitHub tokenには対象リポジトリのIssue/PR操作権限と `project`、`read:project` scopeが必要である。不足時は `gh auth refresh -s project,read:project` など、利用中のGitHub認証方式に合う方法で追加する。Projectはuser/org所有のため、対象リポジトリとProjectの閲覧者が一致することを管理者が確認する。privateリポジトリの内容や秘密情報をProjectフィールドへ転記しない。
 
-Project APIでlink、`Agent status` single-select、Issue item追加に加え、`Open Issues`、`Closed Issues`、`Open PRs`、`Closed PRs` のtable viewを設定する。各viewはitem種別とOpen/Closed状態でfilterされ、`install.sh` または `bin/agentic-loop setup` の再実行時に同名viewを再利用してfilterを修復し、既存のOpen/Closed PRをProjectへ追加する。workerが作成したPRも処理終了時に追加する。Project同期の障害はIssueキューの実行中にはキューを停止しない。
+Project APIでlink、`Agent status` single-select、Issue item追加に加え、次のtable viewをdesired stateとして設定する。`install.sh` または `bin/agentic-loop setup` の再実行は同名viewを再利用し、filter driftを修復して、既存のOpen/Closed PRをProjectへ追加する。workerが作成したPRも処理終了時に追加する。
+
+| View | 自動適用するfilter | 目的と表示順 |
+| --- | --- | --- |
+| `Triage` | `is:issue is:open no:category` | Category未設定のopen Issueを検出する。Agent status・Priorityの欠落とLabel/field不整合は後述の手動検査も行う |
+| `Queue` | `is:issue is:open label:"agent:queued"` | Category、Priority、Created at、Issue番号の順で確認する。各値の順位はSupervisorのclaim順と同じにする |
+| `Active` | `is:issue is:open label:"agent:running","agent:in-review"` | Agent statusでgroupし、Updated at降順。Issue、関連Pull requestを表示する |
+| `Needs input` | `is:issue is:open label:"agent:needs-input"` | Updated at昇順。Title、Agent status、Updated atを表示し、Issue本文・commentを回答先とする |
+| `Recovery` | `is:issue label:"agent:failed","agent:stale"` | Agent statusでgroupし、Updated at昇順。期限切れleaseはSupervisorがqueuedへ復旧するまでrunningとしてIssue commentで検査する |
+| `Recently completed` | `is:issue label:"agent:completed" updated:@today-30d` | Updated at降順。対応Pull requestと完了証跡を追跡する |
+| `Open PRs` / `Closed PRs` | `is:pr is:open` / `is:pr is:closed` | Updated at降順。Title、Status、Updated at、Repositoryを表示する |
+| `All open issues` / `All closed issues` | `is:issue is:open` / `is:issue is:closed` | Updated at降順の完全な監査一覧 |
+
+Issue状態の正本は `agent:*` Labelであり、Project fieldは表示用の複製である。このため状態別ViewのfilterもLabelを使用し、回答後にLabelが遷移すると `Needs input` から自動的に外れる。private repositoryの本文やcomment、秘密情報をProject custom fieldへ複製しない。
+
+GitHub Projects APIはviewのname、layout、filterを作成・更新できる一方、CLI/APIのversionや所有者種別によってvisible field、sort、groupの更新を利用できない場合がある。現在の自動適用範囲はtable layoutとfilterまでとし、上表の「目的と表示順」をそれ以外のdesired stateとする。Project画面で列、sort、groupを上表どおり設定し、`bin/agentic-loop setup` 後に各Viewのfilterと対象集合を目視検証する。`Triage` はCategory欠落を自動抽出し、Agent status・Priorityの欠落やLabel/field不整合を `All open issues` で比較する。`Queue` は `bin/agentic-loop` のcategory rank、priority rank、Created at、Issue番号の比較、`Needs input` は `agent:needs-input` のopen Issue一覧との比較、`Recovery` の期限切れleaseは最新の `agentic-loop:lease` commentの `expires` と現在時刻の比較でdriftを検出する。
+
+Project同期やview修復はbest-effortであり、失敗をstderrへ記録してIssueキュー自体は停止しない。権限または一時障害の復旧後にsetupを再実行する。filter更新は冪等で、再作成も既存名を再利用するためrollbackは直前のfilterへ同じsetup関数で戻せる。view削除は自動化せず、不要Viewを破棄する場合は対象と依存を確認して明示的に承認する。
 
 ## 操作
 

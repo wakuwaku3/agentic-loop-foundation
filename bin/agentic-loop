@@ -631,23 +631,33 @@ setup_project_view() {
       }
     }'
     view_id=$(gh api graphql -f query="$create_mutation" -F projectId="$project_id" -f name="$name" \
-      --jq '.data.createProjectV2View.projectV2View.id')
+      --jq '.data.createProjectV2View.projectV2View.id' 2>/dev/null || true)
   fi
-  [[ -n $view_id ]] || fail "could not create or identify Project view: $name"
+  if [[ -z $view_id ]]; then
+    say "Project viewを作成または特定できませんでした（best-effort）: $name" >&2
+    return 0
+  fi
   local update_mutation='mutation($viewId: ID!, $filter: String!) {
     updateProjectV2View(input: {viewId: $viewId, filter: $filter}) { projectV2View { id } }
   }'
-  gh api graphql -f query="$update_mutation" -F viewId="$view_id" -f filter="$filter" >/dev/null
+  gh api graphql -f query="$update_mutation" -F viewId="$view_id" -f filter="$filter" >/dev/null 2>&1 ||
+    say "Project viewのfilterを修復できませんでした（best-effort）: $name" >&2
 }
 
 setup_project_views() {
   local number=$1 owner=$2 project_id
   project_id=$(gh project view "$number" --owner "$owner" --format json --jq .id)
   [[ -n $project_id ]] || fail 'could not identify the repository Project ID'
-  setup_project_view "$project_id" 'Open Issues' 'is:issue is:open'
-  setup_project_view "$project_id" 'Closed Issues' 'is:issue is:closed'
+  setup_project_view "$project_id" 'Triage' 'is:issue is:open no:category'
+  setup_project_view "$project_id" 'Queue' 'is:issue is:open label:"agent:queued"'
+  setup_project_view "$project_id" 'Active' 'is:issue is:open label:"agent:running","agent:in-review"'
+  setup_project_view "$project_id" 'Needs input' 'is:issue is:open label:"agent:needs-input"'
+  setup_project_view "$project_id" 'Recovery' 'is:issue label:"agent:failed","agent:stale"'
+  setup_project_view "$project_id" 'Recently completed' 'is:issue label:"agent:completed" updated:@today-30d'
   setup_project_view "$project_id" 'Open PRs' 'is:pr is:open'
   setup_project_view "$project_id" 'Closed PRs' 'is:pr is:closed'
+  setup_project_view "$project_id" 'All open issues' 'is:issue is:open'
+  setup_project_view "$project_id" 'All closed issues' 'is:issue is:closed'
 }
 
 setup_project_content() {
