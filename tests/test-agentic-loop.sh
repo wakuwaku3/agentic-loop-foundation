@@ -713,7 +713,12 @@ if "$target/.agentic-loop/update-main.sh" sync "$target" >/dev/null 2>&1; then f
 [[ $(git -C "$target" status --porcelain) == "$before_status" ]] || fail 'periodic updater changed the worktree for a main branch diverged from origin/main'
 git -C "$target" reset --quiet --hard refs/remotes/origin/main
 printf '88 inbox open none 2025-01-01T00:00:00Z\n89 inbox closed none 2025-01-02T00:00:00Z\n' > "$FAKE_GH_ROOT/$state_key.state"
+calls_before=$(wc -l < "$FAKE_GH_ROOT/calls")
 AGENTIC_LOOP_SOURCE="$PROJECT_ROOT" AGENTIC_LOOP_TARGET="$target" AGENTIC_LOOP_SKIP_START=1 "$PROJECT_ROOT/install.sh"
+tail -n "+$((calls_before + 1))" "$FAKE_GH_ROOT/calls" > "$TEST_ROOT/reinstall-calls.log"
+[[ $(grep -c $'\tapi graphql ' "$TEST_ROOT/reinstall-calls.log" || true) -eq 1 ]] || fail 'reinstall repeated GraphQL work beyond its permission check'
+[[ $(grep -Ec $'\tproject (list|view|field-list|link|field-create|item-add|item-edit)' "$TEST_ROOT/reinstall-calls.log" || true) -eq 0 ]] || fail 'reinstall scanned or mutated the existing Project'
+[[ $(grep -c $'\tapi repos/.*/issues/[0-9]*/comments ' "$TEST_ROOT/reinstall-calls.log" || true) -eq 0 ]] || fail 'reinstall reconciled queued Issue comments synchronously'
 project_creates=$(grep -c $'project create' "$FAKE_GH_ROOT/calls" || true)
 [[ $project_creates -eq 1 ]] || { sed -n '1,120p' "$FAKE_GH_ROOT/calls" >&2; fail "reinstall created the Project $project_creates times"; }
 view_creates=$(grep -c $'\tapi graphql -f query=mutation($projectId: ID!, $name: String!)' "$FAKE_GH_ROOT/calls" || true)

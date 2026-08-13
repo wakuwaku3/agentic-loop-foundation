@@ -539,7 +539,9 @@ preflight() {
   git -C "$REPO_ROOT" rev-parse --git-dir >/dev/null 2>&1 || fail 'target is not a Git repository'
   git -C "$REPO_ROOT" remote get-url origin >/dev/null 2>&1 || fail 'origin remote is required'
   gh auth status >/dev/null 2>&1 || fail 'GitHub authentication is required; run gh auth login'
-  if graphql_budget_allows 1; then
+  if [[ ${AGENTIC_LOOP_INSTALL:-0} == 1 ]]; then
+    : # install-target preflight already checked Projects access
+  elif graphql_budget_allows 1; then
     gh api graphql -f query='query { viewer { login projectsV2(first: 1) { totalCount } } }' >/dev/null 2>&1 ||
       fail 'GitHub token needs repository access and project/read:project scopes; run gh auth refresh -s project,read:project'
   else
@@ -712,12 +714,16 @@ setup_project_views() {
 cmd_setup() {
   preflight
   setup_labels
-  if graphql_budget_allows "$((GRAPHQL_RESERVE + 50))"; then
+  if [[ ${AGENTIC_LOOP_INSTALL:-0} == 1 && -r $STATE_ROOT/project.env ]]; then
+    : # Reinstall: keep the persisted Project identity; explicit setup repairs drift.
+  elif graphql_budget_allows "$((GRAPHQL_RESERVE + 50))"; then
     setup_project
   else
     say 'GraphQL残量がsetup用reserveを下回るためProject構成を延期します。Labelキューは利用できます。' >&2
   fi
-  reconcile_queued_categories
+  # Queue-content reconciliation belongs to bounded supervisor polls. Running
+  # it synchronously here makes install cost proportional to the queue size.
+  [[ ${AGENTIC_LOOP_INSTALL:-0} == 1 ]] || reconcile_queued_categories
   say "Agentic Loop GitHub queue is ready for $(repo_name)."
 }
 

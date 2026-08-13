@@ -91,7 +91,10 @@ main() {
   [[ $mode == init ]] && chmod +x "$target/install.sh" "$target/scripts/"*.sh "$target/tests/"*.sh
   git -C "$target" config --local core.hooksPath .githooks
   record_runtime_path
-  "$target/bin/agentic-loop" setup
+  # This preflight already verified authentication and Projects access. On a
+  # reinstall, setup can trust the persisted Project identity instead of
+  # repeating the expensive remote Project drift scan.
+  AGENTIC_LOOP_INSTALL=1 "$target/bin/agentic-loop" setup
   "$target/.agentic-loop/update-main.sh" install "$target"
   "$target/.agentic-loop/diagnose-codebase.sh" install "$target"
   for file in "${SHARED_FILES[@]}"; do entries+="$file"$'\t'"shared"$'\n'; done
