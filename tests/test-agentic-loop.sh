@@ -1316,6 +1316,63 @@ assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'checks=in_progress' 'an ope
 git -C "$target" worktree remove --force "$target-worktrees/issue-17" 2>/dev/null || true
 git -C "$target" branch -D agent/issue-17 >/dev/null 2>&1 || true
 
+# Resuming an Issue with an unpushed local commit (worker crashed after
+# committing but before push, with no PR yet) injects the observed phase and
+# a reuse-the-branch instruction (without a PR to reuse) into the provider
+# prompt, and the handoff comment records the same observed facts. The
+# branch is not pushed by the resume probe itself.
+printf '5001 running open\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+: > "$FAKE_GH_ROOT/codex-calls"
+git -C "$target" worktree add --quiet -b agent/issue-5001 "$target-worktrees/issue-5001" origin/main
+git -C "$target-worktrees/issue-5001" commit --quiet --allow-empty -m 'unpushed local work'
+"$target/bin/agentic-loop" _worker 5001 resume-committed-worker
+assert_contains "$FAKE_GH_ROOT/codex-calls" 'phase: committed-unpushed' 'an unpushed-commit resume did not inject the observed phase into the provider prompt'
+# shellcheck disable=SC2016 # Backticks are literal Markdown in the expected provider prompt.
+assert_contains "$FAKE_GH_ROOT/codex-calls" '既存のbranch `agent/issue-5001` を再利用してください（新規branchは作成しないでください）' 'an unpushed-commit resume did not instruct the provider to reuse the existing branch'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'phase=committed-unpushed' 'an unpushed-commit resume phase was not recorded in the handoff'
+! git -C "$target" ls-remote --exit-code --heads origin refs/heads/agent/issue-5001 >/dev/null 2>&1 || fail 'an unpushed-commit resume unexpectedly pushed the branch'
+git -C "$target" worktree remove --force "$target-worktrees/issue-5001" 2>/dev/null || true
+git -C "$target" branch -D agent/issue-5001 >/dev/null 2>&1 || true
+
+# Resuming an Issue whose commit was pushed but never got a PR (worker
+# crashed between push and PR creation) injects the observed phase and the
+# same reuse-the-branch instruction, and the handoff comment records the
+# same observed facts.
+printf '5002 running open\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+: > "$FAKE_GH_ROOT/codex-calls"
+git -C "$target" worktree add --quiet -b agent/issue-5002 "$target-worktrees/issue-5002" origin/main
+git -C "$target-worktrees/issue-5002" commit --quiet --allow-empty -m 'pushed work, no PR yet'
+git -C "$target-worktrees/issue-5002" push --quiet origin agent/issue-5002
+"$target/bin/agentic-loop" _worker 5002 resume-pushed-worker
+assert_contains "$FAKE_GH_ROOT/codex-calls" 'phase: pushed-no-pr' 'a pushed-but-no-PR resume did not inject the observed phase into the provider prompt'
+# shellcheck disable=SC2016 # Backticks are literal Markdown in the expected provider prompt.
+assert_contains "$FAKE_GH_ROOT/codex-calls" '既存のbranch `agent/issue-5002` を再利用してください（新規branchは作成しないでください）' 'a pushed-but-no-PR resume did not instruct the provider to reuse the existing branch'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'phase=pushed-no-pr' 'a pushed-but-no-PR resume phase was not recorded in the handoff'
+git -C "$target" worktree remove --force "$target-worktrees/issue-5002" 2>/dev/null || true
+git -C "$target" branch -D agent/issue-5002 >/dev/null 2>&1 || true
+git -C "$target" push --quiet origin --delete agent/issue-5002
+
+# A worktree path that exists but is not a registered Git worktree at all
+# (corrupted metadata, e.g. a plain directory left over from a filesystem
+# restore) is not misclassified by resume_probe as a foreign-artifact
+# conflict; it falls through to the git-common-dir resolver immediately
+# after, which fails safely: the Issue is marked failed and nothing under
+# the path is deleted, so a human can inspect and repair it.
+printf '5003 running open\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+before_codex_calls=$(wc -l < "$FAKE_GH_ROOT/codex-calls")
+mkdir -p "$target-worktrees/issue-5003"
+printf 'leftover artifact\n' > "$target-worktrees/issue-5003/marker.txt"
+"$target/bin/agentic-loop" _worker 5003 corrupt-metadata-worker
+grep -Eq '^5003 failed open$' "$state" || fail 'a corrupted worktree path was not marked failed'
+[[ $(wc -l < "$FAKE_GH_ROOT/codex-calls") -eq $before_codex_calls ]] || fail 'a corrupted worktree path started a provider'
+[[ -f $target-worktrees/issue-5003/marker.txt ]] || fail 'a corrupted worktree path had its contents deleted'
+! git -C "$target" show-ref --verify --quiet refs/heads/agent/issue-5003 || fail 'a corrupted worktree path unexpectedly created a branch'
+! grep -Fq 'reason=foreign-artifact' "$FAKE_GH_ROOT/$state_key.comments" || fail 'a corrupted worktree path was misclassified as a foreign-artifact conflict'
+rm -rf "$target-worktrees/issue-5003"
+
 # A stale or duplicate _worker invocation whose Issue is no longer
 # agent:running (e.g. it already raced a requeue) makes no Git, Label, or
 # comment change at all.
