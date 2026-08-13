@@ -537,7 +537,9 @@ preflight() {
 }
 
 setup_labels() {
-  local name color description
+  local name color description current
+  current=$(repo_api labels --method GET -f per_page=100 --paginate \
+    --jq '.[] | [.name, .color, (.description // "")] | @tsv' 2>/dev/null || true)
   for name in "${LABELS[@]}"; do
     case $name in
       queued) color=1D76DB; description='Ready for Agentic Loop' ;;
@@ -549,7 +551,7 @@ setup_labels() {
       stale) color=6E7781; description='Queued work closed after the configured inactivity period' ;;
       blocked) color=C5DEF5; description='Waiting for verified Issue dependencies' ;;
     esac
-    gh label create "$(state_label "$name")" --color "$color" --description "$description" --force >/dev/null
+    setup_label "$(state_label "$name")" "$color" "$description" "$current"
   done
   for name in "${PRIORITY_LABELS[@]}"; do
     case $name in
@@ -558,7 +560,7 @@ setup_labels() {
       medium) color=FBCA04; description='Medium priority' ;;
       low) color=0E8A16; description='Low priority' ;;
     esac
-    gh label create "priority:$name" --color "$color" --description "$description" --force >/dev/null
+    setup_label "priority:$name" "$color" "$description" "$current"
   done
   for name in "${CATEGORY_LABELS[@]}"; do
     case $name in
@@ -569,9 +571,18 @@ setup_labels() {
       feature) color=1D76DB; description='New user-facing value or capability' ;;
       improvement) color=0E8A16; description='Quality, performance, maintenance, documentation, or operations improvement' ;;
     esac
-    gh label create "category:$name" --color "$color" --description "$description" --force >/dev/null
+    setup_label "category:$name" "$color" "$description" "$current"
   done
-  gh label create "$DIAGNOSIS_LABEL" --color D4C5F9 --description 'Actionable finding from periodic codebase diagnosis' --force >/dev/null
+  setup_label "$DIAGNOSIS_LABEL" D4C5F9 'Actionable finding from periodic codebase diagnosis' "$current"
+}
+
+setup_label() {
+  local name=$1 color=$2 description=$3 current=$4 existing_color existing_description
+  IFS=$'\t' read -r existing_color existing_description < <(
+    awk -F '\t' -v name="$name" '$1 == name {print toupper($2) "\t" $3; exit}' <<< "$current"
+  ) || true
+  [[ $existing_color == "$color" && $existing_description == "$description" ]] && return 0
+  gh label create "$name" --color "$color" --description "$description" --force >/dev/null
 }
 
 setup_project() {
@@ -627,17 +638,10 @@ setup_project_migrate_status_options() {
 }
 
 setup_project_view() {
-  local project_id=$1 name=$2 filter=$3 view_id
-  local view_query='query($projectId: ID!) {
-    node(id: $projectId) {
-      ... on ProjectV2 {
-        views(first: 100) { nodes { id name } }
-      }
-    }
-  }'
-  view_id=$(gh api graphql -f query="$view_query" -F projectId="$project_id" \
-    --jq '.data.node.views.nodes[] | [.id, .name] | @tsv' 2>/dev/null |
-    awk -F '\t' -v name="$name" '$2 == name {print $1; exit}' || true)
+  local project_id=$1 name=$2 filter=$3 views_tsv=${4:-} view_id current_filter
+  IFS=$'\t' read -r view_id current_filter < <(
+    awk -F '\t' -v name="$name" '$2 == name {print $1 "\t" $3; exit}' <<< "$views_tsv"
+  ) || true
   if [[ -z $view_id ]]; then
     local create_mutation='mutation($projectId: ID!, $name: String!) {
       createProjectV2View(input: {projectId: $projectId, name: $name, layout: TABLE_LAYOUT}) {
@@ -646,7 +650,9 @@ setup_project_view() {
     }'
     view_id=$(gh api graphql -f query="$create_mutation" -F projectId="$project_id" -f name="$name" \
       --jq '.data.createProjectV2View.projectV2View.id' 2>/dev/null || true)
+    current_filter=''
   fi
+  [[ $current_filter == "$filter" ]] && return 0
   if [[ -z $view_id ]]; then
     say "Project viewを作成または特定できませんでした（best-effort）: $name" >&2
     return 0
@@ -659,19 +665,24 @@ setup_project_view() {
 }
 
 setup_project_views() {
-  local number=$1 owner=$2 project_id
+  local number=$1 owner=$2 project_id views_tsv
   project_id=$(gh project view "$number" --owner "$owner" --format json --jq .id)
   [[ -n $project_id ]] || fail 'could not identify the repository Project ID'
-  setup_project_view "$project_id" 'Triage' 'is:issue is:open no:category'
-  setup_project_view "$project_id" 'Queue' 'is:issue is:open label:"agent:queued"'
-  setup_project_view "$project_id" 'Active' 'is:issue is:open label:"agent:running","agent:in-review"'
-  setup_project_view "$project_id" 'Needs input' 'is:issue is:open label:"agent:needs-input"'
-  setup_project_view "$project_id" 'Recovery' 'is:issue label:"agent:failed","agent:stale"'
-  setup_project_view "$project_id" 'Recently completed' 'is:issue label:"agent:completed" updated:@today-30d'
-  setup_project_view "$project_id" 'Open PRs' 'is:pr is:open'
-  setup_project_view "$project_id" 'Closed PRs' 'is:pr is:closed'
-  setup_project_view "$project_id" 'All open issues' 'is:issue is:open'
-  setup_project_view "$project_id" 'All closed issues' 'is:issue is:closed'
+  views_tsv=$(gh api graphql -f query='query($projectId: ID!) {
+    node(id: $projectId) {
+      ... on ProjectV2 { views(first: 100) { nodes { id name filter } } }
+    }
+  }' -F projectId="$project_id" --jq '.data.node.views.nodes[] | [.id, .name, (.filter // "")] | @tsv' 2>/dev/null || true)
+  setup_project_view "$project_id" 'Triage' 'is:issue is:open no:category' "$views_tsv"
+  setup_project_view "$project_id" 'Queue' 'is:issue is:open label:"agent:queued"' "$views_tsv"
+  setup_project_view "$project_id" 'Active' 'is:issue is:open label:"agent:running","agent:in-review"' "$views_tsv"
+  setup_project_view "$project_id" 'Needs input' 'is:issue is:open label:"agent:needs-input"' "$views_tsv"
+  setup_project_view "$project_id" 'Recovery' 'is:issue label:"agent:failed","agent:stale"' "$views_tsv"
+  setup_project_view "$project_id" 'Recently completed' 'is:issue label:"agent:completed" updated:@today-30d' "$views_tsv"
+  setup_project_view "$project_id" 'Open PRs' 'is:pr is:open' "$views_tsv"
+  setup_project_view "$project_id" 'Closed PRs' 'is:pr is:closed' "$views_tsv"
+  setup_project_view "$project_id" 'All open issues' 'is:issue is:open' "$views_tsv"
+  setup_project_view "$project_id" 'All closed issues' 'is:issue is:closed' "$views_tsv"
 }
 
 setup_project_content() {
@@ -688,16 +699,20 @@ setup_project_content() {
       fi
     fi
   done < <(
-    repo_api issues --method GET -f state=all -f per_page=100 --paginate \
+    repo_api issues --method GET -f state=open -f per_page=100 --paginate \
       --jq '.[] | select(.pull_request == null) | .html_url' 2>/dev/null || true
-    repo_api pulls --method GET -f state=all -f per_page=100 --paginate --jq '.[].html_url' 2>/dev/null || true
+    repo_api pulls --method GET -f state=open -f per_page=100 --paginate --jq '.[].html_url' 2>/dev/null || true
   )
 }
 
 cmd_setup() {
   preflight
   setup_labels
-  setup_project
+  if graphql_budget_allows "$((GRAPHQL_RESERVE + 50))"; then
+    setup_project
+  else
+    say 'GraphQL残量がsetup用reserveを下回るためProject構成を延期します。Labelキューは利用できます。' >&2
+  fi
   reconcile_queued_categories
   say "Agentic Loop GitHub queue is ready for $(repo_name)."
 }
@@ -1555,10 +1570,20 @@ metrics_fetch_events() {
 }
 
 metrics_fetch_pulls() {
-  repo_api pulls --method GET -f state=all -f per_page=100 --paginate --jq '
-    .[] | [.number, (.created_at | fromdateiso8601),
-     (if .merged_at == null then 0 else (.merged_at | fromdateiso8601) end), .head.ref
-    ] | @tsv' 2>/dev/null
+  local since=$1 page=1 rows oldest count
+  while :; do
+    rows=$(repo_api pulls --method GET -f state=all -f sort=updated -f direction=desc -f per_page=100 -f page="$page" --jq '
+      .[] | [.number, (.created_at | fromdateiso8601),
+       (if .merged_at == null then 0 else (.merged_at | fromdateiso8601) end), .head.ref,
+       .updated_at
+      ] | @tsv' 2>/dev/null) || return 1
+    [[ -n $rows ]] || break
+    awk -F '\t' '{print $1 "\t" $2 "\t" $3 "\t" $4}' <<< "$rows"
+    count=$(wc -l <<< "$rows")
+    oldest=$(tail -n 1 <<< "$rows" | cut -f5)
+    [[ $count -lt 100 || $oldest < $since ]] && break
+    page=$((page + 1))
+  done
 }
 
 # The value of one "key=value" token inside an already-extracted marker
@@ -1886,7 +1911,7 @@ cmd_metrics() {
     WARNINGS+=('comment（イベントmarker）の取得に失敗したため、待ち時間・試行・失敗理由系の指標は欠損しています。')
   fi
 
-  if pulls_raw=$(metrics_fetch_pulls); then
+  if pulls_raw=$(metrics_fetch_pulls "$since_iso"); then
     local _ pcreated pmerged pref pissue
     while IFS=$'\t' read -r _ pcreated pmerged pref; do
       [[ $pref =~ ^agent/issue-([0-9]+)$ ]] || continue
@@ -1969,19 +1994,59 @@ queue_project_sync() {
   ( flock 9; grep -Fxq -- "$*" "$STATE_ROOT/project-pending" 2>/dev/null || printf '%s\n' "$*" >> "$STATE_ROOT/project-pending" ) 9> "$STATE_ROOT/project-pending.lock"
 }
 
+PROJECT_METADATA_LOADED=0
+PROJECT_ITEMS_LOADED=0
+PROJECT_ID=''
+declare -A PROJECT_FIELD_IDS=() PROJECT_OPTION_IDS=() PROJECT_ITEM_IDS=() PROJECT_URLS=()
+
+load_project_context() {
+  (( PROJECT_METADATA_LOADED == 0 )) || return 0
+  [[ -r $STATE_ROOT/project.env ]] || return 1
+  local PROJECT_OWNER='' PROJECT_NUMBER='' key value row name id option option_id
+  while IFS='=' read -r key value; do
+    case $key in PROJECT_OWNER) PROJECT_OWNER=$value ;; PROJECT_NUMBER) PROJECT_NUMBER=$value ;; esac
+  done < "$STATE_ROOT/project.env"
+  [[ -n $PROJECT_OWNER && $PROJECT_NUMBER =~ ^[0-9]+$ ]] || return 1
+  PROJECT_ID=$(gh project view "$PROJECT_NUMBER" --owner "$PROJECT_OWNER" --format json --jq .id 2>/dev/null) || return 1
+  while IFS=$'\t' read -r name id option option_id; do
+    [[ -n $name && -n $id ]] || continue
+    PROJECT_FIELD_IDS[$name]=$id
+    [[ -n $option && -n $option_id ]] && PROJECT_OPTION_IDS["$name:$option"]=$option_id
+  done < <(gh project field-list "$PROJECT_NUMBER" --owner "$PROJECT_OWNER" --format json --jq '.fields[] | . as $field | if (.options // [] | length) == 0 then [.name, .id, "", ""] | @tsv else .options[] | [$field.name, $field.id, .name, .id] | @tsv end' 2>/dev/null || true)
+  [[ -n $PROJECT_ID ]] || return 1
+  PROJECT_METADATA_LOADED=1
+}
+
+load_project_items() {
+  (( PROJECT_ITEMS_LOADED == 0 )) || return 0
+  load_project_context || return 1
+  local PROJECT_OWNER='' PROJECT_NUMBER='' key value number url id
+  while IFS='=' read -r key value; do
+    case $key in PROJECT_OWNER) PROJECT_OWNER=$value ;; PROJECT_NUMBER) PROJECT_NUMBER=$value ;; esac
+  done < "$STATE_ROOT/project.env"
+  while IFS=$'\t' read -r number url id; do
+    [[ -n $url ]] && PROJECT_URLS[$url]=1
+    [[ $number =~ ^[0-9]+$ && -n $id ]] && PROJECT_ITEM_IDS[$number]=$id
+  done < <(gh project item-list "$PROJECT_NUMBER" --owner "$PROJECT_OWNER" --format json --limit 1000 \
+    --jq '.items[] | [(.content.number // ""), (.content.url // ""), .id] | @tsv' 2>/dev/null || true)
+  PROJECT_ITEMS_LOADED=1
+}
+
 project_add_content() {
   local url=$1
   graphql_budget_allows "$((GRAPHQL_RESERVE + 1))" || { queue_project_sync "content $url"; return 0; }
   [[ -r $STATE_ROOT/project.env ]] || return 0
-  local PROJECT_OWNER='' PROJECT_NUMBER='' key value existing
+  local PROJECT_OWNER='' PROJECT_NUMBER='' key value added_id number
   while IFS='=' read -r key value; do
     case $key in PROJECT_OWNER) PROJECT_OWNER=$value ;; PROJECT_NUMBER) PROJECT_NUMBER=$value ;; esac
   done < "$STATE_ROOT/project.env"
   [[ -n $PROJECT_OWNER && $PROJECT_NUMBER =~ ^[0-9]+$ ]] || return 0
-  existing=$(gh project item-list "$PROJECT_NUMBER" --owner "$PROJECT_OWNER" --format json --limit 1000 \
-    --jq '.items[].content.url // empty' 2>/dev/null) || { queue_project_sync "content $url"; return 0; }
-  grep -Fxq -- "$url" <<< "$existing" && return 0
-  gh project item-add "$PROJECT_NUMBER" --owner "$PROJECT_OWNER" --url "$url" >/dev/null 2>&1 || queue_project_sync "content $url"
+  load_project_items || { queue_project_sync "content $url"; return 0; }
+  [[ -n ${PROJECT_URLS[$url]:-} ]] && return 0
+  added_id=$(gh project item-add "$PROJECT_NUMBER" --owner "$PROJECT_OWNER" --url "$url" --format json --jq .id 2>/dev/null) || { queue_project_sync "content $url"; return 0; }
+  PROJECT_URLS[$url]=1
+  number=${url##*/}
+  [[ $number =~ ^[0-9]+$ && -n $added_id ]] && PROJECT_ITEM_IDS[$number]=$added_id
 }
 
 project_add_issue() {
@@ -2015,10 +2080,9 @@ project_sync_state() {
     in-review) option='In review' ;; completed) option=Done ;; failed) option=Failed ;; stale) option=Stale ;;
     blocked) option=Blocked ;; *) option=Inbox ;;
   esac
-  project_id=$(gh project view "$PROJECT_NUMBER" --owner "$PROJECT_OWNER" --format json --jq .id 2>/dev/null) || { queue_project_sync "state $issue $state"; return 0; }
-  item_id=$(gh project item-list "$PROJECT_NUMBER" --owner "$PROJECT_OWNER" --format json --limit 1000 --jq ".items[] | select(.content.number == $issue) | .id" 2>/dev/null | head -n 1) || true
-  field_id=$(gh project field-list "$PROJECT_NUMBER" --owner "$PROJECT_OWNER" --format json --jq '.fields[] | select(.name == "Agent status") | .id' 2>/dev/null | head -n 1) || true
-  option_id=$(gh project field-list "$PROJECT_NUMBER" --owner "$PROJECT_OWNER" --format json --jq ".fields[] | select(.name == \"Agent status\") | .options[] | select(.name == \"$option\") | .id" 2>/dev/null | head -n 1) || true
+  load_project_items || { queue_project_sync "state $issue $state"; return 0; }
+  project_id=$PROJECT_ID; item_id=${PROJECT_ITEM_IDS[$issue]:-}
+  field_id=${PROJECT_FIELD_IDS["Agent status"]:-}; option_id=${PROJECT_OPTION_IDS["Agent status:$option"]:-}
   [[ -n $project_id && -n $item_id && -n $field_id && -n $option_id ]] || { queue_project_sync "state $issue $state"; return 0; }
   gh project item-edit --id "$item_id" --project-id "$project_id" --field-id "$field_id" --single-select-option-id "$option_id" >/dev/null 2>&1 || queue_project_sync "state $issue $state"
 }
@@ -2036,10 +2100,9 @@ project_sync_category() {
     integrity-incident) option='Integrity incident' ;; availability-incident) option='Availability incident' ;;
     feature) option=Feature ;; improvement) option=Improvement ;; *) return 0 ;;
   esac
-  project_id=$(gh project view "$PROJECT_NUMBER" --owner "$PROJECT_OWNER" --format json --jq .id 2>/dev/null) || return 0
-  item_id=$(gh project item-list "$PROJECT_NUMBER" --owner "$PROJECT_OWNER" --format json --limit 1000 --jq ".items[] | select(.content.number == $issue) | .id" 2>/dev/null | head -n 1) || return 0
-  field_id=$(gh project field-list "$PROJECT_NUMBER" --owner "$PROJECT_OWNER" --format json --jq '.fields[] | select(.name == "Category") | .id' 2>/dev/null | head -n 1) || return 0
-  option_id=$(gh project field-list "$PROJECT_NUMBER" --owner "$PROJECT_OWNER" --format json --jq ".fields[] | select(.name == \"Category\") | .options[] | select(.name == \"$option\") | .id" 2>/dev/null | head -n 1) || return 0
+  load_project_items || return 0
+  project_id=$PROJECT_ID; item_id=${PROJECT_ITEM_IDS[$issue]:-}
+  field_id=${PROJECT_FIELD_IDS[Category]:-}; option_id=${PROJECT_OPTION_IDS["Category:$option"]:-}
   [[ -n $project_id && -n $item_id && -n $field_id && -n $option_id ]] || return 0
   gh project item-edit --id "$item_id" --project-id "$project_id" --field-id "$field_id" --single-select-option-id "$option_id" >/dev/null 2>&1 || true
 }
@@ -2057,9 +2120,8 @@ project_sync_conflict() {
     case $key in PROJECT_OWNER) PROJECT_OWNER=$value ;; PROJECT_NUMBER) PROJECT_NUMBER=$value ;; esac
   done < "$STATE_ROOT/project.env"
   [[ -n $PROJECT_OWNER && $PROJECT_NUMBER =~ ^[0-9]+$ ]] || return 0
-  project_id=$(gh project view "$PROJECT_NUMBER" --owner "$PROJECT_OWNER" --format json --jq .id 2>/dev/null) || return 0
-  item_id=$(gh project item-list "$PROJECT_NUMBER" --owner "$PROJECT_OWNER" --format json --limit 1000 --jq ".items[] | select(.content.number == $issue) | .id" 2>/dev/null | head -n 1) || return 0
-  field_id=$(gh project field-list "$PROJECT_NUMBER" --owner "$PROJECT_OWNER" --format json --jq '.fields[] | select(.name == "Blocked by") | .id' 2>/dev/null | head -n 1) || return 0
+  load_project_items || return 0
+  project_id=$PROJECT_ID; item_id=${PROJECT_ITEM_IDS[$issue]:-}; field_id=${PROJECT_FIELD_IDS["Blocked by"]:-}
   [[ -n $project_id && -n $item_id && -n $field_id ]] || return 0
   gh project item-edit --id "$item_id" --project-id "$project_id" --field-id "$field_id" --text "$note" >/dev/null 2>&1 || true
 }
@@ -2082,9 +2144,50 @@ reconcile_pending_project() {
   rm -f "$pending"
 }
 
+# One open-Issue snapshot backs all label-state maintenance in a supervisor
+# poll. Without it, an idle poll performs separate list requests for running,
+# queued, needs-input, failed and blocked Issues. Rows are:
+# number<TAB>agent-state<TAB>updated_at<TAB>created_at<TAB>body(base64)<TAB>categories.
+SUPERVISOR_SNAPSHOT=''
+refresh_supervisor_snapshot() {
+  local target="$STATE_ROOT/open-issues.$$"
+  if repo_api issues --method GET -f state=open -f per_page=100 --paginate --jq '
+    .[] | select(.pull_request == null) |
+    [.number,
+     (if any(.labels[]; .name == "agent:running") then "running"
+      elif any(.labels[]; .name == "agent:queued") then "queued"
+      elif any(.labels[]; .name == "agent:needs-input") then "needs-input"
+      elif any(.labels[]; .name == "agent:failed") then "failed"
+      elif any(.labels[]; .name == "agent:blocked") then "blocked"
+      else "other" end),
+     (.updated_at // "-"), .created_at,
+     (if (.body // "") == "" then "-" else ((.body // "") | @base64) end),
+     (([.labels[].name | select(startswith("category:"))] | join(",")) as $categories | if $categories == "" then "-" else $categories end),
+     (if any(.labels[]; .name == "category:loop-continuity") then 0 elif any(.labels[]; .name == "category:confidentiality-incident") then 1 elif any(.labels[]; .name == "category:integrity-incident") then 2 elif any(.labels[]; .name == "category:availability-incident") then 3 elif any(.labels[]; .name == "category:feature") then 4 else 5 end),
+     (if any(.labels[]; .name == "priority:critical") then 0 elif any(.labels[]; .name == "priority:high") then 1 elif any(.labels[]; .name == "priority:medium") then 2 elif any(.labels[]; .name == "priority:low") then 3 else 4 end)
+    ] | @tsv' > "$target"; then
+    SUPERVISOR_SNAPSHOT=$target
+    return 0
+  fi
+  rm -f "$target"
+  SUPERVISOR_SNAPSHOT=''
+  return 1
+}
+
+snapshot_state_rows() {
+  local state=$1
+  [[ -n $SUPERVISOR_SNAPSHOT && -r $SUPERVISOR_SNAPSHOT ]] || return 1
+  awk -F '\t' -v state="$state" '$2 == state' "$SUPERVISOR_SNAPSHOT"
+}
+
+clear_supervisor_snapshot() {
+  [[ -z $SUPERVISOR_SNAPSHOT ]] || rm -f "$SUPERVISOR_SNAPSHOT"
+  SUPERVISOR_SNAPSHOT=''
+}
+
 reconcile_queued_categories() {
   local issue categories category found name payload
-  while IFS= read -r issue; do
+  while IFS=$'\t' read -r issue _ _ _ _ categories _; do
     [[ -n $issue ]] || continue
     categories=$(repo_api "issues/$issue" --jq '[.labels[].name | select(startswith("category:"))] | join(",")') || continue
     category=''; found=0
@@ -2104,7 +2207,7 @@ reconcile_queued_categories() {
     else
       comment_issue "$issue" "<!-- agentic-loop:category-reconciled reason=multiple selected=$category -->\n複数のカテゴリを検出したため、定義済みの最上位カテゴリ \`category:$category\` だけを残しました。必要ならqueued中にカテゴリLabelを1つだけ残して再トリアージしてください。"
     fi
-  done < <(repo_api issues --method GET -f state=open -f labels="$(state_label queued)" -f per_page=100 --paginate --jq '.[] | select(.pull_request == null) | .number' 2>/dev/null || true)
+  done < <(snapshot_state_rows queued || repo_api issues --method GET -f state=open -f labels="$(state_label queued)" -f per_page=100 --paginate --jq '.[] | select(.pull_request == null) | [.number, "queued", "", "", "", ([.labels[].name | select(startswith("category:"))] | join(","))] | @tsv' 2>/dev/null || true)
 }
 
 cmd_sync_issue() {
@@ -2117,6 +2220,11 @@ cmd_sync_issue() {
 lease_body() {
   local worker=$1 now=$2 expires=$3
   printf '<!-- agentic-loop:claim worker=%s created=%s expires=%s -->\\n<!-- agentic-loop:lease worker=%s heartbeat=%s expires=%s -->\\nAgentic Loop worker `%s` のハートビートです（排他的claimを兼ねます）。リースは epoch %s に期限切れとなります。' "$worker" "$now" "$expires" "$worker" "$now" "$expires" "$worker" "$expires"
+}
+
+recent_lease_since() {
+  local now=${1:-$(date +%s)}
+  date -u -d "@$((now - LEASE_SECONDS - 60))" '+%Y-%m-%dT%H:%M:%SZ'
 }
 
 lease_file() { printf '%s\n' "$STATE_ROOT/workers/$1.lease"; }
@@ -2177,8 +2285,9 @@ lease_start() {
 # A loser never changes Labels or starts a worker. The winning comment is then
 # reused as the ordinary heartbeat lease, avoiding an extra durable object.
 claim_acquire() {
-  local issue=$1 worker=$2 now expires id row cid body winner='' current state labels candidate_expires
+  local issue=$1 worker=$2 now expires id row cid body winner='' current state labels candidate_expires since
   now=$(date +%s); expires=$((now + LEASE_SECONDS))
+  since=$(recent_lease_since "$now")
   current=$(repo_api "issues/$issue" --jq '[.state, ([.labels[].name] | join(","))] | @tsv' 2>/dev/null) || return 1
   IFS=$'\t' read -r state labels <<< "$current"
   [[ $state == open && ,$labels, == *,agent:queued,* ]] || return 1
@@ -2196,7 +2305,7 @@ claim_acquire() {
     candidate_expires=$(sed -n 's/.*agentic-loop:claim[^>]*expires=\([0-9][0-9]*\).*/\1/p' <<< "$body" | head -n 1)
     [[ $candidate_expires =~ ^[0-9]+$ && $candidate_expires -ge $now ]] || continue
     [[ -z $winner || $cid -lt $winner ]] && winner=$cid
-  done < <(repo_api "issues/$issue/comments" --method GET -f per_page=100 --paginate --jq '.[] | select(.body | contains("agentic-loop:claim")) | [.id, .body] | @tsv | @base64' 2>/dev/null || true)
+  done < <(repo_api "issues/$issue/comments" --method GET -f since="$since" -f per_page=100 --paginate --jq '.[] | select(.body | contains("agentic-loop:claim")) | [.id, .body] | @tsv | @base64' 2>/dev/null || true)
   if [[ $winner != "$id" ]]; then
     repo_api "issues/comments/$id" --method PATCH -f body="<!-- agentic-loop:claim worker=$worker created=$now expires=0 -->\\nclaim競合に敗れたため解放しました。" >/dev/null 2>&1 || true
     return 1
@@ -2277,8 +2386,9 @@ worker_pid_live() {
 # expired (or missing) lease is recovered. Reading the lease only for Issues
 # without a local worker also cuts API usage.
 recover_expired() {
-  local issue body expires now pidfile count
+  local issue body expires now pidfile count since
   now=$(date +%s)
+  since=$(recent_lease_since "$now")
   while IFS= read -r issue; do
     [[ -n $issue ]] || continue
     worker_alive "$issue" && continue
@@ -2286,7 +2396,7 @@ recover_expired() {
     if [[ -e $pidfile ]]; then
       clear_worker_local "$issue"
     else
-      body=$(repo_api "issues/$issue/comments" --method GET -f per_page=100 --paginate --jq '[.[].body | select(contains("agentic-loop:lease"))] | last // ""' 2>/dev/null | tail -n 1 || true)
+      body=$(repo_api "issues/$issue/comments" --method GET -f since="$since" -f per_page=100 --paginate --jq '[.[].body | select(contains("agentic-loop:lease"))] | last // ""' 2>/dev/null | tail -n 1 || true)
       expires=$(printf '%s\n' "$body" | sed -n 's/.*expires=\([0-9][0-9]*\).*/\1/p' | head -n 1)
       [[ -n $expires && $expires -ge $now ]] && continue
     fi
@@ -2306,7 +2416,7 @@ recover_expired() {
       set_issue_state "$issue" queued
       comment_issue "$issue" '<!-- agentic-loop:recovered -->\n担当workerの終了、またはリース期限切れを検出したため、Issueを安全にキューへ戻しました。'
     fi
-  done < <(repo_api issues --method GET -f state=open -f labels="$(state_label running)" -f per_page=100 --paginate --jq '.[] | select(.pull_request == null) | .number' 2>/dev/null || true)
+  done < <(snapshot_state_rows running | cut -f1 || repo_api issues --method GET -f state=open -f labels="$(state_label running)" -f per_page=100 --paginate --jq '.[] | select(.pull_request == null) | .number' 2>/dev/null || true)
 }
 
 # A lease heartbeat only proves the worker process is alive, not that it is
@@ -2357,7 +2467,7 @@ requeue_answered() {
       set_issue_state "$issue" queued
       comment_issue "$issue" '<!-- agentic-loop:answer-detected -->\n返信を検出したため、このIssueをキューへ戻しました。'
     fi
-  done < <(repo_api issues --method GET -f state=open -f labels="$(state_label needs-input)" -f per_page=100 --paginate --jq '.[] | select(.pull_request == null) | .number' 2>/dev/null || true)
+  done < <(snapshot_state_rows needs-input | cut -f1 || repo_api issues --method GET -f state=open -f labels="$(state_label needs-input)" -f per_page=100 --paginate --jq '.[] | select(.pull_request == null) | .number' 2>/dev/null || true)
 }
 
 triage_stale_queued() {
@@ -2372,7 +2482,7 @@ triage_stale_queued() {
     project_sync_state "$issue" stale
     comment_issue "$issue" "<!-- agentic-loop:stale days=$STALE_DAYS updated=$updated_at -->\nこのIssueは \`agent:queued\` のまま$STALE_DAYS日間更新されなかったため、claim前のトリアージで \`agent:stale\` へ移し、クローズしました。再開するにはIssueをreopenし、内容を確認・更新してから \`agent:queued\` Labelを付けてください。"
     repo_api "issues/$issue" --method PATCH -f state=closed >/dev/null
-  done < <(repo_api issues --method GET -f state=open -f labels="$(state_label queued)" -f per_page=100 --paginate --jq '.[] | select(.pull_request == null) | [.number, .updated_at] | @tsv' 2>/dev/null || true)
+  done < <(snapshot_state_rows queued | awk -F '\t' '{print $1 "\t" $3}' || repo_api issues --method GET -f state=open -f labels="$(state_label queued)" -f per_page=100 --paginate --jq '.[] | select(.pull_request == null) | [.number, .updated_at] | @tsv' 2>/dev/null || true)
 }
 
 # Per-Issue attempt tracking (count + last-attempt timestamp) under Git-external
@@ -2421,7 +2531,7 @@ retry_failed() {
     attempt_cooldown_elapsed "$issue" || continue
     set_issue_state "$issue" queued || continue
     comment_issue "$issue" "<!-- agentic-loop:retry attempt=$count -->\n一時的な失敗の可能性があるため自動的に再試行キューへ戻します（試行 $count/$MAX_ATTEMPTS）。上限に達したら解決不能とみなしてcloseします。" || true
-  done < <(repo_api issues --method GET -f state=open -f labels="$(state_label failed)" -f per_page=100 --paginate --jq '.[] | select(.pull_request == null) | .number' 2>/dev/null)
+  done < <(snapshot_state_rows failed | cut -f1 || repo_api issues --method GET -f state=open -f labels="$(state_label failed)" -f per_page=100 --paginate --jq '.[] | select(.pull_request == null) | .number' 2>/dev/null)
 }
 
 # --- Issue dependency gating (see docs/operations/issue-queue.md) ---
@@ -2482,13 +2592,24 @@ dependency_refs_from_body() {
 # body syntax alone, 3 on missing permission (401/403), 1 on any other
 # (transient) API failure.
 dependency_native_refs() {
-  local issue=$1 error out
+  local issue=$1 error out cache now fetched cached_rc
   mkdir -p "$(dependency_state_dir)"
+  cache="$(dependency_state_dir)/native-$issue"
+  now=$(date +%s)
+  if [[ -r $cache ]]; then
+    IFS=$'\t' read -r fetched cached_rc < "$cache" || true
+    if [[ $fetched =~ ^[0-9]+$ && $cached_rc =~ ^[02]$ && $((now - fetched)) -lt 120 ]]; then
+      tail -n +2 "$cache"
+      return "$cached_rc"
+    fi
+  fi
   error="$(dependency_state_dir)/native-error.$$"
   if out=$(repo_api "issues/$issue/dependencies/blocked_by" --jq '.[].number' 2>"$error"); then
-    rm -f "$error"; printf '%s\n' "$out"; return 0
+    rm -f "$error"
+    { printf '%s\t0\n' "$now"; [[ -z $out ]] || printf '%s\n' "$out"; } > "$cache"
+    printf '%s\n' "$out"; return 0
   fi
-  if grep -Eqi 'HTTP 404' "$error"; then rm -f "$error"; return 2; fi
+  if grep -Eqi 'HTTP 404' "$error"; then printf '%s\t2\n' "$now" > "$cache"; rm -f "$error"; return 2; fi
   if grep -Eqi 'HTTP 40[13]' "$error"; then rm -f "$error"; return 3; fi
   rm -f "$error"; return 1
 }
@@ -2662,7 +2783,7 @@ requeue_dependency_ready() {
       set_issue_state "$issue" queued
       project_sync_state "$issue" queued
     fi
-  done < <(repo_api issues --method GET -f state=open -f labels="$(state_label blocked)" -f per_page=100 --paginate --jq '.[] | select(.pull_request == null) | [.number, (.body // "" | @base64)] | @tsv' 2>/dev/null || true)
+  done < <(snapshot_state_rows blocked | awk -F '\t' '{print $1 "\t" $5}' || repo_api issues --method GET -f state=open -f labels="$(state_label blocked)" -f per_page=100 --paginate --jq '.[] | select(.pull_request == null) | [.number, (.body // "" | @base64)] | @tsv' 2>/dev/null || true)
 }
 
 # --- Change-scope conflict avoidance (see docs/operations/issue-queue.md) ---
@@ -2852,10 +2973,11 @@ clear_conflict_wait() {
 # GitHub's REST reflection lag still reports as running immediately after a
 # requeue. Mirrors recover_expired's liveness test so the two agree.
 issue_genuinely_running() {
-  local issue=$1 body expires now
+  local issue=$1 body expires now since
   worker_pid_live "$issue" && return 0
   now=$(date +%s)
-  body=$(repo_api "issues/$issue/comments" --method GET -f per_page=100 --paginate --jq '[.[].body | select(contains("agentic-loop:lease"))] | last // ""' 2>/dev/null | tail -n 1 || true)
+  since=$(recent_lease_since "$now")
+  body=$(repo_api "issues/$issue/comments" --method GET -f since="$since" -f per_page=100 --paginate --jq '[.[].body | select(contains("agentic-loop:lease"))] | last // ""' 2>/dev/null | tail -n 1 || true)
   expires=$(printf '%s\n' "$body" | sed -n 's/.*expires=\([0-9][0-9]*\).*/\1/p' | head -n 1)
   [[ -n $expires && $expires -ge $now ]]
 }
@@ -2915,7 +3037,13 @@ claim_next() {
     fi
     lease_release "$issue" "$worker"
     clear_worker_local "$issue"
-  done < <(repo_api issues --method GET -f state=open -f labels="$(state_label queued)" -f per_page=100 --paginate --jq '.[] | select(.pull_request == null) | ['"$(queue_rank_jq)"', .created_at, .number, (.body // "" | @base64)] | @tsv' 2>/dev/null | sort -k1,1n -k2,2n -k3,3 -k4,4n | awk -F '\t' '{print $4 "\t" $5}')
+  done < <(
+    if [[ -n $SUPERVISOR_SNAPSHOT && -r $SUPERVISOR_SNAPSHOT ]]; then
+      snapshot_state_rows queued | awk -F '\t' '{print $7 "\t" $8 "\t" $4 "\t" $1 "\t" $5}' | sort -k1,1n -k2,2n -k3,3 -k4,4n | cut -f4,5
+    else
+      repo_api issues --method GET -f state=open -f labels="$(state_label queued)" -f per_page=100 --paginate --jq '.[] | select(.pull_request == null) | ['"$(queue_rank_jq)"', .created_at, .number, (.body // "" | @base64)] | @tsv' 2>/dev/null | sort -k1,1n -k2,2n -k3,3 -k4,4n | awk -F '\t' '{print $4 "\t" $5}'
+    fi
+  )
   return 1
 }
 
@@ -2966,7 +3094,7 @@ next_poll_interval() {
 }
 
 supervise() {
-  trap 'rm -f "$STATE_ROOT/supervisor.pid"; rmdir "$STATE_ROOT/supervisor.lock" 2>/dev/null || true' EXIT
+  trap 'clear_supervisor_snapshot; rm -f "$STATE_ROOT/supervisor.pid"; rmdir "$STATE_ROOT/supervisor.lock" 2>/dev/null || true' EXIT
   # Graceful shutdown (see docs/decisions/0003): on SIGTERM/SIGINT (systemctl
   # stop, kill, OS/WSL shutdown) stop claiming, terminate each worker's process
   # group so nothing is orphaned, and requeue its Issue so the work is not lost.
@@ -2982,6 +3110,8 @@ supervise() {
   enforce_worker_timeout || true
   rebuild_scope_cache || true
   while :; do
+    clear_supervisor_snapshot
+    refresh_supervisor_snapshot || true
     requeue_answered || true
     requeue_dependency_ready || true
     if [[ -e $STATE_ROOT/stop.requested ]]; then
@@ -2997,6 +3127,12 @@ supervise() {
       triage_stale_queued || true
       retry_failed || true
       if exhaustion_note_pause && budget_note_pause && core_budget_note_pause; then
+        # Maintenance above may have moved needs-input/failed/blocked Issues
+        # into queued. Refresh once before claiming so those transitions remain
+        # same-poll observable while still replacing the former seven lists
+        # with at most two consolidated snapshots.
+        clear_supervisor_snapshot
+        refresh_supervisor_snapshot || true
         while [[ $(worker_count) -lt $MAX_WORKERS ]]; do
           local issue worker claim
           claim=$(claim_next) || break
