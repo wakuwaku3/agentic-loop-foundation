@@ -223,13 +223,14 @@ lease切れ、Supervisor再起動、端末再起動、worker異常終了の後�
 | `committed-unpushed` | local commitがありremoteと不一致 | plan/execを継続 |
 | `pushed-no-pr` | remote tipとheadが一致しPRがない | plan/execを継続 |
 | `pr-open` | 対応するopen PRがある | 既存branch/PRを再利用する指示付きでplan/execを継続 |
+| `needs-rebase` | open PRがdefault branchよりbehind、RESTでmerge不可、または競合状態 | `git merge origin/<default-branch>`でbaseを通常取り込み、競合解消、通常push、checks/review再確認、既存PRのmerge、default branch検証まで継続 |
 | `pr-merged` | merge済みPRのhead commitがbranchのheadと一致 | providerを起動せず、cleanupと完了報告だけを行う |
 | `needs-decision` | local/remoteが分岐、またはmerge済みPRのhead commitが不一致 | providerを起動せず `agent:needs-input` にし復旧手順を提示する |
 | `unsafe-foreign` | 専用worktree pathが別Issueのbranchに登録済み、またはbranchが別worktreeで使用中 | providerを起動せず `agent:failed` にし、既存成果物は一切変更しない |
 
 未commitの変更（dirty）は単独では異常とせず、そのままplan/execへ引き継ぐ。`pr-merged`・`needs-decision`・`unsafe-foreign` はいずれもproviderを起動せずに確定するため、二重PR・二重merge・不正なcleanupは構造的に発生しない。安全に再開できない（`needs-decision`・`unsafe-foreign`）場合、worktree・local branch・remote branchのいずれも削除しない。
 
-観測結果はIssueごと1件の `agentic-loop:handoff` コメント（lease同様PATCHで更新）として記録し、phase・branch・head・remote・PR番号・checks・dirty・divergedを含む。この内容はGit/GitHubの観測結果だけから構成されるためsecretやlog本文を含みえず、専用のsecret guardを追加で通す必要がない。同じ内容はplan/exec promptの先頭にも「再開コンテキスト」として注入し、workerが既存branch/PRを再利用するよう明示する。
+観測結果はIssueごと1件の `agentic-loop:handoff` コメント（lease同様PATCHで更新）として記録し、phase・branch・head・remote・PR番号・checks・base・behind・mergeable・dirty・divergedを含む。この内容はGit/GitHubの観測結果だけから構成されるためsecretやlog本文を含みえず、専用のsecret guardを追加で通す必要がない。同じ内容はplan/exec promptの先頭にも「再開コンテキスト」として注入し、workerが既存branch/PRを再利用するよう明示する。`needs-rebase` はchecksが成功していてもbase競合が未解消であることをhandoffと`status`で示し、workerはrebase・reset・force-pushを使わず通常mergeで収束する。
 
 Providerを起動する直前に `worker_confirm_running_label()` がGitHub上のLabelが依然 `agent:running` であることを再確認する。claimからworker起動までの間にIssueの状態が変わっていた場合（stale/duplicateな起動など）、Label・comment・Git状態のいずれも変更せず静かに終了する。
 

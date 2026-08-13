@@ -221,6 +221,10 @@ case "${1:-} ${2:-}" in
       else awk -v n="$issue" '$1 == n {print "agent:" $2}' "$state"; fi
     elif [[ $endpoint =~ ^commits/.+/check-runs$ ]]; then
       [[ -n ${FAKE_RESUME_CHECKS:-} ]] && printf '%s\n' "$FAKE_RESUME_CHECKS"
+    elif [[ $endpoint =~ ^pulls/[0-9]+$ ]]; then
+      printf '%s\x1f%s\x1f%s\x1f%s\x1f%s\n' \
+        "${FAKE_RESUME_BASE_REF:-main}" "${FAKE_RESUME_BASE_SHA:-}" "${FAKE_RESUME_HEAD_SHA:-}" \
+        "${FAKE_RESUME_MERGEABLE:-null}" "${FAKE_RESUME_MERGEABLE_STATE:-unknown}"
     elif [[ $endpoint == pulls && $* == *'resume-probe-prs'* ]]; then
       printf '%s\x1f%s\x1f%s\x1f%s\x1f%s\n' \
         "${FAKE_RESUME_MERGED_PR:-}" "${FAKE_RESUME_MERGED_SHA:-}" "${FAKE_RESUME_MERGED_URL:-}" \
@@ -1615,6 +1619,80 @@ assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'phase=pr-open' 'an open-PR 
 assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'checks=in_progress' 'an open-PR resume check status was not recorded in the handoff'
 git -C "$target" worktree remove --force "$target-worktrees/issue-17" 2>/dev/null || true
 git -C "$target" branch -D agent/issue-17 >/dev/null 2>&1 || true
+
+# An open PR that is behind the fetched default branch must be distinguished
+# from an ahead-only PR even if its checks are already green.  The provider is
+# instructed to merge (not rebase) the default branch, resolve conflicts,
+# normally push, re-check, merge the existing PR, and verify default branch.
+printf '18 running open\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+: > "$FAKE_GH_ROOT/codex-calls"
+git -C "$target" worktree add --quiet -b agent/issue-18 "$target-worktrees/issue-18" origin/main
+git -C "$target-worktrees/issue-18" commit --quiet --allow-empty -m 'PR work behind main'
+resume_head=$(git -C "$target-worktrees/issue-18" rev-parse HEAD)
+git -C "$target-worktrees/issue-18" push --quiet origin agent/issue-18
+git -C "$target" checkout --quiet main
+git -C "$target" commit --quiet --allow-empty -m 'advanced default branch'
+git -C "$target" push --quiet origin main
+base_head=$(git -C "$target" rev-parse HEAD)
+: > "$FAKE_GH_ROOT/calls"
+FAKE_RESUME_OPEN_PR=43 FAKE_RESUME_OPEN_URL="https://github.example/acme/installed-project/pull/43" FAKE_RESUME_CHECKS=success \
+  FAKE_RESUME_BASE_SHA=$base_head FAKE_RESUME_HEAD_SHA=$resume_head FAKE_RESUME_MERGEABLE=true FAKE_RESUME_MERGEABLE_STATE=clean \
+  "$target/bin/agentic-loop" _worker 18 resume-behind-worker
+assert_contains "$FAKE_GH_ROOT/codex-calls" 'phase: needs-rebase' 'a behind open PR was not routed to needs-rebase'
+assert_contains "$FAKE_GH_ROOT/codex-calls" 'git merge origin/main' 'needs-rebase did not instruct a normal default-branch merge'
+assert_contains "$FAKE_GH_ROOT/codex-calls" 'rebase、reset、force-push、履歴書き換えは禁止です' 'needs-rebase did not prohibit history rewriting'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'phase=needs-rebase' 'needs-rebase was not recorded in the handoff'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'behind=1' 'the handoff did not record the default-branch behind count'
+assert_contains "$FAKE_GH_ROOT/calls" 'pulls/43' 'open-PR resume did not use the REST PR-detail endpoint'
+git -C "$target" worktree remove --force "$target-worktrees/issue-18" 2>/dev/null || true
+git -C "$target" branch -D agent/issue-18 >/dev/null 2>&1 || true
+
+# GitHub's definitive false result also enters the convergence route even when
+# the branch is not behind, and an asynchronous unknown result falls back to
+# read-only merge-tree using the fetched commits.
+printf '19 running open\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+: > "$FAKE_GH_ROOT/codex-calls"
+git -C "$target" worktree add --quiet -b agent/issue-19 "$target-worktrees/issue-19" origin/main
+printf 'base\n' > "$target-worktrees/issue-19/resume-conflict.txt"
+git -C "$target-worktrees/issue-19" add resume-conflict.txt
+git -C "$target-worktrees/issue-19" commit --quiet -m 'branch side conflict'
+resume_head=$(git -C "$target-worktrees/issue-19" rev-parse HEAD)
+git -C "$target-worktrees/issue-19" push --quiet origin agent/issue-19
+printf 'default\n' > "$target/resume-conflict.txt"
+git -C "$target" add resume-conflict.txt
+git -C "$target" commit --quiet -m 'default side conflict'
+git -C "$target" push --quiet origin main
+base_head=$(git -C "$target" rev-parse HEAD)
+FAKE_RESUME_OPEN_PR=44 FAKE_RESUME_OPEN_URL="https://github.example/acme/installed-project/pull/44" FAKE_RESUME_CHECKS=success \
+  FAKE_RESUME_BASE_SHA=$base_head FAKE_RESUME_HEAD_SHA=$resume_head FAKE_RESUME_MERGEABLE=false FAKE_RESUME_MERGEABLE_STATE=dirty \
+  "$target/bin/agentic-loop" _worker 19 resume-conflict-worker
+assert_contains "$FAKE_GH_ROOT/codex-calls" 'phase: needs-rebase' 'an explicitly unmergeable PR was not routed to needs-rebase'
+git -C "$target" worktree remove --force "$target-worktrees/issue-19" 2>/dev/null || true
+git -C "$target" branch -D agent/issue-19 >/dev/null 2>&1 || true
+
+printf '20 running open\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+: > "$FAKE_GH_ROOT/codex-calls"
+git -C "$target" worktree add --quiet -b agent/issue-20 "$target-worktrees/issue-20" origin/main
+printf 'branch again\n' > "$target-worktrees/issue-20/resume-conflict.txt"
+git -C "$target-worktrees/issue-20" add resume-conflict.txt
+git -C "$target-worktrees/issue-20" commit --quiet -m 'second branch conflict'
+resume_head=$(git -C "$target-worktrees/issue-20" rev-parse HEAD)
+git -C "$target-worktrees/issue-20" push --quiet origin agent/issue-20
+printf 'default again\n' > "$target/resume-conflict.txt"
+git -C "$target" add resume-conflict.txt
+git -C "$target" commit --quiet -m 'second default conflict'
+git -C "$target" push --quiet origin main
+base_head=$(git -C "$target" rev-parse HEAD)
+FAKE_RESUME_OPEN_PR=45 FAKE_RESUME_OPEN_URL="https://github.example/acme/installed-project/pull/45" FAKE_RESUME_CHECKS=success \
+  FAKE_RESUME_BASE_SHA=$base_head FAKE_RESUME_HEAD_SHA=$resume_head FAKE_RESUME_MERGEABLE=null FAKE_RESUME_MERGEABLE_STATE=unknown \
+  "$target/bin/agentic-loop" _worker 20 resume-unknown-worker
+assert_contains "$FAKE_GH_ROOT/codex-calls" 'phase: needs-rebase' 'merge-tree did not classify an unknown conflicting PR as needs-rebase'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'mergeable=false' 'merge-tree fallback result was not recorded in the handoff'
+git -C "$target" worktree remove --force "$target-worktrees/issue-20" 2>/dev/null || true
+git -C "$target" branch -D agent/issue-20 >/dev/null 2>&1 || true
 
 # Resuming an Issue with an unpushed local commit (worker crashed after
 # committing but before push, with no PR yet) injects the observed phase and

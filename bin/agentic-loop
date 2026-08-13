@@ -3710,12 +3710,18 @@ worker_confirm_running_label() {
 # whole result is computed from observable reality). Sets the RESUME_* globals
 # consumed by worker(). Costs 0 REST(core) calls when the branch does not yet
 # exist or has no commits beyond the default branch, otherwise at most 2 (a
-# combined PR lookup, and check-runs only when an open PR exists).
+# combined PR lookup, its detail, and check-runs only when an open PR exists).
+# The detail request is deliberately REST (rather than GraphQL): it supplies
+# the PR base/head and GitHub's mergeability observation.  When GitHub has not
+# computed that observation yet, merge-tree against the already fetched refs
+# provides a read-only Git fallback.  Thus an open PR costs at most 3 REST
+# calls; a missing branch or a branch equal to the default tip still costs 0.
 resume_probe() {
   local issue=$1 branch=$2 worktree=$3 default_branch=$4 repository=$5
   local branch_ref="refs/heads/$branch" worktree_root registered_branch other main_sha
   RESUME_PHASE="fresh" RESUME_DIRTY=0 RESUME_DIVERGED=0 RESUME_HEAD='' RESUME_REMOTE=''
   RESUME_PR='' RESUME_PR_STATE='' RESUME_PR_URL='' RESUME_CHECKS=''
+  RESUME_BASE_BRANCH='' RESUME_BEHIND=0 RESUME_MERGEABLE='unknown'
 
   if [[ -e $worktree ]]; then
     if worktree_root=$(cd "$worktree" && pwd -P 2>/dev/null); then
@@ -3783,6 +3789,31 @@ resume_probe() {
 
   if [[ $open_pr =~ ^[0-9]+$ ]]; then
     RESUME_PR=$open_pr; RESUME_PR_URL=$open_url; RESUME_PR_STATE="open"; RESUME_PHASE="pr-open"
+    local pr_detail base_ref='' base_sha='' pr_head='' mergeable='' mergeable_state='' merge_tree_status
+    pr_detail=$(repo_api "pulls/$open_pr" --jq '[.base.ref // "", .base.sha // "", .head.sha // "", (if .mergeable == null then "null" else (.mergeable | tostring) end), .mergeable_state // "unknown"] | join("SEP")' 2>/dev/null) || true
+    [[ -n $pr_detail ]] && IFS=$'\x1f' read -r base_ref base_sha pr_head mergeable mergeable_state <<< "${pr_detail/SEP/$sep}"
+    RESUME_BASE_BRANCH=$base_ref
+    # The target default branch was fetched by worker() immediately before this
+    # probe.  Count only commits present on it but absent from the PR head.
+    if [[ $base_ref == "$default_branch" && -n $pr_head ]] && git -C "$REPO_ROOT" cat-file -e "$pr_head^{commit}" 2>/dev/null; then
+      RESUME_BEHIND=$(git -C "$REPO_ROOT" rev-list --count "$pr_head..refs/remotes/origin/$default_branch" 2>/dev/null || printf 0)
+    fi
+    case $mergeable in
+      true) RESUME_MERGEABLE=true ;;
+      false) RESUME_MERGEABLE=false ;;
+      *)
+        # GitHub can return null/unknown while asynchronously calculating this
+        # field. merge-tree writes no worktree state and is therefore safe here.
+        if [[ $mergeable_state == unknown && -n $base_sha && -n $pr_head ]] && git -C "$REPO_ROOT" cat-file -e "$base_sha^{commit}" 2>/dev/null && git -C "$REPO_ROOT" cat-file -e "$pr_head^{commit}" 2>/dev/null; then
+          if git -C "$REPO_ROOT" merge-tree --write-tree "$base_sha" "$pr_head" >/dev/null 2>&1; then
+            RESUME_MERGEABLE=true
+          else
+            merge_tree_status=$?
+            [[ $merge_tree_status -eq 1 ]] && RESUME_MERGEABLE=false
+          fi
+        fi
+        ;;
+    esac
     RESUME_CHECKS=$(repo_api "commits/$RESUME_HEAD/check-runs" --jq '
       ([.check_runs[].conclusion, .check_runs[].status] | map(select(. != null))) as $s |
       if ($s | any(. == "failure" or . == "timed_out" or . == "cancelled")) then "failure"
@@ -3791,6 +3822,9 @@ resume_probe() {
       else "unknown" end
     ' 2>/dev/null) || true
     [[ -n $RESUME_CHECKS ]] || RESUME_CHECKS=unknown
+    if [[ $RESUME_BEHIND -gt 0 || $RESUME_MERGEABLE == false || $mergeable_state == dirty ]]; then
+      RESUME_PHASE="needs-rebase"
+    fi
     return 0
   fi
 
@@ -3821,6 +3855,7 @@ resume_next_hint() {
     committed-unpushed) printf '既存のlocal commitを踏まえて実装を継続し、pushとPR作成まで進める。' ;;
     pushed-no-pr) printf '既存のpush済みcommitを踏まえてPRを作成する。' ;;
     pr-open) printf '既存PRのchecksとreview対応を継続する。' ;;
+    needs-rebase) printf 'default branchをgit mergeで通常取り込み、競合を解消して通常pushする。checksとreviewを再確認し、既存PRをmergeしてdefault branch上の検証まで完了する。rebase、reset、force-push、履歴書き換えは行わない。' ;;
     pr-merged) printf 'worker側で自動的にcleanupし完了報告する（providerは起動しない）。' ;;
     needs-decision) printf '人による分岐またはmerge済みcommitとの不一致の解消を待つ。' ;;
     unsafe-foreign) printf '人によるworktree/branchの競合解消を待つ。' ;;
@@ -3837,9 +3872,9 @@ resume_handoff_file() { printf '%s/workers/%s.handoff' "$STATE_ROOT" "$1"; }
 resume_handoff_body() {
   local phase=$1 branch=$2 head=$3 remote=$4 pr=$5 pr_state=$6 checks=$7 dirty=$8 diverged=$9 now=${10} next
   next=$(resume_next_hint "$phase")
-  printf '<!-- agentic-loop:handoff schema=1 phase=%s branch=%s head=%s remote=%s pr=%s pr_state=%s checks=%s dirty=%s diverged=%s updated=%s -->\\n### 再開のための引き継ぎ（Git/GitHub観測結果から自動生成。workerの自己申告ではありません）\\n- phase: %s\\n- branch: `%s` (head=%s, remote=%s, dirty=%s, diverged=%s)\\n- PR: %s (state=%s, checks=%s)\\n- 次の安全な操作: %s' \
-    "$phase" "$branch" "${head:-none}" "${remote:-none}" "${pr:-none}" "${pr_state:-none}" "${checks:-none}" "$dirty" "$diverged" "$now" \
-    "$phase" "$branch" "${head:-none}" "${remote:-none}" "$dirty" "$diverged" "${pr:-none}" "${pr_state:-none}" "${checks:-none}" "$next"
+  printf '<!-- agentic-loop:handoff schema=1 phase=%s branch=%s head=%s remote=%s pr=%s pr_state=%s checks=%s base=%s behind=%s mergeable=%s dirty=%s diverged=%s updated=%s -->\\n### 再開のための引き継ぎ（Git/GitHub観測結果から自動生成。workerの自己申告ではありません）\\n- phase: %s\\n- branch: `%s` (head=%s, remote=%s, dirty=%s, diverged=%s)\\n- PR: %s (state=%s, checks=%s, base=%s, behind=%s, mergeable=%s)\\n- 次の安全な操作: %s' \
+    "$phase" "$branch" "${head:-none}" "${remote:-none}" "${pr:-none}" "${pr_state:-none}" "${checks:-none}" "${RESUME_BASE_BRANCH:-none}" "${RESUME_BEHIND:-0}" "${RESUME_MERGEABLE:-unknown}" "$dirty" "$diverged" "$now" \
+    "$phase" "$branch" "${head:-none}" "${remote:-none}" "$dirty" "$diverged" "${pr:-none}" "${pr_state:-none}" "${checks:-none}" "${RESUME_BASE_BRANCH:-none}" "${RESUME_BEHIND:-0}" "${RESUME_MERGEABLE:-unknown}" "$next"
 }
 
 # Create or (via a single PATCH) update the one durable handoff comment for an
@@ -3891,6 +3926,9 @@ EOF
   if [[ -n $RESUME_PR ]]; then
     printf -- '- 既存PR: #%s (state=%s, checks=%s) %s\n' "$RESUME_PR" "$RESUME_PR_STATE" "$RESUME_CHECKS" "$RESUME_PR_URL"
     printf -- '既存のbranch `%s` とPR #%s を再利用してください。新しいPRを作成せず、force-pushや履歴の書き換えは行わないでください。\n' "$branch" "$RESUME_PR"
+    if [[ $RESUME_PHASE == needs-rebase ]]; then
+      printf -- '対象default branchは `%s`、behind=%s、mergeable=%s です。`git merge origin/%s` による通常mergeでbaseを取り込み、競合を解消してください。rebase、reset、force-push、履歴書き換えは禁止です。解消後は同じbranchへ通常pushし、checksとreviewを再確認して既存PRをmergeし、default branch上の検証まで完了してください。\n' "$RESUME_BASE_BRANCH" "$RESUME_BEHIND" "$RESUME_MERGEABLE" "$RESUME_BASE_BRANCH"
+    fi
   else
     printf -- '既存のbranch `%s` を再利用してください（新規branchは作成しないでください）。\n' "$branch"
   fi
