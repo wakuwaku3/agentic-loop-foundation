@@ -2117,12 +2117,15 @@ rc=0
 "$upgrade_target/bin/agentic-loop" upgrade >/dev/null 2>&1 || rc=$?
 [[ $rc -eq 2 ]] || fail "expected exit 2 when no revision is configured or given, got $rc"
 
-# Supervisor running -> --apply is refused, nothing changes.
-"$upgrade_target/bin/agentic-loop" start >/dev/null
+# Supervisor running -> --apply is refused, nothing changes. A live pid file
+# is faked directly (rather than a real `start`/`stop` cycle) to keep this
+# scenario fast; upgrade-target.sh only checks $STATE_ROOT/supervisor.pid.
+mkdir -p "$upgrade_target/.git/agentic-loop"
+printf '%s\n' "$$" > "$upgrade_target/.git/agentic-loop/supervisor.pid"
 rc=0
 "$upgrade_target/bin/agentic-loop" upgrade --source "$new_source" --apply --skip-verify >/dev/null 2>&1 || rc=$?
 [[ $rc -eq 2 ]] || fail "expected exit 2 while the Supervisor is running, got $rc"
-"$upgrade_target/bin/agentic-loop" stop >/dev/null
+rm -f "$upgrade_target/.git/agentic-loop/supervisor.pid"
 
 # User-edited conflict: never silently overwritten; --overwrite adopts it explicitly.
 conflict_target=$(new_repository conflict-target)
