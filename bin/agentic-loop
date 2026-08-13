@@ -814,15 +814,19 @@ status_dependency_waits() {
 
 cmd_status() {
   if pid_alive; then say "running (pid $(cat "$STATE_ROOT/supervisor.pid"), max workers $MAX_WORKERS)"; else say 'stopped'; fi
-  local issues line number scope
+  local issues line number scope phase suffix
   issues=$(running_issues)
   if [[ -n $issues ]]; then
     printf 'Running Issues:\n'
     while IFS= read -r line; do
       [[ -n $line ]] || continue
       number=${line#\#}; number=${number%% *}
+      suffix=''
+      phase=$(cat "$(worker_phase_file "$number")" 2>/dev/null || true)
+      [[ -n $phase ]] && suffix+=" (phase: $phase)"
       scope=$(scope_cache_read "$number")
-      if [[ -n $scope ]]; then printf '%s (scope: %s)\n' "$line" "$(paste -sd', ' - <<< "$scope")"; else printf '%s\n' "$line"; fi
+      [[ -n $scope ]] && suffix+=" (scope: $(paste -sd', ' - <<< "$scope"))"
+      printf '%s%s\n' "$line" "$suffix"
     done <<< "$issues"
   else
     say 'Running Issues: none'
@@ -864,6 +868,26 @@ doctor_enum_config() {
   shift 2
   for allowed in "$@"; do [[ $value == "$allowed" ]] && return 0; done
   doctor_add failure "設定値: $name" 'Supervisorを安全な値で実行できません。' "docs/operations/issue-queue.md を確認し、$name を $* のいずれかに修正してください。"
+}
+
+# Whether every residual worktree/branch path (newline-separated, at most 3
+# each per doctor_collect's sampling) belongs to an Issue GitHub currently
+# reports as agent:running, so a running worker's own artifacts are not
+# misclassified as orphaned garbage.
+doctor_residual_belongs_to_running() {
+  local worktrees=$1 branches=$2 running_numbers item num
+  running_numbers=$(running_issues | sed -n 's/^#\([0-9][0-9]*\).*/\1/p')
+  while IFS= read -r item; do
+    [[ -n $item ]] || continue
+    num=${item##*/issue-}
+    grep -Fxq "$num" <<< "$running_numbers" || return 1
+  done <<< "$worktrees"
+  while IFS= read -r item; do
+    [[ -n $item ]] || continue
+    num=${item##*/issue-}
+    grep -Fxq "$num" <<< "$running_numbers" || return 1
+  done <<< "$branches"
+  return 0
 }
 
 doctor_collect() {
@@ -955,7 +979,12 @@ doctor_collect() {
   issue_worktrees=$(git -C "$REPO_ROOT" worktree list --porcelain 2>/dev/null | awk -v root="$WORKTREE_ROOT/issue-" '$1 == "worktree" && index($2, root) == 1 {print $2}' | head -n 3)
   agent_branches=$(git -C "$REPO_ROOT" for-each-ref --format='%(refname:short)' refs/heads/agent/ 2>/dev/null | head -n 3)
   log_files=$(find "$STATE_ROOT/logs" -type f -size +0c -print -quit 2>/dev/null || true)
-  if [[ -n $issue_worktrees || -n $agent_branches || -n $log_files ]]; then doctor_add warning '残存状態' 'worktree、agent branch、またはlogが残っています。実行中のworker由来か確認が必要です。' 'bin/agentic-loop status と docs/operations/issue-queue.md のcleanup手順を確認してください。'
+  if [[ -n $issue_worktrees || -n $agent_branches || -n $log_files ]]; then
+    if pid_alive && doctor_residual_belongs_to_running "$issue_worktrees" "$agent_branches"; then
+      doctor_add success '残存状態' 'worktree、agent branch、またはlogがありますが、いずれもGitHub上でagent:runningのIssueに対応しています。' '対応は不要です。bin/agentic-loop status でphaseを確認できます。'
+    else
+      doctor_add warning '残存状態' 'agent:runningに対応しないworktree、agent branch、またはlogが残っています。実行中のworker由来か確認が必要です。' 'bin/agentic-loop status でrunning Issueの有無を確認してください。対応するIssueが無ければ、そのIssueのagentic-loop:handoffコメント（無ければ本文と直近のcomment）を確認した上で、docs/operations/issue-queue.md のcleanup手順に従って復旧してください。'
+    fi
   else doctor_add success '残存状態' '不要なworktree、agent branch、非空logは見つかりません。' '対応は不要です。'; fi
 }
 
@@ -1147,8 +1176,12 @@ lease_body() {
 
 lease_file() { printf '%s\n' "$STATE_ROOT/workers/$1.lease"; }
 
-# Remove a worker's local bookkeeping (pid + lease-comment id) together.
-clear_worker_local() { rm -f "$STATE_ROOT/workers/$1.pid" "$STATE_ROOT/workers/$1.lease"; }
+# Remove a worker's local bookkeeping (pid + lease-comment id + phase cache)
+# together. The handoff-comment id mapping is intentionally not cleared here:
+# it must survive across worker lifecycles so the next worker keeps updating
+# the same durable comment instead of creating a new one (see docs/decisions/0004).
+clear_worker_local() { rm -f "$STATE_ROOT/workers/$1.pid" "$STATE_ROOT/workers/$1.lease" "$(worker_phase_file "$1")"; }
+worker_phase_file() { printf '%s/workers/%s.phase' "$STATE_ROOT" "$1"; }
 
 # Create the single lease comment for this Issue and remember its id so later
 # heartbeats update it in place. See docs/decisions/0003: one comment per Issue
@@ -1906,9 +1939,12 @@ EOF
 }
 
 # plan stage prompt: investigate only and emit a concrete plan. On a retry the
-# previous exec failure is appended so the plan can address the root cause.
+# previous exec failure is appended so the plan can address the root cause. If
+# resume_context is non-empty (a resumed Issue whose branch already carries
+# work), it is prepended so the plan does not propose redoing completed work.
 plan_prompt() {
-  local issue=$1 repository=$2 failure_context=${3:-}
+  local issue=$1 repository=$2 failure_context=${3:-} resume_context=${4:-}
+  [[ -n $resume_context ]] && printf '%s\n' "$resume_context"
   cat <<EOF
 $repository の GitHub Issue #$issue に対する実装計画を作成してください。
 Issueとそのコメントを要求として扱い、この専用worktreeとリポジトリを調査し、変更方針、影響範囲、検証手順、観測可能な受け入れ条件を日本語で具体化してください。このplan段階ではファイルの変更、commit、push、PR作成、GitHubの状態変更を行わず、最終メッセージに計画本文だけを出力してください。
@@ -1924,7 +1960,8 @@ EOF
 
 # exec stage prompt: the full completion workflow plus the plan to follow.
 exec_prompt() {
-  local issue=$1 repository=$2 plan_file=$3
+  local issue=$1 repository=$2 plan_file=$3 resume_context=${4:-}
+  [[ -n $resume_context ]] && printf '%s\n' "$resume_context"
   issue_prompt "$issue" "$repository"
   if [[ -s $plan_file ]]; then
     cat <<EOF
@@ -2011,8 +2048,210 @@ worker_refine_scope_from_diff() {
   worker_update_scope "$issue" "$(scope_apply_exclusive_paths "$measured")"
 }
 
+# --- Worker resume from existing artifacts (see docs/decisions/0004) ---
+
+# Re-confirm this worker still legitimately owns the Issue immediately before
+# touching any Git state or starting a provider, defending against a stale or
+# duplicate _worker invocation whose Issue was already requeued or reassigned
+# underneath it. Silent on refusal (no label/comment/Git writes) so a benign
+# race does not spam the Issue.
+worker_confirm_running_label() {
+  local issue=$1
+  repo_api "issues/$issue" --jq '.labels[].name' 2>/dev/null | grep -Fxq "$(state_label running)"
+}
+
+# Observe Git and GitHub REST state for an Issue's dedicated branch/worktree
+# and derive a resume phase, never trusting a prior worker's self-report (the
+# whole result is computed from observable reality). Sets the RESUME_* globals
+# consumed by worker(). Costs 0 REST(core) calls when the branch does not yet
+# exist or has no commits beyond the default branch, otherwise at most 2 (a
+# combined PR lookup, and check-runs only when an open PR exists).
+resume_probe() {
+  local issue=$1 branch=$2 worktree=$3 default_branch=$4 repository=$5
+  local branch_ref="refs/heads/$branch" worktree_root registered_branch other main_sha
+  RESUME_PHASE="fresh" RESUME_DIRTY=0 RESUME_DIVERGED=0 RESUME_HEAD='' RESUME_REMOTE=''
+  RESUME_PR='' RESUME_PR_STATE='' RESUME_PR_URL='' RESUME_CHECKS=''
+
+  if [[ -e $worktree ]]; then
+    if worktree_root=$(cd "$worktree" && pwd -P 2>/dev/null); then
+      registered_branch=$(git -C "$REPO_ROOT" worktree list --porcelain 2>/dev/null | awk -v path="$worktree_root" '
+        $1 == "worktree" {matched=($2 == path)}
+        matched && $1 == "branch" {print $2; exit}
+      ')
+      # Only a worktree that is genuinely registered to a different branch is
+      # unsafe; a path that is not a registered worktree at all (corrupted, or
+      # a plain directory) is left to the existing git-common-dir/.agents
+      # resolvers immediately after this probe, which classify that case with
+      # their own specific diagnostics.
+      if [[ -n $registered_branch && $registered_branch != "$branch_ref" ]]; then
+        RESUME_PHASE="unsafe-foreign"; return 0
+      fi
+      [[ -n $(git -C "$worktree_root" status --porcelain 2>/dev/null) ]] && RESUME_DIRTY=1
+    fi
+  else
+    other=$(git -C "$REPO_ROOT" worktree list --porcelain 2>/dev/null | awk -v ref="$branch_ref" '
+      $1 == "worktree" {path=$2} $1 == "branch" && $2 == ref {print path}
+    ')
+    [[ -n $other ]] && { RESUME_PHASE="unsafe-foreign"; return 0; }
+  fi
+
+  git -C "$REPO_ROOT" show-ref --verify --quiet "$branch_ref" || return 0
+  RESUME_HEAD=$(git -C "$REPO_ROOT" rev-parse --verify "$branch_ref" 2>/dev/null) || return 0
+
+  main_sha=$(git -C "$REPO_ROOT" rev-parse --verify -q "refs/remotes/origin/$default_branch" 2>/dev/null || true)
+  if [[ -n $main_sha && $RESUME_HEAD == "$main_sha" ]]; then RESUME_PHASE="worktree-ready"; return 0; fi
+
+  git -C "$REPO_ROOT" fetch origin "$branch" >/dev/null 2>&1 || true
+  RESUME_REMOTE=$(git -C "$REPO_ROOT" rev-parse --verify -q "refs/remotes/origin/$branch" 2>/dev/null || true)
+  if [[ -n $RESUME_REMOTE ]]; then
+    local counts ahead behind
+    counts=$(git -C "$REPO_ROOT" rev-list --left-right --count "$branch_ref...refs/remotes/origin/$branch" 2>/dev/null || printf '0\t0')
+    read -r ahead behind <<< "$counts"
+    [[ ${ahead:-0} -gt 0 && ${behind:-0} -gt 0 ]] && RESUME_DIVERGED=1
+  fi
+
+  # Joined with U+001F (not tab, see dependency_satisfied's identical note):
+  # bash `read` treats consecutive/leading tabs as a single whitespace-class
+  # delimiter and silently collapses an empty leading field, which happens
+  # whenever there is no merged PR yet.
+  local pr_tsv pr_jq merged_pr='' merged_sha='' merged_url='' open_pr='' open_url='' sep=$'\x1f'
+  pr_jq='
+    # resume-probe-prs
+    (map(select(.merged_at != null)) | sort_by(.merged_at) | last) as $m |
+    (map(select(.state == "open")) | sort_by(.created_at) | last) as $o |
+    [$m.number // "", $m.head.sha // "", $m.html_url // "", $o.number // "", $o.html_url // ""] | join("SEP")
+  '
+  pr_jq=${pr_jq/SEP/$sep}
+  pr_tsv=$(repo_api pulls --method GET -f state=all -f head="${repository%%/*}:$branch" -f per_page=100 --jq "$pr_jq" 2>/dev/null) || true
+  [[ -n $pr_tsv ]] && IFS=$'\x1f' read -r merged_pr merged_sha merged_url open_pr open_url <<< "$pr_tsv"
+
+  if [[ $merged_pr =~ ^[0-9]+$ ]]; then
+    if [[ $merged_sha == "$RESUME_HEAD" && $RESUME_DIVERGED -eq 0 ]]; then
+      RESUME_PHASE="pr-merged"; RESUME_PR=$merged_pr; RESUME_PR_URL=$merged_url; RESUME_PR_STATE="merged"
+    else
+      RESUME_PHASE="needs-decision"; RESUME_PR=$merged_pr; RESUME_PR_URL=$merged_url; RESUME_PR_STATE="merged-mismatch"
+    fi
+    return 0
+  fi
+
+  if (( RESUME_DIVERGED )); then RESUME_PHASE="needs-decision"; RESUME_PR_STATE="diverged"; return 0; fi
+
+  if [[ $open_pr =~ ^[0-9]+$ ]]; then
+    RESUME_PR=$open_pr; RESUME_PR_URL=$open_url; RESUME_PR_STATE="open"; RESUME_PHASE="pr-open"
+    RESUME_CHECKS=$(repo_api "commits/$RESUME_HEAD/check-runs" --jq '
+      ([.check_runs[].conclusion, .check_runs[].status] | map(select(. != null))) as $s |
+      if ($s | any(. == "failure" or . == "timed_out" or . == "cancelled")) then "failure"
+      elif ($s | any(. == "in_progress" or . == "queued")) then "in_progress"
+      elif (($s | length) > 0 and ($s | all(. == "success" or . == "neutral" or . == "skipped"))) then "success"
+      else "unknown" end
+    ' 2>/dev/null) || true
+    [[ -n $RESUME_CHECKS ]] || RESUME_CHECKS=unknown
+    return 0
+  fi
+
+  if [[ -n $RESUME_REMOTE && $RESUME_REMOTE == "$RESUME_HEAD" ]]; then RESUME_PHASE="pushed-no-pr"; return 0; fi
+  RESUME_PHASE="committed-unpushed"
+}
+
+# Remove only the local branch for an Issue whose PR is already merged when no
+# worktree exists to remove alongside it (e.g. the worktree was already cleaned
+# up by a previous, interrupted worker run). Mirrors cleanup_completed_worker's
+# safety checks minus the worktree-specific ones.
+cleanup_completed_branch_only() {
+  local branch=$1 merged_oid=$2 local_oid
+  local branch_ref="refs/heads/$branch"
+  local_oid=$(git -C "$REPO_ROOT" rev-parse --verify "$branch_ref" 2>/dev/null) || return 1
+  [[ $local_oid == "$merged_oid" ]] || return 1
+  git -C "$REPO_ROOT" worktree list --porcelain 2>/dev/null | grep -Fxq "branch $branch_ref" && return 1
+  git -C "$REPO_ROOT" update-ref -d "$branch_ref" "$local_oid"
+}
+
+# Human-readable (Japanese) hint of the next safe action for a resume phase,
+# embedded in the handoff comment so a worker picking up mid-stream does not
+# need to re-derive it from the raw fields.
+resume_next_hint() {
+  case $1 in
+    fresh) printf '計画を作成し実装を開始する。' ;;
+    worktree-ready) printf '既存のworktree/branchを再利用して計画を作成し実装を開始する。' ;;
+    committed-unpushed) printf '既存のlocal commitを踏まえて実装を継続し、pushとPR作成まで進める。' ;;
+    pushed-no-pr) printf '既存のpush済みcommitを踏まえてPRを作成する。' ;;
+    pr-open) printf '既存PRのchecksとreview対応を継続する。' ;;
+    pr-merged) printf 'worker側で自動的にcleanupし完了報告する（providerは起動しない）。' ;;
+    needs-decision) printf '人による分岐またはmerge済みcommitとの不一致の解消を待つ。' ;;
+    unsafe-foreign) printf '人によるworktree/branchの競合解消を待つ。' ;;
+    *) printf '状態を確認する。' ;;
+  esac
+}
+
+resume_handoff_file() { printf '%s/workers/%s.handoff' "$STATE_ROOT" "$1"; }
+
+# Render the single handoff comment body. Every field is derived from Git/
+# GitHub observation (see resume_probe), never from a provider's self-report,
+# so this artifact cannot smuggle secrets or log content and does not need a
+# secret-guard pass of its own.
+resume_handoff_body() {
+  local phase=$1 branch=$2 head=$3 remote=$4 pr=$5 pr_state=$6 checks=$7 dirty=$8 diverged=$9 now=${10} next
+  next=$(resume_next_hint "$phase")
+  printf '<!-- agentic-loop:handoff schema=1 phase=%s branch=%s head=%s remote=%s pr=%s pr_state=%s checks=%s dirty=%s diverged=%s updated=%s -->\\n### 再開のための引き継ぎ（Git/GitHub観測結果から自動生成。workerの自己申告ではありません）\\n- phase: %s\\n- branch: `%s` (head=%s, remote=%s, dirty=%s, diverged=%s)\\n- PR: %s (state=%s, checks=%s)\\n- 次の安全な操作: %s' \
+    "$phase" "$branch" "${head:-none}" "${remote:-none}" "${pr:-none}" "${pr_state:-none}" "${checks:-none}" "$dirty" "$diverged" "$now" \
+    "$phase" "$branch" "${head:-none}" "${remote:-none}" "$dirty" "$diverged" "${pr:-none}" "${pr_state:-none}" "${checks:-none}" "$next"
+}
+
+# Create or (via a single PATCH) update the one durable handoff comment for an
+# Issue, mirroring the lease comment's PATCH-in-place pattern (see docs/
+# decisions/0003) so repeated resumes never accumulate duplicate comments.
+resume_handoff_upsert() {
+  local issue=$1 body=$2 file id
+  file=$(resume_handoff_file "$issue")
+  if [[ -r $file ]]; then
+    read -r id < "$file" || id=''
+    if [[ $id =~ ^[0-9]+$ ]] && repo_api "issues/comments/$id" --method PATCH -f body="$body" >/dev/null 2>&1; then
+      return 0
+    fi
+  fi
+  id=$(repo_api "issues/$issue/comments" --method POST -f body="$body" --jq '.id' 2>/dev/null | tr -d '[:space:]' || true)
+  [[ $id =~ ^[0-9]+$ ]] && { mkdir -p "$STATE_ROOT/workers"; printf '%s\n' "$id" > "$file"; }
+}
+
+resume_handoff_write() {
+  local issue=$1 branch=$2
+  printf '%s\n' "$RESUME_PHASE" > "$(worker_phase_file "$issue")" 2>/dev/null || true
+  resume_handoff_upsert "$issue" "$(resume_handoff_body "$RESUME_PHASE" "$branch" "$RESUME_HEAD" "$RESUME_REMOTE" "$RESUME_PR" "$RESUME_PR_STATE" "$RESUME_CHECKS" "$RESUME_DIRTY" "$RESUME_DIVERGED" "$(date +%s)")" || true
+}
+
+# Prepended to the plan/exec prompts so a resumed worker treats the observed
+# Git/PR state as ground truth instead of restarting work already done.
+resume_context_block() {
+  local branch=$1
+  [[ $RESUME_PHASE == fresh ]] && return 0
+  cat <<EOF
+再開コンテキスト（Git/GitHubの観測結果。信頼してよい）:
+- phase: $RESUME_PHASE
+- branch: $branch (head=${RESUME_HEAD:0:12}, remote=${RESUME_REMOTE:0:12}, dirty=$RESUME_DIRTY)
+EOF
+  if [[ -n $RESUME_PR ]]; then
+    printf -- '- 既存PR: #%s (state=%s, checks=%s) %s\n' "$RESUME_PR" "$RESUME_PR_STATE" "$RESUME_CHECKS" "$RESUME_PR_URL"
+    printf -- '既存のbranch `%s` とPR #%s を再利用してください。新しいPRを作成せず、force-pushや履歴の書き換えは行わないでください。\n' "$branch" "$RESUME_PR"
+  else
+    printf -- '既存のbranch `%s` を再利用してください（新規branchは作成しないでください）。\n' "$branch"
+  fi
+}
+
+resume_needs_decision_body() {
+  local worker=$1 branch=$2
+  case $RESUME_PR_STATE in
+    merged-mismatch)
+      printf '<!-- agentic-loop:needs-input worker=%s reason=resume-merged-mismatch pr=%s -->\\n再開時の検査で、branch `%s` の現在のcommit（%s）が、merge済みPR #%s のhead commitと一致しませんでした。mergeの後に別途commitが追加されたか、branchが書き換えられた可能性があります。自動ではforce-pushやreset、branch/worktreeの削除を行いません。既存のworktree/branch/remote branchを確認し、次のいずれかを人手で選んでから、このIssueへ返信してください: (1) 追加分を新しいIssueとして切り出す、(2) branchをmerge済みcommitにresetして完了扱いにする、(3) その他の対応方針を指示する。' \
+        "$worker" "$RESUME_PR" "$branch" "${RESUME_HEAD:0:12}" "$RESUME_PR" ;;
+    *)
+      printf '<!-- agentic-loop:needs-input worker=%s reason=resume-diverged -->\\n再開時の検査で、branch `%s` のlocal commit（%s）とremote commit（%s）が分岐していることを検出しました（双方に相手の持たない独自commitがあります）。自動でのforce-pushやmergeは行いません。どちらのcommitを正とするか人手で判断し、このIssueへ返信してください。既存のworktree/local branch/remote branchは変更していません。' \
+        "$worker" "$branch" "${RESUME_HEAD:0:12}" "${RESUME_REMOTE:0:12}" ;;
+  esac
+}
+
 worker() {
   local issue=$1 worker=$2 repository default_branch branch worktree result git_common_dir agents_dir exit_code=0 heartbeat_pid merged_pr='' merged_oid=''
+  worker_confirm_running_label "$issue" || { clear_worker_local "$issue"; return 0; }
   repository=$(repo_name)
   default_branch=$(repo_api '' --jq .default_branch)
   branch="agent/issue-$issue"
@@ -2023,6 +2262,46 @@ worker() {
     clear_worker_local "$issue"
     return 0
   fi
+
+  resume_probe "$issue" "$branch" "$worktree" "$default_branch" "$repository"
+  resume_handoff_write "$issue" "$branch"
+  case $RESUME_PHASE in
+    unsafe-foreign)
+      set_issue_state "$issue" failed || true
+      comment_issue "$issue" "<!-- agentic-loop:failed worker=$worker reason=foreign-artifact -->\n専用worktreeまたはbranch \`$branch\` が別Issueの成果物、または想定外の状態で使用中のため、workerを起動しませんでした。既存のworktree/branch/commitは変更していません。\`git worktree list\` と \`git branch -a\` の出力を確認し、競合を解消した上で \`agent:queued\` を付け直してください。" || true
+      clear_worker_local "$issue"
+      return 0
+      ;;
+    needs-decision)
+      set_issue_state "$issue" needs-input || true
+      project_sync_state "$issue" needs-input || true
+      comment_issue "$issue" "$(resume_needs_decision_body "$worker" "$branch")" || true
+      clear_worker_local "$issue"
+      return 0
+      ;;
+    pr-merged)
+      local cleaned=1
+      if [[ -e $worktree ]]; then
+        cleanup_completed_worker "$worktree" "$branch" "$RESUME_HEAD" || cleaned=0
+      else
+        cleanup_completed_branch_only "$branch" "$RESUME_HEAD" || cleaned=0
+      fi
+      if [[ $cleaned -eq 1 ]]; then
+        clear_attempts "$issue"
+        set_issue_state "$issue" completed
+        project_sync_state "$issue" completed
+        comment_issue "$issue" "<!-- agentic-loop:completed pr=$RESUME_PR resumed=1 -->\n再開時の検査で、対応PR $RESUME_PR_URL が既にmerge済みであることを確認しました（providerは起動していません）。専用worktreeとlocal branch \`$branch\` を削除しました。remote branchは復旧とGitHubのPR設定との責務分離のため、Supervisorからは削除しません。"
+        repo_api "issues/$issue" --method PATCH -f state=closed >/dev/null
+      else
+        set_issue_state "$issue" failed
+        project_sync_state "$issue" failed
+        comment_issue "$issue" "<!-- agentic-loop:failed worker=$worker reason=merge-or-cleanup resumed=1 -->\n再開時の検査でPR $RESUME_PR_URL のmergeを確認しましたが、安全なcleanupを完了できませんでした。Issueはcloseせず、既存のworktree/branchを保持します。原因確認後に再試行するには \`agent:queued\` を再度付与してください。"
+      fi
+      clear_worker_local "$issue"
+      return 0
+      ;;
+  esac
+
   if [[ ! -e $worktree ]]; then
     git -C "$REPO_ROOT" worktree prune
     if git -C "$REPO_ROOT" show-ref --verify --quiet "refs/heads/$branch"; then
@@ -2055,15 +2334,16 @@ worker() {
   ) & heartbeat_pid=$!
   local plan_usage="$STATE_ROOT/issue-$issue-plan-usage.txt" exec_usage="$STATE_ROOT/issue-$issue-usage.txt"
   local plan_file="$STATE_ROOT/issue-$issue-plan.txt" attempt=0 max_retries started failure_context='' exhausted=0
+  local resume_context; resume_context=$(resume_context_block "$branch")
   max_retries=$(agent_plan_max_retries)
   while :; do
     started=$(date +%s)
-    agent_run_stage plan "$worktree" "$git_common_dir" "$agents_dir" "$plan_file" "$plan_usage" "$(plan_prompt "$issue" "$repository" "$failure_context")" || true
+    agent_run_stage plan "$worktree" "$git_common_dir" "$agents_dir" "$plan_file" "$plan_usage" "$(plan_prompt "$issue" "$repository" "$failure_context" "$resume_context")" || true
     agent_post_usage "$issue" "$worker" "$plan_usage" 0 "$(($(date +%s) - started))"
     worker_refine_scope_from_plan "$issue" "$plan_file"
     exit_code=0
     started=$(date +%s)
-    agent_run_stage exec "$worktree" "$git_common_dir" "$agents_dir" "$result" "$exec_usage" "$(exec_prompt "$issue" "$repository" "$plan_file")" || exit_code=$?
+    agent_run_stage exec "$worktree" "$git_common_dir" "$agents_dir" "$result" "$exec_usage" "$(exec_prompt "$issue" "$repository" "$plan_file" "$resume_context")" || exit_code=$?
     agent_post_usage "$issue" "$worker" "$exec_usage" "$exit_code" "$(($(date +%s) - started))"
     worker_refine_scope_from_diff "$issue" "$worktree" "$default_branch"
     { [[ $exit_code -eq 0 ]] && grep -Fq 'AGENTIC_LOOP_RESULT=completed' "$result"; } && break

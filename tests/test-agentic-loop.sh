@@ -158,6 +158,12 @@ case "${1:-} ${2:-}" in
       elif [[ $* == *starts*with* ]]; then
         target=$(sed -n 's/.*\["agent:\([^"]*\)"\].*/\1/p' <<< "$*"); printf '["agent:%s"]\n' "$target"
       else awk -v n="$issue" '$1 == n {print "agent:" $2}' "$state"; fi
+    elif [[ $endpoint =~ ^commits/.+/check-runs$ ]]; then
+      [[ -n ${FAKE_RESUME_CHECKS:-} ]] && printf '%s\n' "$FAKE_RESUME_CHECKS"
+    elif [[ $endpoint == pulls && $* == *'resume-probe-prs'* ]]; then
+      printf '%s\x1f%s\x1f%s\x1f%s\x1f%s\n' \
+        "${FAKE_RESUME_MERGED_PR:-}" "${FAKE_RESUME_MERGED_SHA:-}" "${FAKE_RESUME_MERGED_URL:-}" \
+        "${FAKE_RESUME_OPEN_PR:-}" "${FAKE_RESUME_OPEN_URL:-}"
     elif [[ $endpoint == pulls ]]; then
       if [[ $form_state == closed ]]; then
         if [[ ${FAKE_PR_MERGED:-1} == 1 ]]; then
@@ -305,6 +311,10 @@ if [[ ${FAKE_CODEX_GIT_OPERATIONS:-0} == 1 ]]; then
   git -C "$worktree" add worker.txt
   git -C "$worktree" commit --quiet -m 'worker change'
   git -C "$worktree" push --quiet origin HEAD:refs/heads/agent/issue-6
+fi
+if [[ ${FAKE_CODEX_COMMIT_ALL:-0} == 1 ]]; then
+  git -C "$worktree" add -A
+  git -C "$worktree" commit --quiet --allow-empty -m 'exec committed pending changes'
 fi
 sleep "${FAKE_CODEX_SLEEP:-0}"
 printf '%s\n' "${FAKE_CODEX_RESULT:-AGENTIC_LOOP_RESULT=completed}" > "$output"
@@ -1147,7 +1157,7 @@ AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _supervise
 write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=2 LEASE_SECONDS=3 STOP_TIMEOUT=10 STALE_DAYS=30
 
 # A linked-worktree worker can fetch, commit, and push through the constructed invocation boundary.
-printf '6 queued open\n' > "$state"
+printf '6 running open\n' > "$state"
 FAKE_CODEX_GIT_OPERATIONS=1 "$target/bin/agentic-loop" _worker 6 linked-worktree-worker
 git -C "$target" fetch --quiet origin agent/issue-6
 git -C "$target" show 'origin/agent/issue-6:worker.txt' | grep -Fxq 'worker change' || fail 'linked-worktree Git metadata operations did not reach the remote'
@@ -1210,6 +1220,129 @@ assert_contains "$FAKE_GH_ROOT/$state_key.comments" '保護対象のrepository p
 assert_contains "$FAKE_GH_ROOT/$state_key.comments" '.agents directoryを安全な通常directoryとして復旧した後、このIssueを安全に再キューしてください' '.agents resolver failure did not explain recovery in Japanese'
 git -C "$target" worktree remove --force "$target-worktrees/issue-12"
 git -C "$target" branch -D agent/issue-12 >/dev/null
+
+# --- Worker resume from existing artifacts (see docs/decisions/0004) ---
+
+# Regression: a worktree at this Issue's expected path but registered to a
+# DIFFERENT Issue's branch must never be reused (previously only existence was
+# checked, not branch identity, so the provider could be launched inside
+# another Issue's worktree).
+printf '13 running open\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+git -C "$target" branch agent/issue-999-foreign
+git -C "$target" worktree add --quiet "$target-worktrees/issue-13" agent/issue-999-foreign
+before_codex_calls=$(wc -l < "$FAKE_GH_ROOT/codex-calls")
+"$target/bin/agentic-loop" _worker 13 foreign-worker
+grep -Eq '^13 failed open$' "$state" || fail 'foreign worktree/branch mismatch was accepted'
+[[ $(wc -l < "$FAKE_GH_ROOT/codex-calls") -eq $before_codex_calls ]] || fail 'foreign worktree/branch mismatch started a provider'
+[[ -e $target-worktrees/issue-13 ]] || fail 'foreign worktree was removed'
+git -C "$target" show-ref --verify --quiet refs/heads/agent/issue-999-foreign || fail 'foreign branch was removed'
+! git -C "$target" show-ref --verify --quiet refs/heads/agent/issue-13 || fail 'a new branch was created despite the foreign worktree conflict'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'reason=foreign-artifact' 'foreign worktree/branch mismatch was not recorded with its reason code'
+git -C "$target" worktree remove --force "$target-worktrees/issue-13"
+git -C "$target" branch -D agent/issue-999-foreign >/dev/null
+
+# Resuming an Issue whose PR is already merged (e.g. a prior worker crashed
+# after GitHub merged the PR but before its own cleanup ran) completes and
+# cleans up without ever starting a provider, so a duplicate PR or merge
+# cannot be created.
+printf '14 running open\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+git -C "$target" worktree add --quiet -b agent/issue-14 "$target-worktrees/issue-14" origin/main
+git -C "$target-worktrees/issue-14" commit --quiet --allow-empty -m 'resumed work'
+merged_sha=$(git -C "$target-worktrees/issue-14" rev-parse HEAD)
+before_codex_calls=$(wc -l < "$FAKE_GH_ROOT/codex-calls")
+FAKE_RESUME_MERGED_PR=99 FAKE_RESUME_MERGED_SHA=$merged_sha FAKE_RESUME_MERGED_URL="https://github.example/acme/installed-project/pull/99" \
+  "$target/bin/agentic-loop" _worker 14 resume-merged-worker
+grep -Eq '^14 completed closed' "$state" || fail 'resuming an already-merged PR did not complete the Issue'
+[[ $(wc -l < "$FAKE_GH_ROOT/codex-calls") -eq $before_codex_calls ]] || fail 'resuming an already-merged PR unnecessarily started a provider'
+[[ ! -e $target-worktrees/issue-14 ]] || fail 'resuming an already-merged PR did not remove the worktree'
+! git -C "$target" show-ref --verify --quiet refs/heads/agent/issue-14 || fail 'resuming an already-merged PR did not remove the local branch'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:completed pr=99' 'resumed merged-PR completion was not recorded'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'resumed=1' 'resumed merged-PR completion did not mark itself as a resume fast path'
+
+# A branch that has diverged from its remote (both sides carry commits the
+# other lacks) is routed to needs-input; no force-push, reset, or deletion of
+# either branch is attempted, and no provider is started.
+printf '15 running open\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+git -C "$target" worktree add --quiet -b agent/issue-15 "$target-worktrees/issue-15" origin/main
+git -C "$target-worktrees/issue-15" commit --quiet --allow-empty -m 'remote side'
+git -C "$target-worktrees/issue-15" push --quiet origin agent/issue-15
+git -C "$target-worktrees/issue-15" reset --quiet --hard HEAD~1
+git -C "$target-worktrees/issue-15" commit --quiet --allow-empty -m 'local side'
+before_codex_calls=$(wc -l < "$FAKE_GH_ROOT/codex-calls")
+"$target/bin/agentic-loop" _worker 15 diverged-worker
+grep -Eq '^15 needs-input open$' "$state" || fail 'a diverged branch was not routed to needs-input'
+[[ $(wc -l < "$FAKE_GH_ROOT/codex-calls") -eq $before_codex_calls ]] || fail 'a diverged branch unnecessarily started a provider'
+git -C "$target" show-ref --verify --quiet refs/heads/agent/issue-15 || fail 'a diverged local branch was removed'
+git -C "$target" ls-remote --exit-code --heads origin refs/heads/agent/issue-15 >/dev/null || fail 'a diverged remote branch was removed'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'reason=resume-diverged' 'a diverged branch was not recorded with its reason code'
+git -C "$target" worktree remove --force "$target-worktrees/issue-15"
+git -C "$target" branch -D agent/issue-15 >/dev/null
+git -C "$target" push --quiet origin --delete agent/issue-15
+
+# An uncommitted change in an existing worktree is not itself an anomaly: the
+# worker proceeds through the normal plan/exec flow (here the provider commits
+# the pending change) and completes, with the dirty flag preserved for audit
+# in the handoff comment.
+printf '16 running open\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+: > "$FAKE_GH_ROOT/codex-calls"
+git -C "$target" worktree add --quiet -b agent/issue-16 "$target-worktrees/issue-16" origin/main
+printf 'uncommitted change\n' > "$target-worktrees/issue-16/dirty.txt"
+FAKE_CODEX_COMMIT_ALL=1 "$target/bin/agentic-loop" _worker 16 dirty-worker
+grep -Eq '^16 completed closed' "$state" || fail 'a dirty worktree resume did not proceed to normal completion'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'dirty=1' 'a dirty worktree resume was not recorded in the handoff'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'phase=worktree-ready' 'a dirty worktree resume phase was not recorded in the handoff'
+[[ ! -e $target-worktrees/issue-16 ]] || fail 'a completed dirty-resume worktree remained'
+
+# Resuming an Issue with an existing open PR injects the observed phase, PR
+# number, and check status into the provider prompt so it reuses the existing
+# branch/PR instead of proposing a new one, and the handoff comment records
+# the same observed facts.
+printf '17 running open\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+: > "$FAKE_GH_ROOT/codex-calls"
+git -C "$target" worktree add --quiet -b agent/issue-17 "$target-worktrees/issue-17" origin/main
+git -C "$target-worktrees/issue-17" commit --quiet --allow-empty -m 'in-progress work'
+FAKE_RESUME_OPEN_PR=42 FAKE_RESUME_OPEN_URL="https://github.example/acme/installed-project/pull/42" FAKE_RESUME_CHECKS=in_progress \
+  "$target/bin/agentic-loop" _worker 17 resume-open-worker
+# shellcheck disable=SC2016 # Backticks are literal Markdown in the expected provider prompt.
+assert_contains "$FAKE_GH_ROOT/codex-calls" '既存のbranch `agent/issue-17` とPR #42 を再利用してください' 'an open-PR resume did not inject reuse instructions into the provider prompt'
+assert_contains "$FAKE_GH_ROOT/codex-calls" 'phase: pr-open' 'an open-PR resume did not inject the observed phase into the provider prompt'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'phase=pr-open' 'an open-PR resume phase was not recorded in the handoff'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'checks=in_progress' 'an open-PR resume check status was not recorded in the handoff'
+git -C "$target" worktree remove --force "$target-worktrees/issue-17" 2>/dev/null || true
+git -C "$target" branch -D agent/issue-17 >/dev/null 2>&1 || true
+
+# A stale or duplicate _worker invocation whose Issue is no longer
+# agent:running (e.g. it already raced a requeue) makes no Git, Label, or
+# comment change at all.
+printf '18 queued open\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+before_codex_calls=$(wc -l < "$FAKE_GH_ROOT/codex-calls")
+"$target/bin/agentic-loop" _worker 18 stale-duplicate-worker
+grep -Eq '^18 queued open$' "$state" || fail 'a duplicate worker invocation changed the Issue label'
+[[ $(wc -l < "$FAKE_GH_ROOT/codex-calls") -eq $before_codex_calls ]] || fail 'a duplicate worker invocation started a provider'
+[[ ! -s $FAKE_GH_ROOT/$state_key.comments ]] || fail 'a duplicate worker invocation posted a comment'
+[[ ! -e $target-worktrees/issue-18 ]] || fail 'a duplicate worker invocation created a worktree'
+
+# `status` surfaces the observed resume phase for a running Issue from the
+# worker's local phase cache, with no additional GitHub API calls of its own.
+printf '19 running open\n' > "$state"
+git -C "$target" worktree add --quiet -b agent/issue-19 "$target-worktrees/issue-19" origin/main
+FAKE_CODEX_SLEEP=2 "$target/bin/agentic-loop" _worker 19 phase-status-worker &
+worker_bg_pid=$!
+status_output=''
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  status_output=$("$target/bin/agentic-loop" status)
+  grep -Fq 'phase:' <<< "$status_output" && break
+  sleep 0.3
+done
+wait "$worker_bg_pid"
+grep -Fq '#19' <<< "$status_output" || fail 'status did not list the running Issue'
+grep -Fq 'phase: worktree-ready' <<< "$status_output" || fail 'status did not display the observed resume phase'
 
 # needs-input and failure are isolated state transitions; a later Issue reply requeues only that Issue.
 printf '4 running open\n5 running open\n' > "$state"
