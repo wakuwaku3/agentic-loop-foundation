@@ -56,6 +56,26 @@ preflight() {
   [[ $provider != codex ]] || codex exec --help >/dev/null 2>&1 || fail 'Codex CLI exec mode is required'
 }
 
+record_runtime_path() {
+  local state_root runtime_file command_name command_path command_dir runtime_path='' provider provider_cli
+  state_root="$(git -C "$TARGET" rev-parse --path-format=absolute --git-common-dir)/agentic-loop"
+  runtime_file="$state_root/runtime.path"
+  for command_name in git gh yq devbox systemctl systemd-escape; do
+    command_path=$(command -v "$command_name")
+    command_dir=$(cd "$(dirname "$command_path")" && pwd)
+    case ":$runtime_path:" in *":$command_dir:"*) ;; *) runtime_path="${runtime_path:+$runtime_path:}$command_dir" ;; esac
+  done
+  provider=$(effective_provider)
+  case $provider in codex) provider_cli=codex ;; claude) provider_cli=claude ;; opencode) provider_cli=opencode ;; esac
+  command_path=$(command -v "$provider_cli")
+  command_dir=$(cd "$(dirname "$command_path")" && pwd)
+  case ":$runtime_path:" in *":$command_dir:"*) ;; *) runtime_path="$runtime_path:$command_dir" ;; esac
+  [[ $runtime_path != *$'\n'* && $runtime_path != *$'\r'* ]] || fail 'runtime PATH contains an unsafe newline'
+  mkdir -p "$state_root"
+  printf '%s\n' "$runtime_path" > "$runtime_file.tmp"
+  mv "$runtime_file.tmp" "$runtime_file"
+}
+
 main() {
   local target=$TARGET mode=install file hook_path
   local -a files=("${SHARED_FILES[@]}")
@@ -73,6 +93,7 @@ main() {
   chmod +x "$target/bin/agentic-loop" "$target/bin/agentic-loop-diagnose" "$target/.agentic-loop/guard-secrets.sh" "$target/.agentic-loop/update-main.sh" "$target/.agentic-loop/diagnose-codebase.sh" "$target/.githooks/pre-commit" "$target/.githooks/pre-push"
   [[ $mode == init ]] && chmod +x "$target/install.sh" "$target/scripts/"*.sh "$target/tests/"*.sh
   git -C "$target" config --local core.hooksPath .githooks
+  record_runtime_path
   "$target/bin/agentic-loop" setup
   "$target/.agentic-loop/update-main.sh" install "$target"
   "$target/.agentic-loop/diagnose-codebase.sh" install "$target"

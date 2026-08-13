@@ -70,7 +70,7 @@ bin/agentic-loop doctor
 bin/agentic-loop metrics
 ```
 
-これらは `devbox run` または `devbox shell` の中で実行してください。devboxコンテキスト外では `yq` がPATHに無く、設定読み取りや起動時検査が失敗します。`start` はSupervisorのsystemd serviceを起動時点のPATHで構成するため、Supervisorの起動もdevboxコンテキストで行う必要があります。
+これらはinstall時に記録された固定runtime PATHを自動的に復元するため、`devbox run`、`devbox shell`、direnv、ホストへの`yq`導入を意識せず、そのまま実行できます。記録先はGit管理外のrepository local state（`.git/agentic-loop/runtime.path`）です。移動やNix storeの回収などで記録済みツールが利用不能になった場合はinstallを再実行して修復します。`start` が生成するSupervisorのsystemd serviceにも同じ固定ツールのPATHが設定されます。
 
 `status` はSupervisorの稼働状態に加え、running Issueごとの経過時間・最終heartbeat・lease期限・worktree・関連PR、queuedの件数と次のclaim候補、needs-input/failed/in-review/blocked/staleの件数とURL、staleなsupervisor pidや期限切れleaseなどの運用上の異常を1つの入口にまとめます（[0005](docs/decisions/0005-status-observability.md)）。常に読み取り専用で、GitHub呼び出しは1回の実行あたり最大2回に抑え、異常があっても終了code 0のままです（合否判定は `doctor` の責務）。自動化からは `bin/agentic-loop status --format json` を使用できます。詳細は [Issueキュー運用](docs/operations/issue-queue.md) を参照してください。
 
