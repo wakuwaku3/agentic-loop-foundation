@@ -310,7 +310,7 @@ agent_run_stage() {
       agent_usage_from_claude_json "$raw_result" >> "$usage_file" || true
       # Claude's final assistant response is the JSON result field, not the
       # surrounding transport object.
-      jq -rse 'map(select(.type == "result" and (.result | type) == "string")) | last.result // empty' "$raw_result" > "$result_file" || cp "$raw_result" "$result_file"
+      yq -r '.result // ""' "$raw_result" > "$result_file" || cp "$raw_result" "$result_file"
       rm -f "$raw_result"
       ;;
     opencode)
@@ -325,7 +325,13 @@ agent_run_stage() {
       agent_usage_from_opencode_json "$raw_result" >> "$usage_file" || true
       # opencode streams several JSON events; only the last text part is the
       # final assistant response, while step-finish is telemetry.
-      jq -rse 'map(select(.part.type == "text" and (.part.text | type) == "string")) | last.part.text // empty' "$raw_result" > "$result_file" || cp "$raw_result" "$result_file"
+      local event message parse_failed=0
+      : > "$result_file"
+      while IFS= read -r event; do
+        message=$(printf '%s\n' "$event" | yq -r 'select(.part.type == "text") | .part.text // ""' -) || { parse_failed=1; break; }
+        [[ -n $message ]] && printf '%s\n' "$message" > "$result_file"
+      done < "$raw_result"
+      (( parse_failed == 0 )) || cp "$raw_result" "$result_file"
       rm -f "$raw_result"
       ;;
     *)
