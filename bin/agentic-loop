@@ -3051,7 +3051,8 @@ worker_count() {
   local count=0 pid
   shopt -s nullglob
   for pidfile in "$STATE_ROOT"/workers/*.pid; do
-    read -r pid < "$pidfile" || true
+    pid=''
+    read -r pid < "$pidfile" 2>/dev/null || true
     if [[ $pid =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then count=$((count + 1)); else rm -f "$pidfile"; fi
   done
   shopt -u nullglob
@@ -3146,7 +3147,11 @@ supervise() {
         done
       fi
       if [[ ${AGENTIC_LOOP_RUN_ONCE:-0} == 1 ]]; then
-        while [[ $(worker_count) -gt 0 ]]; do sleep 1; done
+        # RUN_ONCE is primarily a synchronous boundary: return as soon as the
+        # workers from this poll finish. A one-second polling interval adds a
+        # full second of avoidable latency to every short worker (and to every
+        # E2E scenario using this boundary), so poll only while needed.
+        while [[ $(worker_count) -gt 0 ]]; do sleep 0.1; done
         break
       fi
     fi

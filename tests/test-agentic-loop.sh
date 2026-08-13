@@ -420,6 +420,10 @@ if [[ $worktree =~ /issue-([0-9]+)$ ]]; then
   override_var="FAKE_CODEX_SLEEP_ISSUE_${BASH_REMATCH[1]}"
   sleep_value=${!override_var:-$sleep_value}
 fi
+# Most scenarios only need the fake provider to overlap briefly with the
+# supervisor; a real second per plan and exec stage adds no coverage. Keep the
+# longer values used by heartbeat, shutdown, and timeout scenarios unchanged.
+[[ $sleep_value == 1 ]] && sleep_value=0.1
 sleep "$sleep_value"
 printf '%s\n' "${FAKE_CODEX_RESULT:-AGENTIC_LOOP_RESULT=completed}" > "$output"
 FAKE_CODEX
@@ -479,7 +483,7 @@ fi
 exit 0
 FAKE_DEVBOX
 chmod +x "$FAKE_BIN/gh" "$FAKE_BIN/codex" "$FAKE_BIN/claude" "$FAKE_BIN/opencode" "$FAKE_BIN/systemctl" "$FAKE_BIN/systemd-escape" "$FAKE_BIN/devbox"
-export PATH="$FAKE_BIN:$PATH" FAKE_GH_ROOT XDG_CONFIG_HOME="$TEST_ROOT/config"
+export PATH="$FAKE_BIN:$PATH" FAKE_BIN FAKE_GH_ROOT TEST_HOST_PATH XDG_CONFIG_HOME="$TEST_ROOT/config"
 
 new_repository() {
   local name=$1 target bare
@@ -1694,6 +1698,10 @@ for _ in $(seq 1 40); do
   sleep 0.5
 done
 [[ -n $hang_worker_pid ]] || { kill "$hang_sup_pid" 2>/dev/null; wait "$hang_sup_pid" 2>/dev/null; fail 'hung worker was not claimed before the timeout test'; }
+# Drive the elapsed-time boundary through its persisted clock input instead of
+# waiting eight wall-clock seconds. The next supervisor poll must enforce the
+# same configured timeout against this already-expired start timestamp.
+printf '%s\n' "$(($(date +%s) - 9))" > "$state_root/workers/50.started"
 hang_timed_out=0
 for _ in $(seq 1 40); do
   grep -Eq '^50 failed' "$state" && { hang_timed_out=1; break; }
@@ -1753,9 +1761,15 @@ for _ in $(seq 1 40); do [[ -r $state_root/workers/53.started ]] && { disabled_s
 [[ $disabled_started_seen == 1 ]] || { kill -TERM "-$disabled_worker_pid" 2>/dev/null; wait "$disabled_worker_pid" 2>/dev/null; fail 'test setup did not observe the worker start marker'; }
 printf '%s\n' "$disabled_worker_pid" > "$state_root/workers/53.pid"
 printf '%s\n' "$(($(date +%s) - 100000))" > "$state_root/workers/53.started"
+rm -f "$state_root/poll-interval"
 "$target/bin/agentic-loop" _supervise &
 disabled_sup_pid=$!
-sleep 3
+disabled_poll_seen=0
+for _ in $(seq 1 50); do
+  [[ -r $state_root/poll-interval ]] && { disabled_poll_seen=1; break; }
+  sleep 0.1
+done
+[[ $disabled_poll_seen == 1 ]] || { kill -TERM "$disabled_sup_pid" 2>/dev/null; wait "$disabled_sup_pid" 2>/dev/null; fail 'disabled-timeout supervisor did not complete a poll'; }
 disabled_still_alive=0
 kill -0 "$disabled_worker_pid" 2>/dev/null && disabled_still_alive=1
 disabled_still_running=0
