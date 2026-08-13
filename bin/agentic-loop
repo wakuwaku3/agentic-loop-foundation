@@ -2161,9 +2161,9 @@ claim_acquire() {
   [[ $state == open && ,$labels, == *,agent:queued,* ]] || return 1
   id=$(repo_api "issues/$issue/comments" --method POST -f body="$(lease_body "$worker" "$now" "$expires")" --jq '.id' 2>/dev/null | tr -d '[:space:]' || true)
   [[ $id =~ ^[0-9]+$ ]] || return 1
-  # Give a concurrent POST a bounded opportunity to become visible. The total
-  # ordering by comment id decides ownership; no wall-clock ordering is used.
-  sleep 1
+  # The total ordering by comment id decides ownership; no wall-clock ordering
+  # or timing window is used. A contender posting after this read will observe
+  # this lower id during its own read and lose the election.
   while IFS= read -r row; do
     [[ -n $row ]] || continue
     cid=$(base64 -d <<< "$row" 2>/dev/null | cut -f1)

@@ -23,4 +23,4 @@ systemd unitは固定環境の`devbox run`を入口にする。生成時点の�
 - 同じIssueを複数ホストが同時に実行しない。
 - 他ホストの有効なleaseは既存の回復処理が尊重する。
 - GitHub comment作成・取得ができない場合はclaimを成立させず、安全側でそのpollを見送る。
-- claimごとにREST callと短い調停待ちが増える。
+- claimごとにREST callが増える。
