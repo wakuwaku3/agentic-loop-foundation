@@ -2093,7 +2093,7 @@ cmd_sync_issue() {
 
 lease_body() {
   local worker=$1 now=$2 expires=$3
-  printf '<!-- agentic-loop:claim worker=%s created=%s expires=%s -->\\n<!-- agentic-loop:lease worker=%s heartbeat=%s expires=%s -->\\nAgentic Loop worker `%s` の排他的claimとハートビートです。リースは epoch %s に期限切れとなります。' "$worker" "$now" "$expires" "$worker" "$now" "$expires" "$worker" "$expires"
+  printf '<!-- agentic-loop:claim worker=%s created=%s expires=%s -->\\n<!-- agentic-loop:lease worker=%s heartbeat=%s expires=%s -->\\nAgentic Loop worker `%s` のハートビートです（排他的claimを兼ねます）。リースは epoch %s に期限切れとなります。' "$worker" "$now" "$expires" "$worker" "$now" "$expires" "$worker" "$expires"
 }
 
 lease_file() { printf '%s\n' "$STATE_ROOT/workers/$1.lease"; }
