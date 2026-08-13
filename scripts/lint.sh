@@ -3,7 +3,7 @@ set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
-required=(AGENTS.md README.md Makefile .editorconfig .gitignore .codex/config.toml install.sh devbox.json devbox.lock docs/policies/cost.md docs/policies/testing.md docs/policies/external-environment.md docs/policies/development-environment.md docs/policies/ai-tool-neutrality.md docs/policies/github-language.md docs/policies/validation-harness.md docs/policies/continuous-delivery.md docs/decisions/0002-github-issue-queue.md docs/decisions/0003-supervisor-resilience-and-api-budget.md docs/decisions/0004-worker-resume-and-handoff.md docs/operations/issue-queue.md docs/operations/codebase-diagnosis.md .agentic-loop.toml .agentic-loop/guard-secrets.sh .agentic-loop/update-main.sh .agentic-loop/diagnose-codebase.sh .githooks/pre-commit .githooks/pre-push .agents/skills/submit-requirement/SKILL.md .agents/skills/diagnose-codebase/SKILL.md .claude/skills/submit-requirement/SKILL.md .claude/skills/diagnose-codebase/SKILL.md bin/agentic-loop bin/agentic-loop-diagnose scripts/check-environment.sh scripts/install-target.sh)
+required=(AGENTS.md README.md Makefile .editorconfig .gitignore .codex/config.toml install.sh devbox.json devbox.lock docs/policies/cost.md docs/policies/testing.md docs/policies/external-environment.md docs/policies/development-environment.md docs/policies/ai-tool-neutrality.md docs/policies/github-language.md docs/policies/validation-harness.md docs/policies/continuous-delivery.md docs/decisions/0002-github-issue-queue.md docs/decisions/0003-supervisor-resilience-and-api-budget.md docs/decisions/0004-worker-resume-and-handoff.md docs/decisions/0005-status-observability.md docs/operations/issue-queue.md docs/operations/codebase-diagnosis.md .agentic-loop.toml .agentic-loop/guard-secrets.sh .agentic-loop/update-main.sh .agentic-loop/diagnose-codebase.sh .githooks/pre-commit .githooks/pre-push .agents/skills/submit-requirement/SKILL.md .agents/skills/diagnose-codebase/SKILL.md .claude/skills/submit-requirement/SKILL.md .claude/skills/diagnose-codebase/SKILL.md bin/agentic-loop bin/agentic-loop-diagnose scripts/check-environment.sh scripts/install-target.sh)
 for file in "${required[@]}"; do
   [[ -f $file ]] || { printf 'Missing required file: %s\n' "$file" >&2; exit 1; }
 done
@@ -77,6 +77,22 @@ grep -Fq 'doctor --format json' docs/operations/issue-queue.md || {
 }
 grep -Fq 'doctor) cmd_doctor' bin/agentic-loop || {
   printf 'Doctor command is not distributed through the queue CLI.\n' >&2
+  exit 1
+}
+grep -Fq 'status --format json' docs/operations/issue-queue.md || {
+  printf 'Status machine-readable interface is not documented.\n' >&2
+  exit 1
+}
+grep -Fq 'status) cmd_status' bin/agentic-loop || {
+  printf 'Status command is not distributed through the queue CLI.\n' >&2
+  exit 1
+}
+grep -Fq 'status_snapshot_fetch' bin/agentic-loop || {
+  printf 'Status observability snapshot is missing.\n' >&2
+  exit 1
+}
+grep -Fq 'queue_rank_jq' bin/agentic-loop || {
+  printf 'Queue candidate ordering does not share claim_next\x27s rank expression.\n' >&2
   exit 1
 }
 grep -Fq 'devbox run --pure check' .github/workflows/ci.yml || {
