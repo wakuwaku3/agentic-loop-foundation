@@ -71,6 +71,8 @@ bin/agentic-loop doctor
 
 これらは `devbox run` または `devbox shell` の中で実行してください。devboxコンテキスト外では `yq` がPATHに無く、設定読み取りや起動時検査が失敗します。`start` はSupervisorのsystemd serviceを起動時点のPATHで構成するため、Supervisorの起動もdevboxコンテキストで行う必要があります。
 
+`status` はSupervisorの稼働状態に加え、running Issueごとの経過時間・最終heartbeat・lease期限・worktree・関連PR、queuedの件数と次のclaim候補、needs-input/failed/in-review/blocked/staleの件数とURL、staleなsupervisor pidや期限切れleaseなどの運用上の異常を1つの入口にまとめます（[0005](docs/decisions/0005-status-observability.md)）。常に読み取り専用で、GitHub呼び出しは1回の実行あたり最大2回に抑え、異常があっても終了code 0のままです（合否判定は `doctor` の責務）。自動化からは `bin/agentic-loop status --format json` を使用できます。詳細は [Issueキュー運用](docs/operations/issue-queue.md) を参照してください。
+
 `doctor` はGitHub認証とrepository権限、origin/default branch、plan段・exec段が使用する各AI CLI（`codex`／`claude`／`opencode`、それぞれ `AI CLI (<provider>)` として個別に検査）、Devbox、hooks、Supervisor、systemd service/timer、GitHub Project、設定、残存worktree/branch/logを読み取り専用で検査します。各結果を成功・警告・失敗に分類し、影響と復旧方法を日本語で表示します。必須条件の失敗がある場合だけ終了code 1、警告だけなら0です。自動監視では `bin/agentic-loop doctor --format json` を使用できます。診断はtoken本体を表示せず、修復は `setup`、`start`、install再実行などの明示的な別操作で行います。
 
 既定では30秒poll、最大4件を並列実行します。運用値は root 直下の `.agentic-loop.toml`（TOML、`yq`で読み取り）の `[queue]` セクションで設定し、個人環境の上書きは git 管理外の `.agentic-loop.local.toml` にキー単位で書けます。設定、状態遷移、lease復旧、Projectの制約、トラブルシュートは [Issueキュー運用](docs/operations/issue-queue.md)、設計上の判断は [0001](docs/decisions/0001-minimal-foundation.md) と [0002](docs/decisions/0002-github-issue-queue.md) に記録しています。

@@ -75,8 +75,27 @@ case "${1:-} ${2:-}" in
         --input) j=$((i+1)); input_file=${!j} ;;
       esac
     done
-    if [[ $endpoint == issues && $method == GET && $form_state == all ]]; then
+    if [[ $endpoint == issues && $method == GET && $form_state == all && $wanted == agent:stale ]]; then
+      awk '$2 == "stale" {print $1 "\t" "Fake issue " $1}' "$state" 2>/dev/null || true
+    elif [[ $endpoint == issues && $method == GET && $form_state == all ]]; then
       awk -v slug="$slug" '{print "https://github.example/" slug "/issues/" $1}' "$state" 2>/dev/null || true
+    elif [[ $endpoint == issues && $method == GET && -z $wanted ]]; then
+      # status-snapshot: every open Issue, classified purely by its own state
+      # word (see bin/agentic-loop's status_snapshot_fetch), with the same
+      # category/priority ranks as the agent:queued created_at query above.
+      awk '$3 != "closed" {
+        category=5; if ($7 ~ /(^|,)loop-continuity(,|$)/) category=0; else if ($7 ~ /(^|,)confidentiality-incident(,|$)/) category=1; else if ($7 ~ /(^|,)integrity-incident(,|$)/) category=2; else if ($7 ~ /(^|,)availability-incident(,|$)/) category=3; else if ($7 ~ /(^|,)feature(,|$)/) category=4
+        priority=4; if ($4 ~ /(^|,)critical(,|$)/) priority=0; else if ($4 ~ /(^|,)high(,|$)/) priority=1; else if ($4 ~ /(^|,)medium(,|$)/) priority=2; else if ($4 ~ /(^|,)low(,|$)/) priority=3
+        created=($5 == "" ? $1 : $5)
+        state="other"
+        if ($2 == "running") state="running"
+        else if ($2 == "queued") state="queued"
+        else if ($2 == "needs-input") state="needs-input"
+        else if ($2 == "failed") state="failed"
+        else if ($2 == "in-review") state="in-review"
+        else if ($2 == "blocked") state="blocked"
+        print $1 "\t" "Fake issue " $1 "\t" state "\t" category "\t" priority "\t" created
+      }' "$state" 2>/dev/null || true
     elif [[ $endpoint == issues && $method == GET ]]; then
       case $wanted in
         agent:queued)
@@ -1492,6 +1511,166 @@ wait "$backoff_sup" 2>/dev/null || true
 rm -f "$state_root/stop.requested"
 (( backoff_val > 1 )) || fail "idle backoff did not lengthen the poll interval (got $backoff_val)"
 (( backoff_val <= 8 )) || fail "idle backoff exceeded the configured ceiling (got $backoff_val)"
+
+# --- status observability (Issue #42) ---
+# The Supervisor is deliberately left stopped for the manual-state scenarios
+# below: a live start would call rebuild_scope_cache/recover_expired and
+# overwrite these manually seeded fixtures (mirrors the existing scope/
+# conflict status test above).
+write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=2 LEASE_SECONDS=30 STOP_TIMEOUT=10 STALE_DAYS=30
+rm -f "$state_root/supervisor.pid" "$state_root/stop.requested" "$state_root/project-pending" \
+      "$state_root/budget-paused" "$state_root/core-budget-paused" "$state_root/agent-exhausted"
+rmdir "$state_root/supervisor.lock" 2>/dev/null || true
+rm -rf "$state_root/workers" "$state_root/scope" "$state_root/conflict" "$state_root/dependency" "$state_root/attempts"
+# Earlier scenarios in this file intentionally leave worktrees/branches behind
+# (they test worker() resume/cleanup behavior); clear them so the idle
+# scenario below starts from a genuinely anomaly-free baseline.
+while IFS= read -r leftover_worktree; do
+  [[ -n $leftover_worktree ]] || continue
+  git -C "$target" worktree remove --force "$leftover_worktree" 2>/dev/null || true
+done < <(git -C "$target" worktree list --porcelain | awk -v root="$target-worktrees/issue-" '$1 == "worktree" && index($2, root) == 1 {print $2}')
+while IFS= read -r leftover_branch; do
+  [[ -n $leftover_branch ]] || continue
+  git -C "$target" branch -D "$leftover_branch" >/dev/null 2>&1 || true
+done < <(git -C "$target" for-each-ref --format='%(refname:short)' refs/heads/agent/)
+
+# Scenario: idle (nothing running or queued). status stays a pure read (no
+# repository change, no GitHub write), costs at most 2 REST(core) reads (the
+# open-Issue snapshot and the closed agent:stale summary), and exits 0.
+: > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+before_status=$(git -C "$target" status --porcelain)
+calls_before=$(wc -l < "$FAKE_GH_ROOT/calls" 2>/dev/null || printf 0)
+status_output=$("$target/bin/agentic-loop" status); status_rc=$?
+(( status_rc == 0 )) || fail 'idle status did not exit 0'
+grep -Fq 'stopped' <<< "$status_output" || fail 'idle status did not report the supervisor as stopped'
+grep -Fq 'Running Issues: none' <<< "$status_output" || fail 'idle status did not report no running Issues'
+grep -Fq '競合待ちIssue: none' <<< "$status_output" || fail 'idle status did not report no conflict waits'
+grep -Fq 'キュー: 0件' <<< "$status_output" || fail 'idle status did not report an empty queue'
+grep -Fq '状態サマリ:' <<< "$status_output" || fail 'idle status did not show the state summary section'
+grep -Fq '警告: none' <<< "$status_output" || fail 'idle status unexpectedly reported an anomaly'
+[[ $(git -C "$target" status --porcelain) == "$before_status" ]] || fail 'idle status modified the repository working tree'
+status_delta=$(tail -n +"$((calls_before + 1))" "$FAKE_GH_ROOT/calls")
+idle_core_reads=$(grep -c $'\tapi repos/' <<< "$status_delta" || true)
+idle_mutations=$(grep -Ec -- '--method (POST|PUT|PATCH)|	api graphql|	project |	api rate_limit' <<< "$status_delta" || true)
+(( idle_core_reads <= 2 )) || fail "idle status made more than 2 REST(core) reads (got $idle_core_reads)"
+(( idle_mutations == 0 )) || fail 'idle status made a write or GraphQL/Projects/rate_limit call'
+
+idle_json=$("$target/bin/agentic-loop" status --format json)
+printf '%s' "$idle_json" | yq -p json -o json >/dev/null || fail 'idle status --format json did not produce valid JSON'
+[[ $(printf '%s' "$idle_json" | yq -p json '.schema_version') == 1 ]] || fail 'status --format json did not report schema_version 1'
+[[ $(printf '%s' "$idle_json" | yq -p json '.github_available') == true ]] || fail 'idle status --format json did not report github_available'
+[[ $(printf '%s' "$idle_json" | yq -p json '.supervisor.state') == stopped ]] || fail 'idle status --format json did not report a stopped supervisor'
+[[ $(printf '%s' "$idle_json" | yq -p json '.workers | length') -eq 0 ]] || fail 'idle status --format json listed a running worker'
+[[ $(printf '%s' "$idle_json" | yq -p json '.queue.queued') -eq 0 ]] || fail 'idle status --format json reported a non-empty queue'
+[[ $(printf '%s' "$idle_json" | yq -p json '.anomalies | length') -eq 0 ]] || fail 'idle status --format json reported an anomaly'
+if "$target/bin/agentic-loop" status --format yaml >/dev/null 2>&1; then fail 'status accepted an invalid --format value'; fi
+if "$target/bin/agentic-loop" status extra-argument >/dev/null 2>&1; then fail 'status accepted an unexpected extra argument'; fi
+
+# Scenario: multiple running workers, each with rich local state (started,
+# phase, lease, worktree/PR via the .resume cache) shown with zero additional
+# GitHub calls beyond the one open-Issue snapshot.
+printf '30 running open none 2026-01-01T00:00:00Z\n31 running open none 2026-01-02T00:00:00Z\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+mkdir -p "$state_root/workers"
+now=$(date +%s)
+printf '%s\n' "$((now - 120))" > "$state_root/workers/30.started"
+printf 'worktree-ready\n' > "$state_root/workers/30.phase"
+printf '111\t%s\t%s\n' "$((now + 300))" "$now" > "$state_root/workers/30.lease"
+printf 'pr-open\tagent/issue-30\t6\thttps://github.example/acme/installed-project/pull/6\topen\tsuccess\t0\t0\n' > "$state_root/workers/30.resume"
+printf '%s\n' "$((now - 10))" > "$state_root/workers/31.started"
+printf 'fresh\n' > "$state_root/workers/31.phase"
+status_output=$("$target/bin/agentic-loop" status)
+grep -Fq '#30' <<< "$status_output" || fail 'multi-worker status did not list Issue #30'
+grep -Fq '#31' <<< "$status_output" || fail 'multi-worker status did not list Issue #31'
+grep -Fq 'phase: worktree-ready' <<< "$status_output" || fail 'multi-worker status did not show the observed resume phase'
+grep -Fq 'pr: #6 state=open checks=success' <<< "$status_output" || fail 'multi-worker status did not show the cached PR info'
+grep -Fq 'elapsed:' <<< "$status_output" || fail 'multi-worker status did not show elapsed time since worker start'
+grep -Fq 'heartbeat:' <<< "$status_output" || fail 'multi-worker status did not show the last heartbeat'
+multi_json=$("$target/bin/agentic-loop" status --format json)
+[[ $(printf '%s' "$multi_json" | yq -p json '.workers | length') -eq 2 ]] || fail 'multi-worker status --format json did not list both running Issues'
+[[ $(printf '%s' "$multi_json" | yq -p json '.workers[] | select(.issue == 30) | .pr') -eq 6 ]] || fail 'multi-worker status --format json did not report the cached PR number'
+rm -rf "$state_root/workers"
+
+# Scenario: queued Issues are counted, ordered exactly like claim_next
+# (category rank, then priority rank, then created_at, then number), and the
+# ordering is cross-checked against an actual claim.
+write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=30 STOP_TIMEOUT=10 STALE_DAYS=30
+printf '40 queued open low 2026-01-03T00:00:00Z none none\n41 queued open critical 2026-01-01T00:00:00Z none none\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+queue_json=$("$target/bin/agentic-loop" status --format json)
+[[ $(printf '%s' "$queue_json" | yq -p json '.queue.queued') -eq 2 ]] || fail 'queued status did not count both Issues'
+[[ $(printf '%s' "$queue_json" | yq -p json '.queue.claimable') -eq 2 ]] || fail 'queued status did not report both Issues as claimable'
+[[ $(printf '%s' "$queue_json" | yq -p json '.queue.candidates[0].issue') -eq 41 ]] || fail 'queue candidate preview did not rank the higher-priority Issue first'
+status_output=$("$target/bin/agentic-loop" status)
+grep -Fq '#41 Fake issue 41 (claimable)' <<< "$status_output" || fail 'text status did not show the top claim candidate as claimable'
+rm -f "$state_root/workers/41.pid"
+AGENTIC_LOOP_RUN_ONCE=1 FAKE_CODEX_SLEEP=1 "$target/bin/agentic-loop" _supervise
+grep -Eq '^41 completed closed' "$state" || fail 'claim_next did not claim the Issue the status preview ranked first'
+grep -Eq '^40 queued open' "$state" || fail 'claim_next claimed more than MAX_WORKERS allowed in one pass'
+
+# Scenario: needs-input, failed, blocked and stale Issues are summarized with
+# counts and constructed Issue URLs (no extra GitHub call is needed for the
+# URL: see project_add_content's identical https://github.com/OWNER/REPO
+# convention).
+printf '50 needs-input open\n51 failed open\n52 blocked open\n53 stale closed\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+status_output=$("$target/bin/agentic-loop" status)
+grep -Fq 'needs-input: 1件 (https://github.com/acme/installed-project/issues/50)' <<< "$status_output" || fail 'status did not summarize the needs-input Issue with its URL'
+grep -Fq 'failed: 1件 (https://github.com/acme/installed-project/issues/51)' <<< "$status_output" || fail 'status did not summarize the failed Issue with its URL'
+grep -Fq 'blocked: 1件 (https://github.com/acme/installed-project/issues/52)' <<< "$status_output" || fail 'status did not summarize the blocked Issue with its URL'
+grep -Fq 'stale: 1件 (https://github.com/acme/installed-project/issues/53)' <<< "$status_output" || fail 'status did not summarize the closed agent:stale Issue with its URL'
+
+# Scenario: an expired lease is surfaced as a warning, both in the running
+# Issue's own line and as a structured anomaly, without mutating any state
+# (the supervisor's own recover_expired poll is what actually recovers it).
+printf '60 running open\n' > "$state"
+mkdir -p "$state_root/workers"
+now=$(date +%s)
+printf '222\t%s\t%s\n' "$((now - 100))" "$((now - 400))" > "$state_root/workers/60.lease"
+before_status=$(git -C "$target" status --porcelain)
+status_output=$("$target/bin/agentic-loop" status); status_rc=$?
+(( status_rc == 0 )) || fail 'lease-expired status did not exit 0'
+grep -Fq '#60' <<< "$status_output" || fail 'lease-expired status did not list the running Issue'
+grep -Fq '期限切れ' <<< "$status_output" || fail 'lease-expired status did not mark the running Issue lease as expired'
+grep -Fq 'lease-expired' <<< "$status_output" || fail 'lease-expired status did not report a lease-expired anomaly'
+[[ $(git -C "$target" status --porcelain) == "$before_status" ]] || fail 'lease-expired status modified the repository working tree'
+lease_json=$("$target/bin/agentic-loop" status --format json)
+[[ $(printf '%s' "$lease_json" | yq -p json '.workers[0].lease_expired') == true ]] || fail 'status --format json did not mark the worker lease as expired'
+[[ $(printf '%s' "$lease_json" | yq -p json '.anomalies[] | select(.code == "lease-expired") | .subject') == '#60' ]] || fail 'status --format json did not report the lease-expired anomaly'
+rm -rf "$state_root/workers"
+
+# Scenario: corrupted local-state files (a non-numeric .started, a malformed
+# .lease) and a stale supervisor.pid never crash `status` and are reported as
+# warnings instead, and the repository is left untouched.
+printf '70 running open\n' > "$state"
+mkdir -p "$state_root/workers"
+printf 'not-a-number\n' > "$state_root/workers/70.started"
+printf 'not-numeric\n' > "$state_root/workers/70.lease"
+sh -c 'exit 0' & dead_pid=$!
+wait "$dead_pid" 2>/dev/null || true
+printf '%s\n' "$dead_pid" > "$state_root/supervisor.pid"
+before_status=$(git -C "$target" status --porcelain)
+status_output=$("$target/bin/agentic-loop" status); status_rc=$?
+(( status_rc == 0 )) || fail 'status crashed on corrupted local state'
+grep -Fq 'local-state-corrupt' <<< "$status_output" || fail 'status did not report the corrupted local-state files'
+grep -Fq 'supervisor-stale-pid' <<< "$status_output" || fail 'status did not report the stale supervisor.pid'
+[[ $(git -C "$target" status --porcelain) == "$before_status" ]] || fail 'status modified the repository working tree on corrupted local state'
+rm -f "$state_root/supervisor.pid" "$state_root/workers/70.started" "$state_root/workers/70.lease"
+
+# Scenario: a worktree/branch left over from an Issue no longer agent:running
+# is flagged, and clears once removed.
+git -C "$target" worktree add --quiet -b agent/issue-9999 "$target-worktrees/issue-9999" origin/main
+status_output=$("$target/bin/agentic-loop" status)
+grep -Fq 'residual-worktree' <<< "$status_output" || fail 'status did not flag a residual worktree'
+grep -Fq 'residual-branch' <<< "$status_output" || fail 'status did not flag a residual branch'
+git -C "$target" worktree remove --force "$target-worktrees/issue-9999"
+git -C "$target" branch -D agent/issue-9999 >/dev/null
+status_output=$("$target/bin/agentic-loop" status)
+grep -Fq 'residual-worktree' <<< "$status_output" && fail 'status kept flagging a removed worktree'
+: > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+rm -rf "$state_root/workers"
 
 # Repositories use separate gh/project state and Git state directories.
 second=$(new_repository second-project)

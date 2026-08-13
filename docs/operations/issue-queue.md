@@ -17,6 +17,32 @@ bin/agentic-loop stop
 bin/agentic-loop doctor
 ```
 
+### status: いま何が動き、何を待ち、次に何が来るか
+
+`bin/agentic-loop status`（[ADR 0005](../decisions/0005-status-observability.md)）は、Supervisorの生死だけでなく、running Issueの詳細、queuedの件数と次のclaim候補、needs-input/failed/in-review/blocked/staleの件数とURL、運用上の異常を1つの入口にまとめた運用snapshotである。常に読み取り専用（GitHubへの書き込み・Git作業ツリーの変更を一切行わない）で、GitHub REST(core)呼び出しは1回の実行あたり最大2回（open Issue全件のsnapshotと、closedな`agent:stale`の一覧）に抑え、GraphQL・Projects APIは呼ばない。引数不正時のみ終了code 2で、それ以外は異常があっても常に終了code 0（合否判定は`doctor`の責務）。
+
+- **Supervisor**: 稼働状態、pid、`max_workers`（既存の1行目の文言は不変）。
+- **Running Issues**: Issue番号・title・`(phase: ...)`・`(scope: ...)`に加え、`(started: 開始epoch, elapsed: 経過秒)`・`(heartbeat: 最終heartbeat epoch)`・`(lease_expires: 期限epoch[、期限切れなら「期限切れ」])`・`(worktree: path[、dirty/diverged、または「なし」])`・`(pr: #番号 state=... checks=...)`を、追加のGitHub呼び出しなしでlocal state（`workers/<issue>.started`・`.lease`・`.resume`、scope cache）から表示する。他host所有などlocal stateがない場合は「不明」と明示する。
+- **キュー / 次のclaim候補**: queued総数とclaim可能数、および`claim_next`と同じ順序（category rank→priority rank→created_at→Issue番号）の上位候補を、claimされない理由code（`scope-conflict`／`retry-cooldown`／`claim-paused`）付きで表示する。依存関係の再検証はしない（`agent:blocked`のIssueはqueuedに現れないため対象外であり、これはコスト方針上のbest-effortな割り切りである）。
+- **状態サマリ**: `needs-input`／`failed`／`in-review`／`blocked`／`stale`の件数と、`https://github.com/OWNER/REPO/issues/N`形式のURL一覧（`stale`は直近100件までで打ち切りがある場合は明示する）。
+- **警告**: staleなsupervisor pid/lock、期限切れlease、local stateのないrunning Issue（`worker-missing`、多端末運用では正常）、GitHub上でrunningでないlocal worker（`worker-orphan`）、対応するrunning Issueのない残存worktree/branch、破損したlocal state file、Project同期の再試行待ち、claim一時停止中、をすべてlocal stateの読み取りだけで検出する。
+
+token、worker log本文、Issue本文・コメント、providerのresult fileは一切読まない・表示しない。
+
+```sh
+bin/agentic-loop status --format json
+```
+
+`--format json`は`schema_version: 1`の単一JSONを1行で出す。主なキーは`supervisor`、`workers`（running Issueごとの詳細）、`queue`（`queued`・`claimable`・`candidates`）、`waits`（scope/dependency待ち）、`states`（needs-input/failed/in-review/blocked/staleの件数とIssue一覧）、`anomalies`（`level`/`code`/`subject`/`detail`）、`github_available`（GitHub取得に失敗した場合は`false`になり、それ以外のフィールドはlocalの情報のみを反映する）。
+
+#### `status` / `doctor` / Projects Viewの責務分担
+
+| 入口 | 目的 | 実行頻度・コスト | 合否判定 |
+| --- | --- | --- | --- |
+| `status` | いま何が動き、何を待ち、次に何が来るかの運用snapshot | 対話Agentの受付手順からも毎回呼べる（REST(core)読み取り最大2回、GraphQL/Projects 0回、書き込み0回） | 常に終了code 0（異常はwarning/infoとして列挙するのみ） |
+| `doctor` | 導入・復旧のための環境健全性診断（認証・権限・CLI・Devbox・hooks・systemd・Project設定・設定値・残存状態） | 導入時・障害時に実行 | 必須項目の失敗で終了code 1 |
+| GitHub Project View | 人向けのIssue/PR一覧の可視化層（best-effort、障害はキューを止めない） | GitHub UI上で確認 | 判定には使わない |
+
 ### 事前診断
 
 `bin/agentic-loop doctor` は、`status` の稼働状況表示より広い導入・復旧向けの読み取り専用診断である。GitHub認証とrepository権限、origin/default branch、plan段・exec段が使用する各AI CLI（`codex`／`claude`／`opencode`、それぞれ `AI CLI (<provider>)` として個別に検査）、Devbox、hooks、Supervisor、systemd user service/timer、Project設定、設定値、残存worktree/branch/logを検査し、成功・警告・失敗、影響、復旧方法を日本語で出力する。Projectとtimerは任意の可視化・自動運用機能なので利用不能時は警告とし、GitHub Issueキュー、固定検証環境、hooks、Supervisorなど処理に必須の条件は失敗とする。

@@ -378,13 +378,13 @@ load_config || { [[ ${1:-} == doctor ]] || fail "$CONFIG_ERROR"; }
 
 usage() {
   cat >&2 <<EOF
-Usage: $PROGRAM_NAME {setup|sync-issue ISSUE|start|stop|status|doctor [--format json]}
+Usage: $PROGRAM_NAME {setup|sync-issue ISSUE|start|stop|status [--format json]|doctor [--format json]}
 
   setup   Create or reuse this repository's labels and Project
   sync-issue  Add one Issue to the Project now, or queue a retry
   start   Start one background supervisor for this repository
   stop    Stop claiming work and drain running workers
-  status  Show the supervisor and running Issues
+  status  Show what is running, queued, waiting, and any anomalies (always exit 0)
   doctor  Read-only checks with remediation guidance (exit 1 on failures)
 EOF
 }
@@ -812,34 +812,480 @@ status_dependency_waits() {
   shopt -u nullglob
 }
 
-cmd_status() {
+
+# --- status observability (see docs/decisions/0005) ---
+
+# One TSV row per open Issue, classified purely by its own agent:* Label into
+# running/queued/needs-input/failed/in-review/blocked/other, plus the
+# queue_rank_jq ranks and created_at (used only to order queued rows the same
+# way claim_next does). A single REST(core) call backs every section below
+# except the closed agent:stale summary (see status_stale_fetch).
+status_snapshot_fetch() {
+  repo_api issues --method GET -f state=open -f per_page=100 --paginate --jq '
+    .[] | select(.pull_request == null) |
+    [.number, .title,
+     (if any(.labels[]; .name == "agent:running") then "running"
+      elif any(.labels[]; .name == "agent:queued") then "queued"
+      elif any(.labels[]; .name == "agent:needs-input") then "needs-input"
+      elif any(.labels[]; .name == "agent:failed") then "failed"
+      elif any(.labels[]; .name == "agent:in-review") then "in-review"
+      elif any(.labels[]; .name == "agent:blocked") then "blocked"
+      else "other" end),
+     '"$(queue_rank_jq)"', .created_at] | @tsv'
+}
+
+# Up to 100 closed agent:stale Issues (no --paginate: a bounded, best-effort
+# summary rather than an exhaustive audit -- see docs/operations/issue-queue.md).
+status_stale_fetch() {
+  repo_api issues --method GET -f state=all -f labels="$(state_label stale)" -f per_page=100 --jq \
+    '.[] | select(.pull_request == null) | [.number, .title] | @tsv'
+}
+
+# Human-readable (Japanese) reason claiming is currently paused, or empty if
+# it is not. Purely local: reads the same marker files the supervisor's own
+# poll loop checks (see docs/decisions/0003), so `status` never queries
+# rate_limit itself.
+status_claim_pause_reasons() {
+  local -a reasons=()
+  [[ -e $STATE_ROOT/budget-paused ]] && reasons+=('provider週次利用率のreserve')
+  [[ -e $STATE_ROOT/core-budget-paused ]] && reasons+=('REST(core)のreserve')
+  if [[ -r $STATE_ROOT/agent-exhausted ]]; then
+    local resume=''
+    read -r resume < "$STATE_ROOT/agent-exhausted" || true
+    [[ $resume =~ ^[0-9]+$ ]] && (( $(date +%s) < resume )) && reasons+=('provider利用上限からの回復待ち')
+  fi
+  [[ -e $STATE_ROOT/stop.requested ]] && reasons+=('stop要求によるdrain中')
+  (( ${#reasons[@]} == 0 )) && return 0
+  local IFS=,
+  printf '%s' "${reasons[*]}"
+}
+
+# Read-only counterpart of clear_stale_lock's staleness test: whether
+# supervisor.lock is held but no supervisor is actually alive to hold it.
+# Never mutates state -- status must stay a pure read.
+status_supervisor_lock_stale() {
+  [[ -d $STATE_ROOT/supervisor.lock ]] || return 1
+  pid_alive && return 1
+  if [[ ! -e $STATE_ROOT/supervisor.pid ]]; then
+    local now mtime
+    now=$(date +%s)
+    mtime=$(stat -c %Y "$STATE_ROOT/supervisor.lock" 2>/dev/null || printf '%s' "$now")
+    (( now - mtime < SUPERVISOR_LOCK_GRACE_SECONDS )) && return 1
+  fi
+  return 0
+}
+
+# Populate the STATUS_RUN_* globals for one running Issue purely from local
+# state (phase cache, scope cache, .started, .lease, .resume): no additional
+# REST call. Missing local state (e.g. another host owns the Issue) leaves
+# the fields empty rather than failing.
+status_running_detail() {
+  local issue=$1 now started
+  now=$(date +%s)
+  STATUS_RUN_PHASE=$(cat "$(worker_phase_file "$issue")" 2>/dev/null || true)
+  STATUS_RUN_SCOPE=$(scope_cache_read "$issue")
+  STATUS_RUN_STARTED=''
+  if [[ -r $(worker_started_file "$issue") ]]; then
+    read -r started < "$(worker_started_file "$issue")" || started=''
+    [[ $started =~ ^[0-9]+$ ]] && STATUS_RUN_STARTED=$started
+  fi
+  STATUS_RUN_ELAPSED=''
+  [[ -n $STATUS_RUN_STARTED ]] && STATUS_RUN_ELAPSED=$((now - STATUS_RUN_STARTED))
+  LEASE_ID='' LEASE_EXPIRES='' LEASE_HEARTBEAT=''
+  lease_read "$issue" || true
+  STATUS_RUN_LEASE_EXPIRES=$LEASE_EXPIRES
+  STATUS_RUN_HEARTBEAT=$LEASE_HEARTBEAT
+  STATUS_RUN_LEASE_EXPIRED=0
+  [[ $LEASE_EXPIRES =~ ^[0-9]+$ ]] && (( now > LEASE_EXPIRES )) && STATUS_RUN_LEASE_EXPIRED=1
+  STATUS_RUN_WORKTREE="$WORKTREE_ROOT/issue-$issue"
+  STATUS_RUN_WORKTREE_EXISTS=0
+  [[ -e $STATUS_RUN_WORKTREE ]] && STATUS_RUN_WORKTREE_EXISTS=1
+  RESUME_LOCAL_PHASE='' RESUME_LOCAL_BRANCH='' RESUME_LOCAL_PR='' RESUME_LOCAL_PR_URL='' RESUME_LOCAL_PR_STATE='' RESUME_LOCAL_CHECKS='' RESUME_LOCAL_DIRTY='' RESUME_LOCAL_DIVERGED=''
+  worker_resume_read "$issue" || true
+  STATUS_RUN_BRANCH=${RESUME_LOCAL_BRANCH:-agent/issue-$issue}
+  STATUS_RUN_PR=$RESUME_LOCAL_PR
+  STATUS_RUN_PR_URL=$RESUME_LOCAL_PR_URL
+  STATUS_RUN_PR_STATE=$RESUME_LOCAL_PR_STATE
+  STATUS_RUN_CHECKS=$RESUME_LOCAL_CHECKS
+  STATUS_RUN_DIRTY=${RESUME_LOCAL_DIRTY:-0}
+  STATUS_RUN_DIVERGED=${RESUME_LOCAL_DIVERGED:-0}
+  STATUS_RUN_LOCAL=0
+  { [[ -n $STATUS_RUN_STARTED ]] || [[ -n $RESUME_LOCAL_PHASE ]] || [[ -r $STATE_ROOT/workers/$issue.pid ]]; } && STATUS_RUN_LOCAL=1
+  return 0
+}
+
+# Why an agent:queued Issue is (or is not) claimable right now, derived purely
+# from local state -- the same files claim_next itself consults -- rather than
+# re-running GitHub dependency/scope checks (a best-effort preview, not a
+# claim decision; see docs/operations/issue-queue.md). Sets
+# STATUS_CANDIDATE_REASON/STATUS_CANDIDATE_DETAIL.
+status_queue_candidate_reason() {
+  local issue=$1 file pause
+  file=$(conflict_wait_file "$issue")
+  if [[ -r $file ]]; then
+    local other reason
+    IFS=$'\t' read -r other reason < "$file" || true
+    STATUS_CANDIDATE_REASON=scope-conflict
+    STATUS_CANDIDATE_DETAIL="#$other と重複: $reason"
+    return 0
+  fi
+  if [[ -r $(attempts_file "$issue") ]] && ! attempt_cooldown_elapsed "$issue"; then
+    STATUS_CANDIDATE_REASON=retry-cooldown
+    STATUS_CANDIDATE_DETAIL='直前の失敗からの再試行待機時間内です。'
+    return 0
+  fi
+  pause=$(status_claim_pause_reasons)
+  if [[ -n $pause ]]; then
+    STATUS_CANDIDATE_REASON=claim-paused
+    STATUS_CANDIDATE_DETAIL="$pause"
+    return 0
+  fi
+  STATUS_CANDIDATE_REASON=claimable
+  STATUS_CANDIDATE_DETAIL=''
+}
+
+anomaly_add() { ANOMALY_LEVEL+=("$1"); ANOMALY_CODE+=("$2"); ANOMALY_SUBJECT+=("$3"); ANOMALY_DETAIL+=("$4"); }
+
+# Detect operational anomalies from purely local state (see docs/decisions/
+# 0005): a stale supervisor pid/lock, an expired lease, a running Issue with
+# no local worker state (may be legitimate on a multi-host setup), a local
+# worker whose Issue GitHub no longer reports as agent:running, residual
+# worktrees/branches, corrupted local-state files, a pending Project sync
+# retry queue, and an active claim pause. Never mutates state.
+status_collect_anomalies() {
+  local i issue started running_csv=',' item num count pause
+  if [[ -r $STATE_ROOT/supervisor.pid ]] && ! pid_alive; then
+    anomaly_add warning supervisor-stale-pid supervisor.pid 'supervisor.pid が残っていますが、対応するprocessは生存していません。'
+  fi
+  status_supervisor_lock_stale && anomaly_add warning supervisor-stale-pid supervisor.lock 'supervisor.lock が残っていますが、生存しているsupervisorがありません。'
+
+  for i in "${!RUN_NUM[@]}"; do
+    issue=${RUN_NUM[$i]}
+    running_csv+="$issue,"
+    if [[ -r $(worker_started_file "$issue") ]]; then
+      read -r started < "$(worker_started_file "$issue")" || started=''
+      [[ $started =~ ^[0-9]+$ ]] || anomaly_add warning local-state-corrupt "#$issue" "workers/$issue.started の内容が不正です。"
+    fi
+    LEASE_ID='' LEASE_EXPIRES='' LEASE_HEARTBEAT=''
+    if lease_read "$issue"; then
+      if [[ -n $LEASE_ID && ! $LEASE_ID =~ ^[0-9]+$ ]]; then
+        anomaly_add warning local-state-corrupt "#$issue" "workers/$issue.lease の内容が不正です。"
+      elif [[ $LEASE_EXPIRES =~ ^[0-9]+$ ]] && (( $(date +%s) > LEASE_EXPIRES )); then
+        anomaly_add warning lease-expired "#$issue" "リースが期限切れです（expires=$LEASE_EXPIRES）。次回pollで安全にqueueへ戻ります。"
+      fi
+    fi
+    if [[ ! -r $(worker_started_file "$issue") && ! -r $(worker_phase_file "$issue") && ! -r $STATE_ROOT/workers/$issue.pid ]]; then
+      anomaly_add warning worker-missing "#$issue" 'このホストにlocal stateがありません。別ホストが担当している場合は正常です。'
+    fi
+  done
+
+  shopt -s nullglob
+  local pidfile
+  for pidfile in "$STATE_ROOT"/workers/*.pid; do
+    issue=$(basename "$pidfile" .pid)
+    if worker_pid_live "$issue" && [[ $running_csv != *",$issue,"* ]]; then
+      anomaly_add warning worker-orphan "#$issue" 'local workerは生存していますが、GitHub上ではagent:runningではありません。'
+    fi
+  done
+  shopt -u nullglob
+
+  while IFS= read -r item; do
+    [[ -n $item ]] || continue
+    num=${item##*/issue-}
+    [[ $running_csv == *",$num,"* ]] || anomaly_add warning residual-worktree "$item" 'agent:runningに対応しないworktreeです。'
+  done < <(git -C "$REPO_ROOT" worktree list --porcelain 2>/dev/null | awk -v root="$WORKTREE_ROOT/issue-" '$1 == "worktree" && index($2, root) == 1 {print $2}')
+
+  while IFS= read -r item; do
+    [[ -n $item ]] || continue
+    num=${item#agent/issue-}
+    [[ $num =~ ^[0-9]+$ ]] || continue
+    [[ $running_csv == *",$num,"* ]] || anomaly_add warning residual-branch "$item" 'agent:runningに対応しないbranchです。'
+  done < <(git -C "$REPO_ROOT" for-each-ref --format='%(refname:short)' refs/heads/agent/ 2>/dev/null)
+
+  if [[ -r $STATE_ROOT/project-pending ]]; then
+    count=$(wc -l < "$STATE_ROOT/project-pending" 2>/dev/null || printf 0)
+    (( count > 0 )) && anomaly_add info project-sync-pending project "Project同期の再試行待ちが $count 件あります。"
+  fi
+
+  pause=$(status_claim_pause_reasons)
+  [[ -n $pause ]] && anomaly_add info claim-paused supervisor "claimを一時停止しています: $pause"
+  return 0
+}
+
+status_collect_snapshot() {
+  STATUS_GITHUB_OK=1
+  local raw num title state catrank priorank created
+  if ! raw=$(status_snapshot_fetch); then
+    STATUS_GITHUB_OK=0
+    return 0
+  fi
+  while IFS=$'\t' read -r num title state catrank priorank created; do
+    [[ -n $num ]] || continue
+    case $state in
+      running) RUN_NUM+=("$num"); RUN_TITLE+=("$title") ;;
+      queued) QUEUE_NUM+=("$num"); QUEUE_TITLE+=("$title"); QUEUE_CATRANK+=("$catrank"); QUEUE_PRIORANK+=("$priorank"); QUEUE_CREATED+=("$created") ;;
+      needs-input) NEEDSINPUT_NUM+=("$num"); NEEDSINPUT_TITLE+=("$title") ;;
+      failed) FAILED_NUM+=("$num"); FAILED_TITLE+=("$title") ;;
+      in-review) INREVIEW_NUM+=("$num"); INREVIEW_TITLE+=("$title") ;;
+      blocked) BLOCKED_NUM+=("$num"); BLOCKED_TITLE+=("$title") ;;
+    esac
+  done <<< "$raw"
+  return 0
+}
+
+status_collect_stale() {
+  local raw num title count=0
+  raw=$(status_stale_fetch) || return 0
+  while IFS=$'\t' read -r num title; do
+    [[ -n $num ]] || continue
+    STALE_NUM+=("$num"); STALE_TITLE+=("$title")
+    count=$((count + 1))
+  done <<< "$raw"
+  (( count >= 100 )) && STATUS_STALE_TRUNCATED=1
+  return 0
+}
+
+# The agent:queued snapshot rows, sorted with claim_next's exact comparator
+# (category rank, priority rank, created_at, number) so the candidate preview
+# matches the order Issues will actually be claimed in.
+status_queue_sorted() {
+  local i
+  for i in "${!QUEUE_NUM[@]}"; do
+    printf '%s\t%s\t%s\t%s\t%s\n' "${QUEUE_CATRANK[$i]}" "${QUEUE_PRIORANK[$i]}" "${QUEUE_CREATED[$i]}" "${QUEUE_NUM[$i]}" "${QUEUE_TITLE[$i]}"
+  done | sort -k1,1n -k2,2n -k3,3 -k4,4n
+}
+
+status_render_text_state_line() {
+  local label=$1 numname=$2
+  local -n nums=$numname
+  local url_list='' n
+  for n in "${nums[@]}"; do url_list+="${url_list:+, }https://github.com/$(repo_name)/issues/$n"; done
+  if (( ${#nums[@]} > 0 )); then
+    printf '  %s: %s件 (%s)\n' "$label" "${#nums[@]}" "$url_list"
+  else
+    printf '  %s: 0件\n' "$label"
+  fi
+}
+
+status_render_text() {
   if pid_alive; then say "running (pid $(cat "$STATE_ROOT/supervisor.pid"), max workers $MAX_WORKERS)"; else say 'stopped'; fi
-  local issues line number scope phase suffix
-  issues=$(running_issues)
-  if [[ -n $issues ]]; then
+
+  local i issue title suffix
+  if (( STATUS_GITHUB_OK == 0 )); then
+    say 'Running Issues: 不明（GitHub取得不能）'
+  elif (( ${#RUN_NUM[@]} > 0 )); then
     printf 'Running Issues:\n'
-    while IFS= read -r line; do
-      [[ -n $line ]] || continue
-      number=${line#\#}; number=${number%% *}
+    for i in "${!RUN_NUM[@]}"; do
+      issue=${RUN_NUM[$i]}; title=${RUN_TITLE[$i]}
+      status_running_detail "$issue"
       suffix=''
-      phase=$(cat "$(worker_phase_file "$number")" 2>/dev/null || true)
-      [[ -n $phase ]] && suffix+=" (phase: $phase)"
-      scope=$(scope_cache_read "$number")
-      [[ -n $scope ]] && suffix+=" (scope: $(paste -sd', ' - <<< "$scope"))"
-      printf '%s%s\n' "$line" "$suffix"
-    done <<< "$issues"
+      [[ -n $STATUS_RUN_PHASE ]] && suffix+=" (phase: $STATUS_RUN_PHASE)"
+      [[ -n $STATUS_RUN_SCOPE ]] && suffix+=" (scope: $(paste -sd', ' - <<< "$STATUS_RUN_SCOPE"))"
+      [[ -n $STATUS_RUN_STARTED ]] && suffix+=" (started: $STATUS_RUN_STARTED, elapsed: ${STATUS_RUN_ELAPSED}s)"
+      [[ -n $STATUS_RUN_HEARTBEAT ]] && suffix+=" (heartbeat: $STATUS_RUN_HEARTBEAT)"
+      if [[ -n $STATUS_RUN_LEASE_EXPIRES ]]; then
+        if (( STATUS_RUN_LEASE_EXPIRED )); then suffix+=" (lease_expires: $STATUS_RUN_LEASE_EXPIRES 期限切れ)"
+        else suffix+=" (lease_expires: $STATUS_RUN_LEASE_EXPIRES)"; fi
+      fi
+      if (( STATUS_RUN_WORKTREE_EXISTS )); then suffix+=" (worktree: $STATUS_RUN_WORKTREE, dirty=${STATUS_RUN_DIRTY:-0}, diverged=${STATUS_RUN_DIVERGED:-0})"
+      else suffix+=" (worktree: $STATUS_RUN_WORKTREE なし)"; fi
+      [[ -n $STATUS_RUN_PR ]] && suffix+=" (pr: #$STATUS_RUN_PR state=${STATUS_RUN_PR_STATE:-unknown} checks=${STATUS_RUN_CHECKS:-unknown})"
+      (( STATUS_RUN_LOCAL )) || suffix+=' (worker: 不明。別ホストが担当している可能性があります)'
+      printf '#%s %s%s\n' "$issue" "$title" "$suffix"
+    done
   else
     say 'Running Issues: none'
   fi
+
   local conflicts
   conflicts=$(status_conflict_waits)
   if [[ -n $conflicts ]]; then printf '競合待ちIssue:\n%s\n' "$conflicts"; else say '競合待ちIssue: none'; fi
   local dependencies
   dependencies=$(status_dependency_waits)
   if [[ -n $dependencies ]]; then printf '依存待ちIssue:\n%s\n' "$dependencies"; else say '依存待ちIssue: none'; fi
+
+  if (( STATUS_GITHUB_OK == 0 )); then
+    say 'GitHub: 取得できません（localの情報のみ表示します）。'
+  else
+    local claimable=0 rank1 rank2 created num shown=0
+    while IFS=$'\t' read -r rank1 rank2 created num title; do
+      [[ -n $num ]] || continue
+      status_queue_candidate_reason "$num"
+      [[ $STATUS_CANDIDATE_REASON == claimable ]] && claimable=$((claimable + 1))
+    done < <(status_queue_sorted)
+    printf 'キュー: %s件（claim可能 %s件）\n' "${#QUEUE_NUM[@]}" "$claimable"
+    if (( ${#QUEUE_NUM[@]} > 0 )); then
+      printf '次のclaim候補:\n'
+      while IFS=$'\t' read -r rank1 rank2 created num title; do
+        [[ -n $num ]] || continue
+        (( shown >= 5 )) && break
+        status_queue_candidate_reason "$num"
+        if [[ $STATUS_CANDIDATE_REASON == claimable ]]; then
+          printf '#%s %s (claimable)\n' "$num" "$title"
+        else
+          printf '#%s %s (withheld: %s %s)\n' "$num" "$title" "$STATUS_CANDIDATE_REASON" "$STATUS_CANDIDATE_DETAIL"
+        fi
+        shown=$((shown + 1))
+      done < <(status_queue_sorted)
+    fi
+
+    printf '状態サマリ:\n'
+    status_render_text_state_line needs-input NEEDSINPUT_NUM
+    status_render_text_state_line failed FAILED_NUM
+    status_render_text_state_line in-review INREVIEW_NUM
+    status_render_text_state_line blocked BLOCKED_NUM
+    status_render_text_state_line stale STALE_NUM
+    (( STATUS_STALE_TRUNCATED )) && say '  stale は直近100件までの表示です（打ち切りあり）。'
+  fi
+
+  if (( ${#ANOMALY_LEVEL[@]} > 0 )); then
+    printf '警告:\n'
+    for i in "${!ANOMALY_LEVEL[@]}"; do
+      printf '  [%s] %s %s: %s\n' "${ANOMALY_LEVEL[$i]}" "${ANOMALY_CODE[$i]}" "${ANOMALY_SUBJECT[$i]}" "${ANOMALY_DETAIL[$i]}"
+    done
+  else
+    say '警告: none'
+  fi
 }
 
-doctor_json_escape() {
+status_render_json_state_group() {
+  local label=$1 numname=$2 titlename=$3
+  local -n nums=$numname
+  local -n titles=$titlename
+  local sep='' i
+  printf '"%s":{"count":%s,"issues":[' "$label" "${#nums[@]}"
+  for i in "${!nums[@]}"; do
+    printf '%s{"number":%s,"title":"%s"}' "$sep" "${nums[$i]}" "$(json_escape "${titles[$i]}")"
+    sep=','
+  done
+  printf ']}'
+}
+
+status_render_json() {
+  local i sep
+  printf '{"schema_version":1,"generated_at":%s,"github_available":%s,' "$(date +%s)" "$( ((STATUS_GITHUB_OK)) && printf true || printf false )"
+  if pid_alive; then
+    printf '"supervisor":{"state":"running","pid":%s,"max_workers":%s},' "$(cat "$STATE_ROOT/supervisor.pid")" "$MAX_WORKERS"
+  else
+    printf '"supervisor":{"state":"stopped","pid":null,"max_workers":%s},' "$MAX_WORKERS"
+  fi
+
+  printf '"workers":['
+  sep=''
+  for i in "${!RUN_NUM[@]}"; do
+    status_running_detail "${RUN_NUM[$i]}"
+    printf '%s{"issue":%s,"title":"%s","phase":"%s","scope":[' "$sep" "${RUN_NUM[$i]}" "$(json_escape "${RUN_TITLE[$i]}")" "$(json_escape "$STATUS_RUN_PHASE")"
+    if [[ -n $STATUS_RUN_SCOPE ]]; then
+      local scope_sep='' scope_tok
+      while IFS= read -r scope_tok; do
+        [[ -n $scope_tok ]] || continue
+        printf '%s"%s"' "$scope_sep" "$(json_escape "$scope_tok")"
+        scope_sep=','
+      done <<< "$STATUS_RUN_SCOPE"
+    fi
+    printf '],"started_at":%s,"elapsed_seconds":%s,"heartbeat_at":%s,"lease_expires_at":%s,"lease_expired":%s,"worktree":"%s","worktree_exists":%s,"dirty":%s,"diverged":%s,"branch":"%s","pr":%s,"pr_url":"%s","pr_state":"%s","checks":"%s","local_state":%s}' \
+      "${STATUS_RUN_STARTED:-null}" "${STATUS_RUN_ELAPSED:-null}" "${STATUS_RUN_HEARTBEAT:-null}" "${STATUS_RUN_LEASE_EXPIRES:-null}" \
+      "$( ((STATUS_RUN_LEASE_EXPIRED)) && printf true || printf false )" "$(json_escape "$STATUS_RUN_WORKTREE")" \
+      "$( ((STATUS_RUN_WORKTREE_EXISTS)) && printf true || printf false )" \
+      "$( ((STATUS_RUN_DIRTY)) && printf true || printf false )" "$( ((STATUS_RUN_DIVERGED)) && printf true || printf false )" \
+      "$(json_escape "$STATUS_RUN_BRANCH")" \
+      "${STATUS_RUN_PR:-null}" "$(json_escape "$STATUS_RUN_PR_URL")" "$(json_escape "$STATUS_RUN_PR_STATE")" "$(json_escape "$STATUS_RUN_CHECKS")" \
+      "$( ((STATUS_RUN_LOCAL)) && printf true || printf false )"
+    sep=','
+  done
+  printf '],'
+
+  local claimable=0 rank1 rank2 created num title
+  while IFS=$'\t' read -r rank1 rank2 created num title; do
+    [[ -n $num ]] || continue
+    status_queue_candidate_reason "$num"
+    [[ $STATUS_CANDIDATE_REASON == claimable ]] && claimable=$((claimable + 1))
+  done < <(status_queue_sorted)
+  printf '"queue":{"queued":%s,"claimable":%s,"candidates":[' "${#QUEUE_NUM[@]}" "$claimable"
+  sep=''
+  while IFS=$'\t' read -r rank1 rank2 created num title; do
+    [[ -n $num ]] || continue
+    status_queue_candidate_reason "$num"
+    printf '%s{"issue":%s,"title":"%s","category_rank":%s,"priority_rank":%s,"created_at":"%s","claimable":%s,"withheld":"%s","withheld_detail":"%s"}' \
+      "$sep" "$num" "$(json_escape "$title")" "$rank1" "$rank2" "$(json_escape "$created")" \
+      "$( [[ $STATUS_CANDIDATE_REASON == claimable ]] && printf true || printf false )" \
+      "$(json_escape "$STATUS_CANDIDATE_REASON")" "$(json_escape "$STATUS_CANDIDATE_DETAIL")"
+    sep=','
+  done < <(status_queue_sorted)
+  printf ']},'
+
+  printf '"waits":{"scope":['
+  sep=''
+  local file issue other reason detail
+  shopt -s nullglob
+  for file in "$STATE_ROOT"/conflict/issue-*; do
+    issue=${file##*/issue-}
+    IFS=$'\t' read -r other reason < "$file" || continue
+    printf '%s{"issue":%s,"other":%s,"reason":"%s"}' "$sep" "$issue" "$other" "$(json_escape "$reason")"
+    sep=','
+  done
+  shopt -u nullglob
+  printf '],"dependency":['
+  sep=''
+  shopt -s nullglob
+  for file in "$(dependency_state_dir)"/blocked-*; do
+    issue=${file##*/blocked-}
+    IFS=$'\t' read -r reason detail < "$file" || continue
+    printf '%s{"issue":%s,"reason":"%s","detail":"%s"}' "$sep" "$issue" "$(json_escape "$reason")" "$(json_escape "$detail")"
+    sep=','
+  done
+  shopt -u nullglob
+  printf ']},'
+
+  printf '"states":{'
+  status_render_json_state_group needs-input NEEDSINPUT_NUM NEEDSINPUT_TITLE
+  printf ','
+  status_render_json_state_group failed FAILED_NUM FAILED_TITLE
+  printf ','
+  status_render_json_state_group in-review INREVIEW_NUM INREVIEW_TITLE
+  printf ','
+  status_render_json_state_group blocked BLOCKED_NUM BLOCKED_TITLE
+  printf ','
+  printf '"stale":{"count":%s,"truncated":%s,"issues":[' "${#STALE_NUM[@]}" "$( ((STATUS_STALE_TRUNCATED)) && printf true || printf false )"
+  sep=''
+  for i in "${!STALE_NUM[@]}"; do
+    printf '%s{"number":%s,"title":"%s"}' "$sep" "${STALE_NUM[$i]}" "$(json_escape "${STALE_TITLE[$i]}")"
+    sep=','
+  done
+  printf ']}},'
+
+  printf '"anomalies":['
+  sep=''
+  for i in "${!ANOMALY_LEVEL[@]}"; do
+    printf '%s{"level":"%s","code":"%s","subject":"%s","detail":"%s"}' "$sep" "${ANOMALY_LEVEL[$i]}" "${ANOMALY_CODE[$i]}" "$(json_escape "${ANOMALY_SUBJECT[$i]}")" "$(json_escape "${ANOMALY_DETAIL[$i]}")"
+    sep=','
+  done
+  printf ']}\n'
+}
+
+cmd_status() {
+  local format=text
+  if [[ $# -gt 1 ]]; then
+    [[ $# -eq 3 && $2 == --format && $3 == json ]] || { usage; return 2; }
+    format=json
+  fi
+  declare -ga RUN_NUM=() RUN_TITLE=()
+  declare -ga QUEUE_NUM=() QUEUE_TITLE=() QUEUE_CATRANK=() QUEUE_PRIORANK=() QUEUE_CREATED=()
+  declare -ga NEEDSINPUT_NUM=() NEEDSINPUT_TITLE=() FAILED_NUM=() FAILED_TITLE=() INREVIEW_NUM=() INREVIEW_TITLE=() BLOCKED_NUM=() BLOCKED_TITLE=()
+  declare -ga STALE_NUM=() STALE_TITLE=()
+  declare -ga ANOMALY_LEVEL=() ANOMALY_CODE=() ANOMALY_SUBJECT=() ANOMALY_DETAIL=()
+  declare -g STATUS_GITHUB_OK=1 STATUS_STALE_TRUNCATED=0
+  status_collect_snapshot
+  status_collect_stale
+  status_collect_anomalies
+  if [[ $format == json ]]; then status_render_json; else status_render_text; fi
+  return 0
+}
+
+# Escape a value for embedding in a hand-built JSON string. Shared by every
+# --format json output (doctor, status) so all of them agree on one escaping
+# rule (jq is not a dependency of this script).
+json_escape() {
   local value=$1
   value=${value//\\/\\\\}; value=${value//\"/\\\"}
   value=${value//$'\n'/\\n}; value=${value//$'\r'/\\r}; value=${value//$'\t'/\\t}
@@ -997,7 +1443,7 @@ cmd_doctor() {
   if [[ $format == json ]]; then
     printf '{"schema_version":1,"summary":{"success":%d,"warning":%d,"failure":%d},"checks":[' "$(( ${#DOCTOR_LEVELS[@]} - DOCTOR_WARNINGS - DOCTOR_FAILURES ))" "$DOCTOR_WARNINGS" "$DOCTOR_FAILURES"
     for index in "${!DOCTOR_LEVELS[@]}"; do
-      printf '%s{"level":"%s","name":"%s","impact":"%s","recovery":"%s"}' "$separator" "${DOCTOR_LEVELS[$index]}" "$(doctor_json_escape "${DOCTOR_NAMES[$index]}")" "$(doctor_json_escape "${DOCTOR_IMPACTS[$index]}")" "$(doctor_json_escape "${DOCTOR_RECOVERIES[$index]}")"
+      printf '%s{"level":"%s","name":"%s","impact":"%s","recovery":"%s"}' "$separator" "${DOCTOR_LEVELS[$index]}" "$(json_escape "${DOCTOR_NAMES[$index]}")" "$(json_escape "${DOCTOR_IMPACTS[$index]}")" "$(json_escape "${DOCTOR_RECOVERIES[$index]}")"
       separator=,
     done
     printf ']}\n'
@@ -1175,41 +1621,59 @@ lease_body() {
 }
 
 lease_file() { printf '%s\n' "$STATE_ROOT/workers/$1.lease"; }
+worker_started_file() { printf '%s/workers/%s.started' "$STATE_ROOT" "$1"; }
+worker_resume_file() { printf '%s/workers/%s.resume' "$STATE_ROOT" "$1"; }
 
-# Remove a worker's local bookkeeping (pid + lease-comment id + phase cache)
-# together. The handoff-comment id mapping is intentionally not cleared here:
-# it must survive across worker lifecycles so the next worker keeps updating
-# the same durable comment instead of creating a new one (see docs/decisions/0004).
-clear_worker_local() { rm -f "$STATE_ROOT/workers/$1.pid" "$STATE_ROOT/workers/$1.lease" "$(worker_phase_file "$1")"; }
+# Remove a worker's local bookkeeping (pid + lease + phase + started + resume
+# caches) together. The handoff-comment id mapping is intentionally not
+# cleared here: it must survive across worker lifecycles so the next worker
+# keeps updating the same durable comment instead of creating a new one (see
+# docs/decisions/0004).
+clear_worker_local() {
+  rm -f "$STATE_ROOT/workers/$1.pid" "$(lease_file "$1")" "$(worker_phase_file "$1")" "$(worker_started_file "$1")" "$(worker_resume_file "$1")"
+}
 worker_phase_file() { printf '%s/workers/%s.phase' "$STATE_ROOT" "$1"; }
 
-# Create the single lease comment for this Issue and remember its id so later
-# heartbeats update it in place. See docs/decisions/0003: one comment per Issue
-# updated via PATCH keeps the Issue clean and is gentle on the secondary rate
-# limit (bursty comment creation is what trips abuse detection).
+# Create the single lease comment for this Issue and remember its id, expiry
+# and heartbeat time so later heartbeats update it in place and `status` can
+# read the lease locally without an extra GitHub call. See docs/decisions/0003:
+# one comment per Issue updated via PATCH keeps the Issue clean and is gentle
+# on the secondary rate limit (bursty comment creation is what trips abuse
+# detection).
 lease_start() {
   local issue=$1 worker=$2 now expires id
   now=$(date +%s); expires=$((now + LEASE_SECONDS))
   id=$(repo_api "issues/$issue/comments" --method POST -f body="$(lease_body "$worker" "$now" "$expires")" --jq '.id' 2>/dev/null | tr -d '[:space:]' || true)
   if [[ $id =~ ^[0-9]+$ ]]; then
     mkdir -p "$STATE_ROOT/workers"
-    printf '%s\n' "$id" > "$(lease_file "$issue")"
+    printf '%s\t%s\t%s\n' "$id" "$expires" "$now" > "$(lease_file "$issue")"
   fi
 }
 
 # Refresh the lease by editing the existing comment (a single PATCH). Fall back
 # to creating a fresh comment if we have no id yet, or the stored comment is gone.
 lease_heartbeat() {
-  local issue=$1 worker=$2 now expires id file
+  local issue=$1 worker=$2 now expires id file rest
   file="$(lease_file "$issue")"
   now=$(date +%s); expires=$((now + LEASE_SECONDS))
   if [[ -r $file ]]; then
-    read -r id < "$file" || id=''
+    IFS=$'\t' read -r id rest < "$file" || id=''
     if [[ $id =~ ^[0-9]+$ ]] && repo_api "issues/comments/$id" --method PATCH -f body="$(lease_body "$worker" "$now" "$expires")" >/dev/null 2>&1; then
+      printf '%s\t%s\t%s\n' "$id" "$expires" "$now" > "$file"
       return 0
     fi
   fi
   lease_start "$issue" "$worker"
+}
+
+# Local-only lease read for `status`: id, expiry epoch and last-heartbeat
+# epoch. Tolerates the pre-Issue-#42 single-line (id only) format, in which
+# case expires/heartbeat are left empty rather than failing.
+lease_read() {
+  local file rest
+  file="$(lease_file "$1")"
+  [[ -r $file ]] || return 1
+  IFS=$'\t' read -r LEASE_ID LEASE_EXPIRES LEASE_HEARTBEAT rest < "$file"
 }
 
 # Whether the local worker recorded for this Issue is still running: its pid is
@@ -1794,6 +2258,14 @@ rebuild_scope_cache() {
   done < <(repo_api issues --method GET -f state=open -f labels="$(state_label running)" -f per_page=100 --paginate --jq '.[] | select(.pull_request == null) | [.number, (.body // "" | @base64)] | @tsv' 2>/dev/null || true)
 }
 
+# jq expression fragment (evaluated with an Issue object as `.`) producing the
+# two numeric ranks -- category then priority -- used to order agent:queued
+# Issues. Shared by claim_next and cmd_status's claim-candidate preview so the
+# two orderings cannot drift apart.
+queue_rank_jq() {
+  printf '%s' '(if any(.labels[]; .name == "category:loop-continuity") then 0 elif any(.labels[]; .name == "category:confidentiality-incident") then 1 elif any(.labels[]; .name == "category:integrity-incident") then 2 elif any(.labels[]; .name == "category:availability-incident") then 3 elif any(.labels[]; .name == "category:feature") then 4 else 5 end), (if any(.labels[]; .name == "priority:critical") then 0 elif any(.labels[]; .name == "priority:high") then 1 elif any(.labels[]; .name == "priority:medium") then 2 elif any(.labels[]; .name == "priority:low") then 3 else 4 end)'
+}
+
 claim_next() {
   local issue pid body body_b64 tokens conflict_with
   # shellcheck disable=SC2016 # This is a jq program, not a shell expression.
@@ -1821,7 +2293,7 @@ claim_next() {
       printf '%s\n' "$issue"
       return 0
     fi
-  done < <(repo_api issues --method GET -f state=open -f labels="$(state_label queued)" -f per_page=100 --paginate --jq '.[] | select(.pull_request == null) | [(if any(.labels[]; .name == "category:loop-continuity") then 0 elif any(.labels[]; .name == "category:confidentiality-incident") then 1 elif any(.labels[]; .name == "category:integrity-incident") then 2 elif any(.labels[]; .name == "category:availability-incident") then 3 elif any(.labels[]; .name == "category:feature") then 4 else 5 end), (if any(.labels[]; .name == "priority:critical") then 0 elif any(.labels[]; .name == "priority:high") then 1 elif any(.labels[]; .name == "priority:medium") then 2 elif any(.labels[]; .name == "priority:low") then 3 else 4 end), .created_at, .number, (.body // "" | @base64)] | @tsv' 2>/dev/null | sort -k1,1n -k2,2n -k3,3 -k4,4n | awk -F '\t' '{print $4 "\t" $5}')
+  done < <(repo_api issues --method GET -f state=open -f labels="$(state_label queued)" -f per_page=100 --paginate --jq '.[] | select(.pull_request == null) | ['"$(queue_rank_jq)"', .created_at, .number, (.body // "" | @base64)] | @tsv' 2>/dev/null | sort -k1,1n -k2,2n -k3,3 -k4,4n | awk -F '\t' '{print $4 "\t" $5}')
   return 1
 }
 
@@ -2216,7 +2688,21 @@ resume_handoff_upsert() {
 resume_handoff_write() {
   local issue=$1 branch=$2
   printf '%s\n' "$RESUME_PHASE" > "$(worker_phase_file "$issue")" 2>/dev/null || true
+  # Cache the same Git/GitHub-observed fields locally (mirrors the handoff
+  # comment) so `status` can show phase/branch/PR/checks without any further
+  # API call. Every field here is already derived purely from Git and REST
+  # observation by resume_probe, so it cannot smuggle secrets (see docs/
+  # decisions/0004).
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$RESUME_PHASE" "$branch" "${RESUME_PR:-}" "${RESUME_PR_URL:-}" "${RESUME_PR_STATE:-}" "${RESUME_CHECKS:-}" "${RESUME_DIRTY:-0}" "${RESUME_DIVERGED:-0}" > "$(worker_resume_file "$issue")" 2>/dev/null || true
   resume_handoff_upsert "$issue" "$(resume_handoff_body "$RESUME_PHASE" "$branch" "$RESUME_HEAD" "$RESUME_REMOTE" "$RESUME_PR" "$RESUME_PR_STATE" "$RESUME_CHECKS" "$RESUME_DIRTY" "$RESUME_DIVERGED" "$(date +%s)")" || true
+}
+
+# Local-only read of the cached resume fields written above: phase, branch, PR
+# number, PR URL, PR state, checks, dirty (0/1), diverged (0/1).
+worker_resume_read() {
+  local file="$(worker_resume_file "$1")"
+  [[ -r $file ]] || return 1
+  IFS=$'\t' read -r RESUME_LOCAL_PHASE RESUME_LOCAL_BRANCH RESUME_LOCAL_PR RESUME_LOCAL_PR_URL RESUME_LOCAL_PR_STATE RESUME_LOCAL_CHECKS RESUME_LOCAL_DIRTY RESUME_LOCAL_DIVERGED < "$file"
 }
 
 # Prepended to the plan/exec prompts so a resumed worker treats the observed
@@ -2252,6 +2738,8 @@ resume_needs_decision_body() {
 worker() {
   local issue=$1 worker=$2 repository default_branch branch worktree result git_common_dir agents_dir exit_code=0 heartbeat_pid merged_pr='' merged_oid=''
   worker_confirm_running_label "$issue" || { clear_worker_local "$issue"; return 0; }
+  mkdir -p "$STATE_ROOT/workers"
+  date +%s > "$(worker_started_file "$issue")" 2>/dev/null || true
   repository=$(repo_name)
   default_branch=$(repo_api '' --jq .default_branch)
   branch="agent/issue-$issue"
@@ -2403,7 +2891,7 @@ main() {
     sync-issue) [[ $# -eq 2 ]] || fail 'sync-issue requires one Issue number'; cmd_sync_issue "$2" ;;
     start) [[ $# -eq 1 ]] || fail 'start takes no arguments'; cmd_start ;;
     stop) [[ $# -eq 1 ]] || fail 'stop takes no arguments'; cmd_stop ;;
-    status) [[ $# -eq 1 ]] || fail 'status takes no arguments'; cmd_status ;;
+    status) cmd_status "$@" ;;
     doctor) cmd_doctor "$@" ;;
     _service) [[ $# -eq 1 ]] || exit 2; cmd_service ;;
     _supervise) supervise ;;
