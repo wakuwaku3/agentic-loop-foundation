@@ -24,6 +24,8 @@ curl -fsSL https://raw.githubusercontent.com/wakuwaku3/agentic-loop-foundation/m
 
 GitHub Issueが要求と状態履歴の正本で、Projectは障害がキューを止めない可視化層です。中央キューや外部DB、OpenAI API keyは使いません。
 
+大きな要求は、planが安全な分解条件を満たす場合だけGitHub native sub-issuesへ子を作成できます。子は独立したscope・受け入れ条件・依存を持ち、親は子がすべて検証済み完了になった後も統合検証と通常のPR/mergeを終えるまでopenのままです。詳細は[Issueキュー運用](docs/operations/issue-queue.md#大きな要求の親子分解)を参照してください。
+
 インストールはコードベース自己診断のuser-level systemd timerも設定します。週次診断は要件と実装のずれ、構成、skill候補、不要ファイルを調べ、コードを変更せず `diagnosis`、`category:improvement`、`agent:queued` Label付きの日本語Issueを作成してSupervisorへ修正を委譲します。手動実行は `bin/agentic-loop-diagnose`、詳細は [コードベース自己診断](docs/operations/codebase-diagnosis.md) を参照してください。
 
 ## AIツールの選択

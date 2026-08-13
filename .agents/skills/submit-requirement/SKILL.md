@@ -28,6 +28,8 @@ Supervisor stopped status is not a queue prerequisite failure. A Project sync fa
 
 When already processing an `agent:running` Issue in its dedicated worktree, do not run queue intake or create a replacement Issue. Treat the original Issue and all comments as the requirements, then complete investigation, implementation, full validation, secret guard, commit, push, PR, required checks, review feedback, merge, default-branch verification, and cleanup.
 
+計画が検証済みの `agentic-loop:decomposition` manifest を出した場合だけは例外である。Supervisorがnative sub-issueとdependencyを作成・検証して子をqueueへ公開し、親は子の検証済み完了を待って統合workerとして再開する。running worker自身が通常の代替Issueを作成してはならない。
+
 1. Inspect the repository, its `AGENTS.md`, current behavior, and relevant external facts.
 2. Infer safe, reversible details. Ask only when a missing decision has material cost, security, availability, data-loss, or product consequences.
 3. State the interpreted objective, constraints, invariants, and observable completion criteria briefly; then proceed without waiting for confirmation when the interpretation is safe.

@@ -171,6 +171,18 @@ claim前、queued Issueは（scope競合判定より前に）依存を検査し�
 
 GitHub Projectには `Agent status` に `Blocked` を追加し、`Blocked by` TEXT fieldへ相手Issue番号と理由の短い要約を書く（scope競合待ちと同じfieldを再利用し、両者は状態が異なるため書き込みが競合しない）。既存Projectは `bin/agentic-loop setup` の再実行でoptionを追記する。`bin/agentic-loop status` は依存待ちIssueと理由codeを表示する。
 
+## 大きな要求の親子分解
+
+通常は一つのIssueを一つのPRで完了する。独立してmerge・rollback・検証できる成果が2件以上あり、各成果が一workerで完結し、scopeが共有されず、統合受け入れ条件を明記できる場合だけ、planは次の fenced JSON manifest を出せる。
+
+```agentic-loop:decomposition
+{"schema":1,"mode":"children","integration_acceptance_criteria":"全体検証に成功する","children":[{"key":"api","title":"APIを更新する","purpose":"…","acceptance_criteria":"…","scope":"paths=api env=github-issue","depends_on":[]},{"key":"ui","title":"UIを更新する","purpose":"…","acceptance_criteria":"…","scope":"paths=ui env=github-issue","depends_on":["api"]}]}
+```
+
+keyは一意の小文字英数ハイフン、依存は先行keyだけを参照する。直接子は2〜6、深さは2、全子孫は20までである。不正scope、空の受け入れ条件、未知key、循環、上限超過はGitHubを書き換える前に停止する。Project APIは可視化のbest-effortであり、障害時もIssue Labelとnative relationによるqueueを停止しない。
+
+子はnative sub-issue、native dependency、scope marker、親を指すchild markerを持つ。全関係を作成・確認してからqueueへ公開される。親は子をnative `blocked_by` として待つため、子が単にclosedではなく検証済み完了になるまで統合に進まない。子の失敗・cancel・置換・rollbackは親を完了させず、復旧または利用者判断を必要とする。
+
 ## 状態と復旧
 
 - queued: 未取得
