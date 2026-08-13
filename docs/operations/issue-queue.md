@@ -121,3 +121,33 @@ workerが `AGENTIC_LOOP_RESULT=completed` を返しても、それだけでは�
 remote branchは復旧可能性を残し、GitHubのPR merge時branch削除設定と責務を分離するため、Supervisorからは削除しない。remote branchの保持または削除はrepositoryのコード化されたGitHub設定に従い、このcleanupの成功条件には含めない。
 
 Supervisorはrepositoryごとのuser-level systemd serviceとして登録され、予期しない終了では5秒後に自動再起動する。`stop`による正常終了では再起動しない。service名は `agentic-loop-supervisor-<repository path>.service` で、`systemctl --user status` と `journalctl --user -u` で確認できる。起動時には生存しないPIDとlockを削除してからlease復旧を行う。Supervisorが停止している場合はstatus、`.git/agentic-loop/supervisor.log`、systemd unit、`gh auth status` を確認する。同じリポジトリを複数端末から処理しない。default branch更新後の競合やrequired checks失敗はworkerが最新branchに対して修正・再検証する。
+
+## 中断からの再開
+
+lease切れ、Supervisor再起動、端末再起動、worker異常終了の後にworkerが再起動した場合、`worker()` は既存のIssue専用worktree・branch・commit・PR・check・merge状態をGitとGitHub REST APIから観測し、そこから再開phaseを導出する（[ADR 0004](../decisions/0004-worker-resume-and-handoff.md)）。前任workerの発言やlog内容は信頼せず、観測結果だけを根拠にする。
+
+| phase | 観測条件 | 動作 |
+| --- | --- | --- |
+| `fresh` | 専用branchが存在しない | 新規worktree/branchを作成しplan/execを実行 |
+| `worktree-ready` | branchのheadがdefault branchのtipと同一 | 既存worktree/branchを再利用しplan/execを実行 |
+| `committed-unpushed` | local commitがありremoteと不一致 | plan/execを継続 |
+| `pushed-no-pr` | remote tipとheadが一致しPRがない | plan/execを継続 |
+| `pr-open` | 対応するopen PRがある | 既存branch/PRを再利用する指示付きでplan/execを継続 |
+| `pr-merged` | merge済みPRのhead commitがbranchのheadと一致 | providerを起動せず、cleanupと完了報告だけを行う |
+| `needs-decision` | local/remoteが分岐、またはmerge済みPRのhead commitが不一致 | providerを起動せず `agent:needs-input` にし復旧手順を提示する |
+| `unsafe-foreign` | 専用worktree pathが別Issueのbranchに登録済み、またはbranchが別worktreeで使用中 | providerを起動せず `agent:failed` にし、既存成果物は一切変更しない |
+
+未commitの変更（dirty）は単独では異常とせず、そのままplan/execへ引き継ぐ。`pr-merged`・`needs-decision`・`unsafe-foreign` はいずれもproviderを起動せずに確定するため、二重PR・二重merge・不正なcleanupは構造的に発生しない。安全に再開できない（`needs-decision`・`unsafe-foreign`）場合、worktree・local branch・remote branchのいずれも削除しない。
+
+観測結果はIssueごと1件の `agentic-loop:handoff` コメント（lease同様PATCHで更新）として記録し、phase・branch・head・remote・PR番号・checks・dirty・divergedを含む。この内容はGit/GitHubの観測結果だけから構成されるためsecretやlog本文を含みえず、専用のsecret guardを追加で通す必要がない。同じ内容はplan/exec promptの先頭にも「再開コンテキスト」として注入し、workerが既存branch/PRを再利用するよう明示する。
+
+Providerを起動する直前に `worker_confirm_running_label()` がGitHub上のLabelが依然 `agent:running` であることを再確認する。claimからworker起動までの間にIssueの状態が変わっていた場合（stale/duplicateな起動など）、Label・comment・Git状態のいずれも変更せず静かに終了する。
+
+`bin/agentic-loop status` はrunning Issueごとにこのphaseを追加API呼び出しなしで表示する（worker実行中のlocal cacheから読む）。`doctor` の残存状態チェックは、残存worktree/branch/logがGitHub上のagent:running Issueに対応していれば成功、対応しなければ警告として区別する。
+
+### 失敗の分類
+
+- `needs-input`: 人の判断が必要（branchの分岐、merge済みPRとのcommit不一致、権限不足など）。返信で自動的にqueuedへ戻る。
+- `failed`: 再試行で回復しうる（一時的なAPI障害、破損metadata、別Issueの成果物との競合など）。`retry_failed` が自動的に再試行し、`max_attempts` 到達で解決不能とみなしcloseする。
+- `exhausted`（`agent:queued` へ戻る）: providerのtoken/rate limitに達した場合。Issueをfailedにせず再キューし、Supervisorのclaimを一時停止する。
+- `declined`（close）: workerが実施不要または実施不能と判断した場合。

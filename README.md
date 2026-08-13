@@ -30,7 +30,7 @@ GitHub Issueが要求と状態履歴の正本で、Projectは障害がキュー�
 
 要求処理のworkerが使うAIコーディングツールは `.agentic-loop.toml` の `[agent]` で選択します（`codex`、`claude`、または `opencode`、既定は `codex`）。同じリポジトリをローカル環境に応じて切り替えられ、特定のツールへ固定しません（[AIツール非依存ポリシー](docs/policies/ai-tool-neutrality.md)）。
 
-各Issueは2段で処理します。まず調査と計画だけを行う高品質な**plan段**（Codexは read-only sandbox）、続いて計画に従って実装・検証・PR・mergeまで行う低コストな**exec段**です。高コストな推論を計画に集中させ、実作業は安価に回します。exec段が完了条件を満たせない場合は、`[agent.retry].plan_max`（既定1回）まで flagship で計画を見直して再実行します。
+各Issueは2段で処理します。まず調査と計画だけを行う高品質な**plan段**（Codexは read-only sandbox）、続いて計画に従って実装・検証・PR・mergeまで行う低コストな**exec段**です。高コストな推論を計画に集中させ、実作業は安価に回します。exec段が完了条件を満たせない場合は、`[agent.retry].plan_max`（既定1回）まで flagship で計画を見直して再実行します。中断後の再開時は既存のworktree・branch・commit・PR・merge状態をGit/GitHub APIから観測してphaseを判定し、既存の成果物を再利用します（[運用ドキュメント](docs/operations/issue-queue.md#中断からの再開)、[ADR 0004](docs/decisions/0004-worker-resume-and-handoff.md)）。
 
 **局面ごとに provider・model・reasoning effort を指定できます。** 例えばplanはCodexのフラグシップを高effortで、execはopencodeで、のように混在させられます。段が provider を省略すると `[agent].provider` を継承します。`reasoning_effort` はCodexのみ（既定 plan=`high` / exec=`low`）、opencodeのmodelは `provider/model` 形式です。
 
