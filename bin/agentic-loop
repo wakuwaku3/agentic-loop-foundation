@@ -1678,8 +1678,33 @@ worker_count() {
   printf '%s\n' "$count"
 }
 
+# Terminate every worker's process group and requeue its Issue so a shutdown
+# leaves no orphaned process and no Issue stuck at agent:running. Best-effort:
+# if the requeue API fails, the lease expiry and startup recovery still recover
+# the Issue on the next supervisor start.
+supervisor_graceful_shutdown() {
+  : > "$STATE_ROOT/stop.requested" 2>/dev/null || true
+  local pidfile issue pid
+  shopt -s nullglob
+  for pidfile in "$STATE_ROOT"/workers/*.pid; do
+    issue=$(basename "$pidfile" .pid)
+    read -r pid < "$pidfile" 2>/dev/null || true
+    rm -f "$pidfile"
+    if [[ $pid =~ ^[0-9]+$ ]]; then kill -TERM "-$pid" 2>/dev/null || true; fi
+    if [[ $issue =~ ^[0-9]+$ ]]; then
+      set_issue_state "$issue" queued 2>/dev/null || true
+      comment_issue "$issue" "<!-- agentic-loop:shutdown -->\nSupervisorが停止したため、進行中のIssueを安全にキューへ戻しました。次回のclaimで再開します。" 2>/dev/null || true
+    fi
+  done
+  shopt -u nullglob
+}
+
 supervise() {
   trap 'rm -f "$STATE_ROOT/supervisor.pid"; rmdir "$STATE_ROOT/supervisor.lock" 2>/dev/null || true' EXIT
+  # Graceful shutdown (see docs/decisions/0003): on SIGTERM/SIGINT (systemctl
+  # stop, kill, OS/WSL shutdown) stop claiming, terminate each worker's process
+  # group so nothing is orphaned, and requeue its Issue so the work is not lost.
+  trap 'supervisor_graceful_shutdown; exit 0' TERM INT
   mkdir -p "$STATE_ROOT/workers"
   printf '%s\n' "$$" > "$STATE_ROOT/supervisor.pid"
   # Best-effort maintenance must never crash the supervisor (see docs/decisions/
@@ -1709,7 +1734,9 @@ supervise() {
           lease_comment "$issue" "$worker" || true
           project_add_issue "$issue" || true
           project_sync_state "$issue" running || true
-          "$0" _worker "$issue" "$worker" >> "$STATE_ROOT/logs/issue-$issue.log" 2>&1 &
+          # setsid gives each worker its own process group so shutdown can
+          # terminate the worker and its provider CLI child together.
+          setsid "$0" _worker "$issue" "$worker" >> "$STATE_ROOT/logs/issue-$issue.log" 2>&1 &
           printf '%s\n' "$!" > "$STATE_ROOT/workers/$issue.pid"
         done
       fi

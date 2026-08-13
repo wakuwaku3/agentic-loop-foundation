@@ -118,6 +118,8 @@ grep -Fq 'retry_failed' bin/agentic-loop || { printf 'Transient-failure retry is
 grep -Fq 'exhaustion_note_pause' bin/agentic-loop || { printf 'Token-exhaustion pause is missing.\n' >&2; exit 1; }
 grep -Fq 'agentic-loop:unresolved' bin/agentic-loop || { printf 'Unresolvable-close disposition is missing.\n' >&2; exit 1; }
 grep -Fq 'recover_expired || true' bin/agentic-loop || { printf 'Supervisor poll is not resilient to transient API errors.\n' >&2; exit 1; }
+grep -Fq 'supervisor_graceful_shutdown' bin/agentic-loop || { printf 'Graceful shutdown handler is missing.\n' >&2; exit 1; }
+grep -Fq 'setsid "$0" _worker' bin/agentic-loop || { printf 'Workers are not started in their own process group.\n' >&2; exit 1; }
 grep -Fq 'agentic-loop:dependency-blocked' bin/agentic-loop || { printf 'Issue dependency gating is missing.\n' >&2; exit 1; }
 if grep -Eq 'danger-full-access|OPENAI_API_KEY' bin/agentic-loop bin/agentic-loop-diagnose .agentic-loop/diagnose-codebase.sh install.sh scripts/install-target.sh; then
   printf 'Forbidden Codex execution or API-key billing configuration.\n' >&2
