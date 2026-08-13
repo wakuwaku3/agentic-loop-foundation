@@ -428,6 +428,7 @@ assert_contains "$target/docs/policies/continuous-delivery.md" '空のpipeline�
 assert_contains "$target/.agentic-loop.toml" 'provider = "codex"' 'installed configuration lacks the default AI provider'
 assert_contains "$target/.agentic-loop.toml" 'graphql_reserve = 500' 'installed configuration lacks the GraphQL reserve'
 assert_contains "$target/.agentic-loop.toml" 'core_reserve = 500' 'installed configuration lacks the REST(core) reserve'
+assert_contains "$target/.agentic-loop.toml" 'poll_max_seconds = 120' 'installed configuration lacks the idle poll backoff ceiling'
 assert_contains "$target/.agentic-loop.toml" 'api_retry_attempts = 3' 'installed configuration lacks bounded REST retries'
 assert_contains "$target/docs/operations/issue-queue.md" 'GraphQLの残量・reset時刻' 'installed operations documentation lacks shared rate-limit handling'
 for provider_neutral_doc in docs/operations/issue-queue.md docs/operations/codebase-diagnosis.md; do
@@ -1264,6 +1265,26 @@ AGENTIC_LOOP_RUN_ONCE=1 FAKE_CODEX_SLEEP=3 "$target/bin/agentic-loop" _supervise
 lease_lines=$(grep -c 'agentic-loop:lease' "$FAKE_GH_ROOT/$state_key.comments" || true)
 [[ ${lease_lines:-0} -eq 1 ]] || fail "lease heartbeat should keep a single comment, found ${lease_lines:-0}"
 assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'のハートビートです' 'lease comment was not written'
+
+# Adaptive idle backoff: with an empty queue the poll interval grows beyond the
+# base toward the ceiling, cutting idle GitHub API reads; a live worker resets it.
+write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 POLL_MAX_SECONDS=8 MAX_WORKERS=1 LEASE_SECONDS=30 STOP_TIMEOUT=10 STALE_DAYS=30
+: > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+rm -f "$state_root/stop.requested" "$state_root/poll-interval"
+"$target/bin/agentic-loop" _supervise &
+backoff_sup=$!
+backoff_val=0
+for _ in $(seq 1 20); do
+  backoff_val=$(cat "$state_root/poll-interval" 2>/dev/null || printf '0')
+  [[ $backoff_val =~ ^[0-9]+$ ]] && (( backoff_val > 1 )) && break
+  sleep 0.5
+done
+kill -TERM "$backoff_sup" 2>/dev/null || true
+wait "$backoff_sup" 2>/dev/null || true
+rm -f "$state_root/stop.requested"
+(( backoff_val > 1 )) || fail "idle backoff did not lengthen the poll interval (got $backoff_val)"
+(( backoff_val <= 8 )) || fail "idle backoff exceeded the configured ceiling (got $backoff_val)"
 
 # Repositories use separate gh/project state and Git state directories.
 second=$(new_repository second-project)

@@ -39,6 +39,10 @@ weekly_reserve_percent = 20
 [queue]
 # Polling and concurrency defaults. Use non-negative integer seconds/counts.
 poll_seconds = 30
+# While the queue is idle the poll interval backs off exponentially from
+# poll_seconds up to this, to cut GitHub API reads. Set equal to poll_seconds
+# to disable idle backoff.
+poll_max_seconds = 120
 max_workers = 4
 lease_seconds = 300
 # Zero waits indefinitely for workers during a graceful stop.

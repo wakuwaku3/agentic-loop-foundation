@@ -25,8 +25,8 @@
 
 ### API削減
 
-- **ETag条件付き取得**: Issue一覧などの取得は `If-None-Match` を付け、変化が無ければ304を受ける。304はrate limitを消費しないため、アイドル時のpollは実質無償になる。
-- **アイドル時backoff**: queuedが空の間はpoll間隔を段階的に延ばし、着手可能な変化が現れたら通常間隔へ戻す。
+- **アイドル時backoff**（実装済み）: queuedが空でworkerも居ない間はpoll間隔を `poll_seconds` から `poll_max_seconds` まで指数的に延ばし、workerが動き出したら通常間隔へ戻す。アイドル時のpoll読み取り回数を大きく削減する。
+- **ETag条件付き取得**（保留）: 取得に `If-None-Match` を付け304（rate limit非消費）を狙う案。`gh` CLIは条件付きリクエストとETag/304の受け渡しを素直に扱えず実装が脆くなるため見送る。安いlease（C）・APIバジェット・ガバナー（E）・アイドルbackoff（F）でAPI消費は十分に抑えられており、必要になれば専用HTTPクライアントで再検討する。
 
 ### 安全弁
 
@@ -40,6 +40,6 @@
 
 ## 帰結
 
-- アイドル時はheartbeatが無く、pollも稀で304化するためAPI消費はほぼゼロになる。稼働時も書き込みは状態遷移とIssueごと1つのlease更新に限られ、secondary rate limitの主因が消える。
+- アイドル時はheartbeatが無く、pollもbackoffで疎になるためAPI消費が大きく下がる。稼働時も書き込みは状態遷移とIssueごと1つのlease更新（PATCH）に限られ、secondary rate limitの主因が消える。
 - 万一枯渇へ近づいてもガバナーが予備を残して自動停止し、Retry-Afterを守り、耐性化により落ちない。
 - Supervisorがkill・急死しても、正常時はグレースフルに、異常時は次回起動時にクリーンへ収束する。生存・回復はGitHub leaseを正本に保つため、マルチマシン並列の可能性は損なわれない。
