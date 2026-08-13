@@ -103,11 +103,24 @@ case "${1:-} ${2:-}" in
     elif [[ $endpoint =~ ^issues/([0-9]+)/labels$ && $method == PUT ]]; then
       issue=${BASH_REMATCH[1]}; payload=$(if [[ -n $input_file && $input_file != - ]]; then cat "$input_file"; else cat; fi); target=$(sed -n 's/.*"agent:\([^"]*\)".*/\1/p' <<< "$payload"); category=$(grep -o 'category:[a-z-]*' <<< "$payload" | head -n 1 | cut -d: -f2 || true)
       ( flock 9; awk -v n="$issue" -v s="$target" -v c="$category" '{if ($1 == n) {if (s != "") $2=s; if (c != "") $7=c} print}' "$state" > "$state.$$.tmp" && mv "$state.$$.tmp" "$state" ) 9> "$state.lock"
+    elif [[ $endpoint =~ ^issues/comments/([0-9]+)$ && $method == PATCH ]]; then
+      cid=${BASH_REMATCH[1]}
+      body=''; for arg in "$@"; do [[ $arg == body=* ]] && body=${arg#body=}; done
+      ( flock 9
+        mapfile -t comment_lines < "$comments" 2>/dev/null || comment_lines=()
+        if (( cid >= 1 && cid <= ${#comment_lines[@]} )); then
+          comment_lines[cid-1]="${comment_lines[cid-1]%% *} $body"
+          printf '%s\n' "${comment_lines[@]}" > "$comments"
+        fi
+      ) 9> "$comments.lock"
     elif [[ $endpoint =~ ^issues/([0-9]+)/comments$ ]]; then
       issue=${BASH_REMATCH[1]}
       if [[ $method == POST ]]; then
         body=''; for arg in "$@"; do [[ $arg == body=* ]] && body=${arg#body=}; done
-        printf '%s %s\n' "$issue" "$body" >> "$comments"
+        ( flock 9
+          printf '%s %s\n' "$issue" "$body" >> "$comments"
+          if [[ $* == *"--jq .id"* ]]; then wc -l < "$comments" | tr -d '[:space:]'; printf '\n'; fi
+        ) 9> "$comments.lock"
       elif [[ $* == *needs-input* ]]; then
         if tail -n 1 "$comments" 2>/dev/null | grep -Fq USER_REPLY; then printf 'true\n'; else printf 'false\n'; fi
       else tail -n 1 "$comments" 2>/dev/null || true; fi
@@ -1225,6 +1238,17 @@ wait "$deadpid" 2>/dev/null || true
 printf '%s\n' "$deadpid" > "$state_root/workers/16.pid"
 AGENTIC_LOOP_RUN_ONCE=1 FAKE_CODEX_SLEEP=1 "$target/bin/agentic-loop" _supervise
 grep -Eq '^16 completed closed' "$state" || fail 'a dead local worker Issue was not recovered and reprocessed'
+
+# Cheap lease: heartbeats update a single lease comment in place (PATCH) instead
+# of posting a new comment each beat, so only one lease comment exists per Issue.
+write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=3 STOP_TIMEOUT=10 STALE_DAYS=30
+printf '20 queued open none 2026-01-01T00:00:00Z\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+rm -f "$state_root/stop.requested"
+AGENTIC_LOOP_RUN_ONCE=1 FAKE_CODEX_SLEEP=3 "$target/bin/agentic-loop" _supervise
+lease_lines=$(grep -c 'agentic-loop:lease' "$FAKE_GH_ROOT/$state_key.comments" || true)
+[[ ${lease_lines:-0} -eq 1 ]] || fail "lease heartbeat should keep a single comment, found ${lease_lines:-0}"
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'のハートビートです' 'lease comment was not written'
 
 # Repositories use separate gh/project state and Git state directories.
 second=$(new_repository second-project)
