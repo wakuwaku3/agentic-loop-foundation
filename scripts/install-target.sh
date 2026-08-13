@@ -42,7 +42,7 @@ effective_provider() {
 }
 
 preflight() {
-  local command_name provider provider_cli
+  local command_name provider provider_cli graphql_remaining
   for command_name in git gh yq devbox systemctl systemd-escape; do command -v "$command_name" >/dev/null 2>&1 || fail "$command_name is required"; done
   provider=$(effective_provider)
   case $provider in codex) provider_cli=codex ;; claude) provider_cli=claude ;; opencode) provider_cli=opencode ;; *) fail 'agent.provider must be codex, claude, or opencode' ;; esac
@@ -50,8 +50,14 @@ preflight() {
   git -C "$TARGET" rev-parse --git-dir >/dev/null 2>&1 || fail 'target must be a Git repository'
   git -C "$TARGET" remote get-url origin >/dev/null 2>&1 || fail 'origin remote is required'
   gh auth status >/dev/null 2>&1 || fail 'GitHub authentication is required; run gh auth login'
-  gh api graphql -f query='query { viewer { login projectsV2(first: 1) { totalCount } } }' >/dev/null 2>&1 ||
-    fail 'GitHub token needs repository access and project/read:project scopes'
+  graphql_remaining=$(gh api rate_limit --jq '.resources.graphql.remaining' 2>/dev/null) || fail 'cannot read GitHub API rate limit'
+  read -r graphql_remaining _ <<< "$graphql_remaining"
+  if [[ $graphql_remaining =~ ^[0-9]+$ && $graphql_remaining -gt 0 ]]; then
+    gh api graphql -f query='query { viewer { login projectsV2(first: 1) { totalCount } } }' >/dev/null 2>&1 ||
+      fail 'GitHub token needs repository access and project/read:project scopes'
+  else
+    printf 'GraphQL rate limitが枯渇しているため、Projects権限検査とsetupを延期します。\n' >&2
+  fi
   (cd "$TARGET" && gh repo view --json nameWithOwner --jq .nameWithOwner >/dev/null 2>&1) || fail 'cannot access the target GitHub repository'
   [[ $provider != codex ]] || codex exec --help >/dev/null 2>&1 || fail 'Codex CLI exec mode is required'
 }

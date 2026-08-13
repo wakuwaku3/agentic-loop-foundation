@@ -108,6 +108,8 @@ Supervisorは1 poll内の状態別処理をOpen Issue snapshot最大2回（maint
 
 GraphQL枯渇時もREST APIのquotaは別に確認できる。`gh api rate_limit --jq '.resources | {graphql,core}'` で現在値を確認する。GraphQLのreset前にSupervisorを繰り返し再起動したり、`gh issue list --limit 1000` や `gh project item-list --limit 1000` を手動で反復したりしない。
 
+Project同期はSupervisorプロセス内でProject metadata、item一覧、各itemの現在の `Agent status`、`Category`、`Blocked by` を1回取得して共有する。desired valueと現在値が一致するfieldは更新せず、driftがあるfieldだけを1回更新してcacheも追従させる。このため収束済みのidle pollとinstall再実行はProject item fieldのmutationを発生させない。GraphQL quotaが枯渇している場合もinstallはLabelとREST Issueキューの導入を継続し、Projects権限検査とProject setupをreset後まで延期する。
+
 REST APIはrate limit、secondary rate limit、HTTP 429/5xx、timeout、connection resetなど明示的な一時障害だけを指数backoffで既定3回まで再試行する。認証・権限・入力不正など恒久的な4xxや、冪等性を確認できない操作を無制限に再試行しない。retry回数と待機は日本語でlocal logへ記録し、秘密やresponse本文はIssueへ転載しない。上限到達後は既存のlease、worktree、branchを保持し、Supervisor再起動時のlease復旧で再調査できる。
 
 Supervisorはclaimの直前に、`agent:queued` のまま `STALE_DAYS` 日以上更新されていないIssueを `agent:stale` に遷移し、監査コメントを残してcloseする。再開時はIssueをreopenし、要求を確認・更新して `agent:queued` を付ける。`STALE_DAYS=0` は自動closeを無効にする。queued以外のrunning、needs-input、failed、in-reviewや通常の未キューIssueは対象外である。

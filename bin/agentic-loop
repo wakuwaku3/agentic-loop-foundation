@@ -1997,7 +1997,7 @@ queue_project_sync() {
 PROJECT_METADATA_LOADED=0
 PROJECT_ITEMS_LOADED=0
 PROJECT_ID=''
-declare -A PROJECT_FIELD_IDS=() PROJECT_OPTION_IDS=() PROJECT_ITEM_IDS=() PROJECT_URLS=()
+declare -A PROJECT_FIELD_IDS=() PROJECT_OPTION_IDS=() PROJECT_ITEM_IDS=() PROJECT_URLS=() PROJECT_ITEM_VALUES=()
 
 load_project_context() {
   (( PROJECT_METADATA_LOADED == 0 )) || return 0
@@ -2020,15 +2020,24 @@ load_project_context() {
 load_project_items() {
   (( PROJECT_ITEMS_LOADED == 0 )) || return 0
   load_project_context || return 1
-  local PROJECT_OWNER='' PROJECT_NUMBER='' key value number url id
+  local PROJECT_OWNER='' PROJECT_NUMBER='' key value number url id agent_status category blocked_by
   while IFS='=' read -r key value; do
     case $key in PROJECT_OWNER) PROJECT_OWNER=$value ;; PROJECT_NUMBER) PROJECT_NUMBER=$value ;; esac
   done < "$STATE_ROOT/project.env"
-  while IFS=$'\t' read -r number url id; do
+  while IFS=$'\x1f' read -r number url id agent_status category blocked_by; do
     [[ -n $url ]] && PROJECT_URLS[$url]=1
-    [[ $number =~ ^[0-9]+$ && -n $id ]] && PROJECT_ITEM_IDS[$number]=$id
+    if [[ $number =~ ^[0-9]+$ && -n $id ]]; then
+      PROJECT_ITEM_IDS[$number]=$id
+      PROJECT_ITEM_VALUES["$number:Agent status"]=$agent_status
+      PROJECT_ITEM_VALUES["$number:Category"]=$category
+      PROJECT_ITEM_VALUES["$number:Blocked by"]=$blocked_by
+    fi
   done < <(gh project item-list "$PROJECT_NUMBER" --owner "$PROJECT_OWNER" --format json --limit 1000 \
-    --jq '.items[] | [(.content.number // ""), (.content.url // ""), .id] | @tsv' 2>/dev/null || true)
+    --jq '.items[] | . as $item |
+      def field($name): ([ $item | to_entries[] |
+        select((.key | ascii_downcase | gsub("[^a-z]"; "")) == $name) | .value ][0] // "");
+      [(.content.number // ""), (.content.url // ""), .id,
+       field("agentstatus"), field("category"), field("blockedby")] | join("\u001f")' 2>/dev/null || true)
   PROJECT_ITEMS_LOADED=1
 }
 
@@ -2046,7 +2055,12 @@ project_add_content() {
   added_id=$(gh project item-add "$PROJECT_NUMBER" --owner "$PROJECT_OWNER" --url "$url" --format json --jq .id 2>/dev/null) || { queue_project_sync "content $url"; return 0; }
   PROJECT_URLS[$url]=1
   number=${url##*/}
-  [[ $number =~ ^[0-9]+$ && -n $added_id ]] && PROJECT_ITEM_IDS[$number]=$added_id
+  if [[ $number =~ ^[0-9]+$ && -n $added_id ]]; then
+    PROJECT_ITEM_IDS[$number]=$added_id
+    PROJECT_ITEM_VALUES["$number:Agent status"]=''
+    PROJECT_ITEM_VALUES["$number:Category"]=''
+    PROJECT_ITEM_VALUES["$number:Blocked by"]=''
+  fi
 }
 
 project_add_issue() {
@@ -2084,7 +2098,12 @@ project_sync_state() {
   project_id=$PROJECT_ID; item_id=${PROJECT_ITEM_IDS[$issue]:-}
   field_id=${PROJECT_FIELD_IDS["Agent status"]:-}; option_id=${PROJECT_OPTION_IDS["Agent status:$option"]:-}
   [[ -n $project_id && -n $item_id && -n $field_id && -n $option_id ]] || { queue_project_sync "state $issue $state"; return 0; }
-  gh project item-edit --id "$item_id" --project-id "$project_id" --field-id "$field_id" --single-select-option-id "$option_id" >/dev/null 2>&1 || queue_project_sync "state $issue $state"
+  [[ ${PROJECT_ITEM_VALUES["$issue:Agent status"]:-} == "$option" ]] && return 0
+  if gh project item-edit --id "$item_id" --project-id "$project_id" --field-id "$field_id" --single-select-option-id "$option_id" >/dev/null 2>&1; then
+    PROJECT_ITEM_VALUES["$issue:Agent status"]=$option
+  else
+    queue_project_sync "state $issue $state"
+  fi
 }
 
 project_sync_category() {
@@ -2104,7 +2123,12 @@ project_sync_category() {
   project_id=$PROJECT_ID; item_id=${PROJECT_ITEM_IDS[$issue]:-}
   field_id=${PROJECT_FIELD_IDS[Category]:-}; option_id=${PROJECT_OPTION_IDS["Category:$option"]:-}
   [[ -n $project_id && -n $item_id && -n $field_id && -n $option_id ]] || return 0
-  gh project item-edit --id "$item_id" --project-id "$project_id" --field-id "$field_id" --single-select-option-id "$option_id" >/dev/null 2>&1 || true
+  [[ ${PROJECT_ITEM_VALUES["$issue:Category"]:-} == "$option" ]] && return 0
+  if gh project item-edit --id "$item_id" --project-id "$project_id" --field-id "$field_id" --single-select-option-id "$option_id" >/dev/null 2>&1; then
+    PROJECT_ITEM_VALUES["$issue:Category"]=$option
+  else
+    queue_project_sync "category $issue $category"
+  fi
 }
 
 # Record (or clear, for an empty note) which other Issue this one is waiting
@@ -2123,7 +2147,12 @@ project_sync_conflict() {
   load_project_items || return 0
   project_id=$PROJECT_ID; item_id=${PROJECT_ITEM_IDS[$issue]:-}; field_id=${PROJECT_FIELD_IDS["Blocked by"]:-}
   [[ -n $project_id && -n $item_id && -n $field_id ]] || return 0
-  gh project item-edit --id "$item_id" --project-id "$project_id" --field-id "$field_id" --text "$note" >/dev/null 2>&1 || true
+  [[ ${PROJECT_ITEM_VALUES["$issue:Blocked by"]:-} == "$note" ]] && return 0
+  if gh project item-edit --id "$item_id" --project-id "$project_id" --field-id "$field_id" --text "$note" >/dev/null 2>&1; then
+    PROJECT_ITEM_VALUES["$issue:Blocked by"]=$note
+  else
+    queue_project_sync "conflict $issue $note_b64"
+  fi
 }
 
 reconcile_pending_project() {
