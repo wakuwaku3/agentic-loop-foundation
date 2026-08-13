@@ -440,6 +440,8 @@ empty_repository() {
   bare="$TEST_ROOT/$name.git"
   git init --bare --quiet "$bare"
   git init --quiet -b main "$target"
+  git -C "$target" config user.name Test
+  git -C "$target" config user.email test@example.invalid
   git -C "$target" remote add origin "$bare"
   printf '%s\n' "$target"
 }
