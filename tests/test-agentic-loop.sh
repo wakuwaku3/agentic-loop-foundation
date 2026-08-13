@@ -1195,6 +1195,23 @@ rm -f "$state_root/stop.requested"
 AGENTIC_LOOP_RUN_ONCE=1 FAKE_CODEX_SLEEP=1 "$target/bin/agentic-loop" _supervise
 grep -Eq '^19 completed closed' "$state" || fail 'stuck running Issue was not recovered and processed by the active loop'
 
+# Graceful shutdown: SIGTERM to the supervisor terminates the worker's process
+# group and requeues its in-flight Issue, leaving nothing orphaned.
+write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=30 STOP_TIMEOUT=10 STALE_DAYS=30
+printf '15 queued open none 2026-01-01T00:00:00Z\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+rm -f "$state_root/stop.requested"
+FAKE_CODEX_SLEEP=30 "$target/bin/agentic-loop" _supervise &
+sup_pid=$!
+graceful_claimed=0
+for _ in $(seq 1 40); do [[ -e $state_root/workers/15.pid ]] && { graceful_claimed=1; break; }; sleep 0.5; done
+[[ $graceful_claimed == 1 ]] || { kill "$sup_pid" 2>/dev/null; fail 'worker was not claimed before the shutdown test'; }
+kill -TERM "$sup_pid" 2>/dev/null
+wait "$sup_pid" 2>/dev/null || true
+grep -Eq '^15 queued' "$state" || fail 'graceful shutdown did not requeue the in-flight Issue'
+[[ ! -e $state_root/workers/15.pid ]] || fail 'graceful shutdown left a worker pidfile'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:shutdown' 'graceful shutdown was not recorded on the Issue'
+
 # Repositories use separate gh/project state and Git state directories.
 second=$(new_repository second-project)
 AGENTIC_LOOP_SOURCE="$PROJECT_ROOT" AGENTIC_LOOP_TARGET="$second" AGENTIC_LOOP_SKIP_START=1 "$PROJECT_ROOT/install.sh"
