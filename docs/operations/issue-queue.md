@@ -2,7 +2,7 @@
 
 ## セットアップ
 
-`install.sh` は変更前に `git`、`gh`、設定 `agent.provider`（環境変数 `AGENT_PROVIDER` と git管理外 `.agentic-loop.local.toml` による上書きを含む）から解決したAI CLI（`codex`／`claude`／`opencode`、既定は `codex`）、GitHubログイン、origin、リポジトリ参照、Projects API権限を検査する。provider=opencodeならCodex CLIが存在しなくてもinstallは成立する。既存ファイルとの競合もコピー前に検査する。検査後、8個の状態Label、4個の `priority:*` Label、6個の `category:*` Labelと `Agentic Loop - OWNER/REPOSITORY` Projectを冪等に用意し、既定ではSupervisorを起動する。Projectには同じ6選択肢の `Category` fieldを作成する。`install.sh` と `bin/agentic-loop setup` はRESTで既存のOpen IssueとOpen PRだけを列挙し、Projectにないitemをbackfillする。setup以前にclose済みの履歴は取り込まず、導入後に登録したitemはclose後もProjectに残す。
+`install.sh` は変更前に `git`、`gh`、設定 `agent.provider`（環境変数 `AGENT_PROVIDER` と git管理外 `.agentic-loop.local.toml` による上書きを含む）から解決したAI CLI（`codex`／`claude`／`opencode`、既定は `codex`）、GitHubログイン、origin、リポジトリ参照、Projects API権限を検査する。provider=opencodeならCodex CLIが存在しなくてもinstallは成立する。既存ファイルとの競合もコピー前に検査する。検査後、8個の状態Label、4個の `priority:*` Label、6個の `category:*` Labelと `Agentic Loop - OWNER/REPOSITORY` Projectを冪等に用意し、既定ではSupervisorを起動する。Projectには同じ6選択肢の `Category` fieldを作成する。`install.sh` と `bin/agentic-loop setup` はProjectのrepository link・field・viewだけを収束させ、既存Issue/PRの一括backfillは行わない。Issue受付とworkerが扱ったPRは、必要になった時点で個別にProjectへ登録する。
 
 GitHub tokenには対象リポジトリのIssue/PR操作権限と `project`、`read:project` scopeが必要である。不足時は `gh auth refresh -s project,read:project` など、利用中のGitHub認証方式に合う方法で追加する。Projectはuser/org所有のため、対象リポジトリとProjectの閲覧者が一致することを管理者が確認する。privateリポジトリの内容や秘密情報をProjectフィールドへ転記しない。
 
@@ -119,7 +119,7 @@ Supervisorは1 poll内の状態別処理をOpen Issue snapshot最大2回（maint
 
 GraphQL枯渇時もREST APIのquotaは別に確認できる。`gh api rate_limit --jq '.resources | {graphql,core}'` で現在値を確認する。GraphQLのreset前にSupervisorを繰り返し再起動したり、`gh issue list --limit 1000` や `gh project item-list --limit 1000` を手動で反復したりしない。
 
-Project同期はSupervisorプロセス内でProject metadata、item一覧、各itemの現在の `Agent status`、`Category`、`Blocked by` を1回取得して共有する。desired valueと現在値が一致するfieldは更新せず、driftがあるfieldだけを1回更新してcacheも追従させる。このため収束済みのidle pollとinstall再実行はProject item fieldのmutationを発生させない。GraphQL quotaが枯渇している場合もinstallはLabelとREST Issueキューの導入を継続し、Projects権限検査とProject setupをreset後まで延期する。
+Project同期はProject全itemを走査しない。状態遷移で必要になったIssue/PRだけを `projectItems(first:20)` で照会し、そのプロセス内で現在の `Agent status`、`Category`、`Blocked by` をcacheする。desired valueと現在値が一致するfieldは更新せず、driftがあるfieldだけを更新する。正しいcategory Labelを持つqueued Issueのidle pollと、収束済みinstall再実行はProject itemの照会・mutationを発生させない。一時障害の再試行も1 pollあたり10件に制限し、各Projects操作の前には通常reserveに加えて25 pointの操作余裕を要求する。GraphQL quotaが不足する場合もinstallはLabelとREST Issueキューの導入を継続し、Projects権限検査とProject setupをreset後まで延期する。
 
 REST APIはrate limit、secondary rate limit、HTTP 429/5xx、timeout、connection resetなど明示的な一時障害だけを指数backoffで既定3回まで再試行する。認証・権限・入力不正など恒久的な4xxや、冪等性を確認できない操作を無制限に再試行しない。retry回数と待機は日本語でlocal logへ記録し、秘密やresponse本文はIssueへ転載しない。上限到達後は既存のlease、worktree、branchを保持し、Supervisor再起動時のlease復旧で再調査できる。
 

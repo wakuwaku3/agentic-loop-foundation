@@ -17,7 +17,7 @@ claim前、queued Issueの依存関係（GitHub標準のissue dependenciesとIss
 
 `completed` はworkerの出力だけを根拠にせず、Issue専用branchに対応するPRがGitHub上でmerge済みであることをSupervisorが独立に確認した場合だけ遷移する。未mergeまたは確認不能なら `failed` とし、Issueをcloseせずworktreeを保持する。
 
-Projectはリポジトリ名を含む専用名で冪等に作成または再利用し、リポジトリへlinkする。受付、queue、実行中、入力待ち、復旧、最近の完了、Issue監査、PR監査を分ける10個のtable viewを名前で再利用し、filterを再同期する。setup時に既存PRを、worker終了時にそのbranchのPRをProject itemへ追加する。実行中の可視化はbest-effortで再同期可能とし、Project障害でIssueの取得・状態遷移を止めない。Projectの所有者アクセスがリポジトリより広い場合があるため、機密情報はProjectへ複製せず、管理者がアクセス境界を確認する。
+Projectはリポジトリ名を含む専用名で冪等に作成または再利用し、リポジトリへlinkする。受付、queue、実行中、入力待ち、復旧、最近の完了、Issue監査、PR監査を分ける10個のtable viewを名前で再利用し、filterを再同期する。setupは既存contentを一括登録せず、受付時のIssueとworker終了時のそのbranchのPRを必要時にProject itemへ追加する。実行中の可視化はbest-effortで再同期可能とし、Project障害でIssueの取得・状態遷移を止めない。Projectの所有者アクセスがリポジトリより広い場合があるため、機密情報はProjectへ複製せず、管理者がアクセス境界を確認する。
 
 ## 帰結
 

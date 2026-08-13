@@ -42,6 +42,8 @@ readonly DEPENDENCY_MAX_DEPTH=10
 # legitimate work (plan+exec+PR review can easily take an hour); doctor warns
 # but does not fail, since some deployments may accept the risk deliberately.
 readonly WORKER_TIMEOUT_MIN_SAFE_SECONDS=1800
+readonly PROJECT_OPERATION_BUDGET=25
+readonly PROJECT_RECONCILE_BATCH=10
 
 cd "$REPO_ROOT"
 
@@ -133,6 +135,19 @@ repo_name() {
   mkdir -p "$STATE_ROOT"
   printf '%s\n' "$slug" > "$STATE_ROOT/repository"
   printf '%s\n' "$slug"
+}
+
+repo_issue_url() {
+  local issue=$1 remote host path
+  remote=$(git -C "$REPO_ROOT" remote get-url origin 2>/dev/null || true)
+  case $remote in
+    https://*/*) host=${remote#https://}; host=${host%%/*}; path=${remote#https://"$host"/} ;;
+    ssh://git@*/*) host=${remote#ssh://git@}; host=${host%%/*}; path=${remote#ssh://git@"$host"/} ;;
+    git@*:*) host=${remote#git@}; host=${host%%:*}; path=${remote#git@"$host":} ;;
+    *) host=github.com; path=$(repo_name) ;;
+  esac
+  path=${path%.git}; path=${path%/}
+  printf 'https://%s/%s/issues/%s\n' "$host" "$path" "$issue"
 }
 state_label() { printf 'agent:%s' "$1"; }
 
@@ -587,7 +602,7 @@ setup_label() {
 }
 
 setup_project() {
-  local repository owner title number project_json
+  local repository owner title number project_json project_id linked fields
   repository=$(repo_name)
   owner=${repository%%/*}
   title="Agentic Loop - $repository"
@@ -599,15 +614,23 @@ setup_project() {
   fi
   [[ -n $number ]] || fail 'could not create or identify the repository Project'
   printf 'PROJECT_OWNER=%q\nPROJECT_NUMBER=%q\n' "$owner" "$number" > "$STATE_ROOT/project.env"
-  gh project link "$number" --owner "$owner" --repo "$repository" >/dev/null 2>&1 || true
-  gh project field-create "$number" --owner "$owner" --name 'Agent status' --data-type SINGLE_SELECT \
-    --single-select-options 'Inbox,Queued,Running,Needs input,In review,Done,Failed,Stale,Blocked' >/dev/null 2>&1 || true
-  gh project field-create "$number" --owner "$owner" --name 'Category' --data-type SINGLE_SELECT \
-    --single-select-options 'Loop continuity,Confidentiality incident,Integrity incident,Availability incident,Feature,Improvement' >/dev/null 2>&1 || true
-  gh project field-create "$number" --owner "$owner" --name 'Blocked by' --data-type TEXT >/dev/null 2>&1 || true
+  project_id=$(gh project view "$number" --owner "$owner" --format json --jq .id 2>/dev/null || true)
+  linked=$(gh api graphql -f query='query($project:ID!){node(id:$project){... on ProjectV2{repositories(first:100){nodes{nameWithOwner}}}}}' -F project="$project_id" --jq '.data.node.repositories.nodes[].nameWithOwner' 2>/dev/null || true)
+  grep -Fxq "$repository" <<< "$linked" || gh project link "$number" --owner "$owner" --repo "$repository" >/dev/null 2>&1 || true
+  fields=$(gh project field-list "$number" --owner "$owner" --format json --jq '.fields[].name' 2>/dev/null || true)
+  if ! grep -Fxq 'Agent status' <<< "$fields"; then
+    gh project field-create "$number" --owner "$owner" --name 'Agent status' --data-type SINGLE_SELECT \
+      --single-select-options 'Inbox,Queued,Running,Needs input,In review,Done,Failed,Stale,Blocked' >/dev/null 2>&1 || true
+  fi
+  if ! grep -Fxq 'Category' <<< "$fields"; then
+    gh project field-create "$number" --owner "$owner" --name 'Category' --data-type SINGLE_SELECT \
+      --single-select-options 'Loop continuity,Confidentiality incident,Integrity incident,Availability incident,Feature,Improvement' >/dev/null 2>&1 || true
+  fi
+  if ! grep -Fxq 'Blocked by' <<< "$fields"; then
+    gh project field-create "$number" --owner "$owner" --name 'Blocked by' --data-type TEXT >/dev/null 2>&1 || true
+  fi
   setup_project_migrate_status_options "$number" "$owner"
   setup_project_views "$number" "$owner"
-  setup_project_content "$number" "$owner"
 }
 
 # field-create fails silently (via || true above) once "Agent status" already
@@ -684,26 +707,6 @@ setup_project_views() {
   setup_project_view "$project_id" 'Closed PRs' 'is:pr is:closed' "$views_tsv"
   setup_project_view "$project_id" 'All open issues' 'is:issue is:open' "$views_tsv"
   setup_project_view "$project_id" 'All closed issues' 'is:issue is:closed' "$views_tsv"
-}
-
-setup_project_content() {
-  local number=$1 owner=$2 url existing_urls
-  existing_urls=$(gh project item-list "$number" --owner "$owner" --format json --limit 1000 \
-    --jq '.items[].content.url // empty' 2>/dev/null || true)
-  while IFS= read -r url; do
-    [[ -n $url ]] || continue
-    if ! grep -Fxq -- "$url" <<< "$existing_urls"; then
-      if gh project item-add "$number" --owner "$owner" --url "$url" >/dev/null 2>&1; then
-        existing_urls+="${existing_urls:+$'\n'}$url"
-      else
-        queue_project_sync "content $url"
-      fi
-    fi
-  done < <(
-    repo_api issues --method GET -f state=open -f per_page=100 --paginate \
-      --jq '.[] | select(.pull_request == null) | .html_url' 2>/dev/null || true
-    repo_api pulls --method GET -f state=open -f per_page=100 --paginate --jq '.[].html_url' 2>/dev/null || true
-  )
 }
 
 cmd_setup() {
@@ -2087,9 +2090,10 @@ queue_project_sync() {
 }
 
 PROJECT_METADATA_LOADED=0
-PROJECT_ITEMS_LOADED=0
 PROJECT_ID=''
-declare -A PROJECT_FIELD_IDS=() PROJECT_OPTION_IDS=() PROJECT_ITEM_IDS=() PROJECT_URLS=() PROJECT_ITEM_VALUES=()
+declare -A PROJECT_FIELD_IDS=() PROJECT_OPTION_IDS=() PROJECT_CONTENT_LOADED=() PROJECT_ITEM_IDS=() PROJECT_ITEM_VALUES=()
+
+invalidate_graphql_budget() { rm -f "$(graphql_budget_file)"; }
 
 load_project_context() {
   (( PROJECT_METADATA_LOADED == 0 )) || return 0
@@ -2109,54 +2113,53 @@ load_project_context() {
   PROJECT_METADATA_LOADED=1
 }
 
-load_project_items() {
-  (( PROJECT_ITEMS_LOADED == 0 )) || return 0
+load_project_content() {
+  local url=$1 kind number query row item_id agent_status category blocked_by
+  [[ -z ${PROJECT_CONTENT_LOADED[$url]:-} ]] || return 0
   load_project_context || return 1
-  local PROJECT_OWNER='' PROJECT_NUMBER='' key value number url id agent_status category blocked_by
-  while IFS='=' read -r key value; do
-    case $key in PROJECT_OWNER) PROJECT_OWNER=$value ;; PROJECT_NUMBER) PROJECT_NUMBER=$value ;; esac
-  done < "$STATE_ROOT/project.env"
-  while IFS=$'\x1f' read -r number url id agent_status category blocked_by; do
-    [[ -n $url ]] && PROJECT_URLS[$url]=1
-    if [[ $number =~ ^[0-9]+$ && -n $id ]]; then
-      PROJECT_ITEM_IDS[$number]=$id
-      PROJECT_ITEM_VALUES["$number:Agent status"]=$agent_status
-      PROJECT_ITEM_VALUES["$number:Category"]=$category
-      PROJECT_ITEM_VALUES["$number:Blocked by"]=$blocked_by
-    fi
-  done < <(gh project item-list "$PROJECT_NUMBER" --owner "$PROJECT_OWNER" --format json --limit 1000 \
-    --jq '.items[] | . as $item |
-      def field($name): ([ $item | to_entries[] |
-        select((.key | ascii_downcase | gsub("[^a-z]"; "")) == $name) | .value ][0] // "");
-      [(.content.number // ""), (.content.url // ""), .id,
-       field("agentstatus"), field("category"), field("blockedby")] | join("\u001f")' 2>/dev/null || true)
-  PROJECT_ITEMS_LOADED=1
+  if [[ $url =~ /issues/([0-9]+)$ ]]; then
+    kind=issue; number=${BASH_REMATCH[1]}
+  elif [[ $url =~ /pull/([0-9]+)$ ]]; then
+    kind=pullRequest; number=${BASH_REMATCH[1]}
+  else
+    return 1
+  fi
+  query='query($owner:String!,$repo:String!,$number:Int!){repository(owner:$owner,name:$repo){content:'"$kind"'(number:$number){projectItems(first:20,includeArchived:false){nodes{id project{id} fieldValues(first:20){nodes{... on ProjectV2ItemFieldSingleSelectValue{name field{... on ProjectV2SingleSelectField{name}}} ... on ProjectV2ItemFieldTextValue{text field{... on ProjectV2Field{name}}}}}}}}}}'
+  row=$(gh api graphql -f query="$query" -F owner="$(repo_name | cut -d/ -f1)" -F repo="$(repo_name | cut -d/ -f2)" -F number="$number" --jq '.data.repository.content.projectItems.nodes[] | select(.project.id == "'"$PROJECT_ID"'") | [.id, ([.fieldValues.nodes[] | select(.field.name == "Agent status") | .name][0] // ""), ([.fieldValues.nodes[] | select(.field.name == "Category") | .name][0] // ""), ([.fieldValues.nodes[] | select(.field.name == "Blocked by") | .text][0] // "")] | join("\u001f")' 2>/dev/null | head -n 1) || return 1
+  invalidate_graphql_budget
+  IFS=$'\x1f' read -r item_id agent_status category blocked_by <<< "$row"
+  PROJECT_CONTENT_LOADED[$url]=1
+  PROJECT_ITEM_IDS[$url]=$item_id
+  PROJECT_ITEM_VALUES["$url:Agent status"]=$agent_status
+  PROJECT_ITEM_VALUES["$url:Category"]=$category
+  PROJECT_ITEM_VALUES["$url:Blocked by"]=$blocked_by
 }
 
 project_add_content() {
   local url=$1
-  graphql_budget_allows "$((GRAPHQL_RESERVE + 1))" || { queue_project_sync "content $url"; return 0; }
+  graphql_budget_allows "$((GRAPHQL_RESERVE + PROJECT_OPERATION_BUDGET))" || { queue_project_sync "content $url"; return 0; }
   [[ -r $STATE_ROOT/project.env ]] || return 0
-  local PROJECT_OWNER='' PROJECT_NUMBER='' key value added_id number
+  local PROJECT_OWNER='' PROJECT_NUMBER='' key value added_id
   while IFS='=' read -r key value; do
     case $key in PROJECT_OWNER) PROJECT_OWNER=$value ;; PROJECT_NUMBER) PROJECT_NUMBER=$value ;; esac
   done < "$STATE_ROOT/project.env"
   [[ -n $PROJECT_OWNER && $PROJECT_NUMBER =~ ^[0-9]+$ ]] || return 0
-  load_project_items || { queue_project_sync "content $url"; return 0; }
-  [[ -n ${PROJECT_URLS[$url]:-} ]] && return 0
-  added_id=$(gh project item-add "$PROJECT_NUMBER" --owner "$PROJECT_OWNER" --url "$url" --format json --jq .id 2>/dev/null) || { queue_project_sync "content $url"; return 0; }
-  PROJECT_URLS[$url]=1
-  number=${url##*/}
-  if [[ $number =~ ^[0-9]+$ && -n $added_id ]]; then
-    PROJECT_ITEM_IDS[$number]=$added_id
-    PROJECT_ITEM_VALUES["$number:Agent status"]=''
-    PROJECT_ITEM_VALUES["$number:Category"]=''
-    PROJECT_ITEM_VALUES["$number:Blocked by"]=''
+  load_project_content "$url" || { queue_project_sync "content $url"; return 0; }
+  [[ -n ${PROJECT_ITEM_IDS[$url]:-} ]] && return 0
+  if ! added_id=$(gh project item-add "$PROJECT_NUMBER" --owner "$PROJECT_OWNER" --url "$url" --format json --jq .id 2>/dev/null); then
+    invalidate_graphql_budget
+    queue_project_sync "content $url"
+    return 0
   fi
+  invalidate_graphql_budget
+  PROJECT_ITEM_IDS[$url]=$added_id
+  PROJECT_ITEM_VALUES["$url:Agent status"]=''
+  PROJECT_ITEM_VALUES["$url:Category"]=''
+  PROJECT_ITEM_VALUES["$url:Blocked by"]=''
 }
 
 project_add_issue() {
-  project_add_content "https://github.com/$(repo_name)/issues/$1"
+  project_add_content "$(repo_issue_url "$1")"
 }
 
 project_add_pull_requests() {
@@ -2174,9 +2177,9 @@ project_add_pull_requests() {
 }
 
 project_sync_state() {
-  graphql_budget_allows "$((GRAPHQL_RESERVE + 1))" || { queue_project_sync "state $1 $2"; return 0; }
+  graphql_budget_allows "$((GRAPHQL_RESERVE + PROJECT_OPERATION_BUDGET))" || { queue_project_sync "state $1 $2"; return 0; }
   [[ -r $STATE_ROOT/project.env ]] || return 0
-  local issue=$1 state=$2 PROJECT_OWNER='' PROJECT_NUMBER='' key value project_id item_id field_id option_id option
+  local issue=$1 state=$2 PROJECT_OWNER='' PROJECT_NUMBER='' key value project_id item_id field_id option_id option url
   while IFS='=' read -r key value; do
     case $key in PROJECT_OWNER) PROJECT_OWNER=$value ;; PROJECT_NUMBER) PROJECT_NUMBER=$value ;; esac
   done < "$STATE_ROOT/project.env"
@@ -2186,22 +2189,25 @@ project_sync_state() {
     in-review) option='In review' ;; completed) option=Done ;; failed) option=Failed ;; stale) option=Stale ;;
     blocked) option=Blocked ;; *) option=Inbox ;;
   esac
-  load_project_items || { queue_project_sync "state $issue $state"; return 0; }
-  project_id=$PROJECT_ID; item_id=${PROJECT_ITEM_IDS[$issue]:-}
+  url=$(repo_issue_url "$issue")
+  project_add_content "$url"
+  project_id=$PROJECT_ID; item_id=${PROJECT_ITEM_IDS[$url]:-}
   field_id=${PROJECT_FIELD_IDS["Agent status"]:-}; option_id=${PROJECT_OPTION_IDS["Agent status:$option"]:-}
   [[ -n $project_id && -n $item_id && -n $field_id && -n $option_id ]] || { queue_project_sync "state $issue $state"; return 0; }
-  [[ ${PROJECT_ITEM_VALUES["$issue:Agent status"]:-} == "$option" ]] && return 0
+  [[ ${PROJECT_ITEM_VALUES["$url:Agent status"]:-} == "$option" ]] && return 0
   if gh project item-edit --id "$item_id" --project-id "$project_id" --field-id "$field_id" --single-select-option-id "$option_id" >/dev/null 2>&1; then
-    PROJECT_ITEM_VALUES["$issue:Agent status"]=$option
+    invalidate_graphql_budget
+    PROJECT_ITEM_VALUES["$url:Agent status"]=$option
   else
+    invalidate_graphql_budget
     queue_project_sync "state $issue $state"
   fi
 }
 
 project_sync_category() {
-  graphql_budget_allows "$((GRAPHQL_RESERVE + 1))" || { queue_project_sync "category $1 $2"; return 0; }
+  graphql_budget_allows "$((GRAPHQL_RESERVE + PROJECT_OPERATION_BUDGET))" || { queue_project_sync "category $1 $2"; return 0; }
   [[ -r $STATE_ROOT/project.env ]] || return 0
-  local issue=$1 category=$2 PROJECT_OWNER='' PROJECT_NUMBER='' key value project_id item_id field_id option_id option
+  local issue=$1 category=$2 PROJECT_OWNER='' PROJECT_NUMBER='' key value project_id item_id field_id option_id option url
   while IFS='=' read -r key value; do
     case $key in PROJECT_OWNER) PROJECT_OWNER=$value ;; PROJECT_NUMBER) PROJECT_NUMBER=$value ;; esac
   done < "$STATE_ROOT/project.env"
@@ -2211,14 +2217,17 @@ project_sync_category() {
     integrity-incident) option='Integrity incident' ;; availability-incident) option='Availability incident' ;;
     feature) option=Feature ;; improvement) option=Improvement ;; *) return 0 ;;
   esac
-  load_project_items || return 0
-  project_id=$PROJECT_ID; item_id=${PROJECT_ITEM_IDS[$issue]:-}
+  url=$(repo_issue_url "$issue")
+  project_add_content "$url"
+  project_id=$PROJECT_ID; item_id=${PROJECT_ITEM_IDS[$url]:-}
   field_id=${PROJECT_FIELD_IDS[Category]:-}; option_id=${PROJECT_OPTION_IDS["Category:$option"]:-}
   [[ -n $project_id && -n $item_id && -n $field_id && -n $option_id ]] || return 0
-  [[ ${PROJECT_ITEM_VALUES["$issue:Category"]:-} == "$option" ]] && return 0
+  [[ ${PROJECT_ITEM_VALUES["$url:Category"]:-} == "$option" ]] && return 0
   if gh project item-edit --id "$item_id" --project-id "$project_id" --field-id "$field_id" --single-select-option-id "$option_id" >/dev/null 2>&1; then
-    PROJECT_ITEM_VALUES["$issue:Category"]=$option
+    invalidate_graphql_budget
+    PROJECT_ITEM_VALUES["$url:Category"]=$option
   else
+    invalidate_graphql_budget
     queue_project_sync "category $issue $category"
   fi
 }
@@ -2229,30 +2238,37 @@ project_sync_category() {
 project_sync_conflict() {
   local issue=$1 note=$2 note_b64
   note_b64=$(base64 -w0 <<< "$note")
-  graphql_budget_allows "$((GRAPHQL_RESERVE + 1))" || { queue_project_sync "conflict $issue $note_b64"; return 0; }
+  graphql_budget_allows "$((GRAPHQL_RESERVE + PROJECT_OPERATION_BUDGET))" || { queue_project_sync "conflict $issue $note_b64"; return 0; }
   [[ -r $STATE_ROOT/project.env ]] || return 0
-  local PROJECT_OWNER='' PROJECT_NUMBER='' key value project_id item_id field_id
+  local PROJECT_OWNER='' PROJECT_NUMBER='' key value project_id item_id field_id url
   while IFS='=' read -r key value; do
     case $key in PROJECT_OWNER) PROJECT_OWNER=$value ;; PROJECT_NUMBER) PROJECT_NUMBER=$value ;; esac
   done < "$STATE_ROOT/project.env"
   [[ -n $PROJECT_OWNER && $PROJECT_NUMBER =~ ^[0-9]+$ ]] || return 0
-  load_project_items || return 0
-  project_id=$PROJECT_ID; item_id=${PROJECT_ITEM_IDS[$issue]:-}; field_id=${PROJECT_FIELD_IDS["Blocked by"]:-}
+  url=$(repo_issue_url "$issue")
+  project_add_content "$url"
+  project_id=$PROJECT_ID; item_id=${PROJECT_ITEM_IDS[$url]:-}; field_id=${PROJECT_FIELD_IDS["Blocked by"]:-}
   [[ -n $project_id && -n $item_id && -n $field_id ]] || return 0
-  [[ ${PROJECT_ITEM_VALUES["$issue:Blocked by"]:-} == "$note" ]] && return 0
+  [[ ${PROJECT_ITEM_VALUES["$url:Blocked by"]:-} == "$note" ]] && return 0
   if gh project item-edit --id "$item_id" --project-id "$project_id" --field-id "$field_id" --text "$note" >/dev/null 2>&1; then
-    PROJECT_ITEM_VALUES["$issue:Blocked by"]=$note
+    invalidate_graphql_budget
+    PROJECT_ITEM_VALUES["$url:Blocked by"]=$note
   else
+    invalidate_graphql_budget
     queue_project_sync "conflict $issue $note_b64"
   fi
 }
 
 reconcile_pending_project() {
   [[ -s $STATE_ROOT/project-pending ]] || return 0
-  graphql_budget_allows "$((GRAPHQL_RESERVE + 1))" || return 0
-  local pending="$STATE_ROOT/project-pending.$$" kind first second
+  graphql_budget_allows "$((GRAPHQL_RESERVE + PROJECT_OPERATION_BUDGET))" || return 0
+  local pending="$STATE_ROOT/project-pending.$$" kind first second processed=0
   ( flock 9; mv "$STATE_ROOT/project-pending" "$pending" ) 9> "$STATE_ROOT/project-pending.lock"
   while read -r kind first second; do
+    if (( processed >= PROJECT_RECONCILE_BATCH )); then
+      queue_project_sync "$kind $first${second:+ $second}"
+      continue
+    fi
     case $kind in
       content) project_add_content "$first" ;;
       issue) project_add_issue "$first" ;; # backward-compatible pending entries
@@ -2261,6 +2277,7 @@ reconcile_pending_project() {
       category) project_sync_category "$first" "$second" ;;
       conflict) project_sync_conflict "$first" "$(base64 -d <<< "$second" 2>/dev/null || true)" ;;
     esac
+    processed=$((processed + 1))
   done < "$pending"
   rm -f "$pending"
 }
@@ -2310,15 +2327,13 @@ reconcile_queued_categories() {
   local issue categories category found name payload
   while IFS=$'\t' read -r issue _ _ _ _ categories _; do
     [[ -n $issue ]] || continue
-    categories=$(repo_api "issues/$issue" --jq '[.labels[].name | select(startswith("category:"))] | join(",")') || continue
     category=''; found=0
     for name in "${CATEGORY_LABELS[@]}"; do
       if [[ ,$categories, == *,category:$name,* ]]; then
         found=$((found + 1)); [[ -n $category ]] || category=$name
       fi
     done
-    project_add_issue "$issue"
-    if (( found == 1 )); then project_sync_category "$issue" "$category"; continue; fi
+    (( found == 1 )) && continue
     [[ -n $category ]] || category=improvement
     payload=$(repo_api "issues/$issue" --jq '[.labels[].name | select(startswith("category:") | not)] + ["category:'"$category"'"]') || continue
     printf '%s\n' "$payload" | repo_api "issues/$issue/labels" --method PUT --input - >/dev/null

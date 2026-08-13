@@ -50,6 +50,8 @@ state="$FAKE_GH_ROOT/$key.state"
 project="$FAKE_GH_ROOT/$key.project"
 project_items="$FAKE_GH_ROOT/$key.project-items"
 project_values="$FAKE_GH_ROOT/$key.project-values"
+project_fields="$FAKE_GH_ROOT/$key.project-fields"
+project_link="$FAKE_GH_ROOT/$key.project-link"
 comments="$FAKE_GH_ROOT/$key.comments"
 views="$FAKE_GH_ROOT/$key.views"
 labels="$FAKE_GH_ROOT/$key.labels"
@@ -112,7 +114,7 @@ case "${1:-} ${2:-}" in
         category=5; if ($7 ~ /(^|,)loop-continuity(,|$)/) category=0; else if ($7 ~ /(^|,)confidentiality-incident(,|$)/) category=1; else if ($7 ~ /(^|,)integrity-incident(,|$)/) category=2; else if ($7 ~ /(^|,)availability-incident(,|$)/) category=3; else if ($7 ~ /(^|,)feature(,|$)/) category=4
         priority=4; if ($4 ~ /(^|,)critical(,|$)/) priority=0; else if ($4 ~ /(^|,)high(,|$)/) priority=1; else if ($4 ~ /(^|,)medium(,|$)/) priority=2; else if ($4 ~ /(^|,)low(,|$)/) priority=3
         created=($5 == "" ? $1 : $5); updated=($6 == "" ? "-" : $6)
-        body=($8 == "" ? "-" : $8); categories=($7 == "" || $7 == "none" ? "-" : "category:" $7)
+        body=($8 == "" ? "-" : $8); categories=$7; gsub(/,/, ",category:", categories); categories=(categories == "" || categories == "none" ? "-" : "category:" categories)
         print $1 "\t" $2 "\t" updated "\t" created "\t" body "\t" categories "\t" category "\t" priority
       }' "$state" 2>/dev/null || true
     elif [[ $endpoint == issues && $method == GET && -z $wanted ]]; then
@@ -241,7 +243,17 @@ case "${1:-} ${2:-}" in
     printf '%s\t%s\t%s\n' "${FAKE_GRAPHQL_REMAINING:-5000}" "${FAKE_GRAPHQL_RESET:-$(($(date +%s) + 3600))}" "${FAKE_CORE_REMAINING:-5000}"
     ;;
   'api graphql')
-    if [[ $* == *'fields(first: 100)'* ]]; then
+    if [[ $* == *'projectItems(first:20'* ]]; then
+      number=''; for arg in "$@"; do [[ $arg == number=* ]] && number=${arg#number=}; done
+      if grep -Eq "/(issues|pull)/$number$" "$project_items" 2>/dev/null; then
+        status=''; category=''; blocked_b64=''
+        IFS=$'\t' read -r status category blocked_b64 < <(awk -F '\t' -v n="$number" '$1 == n {print $2 "\t" $3 "\t" $4; exit}' "$project_values" 2>/dev/null || true)
+        blocked=''; [[ -z $blocked_b64 ]] || blocked=$(base64 -d <<< "$blocked_b64")
+        printf 'PVTI_%s\x1f%s\x1f%s\x1f%s\n' "$number" "$status" "$category" "$blocked"
+      fi
+    elif [[ $* == *'repositories(first:100)'* ]]; then
+      [[ -e $project_link ]] && cat "$project_link"
+    elif [[ $* == *'fields(first: 100)'* ]]; then
       [[ ${FAKE_PROJECT_FAIL:-0} == 0 ]] && printf 'true\n'
     elif [[ $* == *createProjectV2View* ]]; then
       name=''
@@ -275,7 +287,10 @@ case "${1:-} ${2:-}" in
   'project list')
     if [[ -e $project ]]; then printf '7\n'; fi ;;
   'project create') touch "$project"; printf '{"number":7}\n' ;;
-  'project link'|'project field-create') exit 0 ;;
+  'project link') printf '%s\n' "$slug" > "$project_link" ;;
+  'project field-create')
+    name=''; for ((i=1; i<=$#; i++)); do [[ ${!i} == --name ]] && { j=$((i+1)); name=${!j}; }; done
+    grep -Fxq "$name" "$project_fields" 2>/dev/null || printf '%s\n' "$name" >> "$project_fields" ;;
   'project item-edit')
     item_id='' option_id='' text=''
     for ((i=1; i<=$#; i++)); do
@@ -325,7 +340,9 @@ case "${1:-} ${2:-}" in
     [[ $* == *'--jq .id'* ]] && printf 'PVTI_%s\n' "${url##*/}" ;;
   'project view') [[ ${FAKE_PROJECT_FAIL:-0} == 0 ]] && printf 'PVT_fake\n' ;;
   'project field-list')
-    if [[ $* == *'$field.name'* ]]; then
+    if [[ $* == *'.fields[].name'* ]]; then
+      cat "$project_fields" 2>/dev/null || true
+    elif [[ $* == *'$field.name'* ]]; then
       printf 'Agent status\tPVTF_status\tQueued\tPVTFO_queued\n'
       printf 'Agent status\tPVTF_status\tRunning\tPVTFO_running\n'
       printf 'Agent status\tPVTF_status\tNeeds input\tPVTFO_needs_input\n'
@@ -714,25 +731,22 @@ assert_contains "$FAKE_GH_ROOT/calls" 'filter=is:pr is:open' 'Open PRs view filt
 assert_contains "$FAKE_GH_ROOT/calls" 'filter=is:pr is:closed' 'Closed PRs view filter was not configured'
 assert_contains "$FAKE_GH_ROOT/calls" 'filter=is:issue is:open' 'All open issues view filter was not configured'
 assert_contains "$FAKE_GH_ROOT/calls" 'filter=is:issue is:closed' 'All closed issues view filter was not configured'
-assert_contains "$FAKE_GH_ROOT/calls" "project item-add 7 --owner acme --url https://github.example/acme/installed-project/pull/1" 'existing PR was not added to the Project'
-assert_contains "$FAKE_GH_ROOT/calls" "project item-add 7 --owner acme --url https://github.example/acme/installed-project/issues/88" 'existing open Issue was not added to the Project'
-if grep -Fq "project item-add 7 --owner acme --url https://github.example/acme/installed-project/issues/89" "$FAKE_GH_ROOT/calls"; then
-  fail 'setup backfilled an already-closed Issue'
-fi
+if grep -Fq $'\tproject item-list ' "$FAKE_GH_ROOT/calls"; then fail 'install scanned every Project item'; fi
 
-# A converged setup reads all views once, performs no filter mutation, and
-# backfills only open content.
+# A converged setup reads all views once and performs no mutation or content
+# backfill.
 calls_before=$(wc -l < "$FAKE_GH_ROOT/calls")
 AGENTIC_LOOP_SKIP_START=1 "$target/bin/agentic-loop" setup >/dev/null
 tail -n "+$((calls_before + 1))" "$FAKE_GH_ROOT/calls" > "$TEST_ROOT/converged-setup-calls.log"
 [[ $(grep -c 'views(first: 100)' "$TEST_ROOT/converged-setup-calls.log" || true) -eq 1 ]] || fail 'converged setup did not consolidate the Project view query'
 [[ $(grep -c 'updateProjectV2View' "$TEST_ROOT/converged-setup-calls.log" || true) -eq 0 ]] || fail 'converged setup rewrote unchanged Project view filters'
 [[ $(grep -c $'\tlabel create ' "$TEST_ROOT/converged-setup-calls.log" || true) -eq 0 ]] || fail 'converged setup rewrote unchanged Labels'
-grep -Fq $'state=open' "$TEST_ROOT/converged-setup-calls.log" || fail 'setup did not backfill open content'
-if grep -Eq $'api repos/.+/(issues|pulls).*state=all' "$TEST_ROOT/converged-setup-calls.log"; then fail 'setup scanned closed Issue or PR history'; fi
+[[ $(grep -c $'\tproject item-list ' "$TEST_ROOT/converged-setup-calls.log" || true) -eq 0 ]] || fail 'converged setup scanned every Project item'
+[[ $(grep -Ec $'\tproject (link|field-create|item-add|item-edit)' "$TEST_ROOT/converged-setup-calls.log" || true) -eq 0 ]] || fail 'converged setup performed a Project mutation'
 
-# A converged queued Issue performs no Project mutation on an idle supervisor
-# poll. A changed value is written once and the in-process snapshot converges.
+# A valid queued Issue performs no Project read or mutation on an idle
+# supervisor poll. Project-side drift repair is handled separately from the
+# rate-limit safety path.
 printf '92 queued open none 2026-01-01T00:00:00Z none improvement\n' > "$FAKE_GH_ROOT/$state_key.state"
 printf 'https://github.com/acme/installed-project/issues/92\n' >> "$FAKE_GH_ROOT/$state_key.project-items"
 printf '92\tQueued\tImprovement\t\n' >> "$FAKE_GH_ROOT/$state_key.project-values"
@@ -745,14 +759,8 @@ if [[ $(grep -c $'\tproject item-edit ' "$TEST_ROOT/converged-idle-project-calls
   fail 'idle supervisor rewrote converged Project fields'
 fi
 
-awk -F '\t' 'BEGIN{OFS="\t"} $1 == 92 {$3="Feature"} {print}' "$FAKE_GH_ROOT/$state_key.project-values" > "$FAKE_GH_ROOT/$state_key.project-values.tmp"
-mv "$FAKE_GH_ROOT/$state_key.project-values.tmp" "$FAKE_GH_ROOT/$state_key.project-values"
-rm -f "$(git -C "$target" rev-parse --absolute-git-dir)/agentic-loop/graphql-rate-limit"
-calls_before=$(wc -l < "$FAKE_GH_ROOT/calls")
-FAKE_CORE_REMAINING=499 AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _supervise
-tail -n "+$((calls_before + 1))" "$FAKE_GH_ROOT/calls" > "$TEST_ROOT/drifted-idle-project-calls.log"
-[[ $(grep -c $'\tproject item-edit ' "$TEST_ROOT/drifted-idle-project-calls.log" || true) -eq 1 ]] || fail 'Project Category drift was not repaired exactly once'
-grep -Eq $'^92\tQueued\tImprovement\t' "$FAKE_GH_ROOT/$state_key.project-values" || fail 'Project Category cache did not converge after repair'
+[[ $(grep -c 'projectItems(first:20' "$TEST_ROOT/converged-idle-project-calls.log" || true) -eq 0 ]] || fail 'idle supervisor queried Project membership for a valid queued Issue'
+[[ $(grep -Ec $'\tproject (item-add|item-edit)' "$TEST_ROOT/converged-idle-project-calls.log" || true) -eq 0 ]] || fail 'idle supervisor mutated Project data for a valid queued Issue'
 
 # Installation remains available while GraphQL is exhausted and does not make
 # a doomed permission query or enter Project setup.
@@ -767,7 +775,8 @@ rm -f "$FAKE_GH_ROOT/$state_key.project-failures" "$(git -C "$target" rev-parse 
 calls_before=$(wc -l < "$FAKE_GH_ROOT/calls")
 FAKE_PROJECT_FAILURES=1 FAKE_GRAPHQL_REMAINING=5000 "$target/bin/agentic-loop" sync-issue 91 >/dev/null
 tail -n "+$((calls_before + 1))" "$FAKE_GH_ROOT/calls" > "$TEST_ROOT/sync-issue-project-calls.log"
-[[ $(grep -c $'\tproject item-list ' "$TEST_ROOT/sync-issue-project-calls.log" || true) -le 1 ]] || fail 'one Issue sync fetched the complete Project item list repeatedly'
+[[ $(grep -c $'\tproject item-list ' "$TEST_ROOT/sync-issue-project-calls.log" || true) -eq 0 ]] || fail 'one Issue sync fetched the complete Project item list'
+[[ $(grep -c 'projectItems(first:20' "$TEST_ROOT/sync-issue-project-calls.log" || true) -le 1 ]] || fail 'one Issue sync repeated its bounded Project membership query'
 [[ $(grep -c $'\tproject field-list ' "$TEST_ROOT/sync-issue-project-calls.log" || true) -le 1 ]] || fail 'one Issue sync fetched Project fields repeatedly'
 pending_project="$(git -C "$target" rev-parse --absolute-git-dir)/agentic-loop/project-pending"
 assert_contains "$pending_project" 'content https://github.com/acme/installed-project/issues/91' 'temporary Project failure was not persisted'
@@ -859,6 +868,8 @@ rmdir "$state_root/supervisor.lock"
 
 # An exhausted GraphQL budget only suppresses Projects; the REST queue still completes work.
 rm -f "$(git -C "$target" rev-parse --absolute-git-dir)/agentic-loop/graphql-rate-limit"
+pending_project="$(git -C "$target" rev-parse --absolute-git-dir)/agentic-loop/project-pending"
+rm -f "$pending_project"
 printf '90 queued open none 2025-01-01T00:00:00Z\n' > "$FAKE_GH_ROOT/$state_key.state"
 before_project_adds=$(grep -c $'\tproject item-add' "$FAKE_GH_ROOT/calls" || true)
 FAKE_GRAPHQL_REMAINING=499 FAKE_GRAPHQL_RESET=$(date +%s) FAKE_REST_FAILURES=1 AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _supervise
@@ -869,11 +880,13 @@ if ! grep -Eq '^90 completed closed' "$FAKE_GH_ROOT/$state_key.state"; then
   fail 'GraphQL exhaustion stopped the REST Issue loop'
 fi
 [[ $after_project_adds -eq $before_project_adds ]] || fail 'GraphQL exhaustion did not suppress Projects synchronization'
-pending_project="$(git -C "$target" rev-parse --absolute-git-dir)/agentic-loop/project-pending"
 [[ -s $pending_project ]] || fail 'suppressed Projects synchronization was not persisted'
 rm -f "$(git -C "$target" rev-parse --absolute-git-dir)/agentic-loop/graphql-rate-limit"
 FAKE_GRAPHQL_REMAINING=5000 AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _supervise
-[[ ! -e $pending_project ]] || fail 'Projects synchronization did not resume after GraphQL recovery'
+if [[ -e $pending_project ]]; then
+  cat "$pending_project" >&2
+  fail 'Projects synchronization did not resume after GraphQL recovery'
+fi
 
 # Commit the runtime configuration so worker worktrees start from a realistic default branch.
 git -C "$target" add .
