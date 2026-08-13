@@ -169,7 +169,7 @@ workerが `AGENTIC_LOOP_RESULT=completed` を返しても、それだけでは�
 
 remote branchは復旧可能性を残し、GitHubのPR merge時branch削除設定と責務を分離するため、Supervisorからは削除しない。remote branchの保持または削除はrepositoryのコード化されたGitHub設定に従い、このcleanupの成功条件には含めない。
 
-Supervisorはrepositoryごとのuser-level systemd serviceとして登録され、予期しない終了では5秒後に自動再起動する。`stop`による正常終了では再起動しない。service名は `agentic-loop-supervisor-<repository path>.service` で、`systemctl --user status` と `journalctl --user -u` で確認できる。起動時には生存しないPIDとlockを削除してからlease復旧を行う。Supervisorが停止している場合はstatus、`.git/agentic-loop/supervisor.log`、systemd unit、`gh auth status` を確認する。同じリポジトリを複数端末から処理しない。default branch更新後の競合やrequired checks失敗はworkerが最新branchに対して修正・再検証する。
+Supervisorはrepositoryごとのuser-level systemd serviceとして登録され、予期しない終了では5秒後に自動再起動する。`stop`による正常終了では再起動しない。service名は `agentic-loop-supervisor-<repository path>.service` で、`systemctl --user status` と `journalctl --user -u` で確認できる。起動時には生存しないPIDとlockを削除してからlease復旧を行う。Supervisorが停止している場合はstatus、`.git/agentic-loop/supervisor.log`、systemd unit、`gh auth status` を確認する。同じリポジトリを複数端末から処理できる。SupervisorはLabel変更前にGitHub上へ期限付きclaimを作り、同じIssueへ同時にclaimした候補をcomment idで一意に調停する。勝者のclaimはlease heartbeatと同じコメントで更新され、敗者はLabel、Git、workerを変更しない。各ホストの`max_workers`はローカル上限なので、repository全体の上限は各ホストの合計になり得る。費用・GitHub API・端末資源に合わせてホストごとの値を設定する。ホスト間でworktreeやPID fileを共有する必要はなく、共有しないこと。default branch更新後の競合やrequired checks失敗はworkerが最新branchに対して修正・再検証する。
 
 ## 中断からの再開
 
