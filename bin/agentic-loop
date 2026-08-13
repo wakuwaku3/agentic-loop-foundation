@@ -39,6 +39,11 @@ readonly EXHAUSTION_PAUSE_SECONDS=1800
 readonly DEPENDENCY_FAILURE_TOLERANCE=3
 # Bound on how far dependency cycle detection walks the blocked_by graph.
 readonly DEPENDENCY_MAX_DEPTH=10
+readonly DECOMPOSITION_SCHEMA_VERSION=1
+readonly DECOMPOSITION_MAX_DIRECT_CHILDREN=6
+readonly DECOMPOSITION_MIN_DIRECT_CHILDREN=2
+readonly DECOMPOSITION_MAX_DEPTH=2
+readonly DECOMPOSITION_MAX_DESCENDANTS=20
 # Below this, worker_timeout_seconds risks killing a worker still doing
 # legitimate work (plan+exec+PR review can easily take an hour); doctor warns
 # but does not fail, since some deployments may accept the risk deliberately.
@@ -654,6 +659,9 @@ setup_project() {
   if ! grep -Fxq 'Blocked by' <<< "$fields"; then
     gh project field-create "$number" --owner "$owner" --name 'Blocked by' --data-type TEXT >/dev/null 2>&1 || true
   fi
+  if ! grep -Fxq 'Integration progress' <<< "$fields"; then
+    gh project field-create "$number" --owner "$owner" --name 'Integration progress' --data-type TEXT >/dev/null 2>&1 || true
+  fi
   setup_project_migrate_status_options "$number" "$owner"
   setup_project_views "$number" "$owner"
 }
@@ -737,6 +745,7 @@ setup_project_views() {
   }' -F projectId="$project_id" --jq '.data.node.views.nodes[] | [.id, .name, (.filter // "")] | @tsv' 2>/dev/null || true)
   setup_project_view "$project_id" 'Triage' 'is:issue is:open no:category' "$views_tsv"
   setup_project_view "$project_id" 'Queue' 'is:issue is:open label:"agent:queued"' "$views_tsv"
+  setup_project_view "$project_id" 'Hierarchy' 'is:issue is:open' "$views_tsv"
   setup_project_view "$project_id" 'Active' 'is:issue is:open label:"agent:running","agent:in-review"' "$views_tsv"
   setup_project_view "$project_id" 'Stopping' 'is:issue is:open label:"agent:stopping"' "$views_tsv"
   setup_project_view "$project_id" 'Needs input' 'is:issue is:open label:"agent:needs-input"' "$views_tsv"
@@ -3482,6 +3491,7 @@ plan_prompt() {
 $repository の GitHub Issue #$issue に対する実装計画を作成してください。
 Issueとそのコメントを要求として扱い、この専用worktreeとリポジトリを調査し、変更方針、影響範囲、検証手順、観測可能な受け入れ条件を日本語で具体化してください。このplan段階ではファイルの変更、commit、push、PR作成、GitHubの状態変更を行わず、最終メッセージに計画本文だけを出力してください。
 計画本文の最後の行に、変更が触れる見込みのpathとexternal環境を示すmarkerを1行だけ出力してください: \`<!-- agentic-loop:scope paths=path1,path2 env=name1,name2 -->\`。repository全体に及ぶ場合は \`paths=*\` としてください。見積もれない場合はこの行を省略してください（安全な既定動作にフォールバックします）。このmarkerはSupervisorが並列worker間の変更scope競合を避けるための機械可読情報であり、実装の一部ではありません。
+一つのworkerで安全に完遂できない要求だけは、scopeが独立し個別にmerge・rollback・検証できる直接の子が2〜6件である場合に限り、計画の末尾（scope markerの前）へ JSON の \`agentic-loop:decomposition\` code blockを置けます。schema=1、mode=children、integration_acceptance_criteria、children（key/title/purpose/acceptance_criteria/scope/depends_on）を含めてください。keyは英小文字・数字・\`-\`のみで一意、scopeは既存scope markerと同じ \`paths=... env=...\` 形式、depends_onは同じmanifestのkeyだけです。循環、共有変更、上限超過、統合条件を定義できない場合はmanifestを出さず、通常の単一PRとして計画してください。
 EOF
   if [[ -n $failure_context ]]; then
     cat <<EOF
@@ -3607,6 +3617,80 @@ worker_refine_scope_from_diff() {
   measured=$(git -C "$worktree" diff --name-only "origin/$default_branch" HEAD 2>/dev/null | sed 's#^#path:#' | sort -u)
   [[ -n $measured ]] || return 0
   worker_update_scope "$issue" "$(scope_apply_exclusive_paths "$measured")"
+}
+
+# --- Parent/child decomposition ------------------------------------------------
+# The plan is untrusted provider output.  Keep it as JSON inside a fenced block
+# and reject it before making any GitHub mutation.  This deliberately has a
+# small, explicit schema: GitHub native sub-issues and dependencies remain the
+# source of truth, rather than a second relationship database in comments.
+decomposition_manifest_from_plan() {
+  local plan=$1
+  awk '/^```agentic-loop:decomposition[[:space:]]*$/{on=1;next} on && /^```[[:space:]]*$/{exit} on{print}' "$plan"
+}
+
+decomposition_validate() {
+  local manifest=$1 parent_depth=${2:-0} keys key dep count scope child_depth
+  [[ -n $manifest ]] || return 1
+  command -v yq >/dev/null 2>&1 || return 1
+  [[ $(yq -p json -r '.schema // ""' <<< "$manifest" 2>/dev/null) == "$DECOMPOSITION_SCHEMA_VERSION" ]] || return 1
+  [[ $(yq -p json -r '.mode // ""' <<< "$manifest" 2>/dev/null) == children ]] || return 1
+  [[ -n $(yq -p json -r '.integration_acceptance_criteria // ""' <<< "$manifest" 2>/dev/null) ]] || return 1
+  count=$(yq -p json -r '.children | length' <<< "$manifest" 2>/dev/null) || return 1
+  [[ $count =~ ^[0-9]+$ ]] && (( count >= DECOMPOSITION_MIN_DIRECT_CHILDREN && count <= DECOMPOSITION_MAX_DIRECT_CHILDREN )) || return 1
+  (( count <= DECOMPOSITION_MAX_DESCENDANTS )) || return 1
+  (( parent_depth < DECOMPOSITION_MAX_DEPTH )) || return 1
+  keys=$(yq -p json -r '.children[].key // ""' <<< "$manifest" 2>/dev/null) || return 1
+  [[ $(sort -u <<< "$keys" | sed '/^$/d' | wc -l) -eq $count ]] || return 1
+  local title purpose
+  while IFS=$'\t' read -r key title purpose child_depth scope; do
+    [[ $key =~ ^[a-z0-9][a-z0-9-]*$ && -n $title && -n $purpose && -n $child_depth && -n $scope ]] || return 1
+    # Reuse the existing normalizer; a malformed scope never becomes an
+    # optimistic empty scope.
+    [[ -n $(scope_marker_from_body "<!-- agentic-loop:scope $scope -->") ]] || return 1
+  done < <(yq -p json -r '.children[] | [.key, (.title // ""), (.purpose // ""), (.acceptance_criteria // ""), .scope] | @tsv' <<< "$manifest" 2>/dev/null)
+  while IFS= read -r dep; do
+    [[ -z $dep ]] && continue
+    grep -Fxq "$dep" <<< "$keys" || return 1
+  done < <(yq -p json -r '.children[].depends_on[]? // ""' <<< "$manifest" 2>/dev/null)
+  # A dependency can only point to an earlier key: this is both a cheap DAG
+  # proof and makes materialization/retry deterministic.
+  local seen=''
+  while IFS= read -r key; do
+    while IFS= read -r dep; do [[ -z $dep ]] || grep -Fxq "$dep" <<< "$seen" || return 1; done < <(yq -p json -r --arg k "$key" '.children[] | select(.key == $k) | .depends_on[]? // ""' <<< "$manifest")
+    seen+="$key"$'\n'
+  done <<< "$keys"
+}
+
+decomposition_materialize() {
+  local parent=$1 plan=$2 manifest hash category key title purpose criteria scope deps child body child_id existing
+  manifest=$(decomposition_manifest_from_plan "$plan")
+  [[ -z $manifest ]] && return 1
+  decomposition_validate "$manifest" 0 || return 2
+  hash=$(printf '%s' "$manifest" | sha256sum | awk '{print $1}')
+  category=$(repo_api "issues/$parent" --jq '[.labels[].name | select(startswith("category:"))][0] // "category:improvement"' 2>/dev/null) || return 3
+  declare -A children=()
+  while IFS=$'\t' read -r key title purpose criteria scope deps; do
+    existing=$(repo_api issues --method GET -f state=all -f per_page=100 --jq '.[] | select((.body // "") | contains("agentic-loop:child parent='"$parent"' key='"$key"' plan='"$hash"'")) | .number' 2>/dev/null | head -n1 || true)
+    if [[ $existing =~ ^[1-9][0-9]*$ ]]; then child=$existing
+    else
+      body="## 目的\n\n$purpose\n\n## 親Issue\n\n#$parent の共通制約と統合受け入れ条件に従います。\n\n## 個別受け入れ条件\n\n$criteria\n\n<!-- agentic-loop:child parent=$parent key=$key plan=$hash -->\n<!-- agentic-loop:scope $scope -->"
+      child=$(repo_api issues --method POST -f title="$title" -f body="$body" --jq .number 2>/dev/null) || return 3
+      [[ $child =~ ^[1-9][0-9]*$ ]] || return 3
+    fi
+    children["$key"]=$child
+    child_id=$(repo_api "issues/$child" --jq .id 2>/dev/null) || return 3
+    repo_api "issues/$parent/sub_issues" --method POST -f sub_issue_id="$child_id" >/dev/null 2>&1 || return 3
+    repo_api "issues/$parent/dependencies/blocked_by" --method POST -f issue_id="$child" >/dev/null 2>&1 || return 3
+  done < <(yq -p json -r '.children[] | [.key,.title,.purpose,.acceptance_criteria,.scope,([.depends_on[]?] | join(","))] | @tsv' <<< "$manifest")
+  while IFS=$'\t' read -r key deps; do
+    child=${children[$key]}
+    IFS=, read -ra dep_list <<< "$deps"
+    for dep in "${dep_list[@]}"; do [[ -z $dep ]] || repo_api "issues/$child/dependencies/blocked_by" --method POST -f issue_id="${children[$dep]}" >/dev/null 2>&1 || return 3; done
+    repo_api "issues/$child/labels" --method PUT --input - <<< "{\"labels\":[\"$category\",\"agent:queued\"]}" >/dev/null 2>&1 || return 3
+    project_add_issue "$child" || true; project_sync_state "$child" queued || true
+  done < <(yq -p json -r '.children[] | [.key,([.depends_on[]?] | join(","))] | @tsv' <<< "$manifest")
+  comment_issue "$parent" "<!-- agentic-loop:decomposition plan=$hash -->\n分解planを検証し、native sub-issueとして子Issueを作成・照合しました。親は全子の検証済み完了後に統合検証を行います。plan hash: \`$hash\`。"
 }
 
 # --- Worker resume from existing artifacts (see docs/decisions/0004) ---
@@ -3918,6 +4002,24 @@ worker() {
     agent_run_stage plan "$worktree" "$git_common_dir" "$agents_dir" "$plan_file" "$plan_usage" "$(plan_prompt "$issue" "$repository" "$failure_context" "$resume_context")" || true
     agent_post_usage "$issue" "$worker" "$plan_usage" 0 "$(($(date +%s) - started))"
     worker_refine_scope_from_plan "$issue" "$plan_file"
+    if [[ -n $(decomposition_manifest_from_plan "$plan_file") ]]; then
+      local existing_children
+      existing_children=$(repo_api "issues/$issue/sub_issues" --jq 'length' 2>/dev/null || true)
+      if [[ ${existing_children:-0} == 0 ]]; then
+        if decomposition_materialize "$issue" "$plan_file"; then
+          kill "$heartbeat_pid" 2>/dev/null || true; wait "$heartbeat_pid" 2>/dev/null || true
+          lease_release "$issue" "$worker"
+          set_issue_state "$issue" blocked; project_sync_state "$issue" blocked || true
+          comment_issue "$issue" '<!-- agentic-loop:decomposition-wait -->\n子Issueを公開しました。親は子の検証済み完了後に既存の依存回復処理で再キューされ、統合検証だけを実行します。' || true
+          scope_cache_clear "$issue"; clear_conflict_wait "$issue"; clear_worker_local "$issue"
+          return 0
+        fi
+        set_issue_state "$issue" needs-input; project_sync_state "$issue" needs-input || true
+        comment_issue "$issue" '<!-- agentic-loop:decomposition-invalid -->\n分解manifestをGitHub変更前に検証または構成できませんでした。子Issueはqueueへ公開していません。manifestのscope・依存DAG・受け入れ条件・GitHub sub-issues権限を確認してください。' || true
+        kill "$heartbeat_pid" 2>/dev/null || true; wait "$heartbeat_pid" 2>/dev/null || true; lease_release "$issue" "$worker"; clear_worker_local "$issue"
+        return 0
+      fi
+    fi
     exit_code=0
     started=$(date +%s)
     agent_run_stage exec "$worktree" "$git_common_dir" "$agents_dir" "$result" "$exec_usage" "$(exec_prompt "$issue" "$repository" "$plan_file" "$resume_context")" || exit_code=$?

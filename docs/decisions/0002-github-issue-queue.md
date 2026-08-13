@@ -22,3 +22,9 @@ Projectはリポジトリ名を含む専用名で冪等に作成または再利�
 ## 帰結
 
 状態と履歴はGitHub上でリポジトリごとに分離され、中央キューや追加の有料基盤が不要になる。同一リポジトリの単一Supervisorによりclaim競合を避ける。複数端末で同時にSupervisorを起動することはサポートしないため、運用上も一台に限定する。Projectの自動追加workflowには依存せず、Agent statusフィールド、link、10個のview、Supervisorのitem-addまでを自動化し、Issueを正本として継続する。
+
+## 親子分解
+
+plan は必要な場合だけ schema `1` の `agentic-loop:decomposition` JSON manifest を出せる。Supervisorは GitHub 変更前に子key、個別受け入れ条件、scope、先行key、DAG、直接子2〜6件、深さ2、総子孫20の上限を検証する。原子的変更、共有変更を切り離せない要求、統合条件を定義できない要求は分解しない。
+
+正本は GitHub native sub-issues と native `blocked_by` である。子は最初 agent state を持たず、親子関係・依存・Project登録を確認してから `agent:queued` を付ける。親は全子を dependency として待ち、closed だけでなく既存の「closed かつ `agent:completed`」証明を満たした後に再queueされ、通常の worker が統合検証・PR・merge を行う。部分作成やAPI障害は fail closed とし、marker と native 関係を照合して再試行時の二重作成を防ぐ。
