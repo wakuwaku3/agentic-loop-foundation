@@ -2192,7 +2192,7 @@ lease_release() {
   IFS=$'\t' read -r id _ < "$file" || return 0
   [[ $id =~ ^[0-9]+$ ]] || return 0
   now=$(date +%s)
-  repo_api "issues/comments/$id" --method PATCH -f body="<!-- agentic-loop:claim worker=$worker created=$now expires=0 -->\\n<!-- agentic-loop:lease worker=$worker heartbeat=$now expires=0 -->\\nこのホストはclaimを解放しました。" >/dev/null 2>&1 || true
+  repo_api "issues/comments/$id" --method PATCH -f body="<!-- agentic-loop:claim worker=$worker created=$now expires=0 -->\\n<!-- agentic-loop:lease worker=$worker heartbeat=$now expires=0 -->\\nAgentic Loop worker \`$worker\` のハートビートです。処理終了に伴い、このホストはclaimを解放しました。" >/dev/null 2>&1 || true
 }
 
 # Refresh the lease by editing the existing comment (a single PATCH). Fall back
