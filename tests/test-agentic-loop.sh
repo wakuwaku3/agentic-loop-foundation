@@ -476,7 +476,18 @@ fi
 # longer values used by heartbeat, shutdown, and timeout scenarios unchanged.
 [[ $sleep_value == 1 ]] && sleep_value=0.1
 sleep "$sleep_value"
-printf '%s\n' "${FAKE_CODEX_RESULT:-AGENTIC_LOOP_RESULT=completed}" > "$output"
+# Tests that exercise the completion protocol need distinct exec responses
+# without making plan calls observable implementation details.  Number only
+# workspace-write calls; unset slots retain the ordinary default response.
+result_var=FAKE_CODEX_RESULT
+if [[ $* == *'--sandbox workspace-write'* ]]; then
+  exec_count_file="$FAKE_GH_ROOT/codex-exec-count"
+  exec_count=$(($(cat "$exec_count_file" 2>/dev/null || printf 0) + 1))
+  printf '%s\n' "$exec_count" > "$exec_count_file"
+  result_var="FAKE_CODEX_EXEC_RESULT_$exec_count"
+fi
+if [[ -v $result_var ]]; then result=${!result_var}; else result=${FAKE_CODEX_RESULT:-AGENTIC_LOOP_RESULT=completed}; fi
+printf '%s\n' "$result" > "$output"
 FAKE_CODEX
 cat > "$FAKE_BIN/claude" <<'FAKE_CLAUDE'
 #!/usr/bin/env bash
@@ -1019,6 +1030,39 @@ assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'stage=plan' 'plan stage usa
 assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'stage=exec' 'exec stage usage was not recorded'
 git -C "$target" worktree remove "$target-worktrees/issue-20" --force 2>/dev/null || true
 git -C "$target" branch -D agent/issue-20 >/dev/null 2>&1 || true
+
+# A clean exec exit without a terminal marker is a protocol retry, not a
+# flagship replan. The second response uses the same plan and completes.
+write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=30 STOP_TIMEOUT=10 STALE_DAYS=30
+printf '201 queued open none 2026-01-01T00:00:00Z\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+: > "$FAKE_GH_ROOT/codex-calls"
+rm -f "$FAKE_GH_ROOT/codex-exec-count"
+AGENT_PLAN_MAX_RETRIES=1 FAKE_CODEX_EXEC_RESULT_1='CI monitorの報告待ちです' FAKE_CODEX_EXEC_RESULT_2='AGENTIC_LOOP_RESULT=completed' AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _supervise
+grep -Eq '^201 completed closed' "$state" || fail 'marker-missing exec retry did not complete after a valid second response'
+[[ $(grep -c -- '--sandbox read-only' "$FAKE_GH_ROOT/codex-calls") -eq 1 ]] || fail 'protocol retry unexpectedly replanned'
+[[ $(grep -c -- '--sandbox workspace-write' "$FAKE_GH_ROOT/codex-calls") -eq 2 ]] || fail 'protocol retry did not limit exec to the initial call plus one retry'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:protocol-retry' 'protocol retry was not audited on the Issue'
+if grep -Fq 'agentic-loop:replan' "$FAKE_GH_ROOT/$state_key.comments"; then fail 'marker-missing exec triggered a flagship replan'; fi
+
+# Two clean exits without a valid terminal marker are deterministic failure;
+# text containing a marker, a trailing non-empty line, and unknown values must
+# receive the same treatment rather than being mistaken for completion.
+for malformed in \
+  $'CI monitorの報告待ちです' \
+  $'説明中の AGENTIC_LOOP_RESULT=completed です' \
+  $'AGENTIC_LOOP_RESULT=completed\n続きの説明' \
+  'AGENTIC_LOOP_RESULT=unknown'; do
+  write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=30 STOP_TIMEOUT=10 STALE_DAYS=30
+  printf '202 queued open none 2026-01-01T00:00:00Z\n' > "$state"
+  : > "$FAKE_GH_ROOT/$state_key.comments"
+  : > "$FAKE_GH_ROOT/codex-calls"
+  rm -f "$FAKE_GH_ROOT/codex-exec-count"
+  FAKE_CODEX_EXEC_RESULT_1="$malformed" FAKE_CODEX_EXEC_RESULT_2="$malformed" AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _supervise
+  grep -Eq '^202 failed open' "$state" || fail "malformed terminal marker was accepted: $malformed"
+  [[ $(grep -c -- '--sandbox read-only' "$FAKE_GH_ROOT/codex-calls") -eq 1 ]] || fail 'malformed terminal marker triggered replan'
+  [[ $(grep -c -- '--sandbox workspace-write' "$FAKE_GH_ROOT/codex-calls") -eq 2 ]] || fail 'malformed terminal marker did not stop after one retry'
+done
 
 # Budget guard: pause claiming while the weekly Codex usage exceeds the reserve,
 # then resume once usage recovers (usage is read from the newest session log).
