@@ -1185,6 +1185,40 @@ grep -Eq '^202 completed closed' "$state" || fail 'same-file scope conflict was 
 assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:scope-resolved' 'conflict resolution was not recorded on the Issue'
 [[ ! -e $state_root/conflict/issue-202 ]] || fail 'resolved conflict-wait state was not cleared'
 
+# Multi-host convergence: status must not display a machine-local wait after
+# another host has claimed the waiting Issue and completed its counterpart.
+printf '54 completed closed none 2026-01-01T00:00:00Z none none %s\n91 running open none 2026-01-02T00:00:00Z none none %s\n' \
+  "$(scope_field 'paths=README.md')" "$(scope_field 'paths=README.md')" > "$state"
+mkdir -p "$state_root/conflict" "$state_root/scope"
+printf '54\tREADME.md\n' > "$state_root/conflict/issue-91"
+printf 'path:README.md\n' > "$state_root/scope/issue-54"
+status_output=$("$target/bin/agentic-loop" status)
+if grep -Fq '#91 競合相手 #54' <<< "$status_output"; then fail 'status displayed a stale multi-host conflict for a non-queued Issue'; fi
+[[ -e $state_root/conflict/issue-91 ]] || fail 'read-only status mutated a stale conflict cache file'
+
+# A long-running Supervisor must converge after another host completes the
+# blocker; startup-only rebuilding is insufficient because the transition can
+# happen between polls. The queued Issue must be claimed without a restart.
+printf '54 running open none 2026-01-01T00:00:00Z none none %s\n70 queued open none 2026-01-02T00:00:00Z none none %s\n' \
+  "$(scope_field 'paths=bin/agentic-loop')" "$(scope_field 'paths=bin/agentic-loop')" > "$state"
+printf '54 <!-- agentic-loop:lease worker=remote-scope-fixture heartbeat=%s expires=%s -->\n' "$(date +%s)" "$(($(date +%s) + 3600))" > "$FAKE_GH_ROOT/$state_key.comments"
+rm -f "$state_root/conflict/issue-91" "$state_root/stop.requested"
+"$target/bin/agentic-loop" _supervise &
+scope_supervisor_pid=$!
+scope_wait_seen=0
+for _ in $(seq 1 40); do [[ -r $state_root/conflict/issue-70 ]] && { scope_wait_seen=1; break; }; sleep 0.1; done
+(( scope_wait_seen == 1 )) || fail 'multi-host fixture did not first persist the legitimate scope conflict'
+printf '54 completed closed none 2026-01-01T00:00:00Z none none %s\n70 queued open none 2026-01-02T00:00:00Z none none %s\n' \
+  "$(scope_field 'paths=bin/agentic-loop')" "$(scope_field 'paths=bin/agentic-loop')" > "$state.transition"
+mv "$state.transition" "$state"
+scope_claimed=0
+for _ in $(seq 1 80); do grep -Eq '^70 completed closed' "$state" && { scope_claimed=1; break; }; sleep 0.1; done
+: > "$state_root/stop.requested"
+wait "$scope_supervisor_pid"
+(( scope_claimed == 1 )) || fail 'queued Issue stayed blocked after the remote blocker completed'
+[[ ! -e $state_root/scope/issue-54 ]] || fail 'poll reconciliation retained a non-running scope cache'
+[[ ! -e $state_root/conflict/issue-70 ]] || fail 'poll reconciliation retained a resolved conflict cache'
+
 # A stale scope cache entry with no live local worker must never block claiming.
 # Regression: after recover_expired requeued Issues, REST reflection lag made
 # rebuild_scope_cache cache a phantom scope for them; since undeclared Issues all
@@ -1271,7 +1305,7 @@ rm -f /tmp/agentic-loop-doctor-scope.$$
 # status surfaces each running Issue's effective scope and any conflict wait.
 # The Supervisor is deliberately left stopped: a live start would call
 # rebuild_scope_cache and overwrite this manually seeded fixture.
-printf '260 running open\n' > "$state"
+printf '260 running open\n261 queued open\n' > "$state"
 mkdir -p "$state_root/scope" "$state_root/conflict"
 printf 'path:bin/agentic-loop' > "$state_root/scope/issue-260"
 printf '260\tbin/agentic-loop\n' > "$state_root/conflict/issue-261"
