@@ -3,7 +3,7 @@ set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
-required=(AGENTS.md README.md Makefile .editorconfig .gitignore .codex/config.toml install.sh devbox.json devbox.lock docs/policies/cost.md docs/policies/testing.md docs/policies/external-environment.md docs/policies/development-environment.md docs/policies/ai-tool-neutrality.md docs/policies/github-language.md docs/policies/validation-harness.md docs/policies/continuous-delivery.md docs/decisions/0002-github-issue-queue.md docs/decisions/0003-supervisor-resilience-and-api-budget.md docs/decisions/0004-worker-resume-and-handoff.md docs/decisions/0005-status-observability.md docs/decisions/0006-worker-hang-timeout.md docs/decisions/0007-loop-metrics.md docs/operations/issue-queue.md docs/operations/codebase-diagnosis.md docs/operations/loop-metrics.md .agentic-loop.toml .agentic-loop/guard-secrets.sh .agentic-loop/update-main.sh .agentic-loop/diagnose-codebase.sh .githooks/pre-commit .githooks/pre-push .agents/skills/submit-requirement/SKILL.md .agents/skills/diagnose-codebase/SKILL.md .claude/skills/submit-requirement/SKILL.md .claude/skills/diagnose-codebase/SKILL.md bin/agentic-loop bin/agentic-loop-diagnose scripts/check-environment.sh scripts/install-target.sh)
+required=(AGENTS.md README.md Makefile .editorconfig .gitignore .codex/config.toml install.sh devbox.json devbox.lock docs/policies/cost.md docs/policies/testing.md docs/policies/external-environment.md docs/policies/development-environment.md docs/policies/ai-tool-neutrality.md docs/policies/github-language.md docs/policies/validation-harness.md docs/policies/continuous-delivery.md docs/decisions/0002-github-issue-queue.md docs/decisions/0003-supervisor-resilience-and-api-budget.md docs/decisions/0004-worker-resume-and-handoff.md docs/decisions/0005-status-observability.md docs/decisions/0006-worker-hang-timeout.md docs/decisions/0007-loop-metrics.md docs/decisions/0008-foundation-upgrade.md docs/operations/issue-queue.md docs/operations/codebase-diagnosis.md docs/operations/loop-metrics.md docs/operations/upgrade.md .agentic-loop.toml .agentic-loop/guard-secrets.sh .agentic-loop/update-main.sh .agentic-loop/diagnose-codebase.sh .githooks/pre-commit .githooks/pre-push .agents/skills/submit-requirement/SKILL.md .agents/skills/diagnose-codebase/SKILL.md .claude/skills/submit-requirement/SKILL.md .claude/skills/diagnose-codebase/SKILL.md bin/agentic-loop bin/agentic-loop-diagnose scripts/check-environment.sh scripts/install-target.sh scripts/lib/foundation-files.sh scripts/upgrade-target.sh scripts/upgrade/migrations/0001-foundation-config-section.sh)
 for file in "${required[@]}"; do
   [[ -f $file ]] || { printf 'Missing required file: %s\n' "$file" >&2; exit 1; }
 done
@@ -63,7 +63,7 @@ for requirement in 'local fast check' 'local full check' 'public repository' 'pr
     exit 1
   }
 done
-grep -Fq 'docs/policies/validation-harness.md' scripts/install-target.sh || {
+grep -Fq 'docs/policies/validation-harness.md' scripts/lib/foundation-files.sh || {
   printf 'Validation harness policy is not distributed.\n' >&2
   exit 1
 }
@@ -154,11 +154,20 @@ grep -Fq '[--days N] [--as-of EPOCH] [--format json]' docs/operations/loop-metri
 grep -Fq 'metrics_close_attempt' bin/agentic-loop || { printf 'Metrics attempt-lifecycle aggregation is missing.\n' >&2; exit 1; }
 grep -Fq 'worker単位の内訳・ランキングは出力しない' docs/operations/loop-metrics.md || { printf 'Metrics privacy guarantee is not documented.\n' >&2; exit 1; }
 grep -Fq '追加費用ゼロ' docs/decisions/0007-loop-metrics.md || { printf 'Metrics cost-neutrality is not documented.\n' >&2; exit 1; }
-grep -Fq 'docs/operations/loop-metrics.md' scripts/install-target.sh || { printf 'Metrics documentation is not distributed.\n' >&2; exit 1; }
-if grep -Eq 'danger-full-access|OPENAI_API_KEY' bin/agentic-loop bin/agentic-loop-diagnose .agentic-loop/diagnose-codebase.sh install.sh scripts/install-target.sh; then
+grep -Fq 'docs/operations/loop-metrics.md' scripts/lib/foundation-files.sh || { printf 'Metrics documentation is not distributed.\n' >&2; exit 1; }
+if grep -Eq 'danger-full-access|OPENAI_API_KEY' bin/agentic-loop bin/agentic-loop-diagnose .agentic-loop/diagnose-codebase.sh install.sh scripts/install-target.sh scripts/upgrade-target.sh scripts/lib/foundation-files.sh scripts/upgrade/migrations/0001-foundation-config-section.sh; then
   printf 'Forbidden Codex execution or API-key billing configuration.\n' >&2
   exit 1
 fi
+
+grep -Fq 'upgrade) cmd_upgrade' bin/agentic-loop || { printf 'Upgrade command is not distributed through the queue CLI.\n' >&2; exit 1; }
+grep -Fq 'docs/operations/upgrade.md' scripts/lib/foundation-files.sh || { printf 'Upgrade documentation is not distributed.\n' >&2; exit 1; }
+grep -Fq 'docs/decisions/0008-foundation-upgrade.md' scripts/lib/foundation-files.sh || { printf 'Upgrade ADR is not distributed.\n' >&2; exit 1; }
+grep -Fq 'upgrade --format json' docs/operations/upgrade.md || { printf 'Upgrade machine-readable interface is not documented.\n' >&2; exit 1; }
+grep -Fq '無断上書き' docs/operations/upgrade.md || { printf 'Upgrade documentation lacks the no-silent-overwrite invariant.\n' >&2; exit 1; }
+grep -Fq '暗黙' docs/operations/upgrade.md || { printf 'Upgrade documentation lacks the no-implicit-main-tracking invariant.\n' >&2; exit 1; }
+grep -Fq '追加費用ゼロ' docs/decisions/0008-foundation-upgrade.md || { printf 'Upgrade cost-neutrality is not documented.\n' >&2; exit 1; }
+grep -Fq 'foundation_manifest_write' scripts/lib/foundation-files.sh || { printf 'Manifest generation is missing from the shared distribution library.\n' >&2; exit 1; }
 
 for doc in README.md docs/operations/issue-queue.md docs/operations/codebase-diagnosis.md; do
   grep -Fq 'opencode' "$doc" || {

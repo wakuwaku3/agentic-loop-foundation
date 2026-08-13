@@ -3,24 +3,8 @@ set -euo pipefail
 
 readonly SOURCE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 readonly TARGET="${1:-.}"
-readonly SHARED_FILES=(
-  AGENTS.md .codex/config.toml docs/policies/cost.md docs/policies/testing.md docs/policies/external-environment.md docs/policies/development-environment.md docs/policies/ai-tool-neutrality.md
-  docs/policies/github-language.md docs/policies/validation-harness.md docs/policies/continuous-delivery.md
-  docs/decisions/0002-github-issue-queue.md docs/decisions/0003-supervisor-resilience-and-api-budget.md docs/decisions/0004-worker-resume-and-handoff.md docs/decisions/0005-status-observability.md docs/decisions/0006-worker-hang-timeout.md docs/decisions/0007-loop-metrics.md docs/operations/issue-queue.md docs/operations/codebase-diagnosis.md docs/operations/loop-metrics.md
-  .agents/skills/submit-requirement/SKILL.md
-  .agents/skills/submit-requirement/agents/openai.yaml
-  .agents/skills/diagnose-codebase/SKILL.md
-  .agents/skills/diagnose-codebase/agents/openai.yaml
-  .claude/skills/submit-requirement/SKILL.md
-  .claude/skills/diagnose-codebase/SKILL.md
-  .agentic-loop/guard-secrets.sh .agentic-loop/update-main.sh .agentic-loop/diagnose-codebase.sh .agentic-loop.toml
-  .githooks/pre-commit .githooks/pre-push bin/agentic-loop bin/agentic-loop-diagnose
-)
-readonly INIT_FILES=(
-  README.md .editorconfig .gitignore Makefile install.sh devbox.json devbox.lock
-  docs/decisions/0001-minimal-foundation.md scripts/format.sh scripts/lint.sh scripts/check-environment.sh scripts/install-target.sh
-  tests/test-agentic-loop.sh .github/workflows/ci.yml
-)
+# shellcheck source=lib/foundation-files.sh
+source "$SOURCE_ROOT/scripts/lib/foundation-files.sh"
 
 fail() { printf 'install-target: %s\n' "$1" >&2; exit 1; }
 
@@ -57,7 +41,7 @@ preflight() {
 }
 
 main() {
-  local target=$TARGET mode=install file hook_path
+  local target=$TARGET mode=install file hook_path repository revision revision_ref migration_level entries='' history
   local -a files=("${SHARED_FILES[@]}")
   [[ -d $target ]] || fail "target is not a directory: $target"
   preflight
@@ -70,12 +54,24 @@ main() {
   for file in "${files[@]}"; do
     if [[ ! -e $target/$file ]]; then mkdir -p "$target/$(dirname "$file")"; cp "$SOURCE_ROOT/$file" "$target/$file"; fi
   done
+
+  repository=${AGENTIC_LOOP_REPOSITORY:-wakuwaku3/agentic-loop-foundation}
+  revision=${AGENTIC_LOOP_RESOLVED_REVISION:-}
+  [[ -n $revision ]] || revision=$(git -C "$SOURCE_ROOT" rev-parse HEAD 2>/dev/null || printf 'unknown')
+  revision_ref=${AGENTIC_LOOP_REVISION:-main}
+  migration_level=$(find "$SOURCE_ROOT/scripts/upgrade/migrations" -maxdepth 1 -name '[0-9][0-9][0-9][0-9]-*.sh' 2>/dev/null | wc -l | tr -d ' ')
+
   chmod +x "$target/bin/agentic-loop" "$target/bin/agentic-loop-diagnose" "$target/.agentic-loop/guard-secrets.sh" "$target/.agentic-loop/update-main.sh" "$target/.agentic-loop/diagnose-codebase.sh" "$target/.githooks/pre-commit" "$target/.githooks/pre-push"
   [[ $mode == init ]] && chmod +x "$target/install.sh" "$target/scripts/"*.sh "$target/tests/"*.sh
   git -C "$target" config --local core.hooksPath .githooks
   "$target/bin/agentic-loop" setup
   "$target/.agentic-loop/update-main.sh" install "$target"
   "$target/.agentic-loop/diagnose-codebase.sh" install "$target"
+  for file in "${SHARED_FILES[@]}"; do entries+="$file"$'\t'"shared"$'\n'; done
+  if [[ $mode == init ]]; then for file in "${INIT_FILES[@]}"; do entries+="$file"$'\t'"init"$'\n'; done; fi
+  history=$(printf '{"at":%s,"from_revision":"none","to_revision":"%s","from_level":0,"to_level":%s,"steps":[],"result":"installed"}' "$(date +%s)" "$(foundation_json_escape "$revision")" "$migration_level")
+  foundation_manifest_write "$target" "$mode" "$repository" "$revision" "$revision_ref" "$migration_level" "$entries" "$history"
+
   if [[ ${AGENTIC_LOOP_SKIP_START:-0} != 1 ]]; then "$target/bin/agentic-loop" start; fi
   printf 'Agentic loop installed (%s) in %s\n' "$mode" "$(cd "$target" && pwd)"
 }
