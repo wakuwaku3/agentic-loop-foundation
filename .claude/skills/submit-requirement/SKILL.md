@@ -35,7 +35,7 @@ When already processing an `agent:running` Issue in its dedicated worktree, do n
 5. Investigate, design, implement, test, and repair until every completion criterion and invariant is demonstrably satisfied.
 6. Run the repository's full validation and secret guard. Do not bypass hooks or expose credentials in commands, logs, commits, or PR text.
 7. Commit, push, open a PR, monitor required checks, address failures and review feedback, and merge the PR. Remove the worktree and branch after a successful merge.
-8. Report the outcome, verification evidence, PR link, and any genuinely unresolved risk concisely.
+8. Report the outcome, verification evidence, PR link, and any genuinely unresolved risk concisely. A worker must not cancel, supersede, merge, or auto-requeue a disposed Issue. If it judges work unnecessary, leave the rationale and return `AGENTIC_LOOP_RESULT=needs-input`; only an authorized operator may use `bin/agentic-loop dispose` or `resume`.
 
 Write GitHub Issue and PR titles, bodies, comments, and reviews in Japanese. Preserve code, logs, identifiers, proper nouns, and quotations in their necessary original form.
 
