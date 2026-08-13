@@ -648,7 +648,7 @@ setup_project_views() {
   local number=$1 owner=$2 project_id
   project_id=$(gh project view "$number" --owner "$owner" --format json --jq .id)
   [[ -n $project_id ]] || fail 'could not identify the repository Project ID'
-  setup_project_view "$project_id" 'Triage' 'is:issue is:open no:status'
+  setup_project_view "$project_id" 'Triage' 'is:issue is:open no:category'
   setup_project_view "$project_id" 'Queue' 'is:issue is:open label:"agent:queued"'
   setup_project_view "$project_id" 'Active' 'is:issue is:open label:"agent:running","agent:in-review"'
   setup_project_view "$project_id" 'Needs input' 'is:issue is:open label:"agent:needs-input"'
