@@ -1194,6 +1194,17 @@ worker_alive() {
   [[ $command_line == *"$SCRIPT_ROOT/bin/agentic-loop"* && $command_line == *" _worker $issue "* ]]
 }
 
+# Lighter local-worker liveness for scope-cache upkeep: the pidfile exists and
+# its pid is alive. Unlike worker_alive it does not require the child to have
+# exec'd into "_worker" yet, so a just-spawned worker's scope entry is honored
+# immediately (no claim/exec race); a phantom entry (no pidfile) still fails.
+worker_pid_live() {
+  local pidfile="$STATE_ROOT/workers/$1.pid" pid
+  [[ -r $pidfile ]] || return 1
+  read -r pid < "$pidfile" || return 1
+  [[ $pid =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null
+}
+
 # Return agent:running Issues whose worker is gone to the queue (see ADR 0003).
 # Local-first: a live local worker is adopted; a dead local worker's Issue is
 # recovered immediately without any GitHub call. When no local worker exists the
@@ -1721,11 +1732,30 @@ clear_conflict_wait() {
 # Rebuild the running-Issue scope cache from GitHub at supervisor startup,
 # since the local cache lives under Git-external state and may not survive a
 # restart. Bounded by the number of currently running Issues.
+# Whether a GitHub agent:running Issue is genuinely in progress — a live local
+# worker, or a still-valid lease (from any machine) — rather than a phantom that
+# GitHub's REST reflection lag still reports as running immediately after a
+# requeue. Mirrors recover_expired's liveness test so the two agree.
+issue_genuinely_running() {
+  local issue=$1 body expires now
+  worker_pid_live "$issue" && return 0
+  now=$(date +%s)
+  body=$(repo_api "issues/$issue/comments" --method GET -f per_page=100 --paginate --jq '[.[].body | select(contains("agentic-loop:lease"))] | last // ""' 2>/dev/null | tail -n 1 || true)
+  expires=$(printf '%s\n' "$body" | sed -n 's/.*expires=\([0-9][0-9]*\).*/\1/p' | head -n 1)
+  [[ -n $expires && $expires -ge $now ]]
+}
+
+# Re-derive the effective scope of genuinely-running Issues at each Supervisor
+# startup so a worker's refined scope marker is honored. Skips REST-lag phantoms
+# (a just-requeued Issue still reported as running but with an expired lease):
+# caching their scope would conflict with every undeclared ("unknown") Issue and
+# deadlock the whole queue (see docs/decisions/0003).
 rebuild_scope_cache() {
   local issue body
   rm -rf "$(scope_cache_dir)"
   while IFS=$'\t' read -r issue body; do
     [[ -n $issue ]] || continue
+    issue_genuinely_running "$issue" || continue
     body=$(base64 -d <<< "$body" 2>/dev/null || true)
     scope_cache_write "$issue" "$(resolve_issue_scope "$body")"
   done < <(repo_api issues --method GET -f state=open -f labels="$(state_label running)" -f per_page=100 --paginate --jq '.[] | select(.pull_request == null) | [.number, (.body // "" | @base64)] | @tsv' 2>/dev/null || true)
