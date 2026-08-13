@@ -6,7 +6,7 @@
 # are a one-time seed for brand-new repositories only; once copied they become
 # the target's own files and upgrade never overwrites or removes them.
 readonly SHARED_FILES=(
-  AGENTS.md .codex/config.toml docs/policies/cost.md docs/policies/testing.md docs/policies/external-environment.md docs/policies/development-environment.md docs/policies/ai-tool-neutrality.md
+  AGENTS.md .codex/config.toml .claude/settings.json .claude/hooks/confirm-main-worktree-edit.sh docs/policies/cost.md docs/policies/testing.md docs/policies/external-environment.md docs/policies/development-environment.md docs/policies/ai-tool-neutrality.md
   docs/policies/github-language.md docs/policies/validation-harness.md docs/policies/continuous-delivery.md
   docs/decisions/0002-github-issue-queue.md docs/decisions/0003-supervisor-resilience-and-api-budget.md docs/decisions/0004-worker-resume-and-handoff.md docs/decisions/0005-status-observability.md docs/decisions/0006-worker-hang-timeout.md docs/decisions/0007-loop-metrics.md docs/decisions/0008-multi-host-claim.md docs/decisions/0009-foundation-upgrade.md docs/operations/issue-queue.md docs/operations/codebase-diagnosis.md docs/operations/loop-metrics.md docs/operations/upgrade.md
   .agents/skills/submit-requirement/SKILL.md

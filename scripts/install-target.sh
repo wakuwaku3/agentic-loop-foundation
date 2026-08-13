@@ -87,7 +87,7 @@ main() {
   revision_ref=${AGENTIC_LOOP_REVISION:-main}
   migration_level=$(find "$SOURCE_ROOT/scripts/upgrade/migrations" -maxdepth 1 -name '[0-9][0-9][0-9][0-9]-*.sh' 2>/dev/null | wc -l | tr -d ' ')
 
-  chmod +x "$target/bin/agentic-loop" "$target/bin/agentic-loop-diagnose" "$target/.agentic-loop/guard-secrets.sh" "$target/.agentic-loop/update-main.sh" "$target/.agentic-loop/diagnose-codebase.sh" "$target/.githooks/pre-commit" "$target/.githooks/pre-push"
+  chmod +x "$target/bin/agentic-loop" "$target/bin/agentic-loop-diagnose" "$target/.agentic-loop/guard-secrets.sh" "$target/.agentic-loop/update-main.sh" "$target/.agentic-loop/diagnose-codebase.sh" "$target/.githooks/pre-commit" "$target/.githooks/pre-push" "$target/.claude/hooks/confirm-main-worktree-edit.sh"
   [[ $mode == init ]] && chmod +x "$target/install.sh" "$target/scripts/"*.sh "$target/tests/"*.sh
   git -C "$target" config --local core.hooksPath .githooks
   record_runtime_path

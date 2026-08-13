@@ -2329,8 +2329,62 @@ if [[ $TEST_GROUP == all || $TEST_GROUP == upgrade ]]; then
 # --- Foundation upgrade (bin/agentic-loop upgrade, scripts/upgrade-target.sh) ---
 # See docs/operations/upgrade.md / docs/decisions/0009-foundation-upgrade.md.
 
+# --- Claude Code main-worktree edit confirmation hook ----------------------
+hook_main="$TEST_ROOT/hook main"
+hook_worker="$TEST_ROOT/hook worker"
+hook_outside="$TEST_ROOT/hook outside"
+mkdir -p "$hook_main" "$hook_outside"
+git -C "$hook_main" init --quiet
+git -C "$hook_main" config user.email test@example.invalid
+git -C "$hook_main" config user.name test
+printf 'tracked\n' > "$hook_main/tracked file.txt"
+git -C "$hook_main" add 'tracked file.txt'
+git -C "$hook_main" commit --quiet -m tracked
+git -C "$hook_main" worktree add --quiet -b hook-worker "$hook_worker"
+ln -s "$hook_outside" "$hook_main/outside-link"
+ln -s "$hook_main" "$hook_outside/main-link"
+
+run_edit_hook() {
+  local tool=$1 path=$2 cwd=$3 field=file_path
+  [[ $tool == NotebookEdit ]] && field=notebook_path
+  printf '{"tool_name":"%s","tool_input":{"%s":"%s"},"cwd":"%s"}' "$tool" "$field" "$path" "$cwd" |
+    "$PROJECT_ROOT/.claude/hooks/confirm-main-worktree-edit.sh"
+}
+hook_before=$(git -C "$hook_main" status --porcelain)
+for edit_tool in Edit Write NotebookEdit; do
+  hook_result=$(run_edit_hook "$edit_tool" "$hook_main/tracked file.txt" "$hook_main")
+  [[ $hook_result == *'"permissionDecision":"ask"'* ]] || fail "$edit_tool did not ask before a main-worktree tracked edit"
+  [[ $hook_result == *'Issue キュー'* ]] || fail "$edit_tool ask did not direct the user to the Issue queue"
+  [[ $hook_result != *'"permissionDecision":"deny"'* ]] || fail "$edit_tool hook denied rather than asked"
+done
+[[ $(git -C "$hook_main" status --porcelain) == "$hook_before" ]] || fail 'edit hook changed a file itself'
+[[ -z $(run_edit_hook Edit "$hook_worker/tracked file.txt" "$hook_worker") ]] || fail 'linked worker worktree was unexpectedly gated'
+printf 'scratch\n' > "$hook_main/scratchpad.txt"
+[[ -z $(run_edit_hook Edit "$hook_main/scratchpad.txt" "$hook_main") ]] || fail 'untracked main-worktree scratchpad was unexpectedly gated'
+[[ -z $(run_edit_hook Edit /tmp/agentic-loop-hook-scratch.txt "$hook_main") ]] || fail '/tmp edit was unexpectedly gated'
+[[ -z $(run_edit_hook Edit "$hook_outside/outside.txt" "$hook_main") ]] || fail 'outside edit was unexpectedly gated'
+[[ -z $(run_edit_hook Read "$hook_main/tracked file.txt" "$hook_main") ]] || fail 'read tool was unexpectedly gated'
+hook_result=$(run_edit_hook Edit "$hook_main/subdir/../tracked file.txt" "$hook_main")
+[[ $hook_result == *'"permissionDecision":"ask"'* ]] || fail 'path traversal bypassed the edit hook'
+hook_result=$(run_edit_hook Edit "$hook_outside/main-link/tracked file.txt" "$hook_main")
+[[ $hook_result == *'"permissionDecision":"ask"'* ]] || fail 'symlink path bypassed the edit hook'
+hook_result=$(printf '{"tool_name":"Edit","tool_input":{},"cwd":"%s"}' "$hook_main" | "$PROJECT_ROOT/.claude/hooks/confirm-main-worktree-edit.sh")
+[[ $hook_result == *'"permissionDecision":"ask"'* ]] || fail 'malformed edit input did not fail safely'
+
+# The project settings and executable hook are Foundation-managed shared files.
+settings_conflict_target=$(new_repository settings-conflict-target)
+mkdir -p "$settings_conflict_target/.claude"
+printf '{"custom":"keep"}\n' > "$settings_conflict_target/.claude/settings.json"
+if AGENTIC_LOOP_SOURCE="$PROJECT_ROOT" AGENTIC_LOOP_TARGET="$settings_conflict_target" AGENTIC_LOOP_SKIP_START=1 "$PROJECT_ROOT/install.sh" >/dev/null 2>&1; then
+  fail 'install silently overwrote an existing Claude settings file'
+fi
+[[ $(<"$settings_conflict_target/.claude/settings.json") == '{"custom":"keep"}' ]] || fail 'install changed an existing Claude settings file'
+
 upgrade_target=$(new_repository upgrade-target)
 AGENTIC_LOOP_SOURCE="$PROJECT_ROOT" AGENTIC_LOOP_TARGET="$upgrade_target" AGENTIC_LOOP_SKIP_START=1 "$PROJECT_ROOT/install.sh" >/dev/null
+[[ -x $upgrade_target/.claude/hooks/confirm-main-worktree-edit.sh ]] || fail 'install did not distribute an executable Claude edit hook'
+[[ $(yq -p json -r '.hooks.PreToolUse[0].matcher' "$upgrade_target/.claude/settings.json") == 'Edit|Write|NotebookEdit' ]] || fail 'install did not distribute Claude hook settings'
+[[ $(yq -p json -r '.files[] | select(.path == ".claude/hooks/confirm-main-worktree-edit.sh") | .class' "$upgrade_target/.agentic-loop/manifest.json") == shared ]] || fail 'manifest did not classify the Claude edit hook as shared'
 [[ -f $upgrade_target/.agentic-loop/manifest.json ]] || fail 'install did not write a Foundation manifest'
 [[ $(yq -p json -o yaml '.mode' "$upgrade_target/.agentic-loop/manifest.json") == install ]] || fail 'manifest recorded the wrong install mode'
 [[ $(yq -p json -o yaml '.source.repository' "$upgrade_target/.agentic-loop/manifest.json") == 'wakuwaku3/agentic-loop-foundation' ]] || fail 'manifest recorded the wrong source repository'

@@ -3,10 +3,22 @@ set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
-required=(AGENTS.md README.md Makefile .editorconfig .gitignore .codex/config.toml install.sh devbox.json devbox.lock docs/policies/cost.md docs/policies/testing.md docs/policies/external-environment.md docs/policies/development-environment.md docs/policies/ai-tool-neutrality.md docs/policies/github-language.md docs/policies/validation-harness.md docs/policies/continuous-delivery.md docs/decisions/0002-github-issue-queue.md docs/decisions/0003-supervisor-resilience-and-api-budget.md docs/decisions/0004-worker-resume-and-handoff.md docs/decisions/0005-status-observability.md docs/decisions/0006-worker-hang-timeout.md docs/decisions/0007-loop-metrics.md docs/decisions/0009-foundation-upgrade.md docs/operations/issue-queue.md docs/operations/codebase-diagnosis.md docs/operations/loop-metrics.md docs/operations/upgrade.md .agentic-loop.toml .agentic-loop/guard-secrets.sh .agentic-loop/update-main.sh .agentic-loop/diagnose-codebase.sh .githooks/pre-commit .githooks/pre-push .agents/skills/submit-requirement/SKILL.md .agents/skills/diagnose-codebase/SKILL.md .claude/skills/submit-requirement/SKILL.md .claude/skills/diagnose-codebase/SKILL.md bin/agentic-loop bin/agentic-loop-diagnose scripts/check-environment.sh scripts/install-target.sh scripts/lib/foundation-files.sh scripts/upgrade-target.sh scripts/upgrade/migrations/0001-foundation-config-section.sh)
+required=(AGENTS.md README.md Makefile .editorconfig .gitignore .codex/config.toml .claude/settings.json .claude/hooks/confirm-main-worktree-edit.sh install.sh devbox.json devbox.lock docs/policies/cost.md docs/policies/testing.md docs/policies/external-environment.md docs/policies/development-environment.md docs/policies/ai-tool-neutrality.md docs/policies/github-language.md docs/policies/validation-harness.md docs/policies/continuous-delivery.md docs/decisions/0002-github-issue-queue.md docs/decisions/0003-supervisor-resilience-and-api-budget.md docs/decisions/0004-worker-resume-and-handoff.md docs/decisions/0005-status-observability.md docs/decisions/0006-worker-hang-timeout.md docs/decisions/0007-loop-metrics.md docs/decisions/0009-foundation-upgrade.md docs/operations/issue-queue.md docs/operations/codebase-diagnosis.md docs/operations/loop-metrics.md docs/operations/upgrade.md .agentic-loop.toml .agentic-loop/guard-secrets.sh .agentic-loop/update-main.sh .agentic-loop/diagnose-codebase.sh .githooks/pre-commit .githooks/pre-push .agents/skills/submit-requirement/SKILL.md .agents/skills/diagnose-codebase/SKILL.md .claude/skills/submit-requirement/SKILL.md .claude/skills/diagnose-codebase/SKILL.md bin/agentic-loop bin/agentic-loop-diagnose scripts/check-environment.sh scripts/install-target.sh scripts/lib/foundation-files.sh scripts/upgrade-target.sh scripts/upgrade/migrations/0001-foundation-config-section.sh)
 for file in "${required[@]}"; do
   [[ -f $file ]] || { printf 'Missing required file: %s\n' "$file" >&2; exit 1; }
 done
+
+yq -p json -o json '.' .claude/settings.json >/dev/null || { printf 'Invalid Claude settings JSON.\n' >&2; exit 1; }
+[[ $(yq -p json -r '.hooks.PreToolUse[0].matcher // ""' .claude/settings.json) == 'Edit|Write|NotebookEdit' ]] || { printf 'Claude edit hook matcher is invalid.\n' >&2; exit 1; }
+[[ $(yq -p json -r '.hooks.PreToolUse[0].hooks[0].command // ""' .claude/settings.json) == '${CLAUDE_PROJECT_DIR}/.claude/hooks/confirm-main-worktree-edit.sh' ]] || { printf 'Claude edit hook command is invalid.\n' >&2; exit 1; }
+grep -Fq 'permissionDecision":"ask"' .claude/hooks/confirm-main-worktree-edit.sh || { printf 'Claude edit hook must request confirmation.\n' >&2; exit 1; }
+if grep -Fq 'permissionDecision":"deny"' .claude/hooks/confirm-main-worktree-edit.sh; then
+  printf 'Claude edit hook must not deny edits.\n' >&2
+  exit 1
+fi
+grep -Fq '.claude/settings.json' scripts/lib/foundation-files.sh || { printf 'Claude settings are not distributed as a shared file.\n' >&2; exit 1; }
+grep -Fq '.claude/hooks/confirm-main-worktree-edit.sh' scripts/lib/foundation-files.sh || { printf 'Claude edit hook is not distributed as a shared file.\n' >&2; exit 1; }
+grep -Fq 'confirm-main-worktree-edit.sh' scripts/install-target.sh || { printf 'Claude edit hook is not made executable on install.\n' >&2; exit 1; }
 
 grep -Fxq 'approval_policy = "never"' .codex/config.toml || { printf 'Invalid Codex approval policy.\n' >&2; exit 1; }
 if grep -Eq '^[[:space:]]*sandbox_mode[[:space:]]*=' .codex/config.toml; then
