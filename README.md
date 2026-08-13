@@ -12,7 +12,7 @@ devbox run --pure check
 
 ## インストール
 
-導入したいディレクトリへ移動し、次の1コマンドを実行します。
+Devboxを導入した上で、導入したいディレクトリへ移動し、次の1コマンドを実行します。ホストへ`yq`を別途インストールする必要はありません。インストーラーは`yq`がPATHにない場合、取得した`devbox.json`と`devbox.lock`を使って固定環境内でpreflight、setup、Supervisor起動までを続行します。
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/wakuwaku3/agentic-loop-foundation/main/install.sh | bash
@@ -71,7 +71,7 @@ bin/agentic-loop metrics
 bin/agentic-loop upgrade
 ```
 
-これらは `devbox run` または `devbox shell` の中で実行してください。devboxコンテキスト外では `yq` がPATHに無く、設定読み取りや起動時検査が失敗します。`start` はSupervisorのsystemd serviceを起動時点のPATHで構成するため、Supervisorの起動もdevboxコンテキストで行う必要があります。
+これらはinstall時に記録された固定runtime PATHを自動的に復元するため、`devbox run`、`devbox shell`、direnv、ホストへの`yq`導入を意識せず、そのまま実行できます。記録先はGit管理外のrepository local state（`.git/agentic-loop/runtime.path`）です。移動やNix storeの回収などで記録済みツールが利用不能になった場合はinstallを再実行して修復します。`start` が生成するSupervisorのsystemd serviceにも同じ固定ツールのPATHが設定されます。
 
 `status` はSupervisorの稼働状態に加え、running Issueごとの経過時間・最終heartbeat・lease期限・worktree・関連PR、queuedの件数と次のclaim候補、needs-input/failed/in-review/blocked/staleの件数とURL、staleなsupervisor pidや期限切れleaseなどの運用上の異常を1つの入口にまとめます（[0005](docs/decisions/0005-status-observability.md)）。常に読み取り専用で、GitHub呼び出しは1回の実行あたり最大2回に抑え、異常があっても終了code 0のままです（合否判定は `doctor` の責務）。自動化からは `bin/agentic-loop status --format json` を使用できます。詳細は [Issueキュー運用](docs/operations/issue-queue.md) を参照してください。
 
@@ -79,6 +79,6 @@ bin/agentic-loop upgrade
 
 `metrics` は既存のIssue/PR/comment履歴だけから、queue待ち時間・処理時間・失敗率・手戻り・worker稼働率などの傾向を再現可能に集計する読み取り専用コマンドです（[ADR 0007](docs/decisions/0007-loop-metrics.md)）。GitHub REST(core)読み取りは1回の実行あたり最大3回に固定し、Actions/CI・GraphQL・Projects APIは呼びません。追加の外部DB・有料monitoring・API課金は一切発生しません。Issue title・コメント本文・worker識別子は取得・出力せず、worker単位の内訳やランキングも出しません。`--as-of EPOCH`で窓の終端を固定すれば、同じ入力から常に同一の出力が得られます。詳細は [運用ドキュメント](docs/operations/loop-metrics.md) を参照してください。
 
-`upgrade` は導入済みのFoundationを、利用者の変更を失わず安全に更新するコマンドです（[ADR 0008](docs/decisions/0008-foundation-upgrade.md)）。既定は書き込みを一切行わないdry-runで、追加・更新・競合・削除候補・設定migrationを日本語で表示します。`--apply`で実際に適用し、破壊的・不可逆・追加費用・権限変更を伴う項目は`--approve`なしでは適用しません。適用後は`doctor`と完全検証を実行し、失敗時は`--rollback`または再実行の案内を表示します。詳細は [運用ドキュメント](docs/operations/upgrade.md) を参照してください。
+`upgrade` は導入済みのFoundationを、利用者の変更を失わず安全に更新するコマンドです（[ADR 0009](docs/decisions/0009-foundation-upgrade.md)）。既定は書き込みを一切行わないdry-runで、追加・更新・競合・削除候補・設定migrationを日本語で表示します。`--apply`で実際に適用し、破壊的・不可逆・追加費用・権限変更を伴う項目は`--approve`なしでは適用しません。適用後は`doctor`と完全検証を実行し、失敗時は`--rollback`または再実行の案内を表示します。詳細は [運用ドキュメント](docs/operations/upgrade.md) を参照してください。
 
 既定では30秒poll、最大4件を並列実行します。運用値は root 直下の `.agentic-loop.toml`（TOML、`yq`で読み取り）の `[queue]` セクションで設定し、個人環境の上書きは git 管理外の `.agentic-loop.local.toml` にキー単位で書けます。lease heartbeatが生きたままworkerが内部でハングした場合に備え、`[queue].worker_timeout_seconds`（既定4時間、`0`で無効化）を超えて実行中のworkerはプロセスグループごと停止され、失敗として自動的に境界付き再試行キューへ戻ります（[0006](docs/decisions/0006-worker-hang-timeout.md)）。設定、状態遷移、lease復旧、Projectの制約、トラブルシュートは [Issueキュー運用](docs/operations/issue-queue.md)、設計上の判断は [0001](docs/decisions/0001-minimal-foundation.md) と [0002](docs/decisions/0002-github-issue-queue.md) に記録しています。

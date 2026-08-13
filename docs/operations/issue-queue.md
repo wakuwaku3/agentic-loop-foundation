@@ -2,11 +2,28 @@
 
 ## セットアップ
 
-`install.sh` は変更前に `git`、`gh`、設定 `agent.provider`（環境変数 `AGENT_PROVIDER` と git管理外 `.agentic-loop.local.toml` による上書きを含む）から解決したAI CLI（`codex`／`claude`／`opencode`、既定は `codex`）、GitHubログイン、origin、リポジトリ参照、Projects API権限を検査する。provider=opencodeならCodex CLIが存在しなくてもinstallは成立する。既存ファイルとの競合もコピー前に検査する。検査後、8個の状態Label、4個の `priority:*` Label、6個の `category:*` Labelと `Agentic Loop - OWNER/REPOSITORY` Projectを冪等に用意し、既定ではSupervisorを起動する。Projectには同じ6選択肢の `Category` fieldを作成する。`install.sh` と `bin/agentic-loop setup` はRESTで既存のOpen/Closed IssueとPRを列挙し、Projectにないitemをbackfillする。
+`install.sh` は変更前に `git`、`gh`、設定 `agent.provider`（環境変数 `AGENT_PROVIDER` と git管理外 `.agentic-loop.local.toml` による上書きを含む）から解決したAI CLI（`codex`／`claude`／`opencode`、既定は `codex`）、GitHubログイン、origin、リポジトリ参照、Projects API権限を検査する。provider=opencodeならCodex CLIが存在しなくてもinstallは成立する。既存ファイルとの競合もコピー前に検査する。検査後、8個の状態Label、4個の `priority:*` Label、6個の `category:*` Labelと `Agentic Loop - OWNER/REPOSITORY` Projectを冪等に用意し、既定ではSupervisorを起動する。Projectには同じ6選択肢の `Category` fieldを作成する。`install.sh` と `bin/agentic-loop setup` はRESTで既存のOpen IssueとOpen PRだけを列挙し、Projectにないitemをbackfillする。setup以前にclose済みの履歴は取り込まず、導入後に登録したitemはclose後もProjectに残す。
 
 GitHub tokenには対象リポジトリのIssue/PR操作権限と `project`、`read:project` scopeが必要である。不足時は `gh auth refresh -s project,read:project` など、利用中のGitHub認証方式に合う方法で追加する。Projectはuser/org所有のため、対象リポジトリとProjectの閲覧者が一致することを管理者が確認する。privateリポジトリの内容や秘密情報をProjectフィールドへ転記しない。
 
-Project APIでlink、`Agent status` single-select、Issue item追加に加え、`Open Issues`、`Closed Issues`、`Open PRs`、`Closed PRs` のtable viewを設定する。各viewはitem種別とOpen/Closed状態でfilterされ、`install.sh` または `bin/agentic-loop setup` の再実行時に同名viewを再利用してfilterを修復し、既存のOpen/Closed PRをProjectへ追加する。workerが作成したPRも処理終了時に追加する。Project同期の障害はIssueキューの実行中にはキューを停止しない。
+Project APIでlink、`Agent status` single-select、Issue item追加に加え、次のtable viewをdesired stateとして設定する。`install.sh` または `bin/agentic-loop setup` の再実行はview一覧を1回だけ取得して同名viewを再利用し、filterにdriftがあるものだけを修復して、既存のOpen PRをProjectへ追加する。workerが作成したPRも処理終了時に追加する。
+
+| View | 自動適用するfilter | 目的と表示順 |
+| --- | --- | --- |
+| `Triage` | `is:issue is:open no:category` | Category未設定のopen Issueを検出する。Agent status・Priorityの欠落とLabel/field不整合は後述の手動検査も行う |
+| `Queue` | `is:issue is:open label:"agent:queued"` | Category、Priority、Created at、Issue番号の順で確認する。各値の順位はSupervisorのclaim順と同じにする |
+| `Active` | `is:issue is:open label:"agent:running","agent:in-review"` | Agent statusでgroupし、Updated at降順。Issue、関連Pull requestを表示する |
+| `Needs input` | `is:issue is:open label:"agent:needs-input"` | Updated at昇順。Title、Agent status、Updated atを表示し、Issue本文・commentを回答先とする |
+| `Recovery` | `is:issue label:"agent:failed","agent:stale"` | Agent statusでgroupし、Updated at昇順。期限切れleaseはSupervisorがqueuedへ復旧するまでrunningとしてIssue commentで検査する |
+| `Recently completed` | `is:issue label:"agent:completed" updated:@today-30d` | Updated at降順。対応Pull requestと完了証跡を追跡する |
+| `Open PRs` / `Closed PRs` | `is:pr is:open` / `is:pr is:closed` | Updated at降順。Title、Status、Updated at、Repositoryを表示する |
+| `All open issues` / `All closed issues` | `is:issue is:open` / `is:issue is:closed` | Updated at降順の運用一覧。Closed側はsetup以前の全履歴ではなく、Project導入後に登録されたitemを表示する |
+
+Issue状態の正本は `agent:*` Labelであり、Project fieldは表示用の複製である。このため状態別ViewのfilterもLabelを使用し、回答後にLabelが遷移すると `Needs input` から自動的に外れる。private repositoryの本文やcomment、秘密情報をProject custom fieldへ複製しない。
+
+GitHub Projects APIはviewのname、layout、filterを作成・更新できる一方、CLI/APIのversionや所有者種別によってvisible field、sort、groupの更新を利用できない場合がある。現在の自動適用範囲はtable layoutとfilterまでとし、上表の「目的と表示順」をそれ以外のdesired stateとする。Project画面で列、sort、groupを上表どおり設定し、`bin/agentic-loop setup` 後に各Viewのfilterと対象集合を目視検証する。`Triage` はCategory欠落を自動抽出し、Agent status・Priorityの欠落やLabel/field不整合を `All open issues` で比較する。`Queue` は `bin/agentic-loop` のcategory rank、priority rank、Created at、Issue番号の比較、`Needs input` は `agent:needs-input` のopen Issue一覧との比較、`Recovery` の期限切れleaseは最新の `agentic-loop:lease` commentの `expires` と現在時刻の比較でdriftを検出する。
+
+Project同期やview修復はbest-effortであり、失敗をstderrへ記録してIssueキュー自体は停止しない。権限または一時障害の復旧後にsetupを再実行する。filter更新は冪等で、再作成も既存名を再利用するためrollbackは直前のfilterへ同じsetup関数で戻せる。view削除は自動化せず、不要Viewを破棄する場合は対象と依存を確認して明示的に承認する。
 
 ## 操作
 
@@ -44,7 +61,7 @@ bin/agentic-loop status --format json
 | `status` | いま何が動き、何を待ち、次に何が来るかの運用snapshot | 対話Agentの受付手順からも毎回呼べる（REST(core)読み取り最大2回、GraphQL/Projects 0回、書き込み0回） | 常に終了code 0（異常はwarning/infoとして列挙するのみ） |
 | `doctor` | 導入・復旧のための環境健全性診断（認証・権限・CLI・Devbox・hooks・systemd・Project設定・設定値・残存状態・Foundation manifest/revision pin/中断したupgrade） | 導入時・障害時に実行 | 必須項目の失敗で終了code 1 |
 | `metrics` | 過去の傾向（待ち時間・失敗率・手戻り・稼働率）の再現可能な集計（[運用ドキュメント](loop-metrics.md)） | 利用者が任意の頻度で実行（REST(core)読み取り最大3回、GraphQL/Projects 0回、書き込み0回） | 常に終了code 0（合否判定は`doctor`の責務） |
-| `upgrade` | 導入済みFoundationの安全な更新（[運用ドキュメント](upgrade.md)、[ADR 0008](../decisions/0008-foundation-upgrade.md)） | 運用者が明示実行（Supervisor停止中のみ`--apply`可）。既定はdry-runでGitHub書き込み0回 | 承認未済は終了code 3、適用・検証失敗は1、引数不正は2 |
+| `upgrade` | 導入済みFoundationの安全な更新（[運用ドキュメント](upgrade.md)、[ADR 0009](../decisions/0009-foundation-upgrade.md)） | 運用者が明示実行（Supervisor停止中のみ`--apply`可）。既定はdry-runでGitHub書き込み0回 | 承認未済は終了code 3、適用・検証失敗は1、引数不正は2 |
 | GitHub Project View | 人向けのIssue/PR一覧の可視化層（best-effort、障害はキューを止めない） | GitHub UI上で確認 | 判定には使わない |
 
 ### 事前診断
@@ -59,7 +76,7 @@ bin/agentic-loop doctor --format json
 
 ### upgrade: 導入済みFoundationの安全な更新
 
-`bin/agentic-loop upgrade`（[運用ドキュメント](upgrade.md)、[ADR 0008](../decisions/0008-foundation-upgrade.md)）は、既定では書き込みを一切行わないdry-runで、追加・更新・利用者編集との競合・削除候補・設定migrationを日本語で表示する。`--apply`で実際に適用し、破壊的・不可逆・追加費用・権限変更を伴う項目は`--approve`なしでは適用しない。適用前後で`doctor`と完全検証を実行し、失敗時は適用状態を保持したまま`--rollback`または再実行を案内する。Supervisorが稼働中の`--apply`と、明示的なrevision指定を欠く実行はいずれも拒否する（`main`への暗黙追従はしない）。
+`bin/agentic-loop upgrade`（[運用ドキュメント](upgrade.md)、[ADR 0009](../decisions/0009-foundation-upgrade.md)）は、既定では書き込みを一切行わないdry-runで、追加・更新・利用者編集との競合・削除候補・設定migrationを日本語で表示する。`--apply`で実際に適用し、破壊的・不可逆・追加費用・権限変更を伴う項目は`--approve`なしでは適用しない。適用前後で`doctor`と完全検証を実行し、失敗時は適用状態を保持したまま`--rollback`または再実行を案内する。Supervisorが稼働中の`--apply`と、明示的なrevision指定を欠く実行はいずれも拒否する（`main`への暗黙追従はしない）。
 
 利用者は要求をIssueとして登録し、6個の `category:*` のうち1つと `agent:queued` を付ける。取得順はcategory、同一category内のcritical、high、medium、low、優先度なし、作成日時、Issue番号の順とする。category順は `loop-continuity`、`confidentiality-incident`、`integrity-incident`、`availability-incident`、`feature`、`improvement` で固定する。複数のpriority LabelがあるIssueは最も高いものを使う。依存関係は後述の「Issue間の依存関係」に従ってGitHub標準機能またはIssue本文に明記する。変更が及ぶpathやexternal環境が分かる場合は、後述の「変更競合の予防」に従って本文へ `agentic-loop:scope` markerを1行記載する。不明な場合は記載を省略してよく、安全な既定動作（`unknown_scope`）にフォールバックする。回答は `agent:needs-input` のIssueへコメントする。
 
@@ -92,6 +109,8 @@ incident Issueには、秘密の値、攻撃手順、不要な個人情報を本
 `.agentic-loop.toml` の `[queue]` で `poll_seconds`、`max_workers`、`lease_seconds`、`stop_timeout`、`stale_days`、`graphql_reserve`、`rate_limit_cache_seconds`、`api_retry_attempts`、`api_retry_base_seconds`、`max_attempts`、`retry_cooldown_seconds`、`worker_timeout_seconds`、`unknown_scope`、`exclusive_paths` を変更できる。個人環境向けの上書きは git 管理外の `.agentic-loop.local.toml` に同じキーを書けば、キー単位で優先される。設定はTOMLで、読み取りには `yq` を用いる。既定の並列数は4とし、これを超えてむやみに増やさない。worker失敗の多くはtoken枯渇やセッション中断などの一時的要因であるため、失敗したIssueは即座にagent:failedへ留め置かない。Supervisorの`retry_failed`が、開いている全てのagent:failed（過去分・追跡外を含む）を`[queue].max_attempts`（既定3、総試行回数）まで`[queue].retry_cooldown_seconds`（既定600秒）のクールダウンを挟んで自動的にagent:queuedへ戻して再試行し、上限に達したら解決不能とみなしてIssueをcloseする。人手でのラベル付け替えは不要。workerが実施不要または実施不能と判断した場合は`AGENTIC_LOOP_RESULT=declined`でIssueをcloseできる。providerのtoken/rate limitに達した失敗はIssueをfailedにせずagent:queuedへ戻し、Supervisorはclaimを一定時間（`EXHAUSTION_PAUSE_SECONDS`）一時停止して上限回復後に自動再開する。`[budget].weekly_reserve_percent` は緊急枠の確保用で、週次利用率が `100 - 値` を超える間はSupervisorが新規Issueのclaimを一時停止し、回復すると再開する。利用率はheadlessで取得できるCodexのセッションログ（最新の `token_count` の `secondary.used_percent`）から読むbest-effortで、取得できない場合やCodex以外のproviderのみの場合はfail open（claim継続）とする。0で無効化できる。増加はCodex契約上の制限、Git競合、端末資源を確認してから行う。stopは新規claimを止め、workerをdrainする。`STOP_TIMEOUT=0` は完了まで待つ。
 
 SupervisorとworkerはGit common stateにGraphQLの残量・reset時刻を短時間cacheして共有する。Issue一覧、Label、comment、heartbeat、PRのmerge確認などloopのcore操作はREST APIを使い、GraphQLはbest-effortのProjects操作だけに限定する。残量が `GRAPHQL_RESERVE` 以下ならProjects item・field同期だけを抑制し、Issue Labelを正本とするqueue処理は継続する。reset後は次のProjects操作が最新残量を再取得し、冪等な同期を再開する。既定値は500であり、0にすると残量によるProjects保護を無効化する。
+
+Supervisorは1 poll内の状態別処理をOpen Issue snapshot最大2回（maintenance前と、状態遷移を反映するclaim直前）で共有する。Project ID・field/option ID・最大1,000件のitem対応はSupervisor process内で1回取得して再利用し、field更新ごとに全item・fieldを取り直さない。claimとlease復旧が読むcommentは現在のlease期限に関係する更新期間へ限定し、native dependencyの結果は120秒cacheする。
 
 GraphQL枯渇時もREST APIのquotaは別に確認できる。`gh api rate_limit --jq '.resources | {graphql,core}'` で現在値を確認する。GraphQLのreset前にSupervisorを繰り返し再起動したり、`gh issue list --limit 1000` や `gh project item-list --limit 1000` を手動で反復したりしない。
 
@@ -158,7 +177,7 @@ workerが `AGENTIC_LOOP_RESULT=completed` を返しても、それだけでは�
 
 remote branchは復旧可能性を残し、GitHubのPR merge時branch削除設定と責務を分離するため、Supervisorからは削除しない。remote branchの保持または削除はrepositoryのコード化されたGitHub設定に従い、このcleanupの成功条件には含めない。
 
-Supervisorはrepositoryごとのuser-level systemd serviceとして登録され、予期しない終了では5秒後に自動再起動する。`stop`による正常終了では再起動しない。service名は `agentic-loop-supervisor-<repository path>.service` で、`systemctl --user status` と `journalctl --user -u` で確認できる。起動時には生存しないPIDとlockを削除してからlease復旧を行う。Supervisorが停止している場合はstatus、`.git/agentic-loop/supervisor.log`、systemd unit、`gh auth status` を確認する。同じリポジトリを複数端末から処理しない。default branch更新後の競合やrequired checks失敗はworkerが最新branchに対して修正・再検証する。
+Supervisorはrepositoryごとのuser-level systemd serviceとして登録され、予期しない終了では5秒後に自動再起動する。`stop`による正常終了では再起動しない。service名は `agentic-loop-supervisor-<repository path>.service` で、`systemctl --user status` と `journalctl --user -u` で確認できる。起動時には生存しないPIDとlockを削除してからlease復旧を行う。Supervisorが停止している場合はstatus、`.git/agentic-loop/supervisor.log`、systemd unit、`gh auth status` を確認する。同じリポジトリを複数端末から処理できる。SupervisorはLabel変更前にGitHub上へ期限付きclaimを作り、同じIssueへ同時にclaimした候補をcomment idで一意に調停する。勝者のclaimはlease heartbeatと同じコメントで更新され、敗者はLabel、Git、workerを変更しない。各ホストの`max_workers`はローカル上限なので、repository全体の上限は各ホストの合計になり得る。費用・GitHub API・端末資源に合わせてホストごとの値を設定する。ホスト間でworktreeやPID fileを共有する必要はなく、共有しないこと。default branch更新後の競合やrequired checks失敗はworkerが最新branchに対して修正・再検証する。
 
 ## 中断からの再開
 

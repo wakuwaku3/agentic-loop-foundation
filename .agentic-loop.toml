@@ -11,12 +11,12 @@ provider = "codex"
 # reasoning_effort applies to Codex only (default high for plan, low for exec).
 [agent.plan]
 # provider = "codex"
-# model = "gpt-5-codex"
+model = "gpt-5.6-sol"
 reasoning_effort = "high"
 
 [agent.exec]
 # provider = "opencode"
-# model = "anthropic/claude-sonnet-4"
+model = "gpt-5.6-terra"
 reasoning_effort = "low"
 
 [agent.retry]
@@ -27,7 +27,7 @@ plan_max = 1
 # Codex enforces read-only via its sandbox; other providers rely on the prompt.
 [agent.diagnose]
 # provider = "codex"
-# model = "gpt-5-codex"
+model = "gpt-5.6-terra"
 reasoning_effort = "low"
 
 [budget]

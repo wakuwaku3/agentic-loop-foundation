@@ -6,6 +6,7 @@ readonly PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 readonly TEST_ROOT="$(mktemp -d)"
 readonly FAKE_BIN="$TEST_ROOT/bin"
 readonly FAKE_GH_ROOT="$TEST_ROOT/gh"
+readonly TEST_HOST_PATH="$PATH"
 trap 'rm -rf "$TEST_ROOT"' EXIT
 
 fail() { printf 'FAIL: %s\n' "$1" >&2; exit 1; }
@@ -47,6 +48,7 @@ project="$FAKE_GH_ROOT/$key.project"
 project_items="$FAKE_GH_ROOT/$key.project-items"
 comments="$FAKE_GH_ROOT/$key.comments"
 views="$FAKE_GH_ROOT/$key.views"
+labels="$FAKE_GH_ROOT/$key.labels"
 diagnosis_issues="$FAKE_GH_ROOT/$key.diagnosis-issues"
 metrics_issues="$FAKE_GH_ROOT/$key.metrics-issues"
 metrics_events="$FAKE_GH_ROOT/$key.metrics-events"
@@ -78,7 +80,9 @@ case "${1:-} ${2:-}" in
         --input) j=$((i+1)); input_file=${!j} ;;
       esac
     done
-    if [[ $endpoint == issues && $method == GET && $* == *fromdateiso8601* ]]; then
+    if [[ $endpoint == labels && $method == GET ]]; then
+      cat "$labels" 2>/dev/null || true
+    elif [[ $endpoint == issues && $method == GET && $* == *fromdateiso8601* ]]; then
       # bin/agentic-loop metrics collection A: hand-authored fixture rows are
       # returned verbatim (the fake gh never runs real jq), keyed off the
       # fromdateiso8601 call that only this query makes.
@@ -97,6 +101,16 @@ case "${1:-} ${2:-}" in
       awk '$2 == "stale" {print $1 "\t" "Fake issue " $1}' "$state" 2>/dev/null || true
     elif [[ $endpoint == issues && $method == GET && $form_state == all ]]; then
       awk -v slug="$slug" '{print "https://github.example/" slug "/issues/" $1}' "$state" 2>/dev/null || true
+    elif [[ $endpoint == issues && $method == GET && $form_state == open && $* == *html_url* ]]; then
+      awk -v slug="$slug" '$3 != "closed" {print "https://github.example/" slug "/issues/" $1}' "$state" 2>/dev/null || true
+    elif [[ $endpoint == issues && $method == GET && -z $wanted && $* == *'then "-" else'* ]]; then
+      awk '$3 != "closed" {
+        category=5; if ($7 ~ /(^|,)loop-continuity(,|$)/) category=0; else if ($7 ~ /(^|,)confidentiality-incident(,|$)/) category=1; else if ($7 ~ /(^|,)integrity-incident(,|$)/) category=2; else if ($7 ~ /(^|,)availability-incident(,|$)/) category=3; else if ($7 ~ /(^|,)feature(,|$)/) category=4
+        priority=4; if ($4 ~ /(^|,)critical(,|$)/) priority=0; else if ($4 ~ /(^|,)high(,|$)/) priority=1; else if ($4 ~ /(^|,)medium(,|$)/) priority=2; else if ($4 ~ /(^|,)low(,|$)/) priority=3
+        created=($5 == "" ? $1 : $5); updated=($6 == "" ? "-" : $6)
+        body=($8 == "" ? "-" : $8); categories=($7 == "" || $7 == "none" ? "-" : "category:" $7)
+        print $1 "\t" $2 "\t" updated "\t" created "\t" body "\t" categories "\t" category "\t" priority
+      }' "$state" 2>/dev/null || true
     elif [[ $endpoint == issues && $method == GET && -z $wanted ]]; then
       # status-snapshot: every open Issue, classified purely by its own state
       # word (see bin/agentic-loop's status_snapshot_fetch), with the same
@@ -158,6 +172,8 @@ case "${1:-} ${2:-}" in
           printf '%s %s\n' "$issue" "$body" >> "$comments"
           if [[ $* == *"--jq .id"* ]]; then wc -l < "$comments" | tr -d '[:space:]'; printf '\n'; fi
         ) 9> "$comments.lock"
+      elif [[ $* == *agentic-loop:claim* ]]; then
+        awk -v n="$issue" '$1 == n && index($0, "agentic-loop:claim") {body=$0; sub(/^[^ ]+ /, "", body); printf "%s\t%s", NR, body | "base64 -w0"; close("base64 -w0"); printf "\n"}' "$comments" 2>/dev/null || true
       elif [[ $* == *needs-input* ]]; then
         if tail -n 1 "$comments" 2>/dev/null | grep -Fq USER_REPLY; then printf 'true\n'; else printf 'false\n'; fi
       else tail -n 1 "$comments" 2>/dev/null || true; fi
@@ -173,6 +189,8 @@ case "${1:-} ${2:-}" in
       issue=${BASH_REMATCH[1]}
       if [[ $method == PATCH && $form_state == closed ]]; then
         ( flock 9; awk -v n="$issue" '{if ($1 == n) $3="closed"; print}' "$state" > "$state.$$.tmp" && mv "$state.$$.tmp" "$state" ) 9> "$state.lock"
+      elif [[ $* == *'[.state, ([.labels[].name]'* ]]; then
+        awk -v n="$issue" '$1 == n {printf "%s\tagent:%s\n", $3, $2}' "$state"
       elif [[ $* == *'.state_reason // ""'* ]]; then
         if ! awk -v n="$issue" '$1 == n {found=1} END{exit !found}' "$state" 2>/dev/null; then
           printf 'HTTP 404: Not Found\n' >&2; exit 1
@@ -210,6 +228,7 @@ case "${1:-} ${2:-}" in
         fi
       elif [[ $* == *head=* && $* == *html_url* ]]; then printf 'https://github.example/%s/pull/6\n' "$slug"
       elif [[ $form_state == all && $* == *html_url* ]]; then printf 'https://github.example/%s/pull/1\nhttps://github.example/%s/pull/2\n' "$slug" "$slug"
+      elif [[ $form_state == open && $* == *html_url* ]]; then printf 'https://github.example/%s/pull/1\n' "$slug"
       elif [[ $* == *html_url* ]]; then printf 'https://github.example/%s/pull/6\n' "$slug"; fi
     elif [[ -z $endpoint ]]; then
       if [[ $* == *permissions.push* ]]; then printf 'true\n'; else printf 'main\n'; fi
@@ -224,20 +243,43 @@ case "${1:-} ${2:-}" in
       name=''
       for ((i=1; i<=$#; i++)); do [[ ${!i} == name=* ]] && name=${!i#name=}; done
       id="PV_$(printf '%s' "$name" | tr ' ' '_')"
-      printf '%s\t%s\n' "$id" "$name" >> "$views"
+      printf '%s\t%s\t\n' "$id" "$name" >> "$views"
       printf '%s\n' "$id"
     elif [[ $* == *'views(first: 100)'* ]]; then
       cat "$views" 2>/dev/null || true
+    elif [[ $* == *updateProjectV2View* && ${FAKE_PROJECT_VIEW_UPDATE_FAILURE:-0} == 1 ]]; then
+      exit 1
+    elif [[ $* == *updateProjectV2View* ]]; then
+      view_id=''; filter=''
+      for ((i=1; i<=$#; i++)); do
+        [[ ${!i} == viewId=* ]] && view_id=${!i#viewId=}
+        [[ ${!i} == filter=* ]] && filter=${!i#filter=}
+      done
+      awk -F '\t' -v id="$view_id" -v filter="$filter" 'BEGIN{OFS="\t"} $1 == id {$3=filter} {print}' "$views" > "$views.$$.tmp" && mv "$views.$$.tmp" "$views"
     fi ;;
   'repo view')
     if [[ $* == *defaultBranchRef* ]]; then printf 'main\n'; else printf '%s\n' "$slug"; fi ;;
-  'label create') exit 0 ;;
+  'label create')
+    label_name=${3:-}; color=''; description=''
+    for ((i=1; i<=$#; i++)); do
+      [[ ${!i} == --color ]] && { j=$((i+1)); color=${!j}; }
+      [[ ${!i} == --description ]] && { j=$((i+1)); description=${!j}; }
+    done
+    awk -F '\t' -v name="$label_name" '$1 != name' "$labels" 2>/dev/null > "$labels.$$.tmp" || true
+    printf '%s\t%s\t%s\n' "$label_name" "$color" "$description" >> "$labels.$$.tmp"
+    mv "$labels.$$.tmp" "$labels" ;;
   'project list')
     if [[ -e $project ]]; then printf '7\n'; fi ;;
   'project create') touch "$project"; printf '{"number":7}\n' ;;
   'project link'|'project field-create'|'project item-edit') exit 0 ;;
   'project item-list')
-    if [[ $* == *content.number* ]]; then printf 'PVTI_fake\n'; else cat "$project_items" 2>/dev/null || true; fi ;;
+    if [[ $* == *'.items[] | [('* ]]; then
+      while IFS= read -r item_url; do
+        [[ -n $item_url ]] || continue
+        item_number=${item_url##*/}
+        printf '%s\t%s\tPVTI_%s\n' "$item_number" "$item_url" "$item_number"
+      done < <(cat "$project_items" 2>/dev/null || true)
+    elif [[ $* == *content.number* ]]; then printf 'PVTI_fake\n'; else cat "$project_items" 2>/dev/null || true; fi ;;
   'project item-add')
     if (( ${FAKE_PROJECT_FAILURES:-0} > 0 )); then
       failure_file="$FAKE_GH_ROOT/$key.project-failures"
@@ -245,9 +287,25 @@ case "${1:-} ${2:-}" in
       if (( failures < FAKE_PROJECT_FAILURES )); then printf '%s\n' "$((failures + 1))" > "$failure_file"; exit 1; fi
     fi
     url=''; for ((i=1; i<=$#; i++)); do [[ ${!i} == --url ]] && { j=$((i+1)); url=${!j}; }; done
-    grep -Fxq -- "$url" "$project_items" 2>/dev/null || printf '%s\n' "$url" >> "$project_items" ;;
+    grep -Fxq -- "$url" "$project_items" 2>/dev/null || printf '%s\n' "$url" >> "$project_items"
+    [[ $* == *'--jq .id'* ]] && printf 'PVTI_%s\n' "${url##*/}" ;;
   'project view') [[ ${FAKE_PROJECT_FAIL:-0} == 0 ]] && printf 'PVT_fake\n' ;;
-  'project field-list') printf 'PVTF_fake\n' ;;
+  'project field-list')
+    if [[ $* == *'$field.name'* ]]; then
+      printf 'Agent status\tPVTF_status\tQueued\tPVTFO_queued\n'
+      printf 'Agent status\tPVTF_status\tRunning\tPVTFO_running\n'
+      printf 'Agent status\tPVTF_status\tNeeds input\tPVTFO_needs_input\n'
+      printf 'Agent status\tPVTF_status\tIn review\tPVTFO_in_review\n'
+      printf 'Agent status\tPVTF_status\tDone\tPVTFO_done\n'
+      printf 'Agent status\tPVTF_status\tFailed\tPVTFO_failed\n'
+      printf 'Agent status\tPVTF_status\tStale\tPVTFO_stale\n'
+      printf 'Agent status\tPVTF_status\tBlocked\tPVTFO_blocked\n'
+      printf 'Category\tPVTF_category\tImprovement\tPVTFO_improvement\n'
+      printf 'Category\tPVTF_category\tFeature\tPVTFO_feature\n'
+      printf 'Blocked by\tPVTF_blocked_by\t\t\n'
+    else
+      printf 'PVTF_fake\n'
+    fi ;;
   'pr list')
     if [[ $* == *'--state merged'* ]]; then
       if [[ ${FAKE_PR_MERGED:-1} == 1 ]]; then
@@ -362,6 +420,10 @@ if [[ $worktree =~ /issue-([0-9]+)$ ]]; then
   override_var="FAKE_CODEX_SLEEP_ISSUE_${BASH_REMATCH[1]}"
   sleep_value=${!override_var:-$sleep_value}
 fi
+# Most scenarios only need the fake provider to overlap briefly with the
+# supervisor; a real second per plan and exec stage adds no coverage. Keep the
+# longer values used by heartbeat, shutdown, and timeout scenarios unchanged.
+[[ $sleep_value == 1 ]] && sleep_value=0.1
 sleep "$sleep_value"
 printf '%s\n' "${FAKE_CODEX_RESULT:-AGENTIC_LOOP_RESULT=completed}" > "$output"
 FAKE_CODEX
@@ -412,11 +474,17 @@ printf '%s\n' "${2#/}" | tr '/' '-'
 FAKE_SYSTEMD_ESCAPE
 cat > "$FAKE_BIN/devbox" <<'FAKE_DEVBOX'
 #!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >> "$FAKE_GH_ROOT/devbox-calls"
+if [[ ${1:-} == run && ${2:-} == --config && ${4:-} == -- ]]; then
+  shift 4
+  PATH="$FAKE_BIN:$TEST_HOST_PATH" exec "$@"
+fi
 [[ ${FAKE_DEVBOX_FAIL:-0} == 0 ]] || exit 1
 exit 0
 FAKE_DEVBOX
 chmod +x "$FAKE_BIN/gh" "$FAKE_BIN/codex" "$FAKE_BIN/claude" "$FAKE_BIN/opencode" "$FAKE_BIN/systemctl" "$FAKE_BIN/systemd-escape" "$FAKE_BIN/devbox"
-export PATH="$FAKE_BIN:$PATH" FAKE_GH_ROOT XDG_CONFIG_HOME="$TEST_ROOT/config"
+export PATH="$FAKE_BIN:$PATH" FAKE_BIN FAKE_GH_ROOT TEST_HOST_PATH XDG_CONFIG_HOME="$TEST_ROOT/config"
 
 new_repository() {
   local name=$1 target bare
@@ -588,21 +656,44 @@ AGENTIC_LOOP_SOURCE="$PROJECT_ROOT" AGENTIC_LOOP_TARGET="$target" AGENTIC_LOOP_S
 project_creates=$(grep -c $'project create' "$FAKE_GH_ROOT/calls" || true)
 [[ $project_creates -eq 1 ]] || { sed -n '1,120p' "$FAKE_GH_ROOT/calls" >&2; fail "reinstall created the Project $project_creates times"; }
 view_creates=$(grep -c $'\tapi graphql -f query=mutation($projectId: ID!, $name: String!)' "$FAKE_GH_ROOT/calls" || true)
-[[ $view_creates -eq 4 ]] || { sed -n '1,160p' "$FAKE_GH_ROOT/calls" >&2; fail "reinstall created the Project views $view_creates times"; }
-for view in 'Open Issues' 'Closed Issues' 'Open PRs' 'Closed PRs'; do
+[[ $view_creates -eq 10 ]] || { sed -n '1,220p' "$FAKE_GH_ROOT/calls" >&2; fail "reinstall created the Project views $view_creates times"; }
+for view in 'Triage' 'Queue' 'Active' 'Needs input' 'Recovery' 'Recently completed' 'Open PRs' 'Closed PRs' 'All open issues' 'All closed issues'; do
   [[ $(awk -F '\t' -v name="$view" '$2 == name {count++} END {print count+0}' "$FAKE_GH_ROOT/$state_key.views") -eq 1 ]] || fail "Project view is not idempotent: $view"
 done
-assert_contains "$FAKE_GH_ROOT/calls" 'filter=is:issue is:open' 'Open Issues view filter was not configured'
-assert_contains "$FAKE_GH_ROOT/calls" 'filter=is:issue is:closed' 'Closed Issues view filter was not configured'
+assert_contains "$FAKE_GH_ROOT/calls" 'filter=is:issue is:open no:category' 'Triage view filter was not configured'
+assert_contains "$FAKE_GH_ROOT/calls" 'filter=is:issue is:open label:"agent:queued"' 'Queue view filter was not configured'
+assert_contains "$FAKE_GH_ROOT/calls" 'filter=is:issue is:open label:"agent:running","agent:in-review"' 'Active view filter was not configured'
+assert_contains "$FAKE_GH_ROOT/calls" 'filter=is:issue is:open label:"agent:needs-input"' 'Needs input view filter was not configured'
+assert_contains "$FAKE_GH_ROOT/calls" 'filter=is:issue label:"agent:failed","agent:stale"' 'Recovery view filter was not configured'
+assert_contains "$FAKE_GH_ROOT/calls" 'filter=is:issue label:"agent:completed" updated:@today-30d' 'Recently completed view filter was not configured'
 assert_contains "$FAKE_GH_ROOT/calls" 'filter=is:pr is:open' 'Open PRs view filter was not configured'
 assert_contains "$FAKE_GH_ROOT/calls" 'filter=is:pr is:closed' 'Closed PRs view filter was not configured'
+assert_contains "$FAKE_GH_ROOT/calls" 'filter=is:issue is:open' 'All open issues view filter was not configured'
+assert_contains "$FAKE_GH_ROOT/calls" 'filter=is:issue is:closed' 'All closed issues view filter was not configured'
 assert_contains "$FAKE_GH_ROOT/calls" "project item-add 7 --owner acme --url https://github.example/acme/installed-project/pull/1" 'existing PR was not added to the Project'
 assert_contains "$FAKE_GH_ROOT/calls" "project item-add 7 --owner acme --url https://github.example/acme/installed-project/issues/88" 'existing open Issue was not added to the Project'
-assert_contains "$FAKE_GH_ROOT/calls" "project item-add 7 --owner acme --url https://github.example/acme/installed-project/issues/89" 'existing closed Issue was not added to the Project'
+if grep -Fq "project item-add 7 --owner acme --url https://github.example/acme/installed-project/issues/89" "$FAKE_GH_ROOT/calls"; then
+  fail 'setup backfilled an already-closed Issue'
+fi
+
+# A converged setup reads all views once, performs no filter mutation, and
+# backfills only open content.
+calls_before=$(wc -l < "$FAKE_GH_ROOT/calls")
+AGENTIC_LOOP_SKIP_START=1 "$target/bin/agentic-loop" setup >/dev/null
+tail -n "+$((calls_before + 1))" "$FAKE_GH_ROOT/calls" > "$TEST_ROOT/converged-setup-calls.log"
+[[ $(grep -c 'views(first: 100)' "$TEST_ROOT/converged-setup-calls.log" || true) -eq 1 ]] || fail 'converged setup did not consolidate the Project view query'
+[[ $(grep -c 'updateProjectV2View' "$TEST_ROOT/converged-setup-calls.log" || true) -eq 0 ]] || fail 'converged setup rewrote unchanged Project view filters'
+[[ $(grep -c $'\tlabel create ' "$TEST_ROOT/converged-setup-calls.log" || true) -eq 0 ]] || fail 'converged setup rewrote unchanged Labels'
+grep -Fq $'state=open' "$TEST_ROOT/converged-setup-calls.log" || fail 'setup did not backfill open content'
+if grep -Eq $'api repos/.+/(issues|pulls).*state=all' "$TEST_ROOT/converged-setup-calls.log"; then fail 'setup scanned closed Issue or PR history'; fi
 
 # Intake synchronization is immediate, idempotent, and persists temporary Projects failures for reconciliation.
 rm -f "$FAKE_GH_ROOT/$state_key.project-failures" "$(git -C "$target" rev-parse --absolute-git-dir)/agentic-loop/graphql-rate-limit"
+calls_before=$(wc -l < "$FAKE_GH_ROOT/calls")
 FAKE_PROJECT_FAILURES=1 FAKE_GRAPHQL_REMAINING=5000 "$target/bin/agentic-loop" sync-issue 91 >/dev/null
+tail -n "+$((calls_before + 1))" "$FAKE_GH_ROOT/calls" > "$TEST_ROOT/sync-issue-project-calls.log"
+[[ $(grep -c $'\tproject item-list ' "$TEST_ROOT/sync-issue-project-calls.log" || true) -le 1 ]] || fail 'one Issue sync fetched the complete Project item list repeatedly'
+[[ $(grep -c $'\tproject field-list ' "$TEST_ROOT/sync-issue-project-calls.log" || true) -le 1 ]] || fail 'one Issue sync fetched Project fields repeatedly'
 pending_project="$(git -C "$target" rev-parse --absolute-git-dir)/agentic-loop/project-pending"
 assert_contains "$pending_project" 'content https://github.com/acme/installed-project/issues/91' 'temporary Project failure was not persisted'
 FAKE_PROJECT_FAILURES=1 "$target/bin/agentic-loop" sync-issue 91 >/dev/null
@@ -611,6 +702,9 @@ printf '91 inbox open none 2026-01-01T00:00:00Z\n' > "$FAKE_GH_ROOT/$state_key.s
 AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _supervise
 [[ ! -e $pending_project ]] || fail 'successful reconciliation did not clear the Project retry queue'
 
+# Projects APIの一時的または権限制約による失敗はIssueキューのsetupを停止しない。
+FAKE_PROJECT_VIEW_UPDATE_FAILURE=1 AGENTIC_LOOP_SKIP_START=1 "$target/bin/agentic-loop" setup >/dev/null
+
 write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=2 LEASE_SECONDS=3 STOP_TIMEOUT=10 STALE_DAYS=30
 "$target/bin/agentic-loop" start
 first_pid="$(git -C "$target" rev-parse --absolute-git-dir)/agentic-loop/supervisor.pid"
@@ -618,7 +712,7 @@ first_pid=$(cat "$first_pid")
 supervisor_service="$XDG_CONFIG_HOME/systemd/user/agentic-loop-supervisor-$(printf '%s' "${target#/}" | tr '/' '-').service"
 [[ -f $supervisor_service ]] || fail 'start did not install the repository supervisor service'
 assert_contains "$supervisor_service" 'Restart=on-failure' 'supervisor service does not restart after an unexpected exit'
-assert_contains "$supervisor_service" "ExecStart=$target/bin/agentic-loop _service" 'supervisor service does not target the repository CLI'
+assert_contains "$supervisor_service" "ExecStart=$FAKE_BIN/devbox run -- $target/bin/agentic-loop _service" 'supervisor service does not enter the pinned Devbox environment'
 assert_contains "$supervisor_service" "Environment=PATH=$FAKE_BIN:" 'supervisor service PATH does not include the verified Codex directory'
 assert_contains "$FAKE_GH_ROOT/systemctl-calls" "enable $(basename "$supervisor_service")" 'supervisor service was not enabled'
 "$target/bin/agentic-loop" start
@@ -694,7 +788,11 @@ printf '90 queued open none 2025-01-01T00:00:00Z\n' > "$FAKE_GH_ROOT/$state_key.
 before_project_adds=$(grep -c $'\tproject item-add' "$FAKE_GH_ROOT/calls" || true)
 FAKE_GRAPHQL_REMAINING=499 FAKE_GRAPHQL_RESET=$(date +%s) FAKE_REST_FAILURES=1 AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _supervise
 after_project_adds=$(grep -c $'\tproject item-add' "$FAKE_GH_ROOT/calls" || true)
-grep -Eq '^90 completed closed' "$FAKE_GH_ROOT/$state_key.state" || fail 'GraphQL exhaustion stopped the REST Issue loop'
+if ! grep -Eq '^90 completed closed' "$FAKE_GH_ROOT/$state_key.state"; then
+  tail -n 80 "$FAKE_GH_ROOT/calls" >&2
+  cat "$FAKE_GH_ROOT/$state_key.state" >&2
+  fail 'GraphQL exhaustion stopped the REST Issue loop'
+fi
 [[ $after_project_adds -eq $before_project_adds ]] || fail 'GraphQL exhaustion did not suppress Projects synchronization'
 pending_project="$(git -C "$target" rev-parse --absolute-git-dir)/agentic-loop/project-pending"
 [[ -s $pending_project ]] || fail 'suppressed Projects synchronization was not persisted'
@@ -1055,8 +1153,8 @@ grep -Eq '^310 completed closed' "$state" || fail 'dependency satisfied by agent
 grep -Eq '^311 blocked open' "$state" || fail 'a dependency closed without agent:completed was accepted as satisfied'
 assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:dependency-blocked reason=incomplete' 'incomplete-dependency block was not recorded with its reason'
 [[ -r $state_root/dependency/blocked-311 ]] || fail 'dependency block state was not persisted for status/Project visibility'
-assert_contains "$FAKE_GH_ROOT/calls" 'select(.name == "Blocked") | .id' 'blocked state was not synchronized to the Project Agent status field'
-assert_contains "$FAKE_GH_ROOT/calls" 'select(.name == "Blocked by") | .id' 'blocked reason was not written to the Project Blocked by field'
+assert_contains "$FAKE_GH_ROOT/calls" '--single-select-option-id PVTFO_blocked' 'blocked state was not synchronized to the Project Agent status field'
+assert_contains "$FAKE_GH_ROOT/calls" '--field-id PVTF_blocked_by' 'blocked reason was not written to the Project Blocked by field'
 
 # Once the blocking dependency itself completes, the blocked Issue is
 # automatically requeued and claimed in the same poll, with no manual Label edit.
@@ -1550,6 +1648,21 @@ lease_lines=$(grep -c 'agentic-loop:lease' "$FAKE_GH_ROOT/$state_key.comments" |
 [[ ${lease_lines:-0} -eq 1 ]] || fail "lease heartbeat should keep a single comment, found ${lease_lines:-0}"
 assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'のハートビートです' 'lease comment was not written'
 
+# Two hosts may observe the same queued snapshot. A still-valid claim created
+# by the other host wins by comment id, so this Supervisor must neither change
+# the Label nor start a duplicate worker. Once that claim expires, the Issue is
+# claimable and completes normally.
+write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=3 STOP_TIMEOUT=10 STALE_DAYS=30
+printf '21 queued open none 2026-01-01T00:00:00Z\n' > "$state"
+now=$(date +%s)
+printf '21 <!-- agentic-loop:claim worker=other-host created=%s expires=%s -->\\n<!-- agentic-loop:lease worker=other-host heartbeat=%s expires=%s -->\n' "$now" "$((now + 30))" "$now" "$((now + 30))" > "$FAKE_GH_ROOT/$state_key.comments"
+rm -f "$state_root/stop.requested"
+AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _supervise
+grep -Eq '^21 queued open' "$state" || fail 'a second host stole an Issue with a valid distributed claim'
+sed -i 's/expires=[0-9][0-9]*/expires=1/g' "$FAKE_GH_ROOT/$state_key.comments"
+AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _supervise
+grep -Eq '^21 completed closed' "$state" || fail 'an Issue did not become claimable after the other host claim expired'
+
 # Adaptive idle backoff: with an empty queue the poll interval grows beyond the
 # base toward the ceiling, cutting idle GitHub API reads; a live worker resets it.
 write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 POLL_MAX_SECONDS=8 MAX_WORKERS=1 LEASE_SECONDS=30 STOP_TIMEOUT=10 STALE_DAYS=30
@@ -1588,6 +1701,10 @@ for _ in $(seq 1 40); do
   sleep 0.5
 done
 [[ -n $hang_worker_pid ]] || { kill "$hang_sup_pid" 2>/dev/null; wait "$hang_sup_pid" 2>/dev/null; fail 'hung worker was not claimed before the timeout test'; }
+# Drive the elapsed-time boundary through its persisted clock input instead of
+# waiting eight wall-clock seconds. The next supervisor poll must enforce the
+# same configured timeout against this already-expired start timestamp.
+printf '%s\n' "$(($(date +%s) - 9))" > "$state_root/workers/50.started"
 hang_timed_out=0
 for _ in $(seq 1 40); do
   grep -Eq '^50 failed' "$state" && { hang_timed_out=1; break; }
@@ -1647,9 +1764,15 @@ for _ in $(seq 1 40); do [[ -r $state_root/workers/53.started ]] && { disabled_s
 [[ $disabled_started_seen == 1 ]] || { kill -TERM "-$disabled_worker_pid" 2>/dev/null; wait "$disabled_worker_pid" 2>/dev/null; fail 'test setup did not observe the worker start marker'; }
 printf '%s\n' "$disabled_worker_pid" > "$state_root/workers/53.pid"
 printf '%s\n' "$(($(date +%s) - 100000))" > "$state_root/workers/53.started"
+rm -f "$state_root/poll-interval"
 "$target/bin/agentic-loop" _supervise &
 disabled_sup_pid=$!
-sleep 3
+disabled_poll_seen=0
+for _ in $(seq 1 50); do
+  [[ -r $state_root/poll-interval ]] && { disabled_poll_seen=1; break; }
+  sleep 0.1
+done
+[[ $disabled_poll_seen == 1 ]] || { kill -TERM "$disabled_sup_pid" 2>/dev/null; wait "$disabled_sup_pid" 2>/dev/null; fail 'disabled-timeout supervisor did not complete a poll'; }
 disabled_still_alive=0
 kill -0 "$disabled_worker_pid" 2>/dev/null && disabled_still_alive=1
 disabled_still_running=0
@@ -1874,6 +1997,33 @@ AGENTIC_LOOP_SOURCE="$PROJECT_ROOT" AGENTIC_LOOP_TARGET="$empty" AGENTIC_LOOP_SK
 [[ -x $empty/scripts/check-environment.sh ]] || fail 'empty repository did not get the environment guard'
 assert_contains "$empty/README.md" 'opencode' 'installed README.md does not document opencode as a supported provider'
 
+# The documented one-command install bootstraps yq through the downloaded
+# Devbox definition instead of requiring an unpinned host installation.
+bootstrap_bin="$TEST_ROOT/bootstrap-bin"
+mkdir -p "$bootstrap_bin"
+for command_name in bash dirname git devbox mktemp rm; do ln -s "$(command -v "$command_name")" "$bootstrap_bin/$command_name"; done
+bootstrap=$(new_repository bootstrap-project)
+env PATH="$bootstrap_bin" FAKE_BIN="$FAKE_BIN" TEST_HOST_PATH="$TEST_HOST_PATH" FAKE_GH_ROOT="$FAKE_GH_ROOT" \
+AGENTIC_LOOP_SOURCE="$PROJECT_ROOT" AGENTIC_LOOP_TARGET="$bootstrap" AGENTIC_LOOP_SKIP_START=1 \
+  "$PROJECT_ROOT/install.sh"
+assert_contains "$FAKE_GH_ROOT/devbox-calls" "run --config $PROJECT_ROOT -- $PROJECT_ROOT/scripts/install-target.sh $bootstrap" 'install did not bootstrap missing yq through the pinned Devbox environment'
+[[ -x $bootstrap/bin/agentic-loop ]] || fail 'Devbox bootstrap did not complete installation'
+bootstrap_state="$(git -C "$bootstrap" rev-parse --absolute-git-dir)/agentic-loop"
+[[ -s $bootstrap_state/runtime.path ]] || fail 'install did not record the verified runtime PATH'
+bootstrap_status=$(env PATH="$bootstrap_bin" FAKE_BIN="$FAKE_BIN" TEST_HOST_PATH="$TEST_HOST_PATH" FAKE_GH_ROOT="$FAKE_GH_ROOT" \
+  XDG_CONFIG_HOME="$XDG_CONFIG_HOME" "$bootstrap/bin/agentic-loop" status)
+grep -Eq '^(running|stopped)$' <<< "$bootstrap_status" || fail 'installed CLI did not restore its runtime dependencies from an ordinary shell'
+
+no_devbox_bin="$TEST_ROOT/no-devbox-bin"
+mkdir -p "$no_devbox_bin"
+for command_name in bash git mktemp rm; do ln -s "$(command -v "$command_name")" "$no_devbox_bin/$command_name"; done
+missing_devbox=$(new_repository missing-devbox-project)
+if env PATH="$no_devbox_bin" AGENTIC_LOOP_SOURCE="$PROJECT_ROOT" AGENTIC_LOOP_TARGET="$missing_devbox" AGENTIC_LOOP_SKIP_START=1 \
+  "$PROJECT_ROOT/install.sh" >"$TEST_ROOT/missing-devbox.out" 2>&1; then
+  fail 'install succeeded without either yq or Devbox'
+fi
+assert_contains "$TEST_ROOT/missing-devbox.out" 'devbox is required to bootstrap' 'missing Devbox error does not explain the bootstrap requirement'
+
 secret_target="$TEST_ROOT/secret-project"
 mkdir -p "$secret_target"
 git -C "$secret_target" init --quiet
@@ -2070,7 +2220,7 @@ metrics_text=$("$target/bin/agentic-loop" metrics --days "$days" --as-of "$as_of
 [[ $metrics_text != *'Fake issue'* && $metrics_text != *'worker=w'* ]] || fail 'metrics text format leaked private data'
 
 # --- Foundation upgrade (bin/agentic-loop upgrade, scripts/upgrade-target.sh) ---
-# See docs/operations/upgrade.md / docs/decisions/0008-foundation-upgrade.md.
+# See docs/operations/upgrade.md / docs/decisions/0009-foundation-upgrade.md.
 
 upgrade_target=$(new_repository upgrade-target)
 AGENTIC_LOOP_SOURCE="$PROJECT_ROOT" AGENTIC_LOOP_TARGET="$upgrade_target" AGENTIC_LOOP_SKIP_START=1 "$PROJECT_ROOT/install.sh" >/dev/null

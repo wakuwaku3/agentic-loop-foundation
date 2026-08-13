@@ -1,4 +1,4 @@
-# 導入済みFoundationのupgrade（[ADR 0008](../decisions/0008-foundation-upgrade.md)）
+# 導入済みFoundationのupgrade（[ADR 0009](../decisions/0009-foundation-upgrade.md)）
 
 `bin/agentic-loop upgrade`は、既に導入済みのAgentic Loop Foundationを、利用者の変更を失わず、互換性と差分を確認しながら更新するcommandである。既定は書き込みを一切行わないdry-runで、`--apply`を指定した場合だけ実際に変更する。
 
@@ -63,7 +63,7 @@ install/upgradeの度に、target repositoryへ`.agentic-loop/manifest.json`を�
 | 新revisionに無い、targetの内容が旧manifestと異なる(利用者編集済み) | 削除候補 | 削除しない。手動判断を促す |
 | `class: init`のfileに上流の変更がある | 情報のみ | 何もしない |
 
-いずれの上書き・削除も、同じdirectory内に一時fileを書いてから`mv`でatomicに置換する。現在実行中の`bin/agentic-loop`が自分自身を安全に置き換えられるのはこのためである([ADR 0008](../decisions/0008-foundation-upgrade.md)参照)。
+いずれの上書き・削除も、同じdirectory内に一時fileを書いてから`mv`でatomicに置換する。現在実行中の`bin/agentic-loop`が自分自身を安全に置き換えられるのはこのためである([ADR 0009](../decisions/0009-foundation-upgrade.md)参照)。
 
 ## 設定のmigration
 
@@ -124,7 +124,7 @@ manifestが無い場合の分類は前述の表の通りで、内容が一致す
 
 ## release手順
 
-配布物のtag/releaseは持たない。`main`へのmergeが唯一の配布起点であり([継続的デリバリーポリシー](../policies/continuous-delivery.md))、`--revision <SHA>`による明示pinと`migration_level`・manifest schemaが互換性の判定単位になる。将来SemVer tagging/GitHub Releaseへ移行する場合は、`[foundation].revision`にtag名を許可する拡張として本docsとADR 0008を更新する。
+配布物のtag/releaseは持たない。`main`へのmergeが唯一の配布起点であり([継続的デリバリーポリシー](../policies/continuous-delivery.md))、`--revision <SHA>`による明示pinと`migration_level`・manifest schemaが互換性の判定単位になる。将来SemVer tagging/GitHub Releaseへ移行する場合は、`[foundation].revision`にtag名を許可する拡張として本docsとADR 0009を更新する。
 
 ## 費用・秘密
 

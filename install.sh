@@ -9,6 +9,27 @@ trap 'rm -rf "$TEMP_DIR"' EXIT
 
 command -v git >/dev/null || { printf 'git is required.\n' >&2; exit 1; }
 
+# Runs install-target.sh, or upgrade-target.sh when the first remaining
+# argument is "upgrade" (see docs/operations/upgrade.md). Falls back to
+# bootstrapping the pinned Devbox environment when yq is not on host PATH.
+run_installer() {
+  local source_root=$1 target_script=install-target.sh
+  shift
+  if [[ ${1:-} == upgrade ]]; then
+    shift
+    target_script=upgrade-target.sh
+  fi
+  if command -v yq >/dev/null 2>&1; then
+    "$source_root/scripts/$target_script" "$TARGET" "$@"
+    return
+  fi
+  command -v devbox >/dev/null 2>&1 || {
+    printf 'devbox is required to bootstrap the pinned installation environment (yq is not available).\n' >&2
+    exit 1
+  }
+  devbox run --config "$source_root" -- "$source_root/scripts/$target_script" "$TARGET" "$@"
+}
+
 if [[ -n ${AGENTIC_LOOP_SOURCE:-} ]]; then
   source_dir="$AGENTIC_LOOP_SOURCE"
 else
@@ -31,8 +52,4 @@ else
 fi
 export AGENTIC_LOOP_REPOSITORY="$REPOSITORY" AGENTIC_LOOP_REVISION="$REVISION" AGENTIC_LOOP_RESOLVED_REVISION="$resolved_revision"
 
-if [[ ${1:-} == upgrade ]]; then
-  shift
-  exec "$source_dir/scripts/upgrade-target.sh" "$TARGET" "$@"
-fi
-"$source_dir/scripts/install-target.sh" "$TARGET"
+run_installer "$source_dir" "$@"
