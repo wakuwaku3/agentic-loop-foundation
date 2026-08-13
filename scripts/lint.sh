@@ -138,6 +138,8 @@ grep -Fq -- '--sandbox workspace-write' bin/agentic-loop || { printf 'Unsafe Cod
 grep -Fq 'AGENT_PROVIDER' bin/agentic-loop || { printf 'AI provider is not selectable.\n' >&2; exit 1; }
 grep -Fq -- '--dangerously-skip-permissions' bin/agentic-loop || { printf 'Claude worker isolation is not configured.\n' >&2; exit 1; }
 grep -Fq 'agentic-loop:usage' bin/agentic-loop || { printf 'Token usage is not recorded for analysis.\n' >&2; exit 1; }
+cmp -s .agents/skills/submit-requirement/SKILL.md .claude/skills/submit-requirement/SKILL.md || { printf 'Codex and Claude submit-requirement skills diverged.\n' >&2; exit 1; }
+grep -Fq 'exec終了プロトコルと外部待機' docs/operations/issue-queue.md || { printf 'Exec completion protocol is not documented.\n' >&2; exit 1; }
 grep -Fq -- '--sandbox read-only' bin/agentic-loop || { printf 'Plan stage does not run read-only.\n' >&2; exit 1; }
 grep -Fq 'agent_phase_effort' bin/agentic-loop || { printf 'Plan and exec reasoning effort is not tiered.\n' >&2; exit 1; }
 grep -Fq 'agent_phase_provider' bin/agentic-loop || { printf 'Per-phase provider selection is missing.\n' >&2; exit 1; }

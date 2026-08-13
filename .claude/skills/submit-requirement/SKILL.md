@@ -37,6 +37,10 @@ When already processing an `agent:running` Issue in its dedicated worktree, do n
 7. Commit, push, open a PR, monitor required checks, address failures and review feedback, and merge the PR. Remove the worktree and branch after a successful merge.
 8. Report the outcome, verification evidence, PR link, and any genuinely unresolved risk concisely. A worker must not cancel, supersede, merge, or auto-requeue a disposed Issue. If it judges work unnecessary, leave the rationale and return `AGENTIC_LOOP_RESULT=needs-input`; only an authorized operator may use `bin/agentic-loop dispose` or `resume`.
 
+Required checks、AI review、merge待ちは、同一turnで前景実行する。`gh pr checks --watch` などを時間上限付きで実行し、pendingなら状態を再確認して前景で繰り返す。background process、別agent、別sessionに待機を委譲しない。checksが未確定、review feedbackが未対応、mergeまたはdefault branchでの検証が未完了のまま「待機中です」等で終了してはならない。失敗時は修正して必要な検証を再実行し、mergeとdefault branch検証まで完遂するか、正当な終端状態へ分類するまで継続する。
+
+workerの最終応答は、最後の非空行を `AGENTIC_LOOP_RESULT=completed`、`AGENTIC_LOOP_RESULT=failed`、`AGENTIC_LOOP_RESULT=needs-input`、`AGENTIC_LOOP_RESULT=declined` のいずれか一行だけにする。markerの後に説明やコードフェンスを続けず、自由文の待機報告を完了結果として扱わない。
+
 Write GitHub Issue and PR titles, bodies, comments, and reviews in Japanese. Preserve code, logs, identifiers, proper nouns, and quotations in their necessary original form.
 
 Treat requests about this workflow exactly like application requests. Improve the loop when doing so is required by the user's goal.

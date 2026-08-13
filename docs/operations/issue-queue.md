@@ -190,6 +190,12 @@ lease heartbeatはworkerプロセスが生きている証明にすぎず、作�
 
 workerが `AGENTIC_LOOP_RESULT=completed` を返しても、それだけでは完了にしない。SupervisorはIssue専用branchをheadとするmerge済みPRをGitHub APIで確認し、PRの `headRefOid` がlocal branch先端と一致することを検証する。さらに、専用worktreeが期待pathでそのbranchを使用し、未commit変更がないことを確認してからworktreeを通常削除し、確認済みOIDとのcompare-and-deleteでlocal branchを削除する。merge未確認、別worktreeで使用中、未commit変更、想定外ref、または削除競合がある場合は `failed` とし、残っているworktreeとbranch dataを保持して安全な再調査を可能にする。
 
+### exec終了プロトコルと外部待機
+
+workerはCI、required checks、AI review、mergeなどの外部完了を同一turn内の前景処理で待つ。`gh pr checks --watch` 等は有限のtimeout単位で実行し、timeout後もpendingなら状態を再確認して繰り返す。background process、別agent、別sessionへの待機委譲、または「待機中です」だけの終了は許可しない。checks未確定、review feedback未対応、merge未実施、default branch検証未完了のいずれかでは最終応答を書かない。この待機は `[queue].worker_timeout_seconds` のworker全体上限の内側で行われ、上限を延長または無効化しない。
+
+正当な終了時、providerは最後の非空行に `AGENTIC_LOOP_RESULT=completed`、`AGENTIC_LOOP_RESULT=failed`、`AGENTIC_LOOP_RESULT=needs-input`、`AGENTIC_LOOP_RESULT=declined` のいずれか一つだけを返す。provider processが正常終了しても有効なmarkerがない場合は、正常な失敗やCI待ちをreplan理由にせず、同一計画に「前景待機を完遂しmarkerを返す」補足を加えてexecを1回だけ即時再実行する。再実行もmarkerなしなら無限再試行・高コストなreplanへ進まず `failed` に遷移する。一方、providerの異常終了、明示的な `AGENTIC_LOOP_RESULT=failed`、token/rate-limit枯渇は既存のbounded replanまたはexhausted復旧処理をそのまま使う。GitHub設定の変更、新規外部service、追加課金は導入しない。
+
 remote branchは復旧可能性を残し、GitHubのPR merge時branch削除設定と責務を分離するため、Supervisorからは削除しない。remote branchの保持または削除はrepositoryのコード化されたGitHub設定に従い、このcleanupの成功条件には含めない。
 
 Supervisorはrepositoryごとのuser-level systemd serviceとして登録され、予期しない終了では5秒後に自動再起動する。`stop`による正常終了では再起動しない。service名は `agentic-loop-supervisor-<repository path>.service` で、`systemctl --user status` と `journalctl --user -u` で確認できる。起動時には生存しないPIDとlockを削除してからlease復旧を行う。Supervisorが停止している場合はstatus、`.git/agentic-loop/supervisor.log`、systemd unit、`gh auth status` を確認する。同じリポジトリを複数端末から処理できる。SupervisorはLabel変更前にGitHub上へ期限付きclaimを作り、同じIssueへ同時にclaimした候補をcomment idで一意に調停する。勝者のclaimはlease heartbeatと同じコメントで更新され、敗者はLabel、Git、workerを変更しない。各ホストの`max_workers`はローカル上限なので、repository全体の上限は各ホストの合計になり得る。費用・GitHub API・端末資源に合わせてホストごとの値を設定する。ホスト間でworktreeやPID fileを共有する必要はなく、共有しないこと。default branch更新後の競合やrequired checks失敗はworkerが最新branchに対して修正・再検証する。
