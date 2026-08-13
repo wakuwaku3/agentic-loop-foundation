@@ -1122,7 +1122,7 @@ assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:declined' 'dec
 # A token/rate-limit exhaustion re-queues the Issue (never failed) and pauses the
 # supervisor; claiming resumes once the exhaustion clears.
 write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=3 STOP_TIMEOUT=10 STALE_DAYS=30
-rm -f "$state_root/agent-exhausted"
+rm -f "$state_root/agent-exhausted" "$FAKE_GH_ROOT/codex-exec-count"
 printf '60 queued open none 2026-01-01T00:00:00Z\n' > "$state"
 : > "$FAKE_GH_ROOT/$state_key.comments"
 AGENTIC_LOOP_RUN_ONCE=1 FAKE_CODEX_RESULT='rate limit reached' "$target/bin/agentic-loop" _supervise
