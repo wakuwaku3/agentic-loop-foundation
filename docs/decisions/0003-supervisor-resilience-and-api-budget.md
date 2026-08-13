@@ -20,7 +20,7 @@
 ### 障害耐性
 
 - **グレースフルシャットダウン**: SupervisorはSIGTERM/SIGINTを捕捉し、claimを止め、進行中Issueを安全にキューへ戻し、workerをプロセスグループごと停止し、lock/pid/leaseを解放してから終了する。`systemctl stop`・`kill`・OS/WSLの正常シャットダウン（SIGTERMが届く）はクリーンに畳まれ、孤児やphantom runningを残さない。
-- **再起動時リカバー**: 急死・電源断・WSLクラッシュのようにSIGTERMが届かない場合は、次にSupervisorが起動した時点で回復する。`agent:running` のうちleaseが期限切れのものをqueuedへ戻す（マシンをまたいだ回復の基本）。加えて、leaseがこのマシンのworkerに属し、そのworkerがローカルで死んでいる場合は期限切れを待たず即時にqueuedへ戻す（他マシンのleaseには触れないので並列安全）。この回復は起動時とpoll毎の双方で行う。
+- **再起動時リカバー**: 急死・電源断・WSLクラッシュのようにSIGTERMが届かない場合は、次にSupervisorが起動した時点で回復する。`agent:running` のうちleaseが期限切れのものをqueuedへ戻す（マシンをまたいだ回復の基本）。加えて、leaseがこのマシンのworkerに属し、そのworkerがローカルで死んでいる場合は期限切れを待たず即時にqueuedへ戻す（他マシンのleaseには触れないので並列安全）。この回復は起動時とpoll毎の双方で行う。ただし完了前に繰り返し停止するIssue（lease期限切れ・急死で `AGENTIC_LOOP_RESULT=failed` を返さないため、`retry_failed` の `max_attempts` 上限に載らないまま無限に再キューされうる）を束ねるため、claim都度記録される試行回数が `max_attempts` に達した回復対象はqueuedではなく `agent:failed` へescalateし、`retry_failed` の解決不能closeに載せる。
 - **安いlease**: heartbeatは新規コメントを作らず、Issueごとに1つのleaseコメントを更新（PATCH）で打ち直す。Issueは肥大せず、`recover_expired` は1コメントの読み取りで済む。heartbeat間隔はマシン跨ぎ調整に十分な粒度まで延ばす。
 
 ### API削減

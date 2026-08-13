@@ -1757,7 +1757,7 @@ worker_pid_live() {
 # expired (or missing) lease is recovered. Reading the lease only for Issues
 # without a local worker also cuts API usage.
 recover_expired() {
-  local issue body expires now pidfile
+  local issue body expires now pidfile count
   now=$(date +%s)
   while IFS= read -r issue; do
     [[ -n $issue ]] || continue
@@ -1770,10 +1770,22 @@ recover_expired() {
       expires=$(printf '%s\n' "$body" | sed -n 's/.*expires=\([0-9][0-9]*\).*/\1/p' | head -n 1)
       [[ -n $expires && $expires -ge $now ]] && continue
     fi
-    set_issue_state "$issue" queued
     scope_cache_clear "$issue"
     clear_conflict_wait "$issue"
-    comment_issue "$issue" '<!-- agentic-loop:recovered -->\n担当workerの終了、またはリース期限切れを検出したため、Issueを安全にキューへ戻しました。'
+    # A worker that keeps dying before finishing (lease expiry / crash, never an
+    # explicit AGENTIC_LOOP_RESULT=failed) would otherwise be requeued forever:
+    # claim_next records an attempt per claim, but only retry_failed's
+    # MAX_ATTEMPTS bound consults it, and that path only sees agent:failed. Once
+    # the recorded attempts reach the limit, escalate to agent:failed so
+    # retry_failed closes it as unresolvable instead of spinning the queue.
+    count=$(attempt_count "$issue")
+    if (( count >= MAX_ATTEMPTS )); then
+      set_issue_state "$issue" failed
+      comment_issue "$issue" "<!-- agentic-loop:recover-exhausted attempts=$count -->\n担当workerが完了前に繰り返し停止したため（試行 $count/$MAX_ATTEMPTS）、キューへ戻さず \`agent:failed\` へ移します。以降は解決不能として自動でcloseされます。再開が必要なら内容を確認のうえ \`agent:queued\` を付け直してください。"
+    else
+      set_issue_state "$issue" queued
+      comment_issue "$issue" '<!-- agentic-loop:recovered -->\n担当workerの終了、またはリース期限切れを検出したため、Issueを安全にキューへ戻しました。'
+    fi
   done < <(repo_api issues --method GET -f state=open -f labels="$(state_label running)" -f per_page=100 --paginate --jq '.[] | select(.pull_request == null) | .number' 2>/dev/null || true)
 }
 

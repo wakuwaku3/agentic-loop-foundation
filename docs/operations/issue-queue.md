@@ -140,7 +140,7 @@ GitHub Projectには `Agent status` に `Blocked` を追加し、`Blocked by` TE
 - stale: queuedのまま設定日数更新されず、監査コメント付きで自動closeされた
 - blocked: 依存Issueが未完了のためclaimを保留中。依存が解消すると自動的にqueuedへ戻る
 
-Supervisorは起動時に加えて各pollでもrunning Issueの最新leaseコメントを読み、期限切れをqueuedへ戻す。これにより、workerがクラッシュしてリースが切れたIssueは長時間稼働中でも自動でキューへ復帰し、agent:runningのまま滞留しない。
+Supervisorは起動時に加えて各pollでもrunning Issueの最新leaseコメントを読み、期限切れをqueuedへ戻す。これにより、workerがクラッシュしてリースが切れたIssueは長時間稼働中でも自動でキューへ復帰し、agent:runningのまま滞留しない。ただし、完了前に繰り返し停止する（lease期限切れ・急死で `AGENTIC_LOOP_RESULT=failed` すら返さない）Issueが無限に再キューされ続けないよう、claim都度記録される試行回数が `max_attempts` に達した回復対象は、queuedへ戻さず `agent:failed` へ移し、`retry_failed` が解決不能とみなして自動closeする。
 
 ### ハングしたworkerの検出と停止（[ADR 0006](../decisions/0006-worker-hang-timeout.md)）
 

@@ -1451,6 +1451,32 @@ mkdir -p "$state_root"
 "$target/bin/agentic-loop" _supervise
 grep -Eq '^9 queued open$' "$state" || fail 'expired running Issue was not recovered'
 
+# A worker that keeps dying before finishing (lease expiry / crash, never an
+# explicit AGENTIC_LOOP_RESULT=failed) must not requeue forever: once its recorded
+# claim attempts reach MAX_ATTEMPTS, recover_expired escalates it to agent:failed
+# so retry_failed closes it as unresolvable instead of looping in the queue.
+write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=3 STOP_TIMEOUT=10 STALE_DAYS=30 MAX_ATTEMPTS=2 RETRY_COOLDOWN_SECONDS=0
+printf '91 running open\n' > "$state"
+printf '91 <!-- agentic-loop:lease worker=dead heartbeat=1 expires=1 -->\n' > "$FAKE_GH_ROOT/$state_key.comments"
+mkdir -p "$state_root/attempts"; printf '2\t0\n' > "$state_root/attempts/issue-91"
+rm -f "$state_root/stop.requested"
+AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _supervise
+grep -Eq '^91 failed closed$' "$state" || fail 'a worker that kept dying before finishing was not escalated and closed after MAX_ATTEMPTS'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:recover-exhausted' 'lease-death escalation was not recorded on the Issue'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:unresolved' 'escalated Issue was not closed as unresolvable'
+[[ ! -e $state_root/attempts/issue-91 ]] || fail 'attempts counter was not cleared after unresolvable closure'
+
+# Under the attempt limit, a crashed worker's Issue still returns to the queue
+# (no premature escalation) so ordinary transient deaths keep retrying.
+printf '92 running open\n' > "$state"
+printf '92 <!-- agentic-loop:lease worker=dead heartbeat=1 expires=1 -->\n' > "$FAKE_GH_ROOT/$state_key.comments"
+mkdir -p "$state_root/attempts"; printf '1\t0\n' > "$state_root/attempts/issue-92"
+: > "$state_root/stop.requested"
+"$target/bin/agentic-loop" _supervise
+grep -Eq '^92 queued open$' "$state" || fail 'a crashed worker under the attempt limit was not requeued'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:recovered' 'under-limit recovery was not recorded as a normal requeue'
+rm -f "$state_root/attempts/issue-91" "$state_root/attempts/issue-92"
+
 # Recovery also runs inside the poll loop, not only at startup: a running Issue
 # whose worker died (expired lease) is recovered and processed while the
 # supervisor keeps running, instead of remaining stuck at agent:running forever.
