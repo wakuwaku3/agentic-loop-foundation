@@ -10,10 +10,11 @@
 
 ## 要求のルーティング
 
-- 対話中のAgentが通常のbuild・変更要求を受けた場合、Issueキューがセットアップ済みでSupervisorが正常なら直接実装しない。同一要求を検索し、重複を作らずIssueを再利用または作成して、要求実態に対応する排他的な `category:*` 1個と `agent:queued` を付け、queuedまたはrunningを確認して終了する。
+- 対話中のAgentが通常のbuild・変更要求を受けた場合、Issueキューがセットアップ済みでGitHub Issueのread/writeと登録後状態を検証できるなら直接実装しない。必要最小限のactive Issue確認で同一要求を再利用または作成し、要求実態に対応する排他的な `category:*` 1個と `agent:queued` を付け、queuedまたはrunningを確認して終了する。
+- 利用者が「Issueを作って」など新規Issue作成を明示した場合は重複検索を省略する。ただし、既存Issueの再利用・重複確認も明示された場合と、コード診断・定期監査では検索する。
 - `agent:running` Issueを専用worktreeで処理中のworkerは受付を再実行しない。代替Issueを作らず、調査・変更・検証・PR・checks・review・merge・cleanupを完遂する。
 - 利用者が同期実行または直接実装を明示した場合は、その指示を優先してworker手順を実行する。
-- キューまたはSupervisorを利用できない場合は状態を明示し、[Issueキュー運用](docs/operations/issue-queue.md)の安全なfallbackに従う。
+- Supervisorの停止だけをIssue受付の失敗にしない。停止中も検証済みのIssueをqueuedとして永続化し、登録済みであること、停止中であること、処理開始にはSupervisorの起動が必要なことを報告する。GitHub権限または登録後状態を検証できない場合は成功扱いせず、[Issueキュー運用](docs/operations/issue-queue.md)の安全なfallbackに従う。
 - 読み取り専用の質問、診断、status確認、start・stopなどの運用コマンドはIssue化しない。
 
 ## 不変条件

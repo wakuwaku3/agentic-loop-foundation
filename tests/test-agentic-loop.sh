@@ -600,7 +600,17 @@ assert_contains "$target/AGENTS.md" '通常のbuild・変更要求' 'installed A
 assert_contains "$target/AGENTS.md" 'agent:running' 'installed AGENTS.md lacks the worker exception'
 assert_contains "$target/.agents/skills/submit-requirement/SKILL.md" 'Queue-first intake' 'installed skill lacks queue-first routing'
 assert_contains "$target/.agents/skills/submit-requirement/SKILL.md" 'Non-recursive worker exception' 'installed skill lacks the worker exception'
-assert_contains "$target/docs/operations/issue-queue.md" 'open Issueのtitleとbodyを検索' 'installed docs lack duplicate avoidance'
+assert_contains "$target/AGENTS.md" '新規Issue作成を明示した場合は重複検索を省略' 'installed AGENTS.md does not bypass duplicate search for explicit Issue creation'
+assert_contains "$target/.agents/skills/submit-requirement/SKILL.md" 'do not search for duplicates and create a new Issue' 'installed skill does not bypass duplicate search for explicit Issue creation'
+assert_contains "$target/.agents/skills/submit-requirement/SKILL.md" 'inspect only active Issues' 'installed skill lacks minimal active-Issue matching for automatic intake'
+assert_contains "$target/.agents/skills/submit-requirement/SKILL.md" 'search both open and closed Issues' 'installed skill does not preserve diagnosis duplicate checks'
+assert_contains "$target/.agents/skills/submit-requirement/SKILL.md" 'do not require it to be running for intake' 'installed skill still requires a running Supervisor for intake'
+assert_contains "$target/.agents/skills/submit-requirement/SKILL.md" 'will not be claimed until the Supervisor is started' 'installed skill does not report the stopped-Supervisor claim condition'
+assert_contains "$target/.agents/skills/submit-requirement/SKILL.md" 'final open/category/state invariants cannot be verified' 'installed skill lacks a safe fallback for unverifiable Issue state'
+assert_contains "$target/docs/operations/issue-queue.md" '重複検索を呼ばず、新規作成する' 'installed docs do not bypass duplicate-search API calls for explicit Issue creation'
+assert_contains "$target/docs/operations/issue-queue.md" 'open・closed Issueを検索' 'installed docs do not preserve diagnosis duplicate checks'
+assert_contains "$target/docs/operations/issue-queue.md" 'Supervisorが停止中であること' 'installed docs do not require stopped-Supervisor reporting'
+assert_contains "$target/docs/operations/issue-queue.md" 'Supervisor停止はこのfallbackと区別する' 'installed docs conflate a stopped Supervisor with GitHub verification failure'
 assert_contains "$target/docs/operations/issue-queue.md" '安全なfallback' 'installed docs lack safe fallback'
 timer="$XDG_CONFIG_HOME/systemd/user/agentic-loop-main-sync-$(printf '%s' "${target#/}" | tr '/' '-').timer"
 service=${timer%.timer}.service
