@@ -3,7 +3,7 @@ set -euo pipefail
 
 readonly PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 readonly RUN_ROOT="$(mktemp -d)"
-readonly TEST_GROUPS=(queue lifecycle auxiliary)
+readonly TEST_GROUPS=(queue lifecycle auxiliary upgrade)
 declare -A pids=()
 
 cleanup() {

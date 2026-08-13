@@ -10,7 +10,7 @@ readonly TEST_HOST_PATH="$PATH"
 readonly TEST_GROUP="${AGENTIC_LOOP_TEST_GROUP:-all}"
 trap 'rm -rf "$TEST_ROOT"' EXIT
 
-case "$TEST_GROUP" in all|queue|lifecycle|auxiliary) ;; *) printf 'Unknown test group: %s\n' "$TEST_GROUP" >&2; exit 2 ;; esac
+case "$TEST_GROUP" in all|queue|lifecycle|auxiliary|upgrade) ;; *) printf 'Unknown test group: %s\n' "$TEST_GROUP" >&2; exit 2 ;; esac
 
 fail() { printf 'FAIL: %s\n' "$1" >&2; exit 1; }
 assert_contains() { grep -Fq -- "$2" "$1" || fail "$3"; }
@@ -49,6 +49,7 @@ key=$(printf '%s' "$PWD" | tr '/' '_')
 state="$FAKE_GH_ROOT/$key.state"
 project="$FAKE_GH_ROOT/$key.project"
 project_items="$FAKE_GH_ROOT/$key.project-items"
+project_values="$FAKE_GH_ROOT/$key.project-values"
 comments="$FAKE_GH_ROOT/$key.comments"
 views="$FAKE_GH_ROOT/$key.views"
 labels="$FAKE_GH_ROOT/$key.labels"
@@ -274,13 +275,39 @@ case "${1:-} ${2:-}" in
   'project list')
     if [[ -e $project ]]; then printf '7\n'; fi ;;
   'project create') touch "$project"; printf '{"number":7}\n' ;;
-  'project link'|'project field-create'|'project item-edit') exit 0 ;;
+  'project link'|'project field-create') exit 0 ;;
+  'project item-edit')
+    item_id='' option_id='' text=''
+    for ((i=1; i<=$#; i++)); do
+      case ${!i} in
+        --id) j=$((i+1)); item_id=${!j} ;;
+        --single-select-option-id) j=$((i+1)); option_id=${!j} ;;
+        --text) j=$((i+1)); text=${!j} ;;
+      esac
+    done
+    item_number=${item_id#PVTI_}
+    status=''; category=''; blocked_b64=''
+    IFS=$'\t' read -r status category blocked_b64 < <(awk -F '\t' -v n="$item_number" '$1 == n {print $2 "\t" $3 "\t" $4; exit}' "$project_values" 2>/dev/null || true)
+    case $option_id in
+      PVTFO_queued) status=Queued ;; PVTFO_running) status=Running ;;
+      PVTFO_needs_input) status='Needs input' ;; PVTFO_in_review) status='In review' ;;
+      PVTFO_done) status=Done ;; PVTFO_failed) status=Failed ;; PVTFO_stale) status=Stale ;;
+      PVTFO_blocked) status=Blocked ;; PVTFO_improvement) category=Improvement ;;
+      PVTFO_feature) category=Feature ;;
+    esac
+    [[ -z $text ]] || blocked_b64=$(printf '%s' "$text" | base64 -w0)
+    awk -F '\t' -v n="$item_number" '$1 != n' "$project_values" 2>/dev/null > "$project_values.$$.tmp" || true
+    printf '%s\t%s\t%s\t%s\n' "$item_number" "$status" "$category" "$blocked_b64" >> "$project_values.$$.tmp"
+    mv "$project_values.$$.tmp" "$project_values" ;;
   'project item-list')
-    if [[ $* == *'.items[] | [('* ]]; then
+    if [[ $* == *'.items[] | [('* || $* == *'field("agentstatus")'* ]]; then
       while IFS= read -r item_url; do
         [[ -n $item_url ]] || continue
         item_number=${item_url##*/}
-        printf '%s\t%s\tPVTI_%s\n' "$item_number" "$item_url" "$item_number"
+        status=''; category=''; blocked_b64=''
+        IFS=$'\t' read -r status category blocked_b64 < <(awk -F '\t' -v n="$item_number" '$1 == n {print $2 "\t" $3 "\t" $4; exit}' "$project_values" 2>/dev/null || true)
+        blocked=''; [[ -z $blocked_b64 ]] || blocked=$(base64 -d <<< "$blocked_b64")
+        printf '%s\x1f%s\x1fPVTI_%s\x1f%s\x1f%s\x1f%s\n' "$item_number" "$item_url" "$item_number" "$status" "$category" "$blocked"
       done < <(cat "$project_items" 2>/dev/null || true)
     elif [[ $* == *content.number* ]]; then printf 'PVTI_fake\n'; else cat "$project_items" 2>/dev/null || true; fi ;;
   'project item-add')
@@ -291,6 +318,10 @@ case "${1:-} ${2:-}" in
     fi
     url=''; for ((i=1; i<=$#; i++)); do [[ ${!i} == --url ]] && { j=$((i+1)); url=${!j}; }; done
     grep -Fxq -- "$url" "$project_items" 2>/dev/null || printf '%s\n' "$url" >> "$project_items"
+    item_number=${url##*/}
+    if ! awk -F '\t' -v n="$item_number" '$1 == n {found=1} END {exit !found}' "$project_values" 2>/dev/null; then
+      printf '%s\t\t\t\n' "$item_number" >> "$project_values"
+    fi
     [[ $* == *'--jq .id'* ]] && printf 'PVTI_%s\n' "${url##*/}" ;;
   'project view') [[ ${FAKE_PROJECT_FAIL:-0} == 0 ]] && printf 'PVT_fake\n' ;;
   'project field-list')
@@ -483,6 +514,7 @@ if [[ ${1:-} == run && ${2:-} == --config && ${4:-} == -- ]]; then
   shift 4
   PATH="$FAKE_BIN:$TEST_HOST_PATH" exec "$@"
 fi
+[[ ${FAKE_DEVBOX_FAIL:-0} == 0 ]] || exit 1
 exit 0
 FAKE_DEVBOX
 chmod +x "$FAKE_BIN/gh" "$FAKE_BIN/codex" "$FAKE_BIN/claude" "$FAKE_BIN/opencode" "$FAKE_BIN/systemctl" "$FAKE_BIN/systemd-escape" "$FAKE_BIN/devbox"
@@ -510,6 +542,8 @@ empty_repository() {
   bare="$TEST_ROOT/$name.git"
   git init --bare --quiet "$bare"
   git init --quiet -b main "$target"
+  git -C "$target" config user.name Test
+  git -C "$target" config user.email test@example.invalid
   git -C "$target" remote add origin "$bare"
   printf '%s\n' "$target"
 }
@@ -686,6 +720,37 @@ tail -n "+$((calls_before + 1))" "$FAKE_GH_ROOT/calls" > "$TEST_ROOT/converged-s
 [[ $(grep -c $'\tlabel create ' "$TEST_ROOT/converged-setup-calls.log" || true) -eq 0 ]] || fail 'converged setup rewrote unchanged Labels'
 grep -Fq $'state=open' "$TEST_ROOT/converged-setup-calls.log" || fail 'setup did not backfill open content'
 if grep -Eq $'api repos/.+/(issues|pulls).*state=all' "$TEST_ROOT/converged-setup-calls.log"; then fail 'setup scanned closed Issue or PR history'; fi
+
+# A converged queued Issue performs no Project mutation on an idle supervisor
+# poll. A changed value is written once and the in-process snapshot converges.
+printf '92 queued open none 2026-01-01T00:00:00Z none improvement\n' > "$FAKE_GH_ROOT/$state_key.state"
+printf 'https://github.com/acme/installed-project/issues/92\n' >> "$FAKE_GH_ROOT/$state_key.project-items"
+printf '92\tQueued\tImprovement\t\n' >> "$FAKE_GH_ROOT/$state_key.project-values"
+rm -f "$(git -C "$target" rev-parse --absolute-git-dir)/agentic-loop/graphql-rate-limit"
+calls_before=$(wc -l < "$FAKE_GH_ROOT/calls")
+FAKE_CORE_REMAINING=499 AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _supervise
+tail -n "+$((calls_before + 1))" "$FAKE_GH_ROOT/calls" > "$TEST_ROOT/converged-idle-project-calls.log"
+if [[ $(grep -c $'\tproject item-edit ' "$TEST_ROOT/converged-idle-project-calls.log" || true) -ne 0 ]]; then
+  cat "$TEST_ROOT/converged-idle-project-calls.log" >&2
+  fail 'idle supervisor rewrote converged Project fields'
+fi
+
+awk -F '\t' 'BEGIN{OFS="\t"} $1 == 92 {$3="Feature"} {print}' "$FAKE_GH_ROOT/$state_key.project-values" > "$FAKE_GH_ROOT/$state_key.project-values.tmp"
+mv "$FAKE_GH_ROOT/$state_key.project-values.tmp" "$FAKE_GH_ROOT/$state_key.project-values"
+rm -f "$(git -C "$target" rev-parse --absolute-git-dir)/agentic-loop/graphql-rate-limit"
+calls_before=$(wc -l < "$FAKE_GH_ROOT/calls")
+FAKE_CORE_REMAINING=499 AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _supervise
+tail -n "+$((calls_before + 1))" "$FAKE_GH_ROOT/calls" > "$TEST_ROOT/drifted-idle-project-calls.log"
+[[ $(grep -c $'\tproject item-edit ' "$TEST_ROOT/drifted-idle-project-calls.log" || true) -eq 1 ]] || fail 'Project Category drift was not repaired exactly once'
+grep -Eq $'^92\tQueued\tImprovement\t' "$FAKE_GH_ROOT/$state_key.project-values" || fail 'Project Category cache did not converge after repair'
+
+# Installation remains available while GraphQL is exhausted and does not make
+# a doomed permission query or enter Project setup.
+rm -f "$(git -C "$target" rev-parse --absolute-git-dir)/agentic-loop/graphql-rate-limit"
+calls_before=$(wc -l < "$FAKE_GH_ROOT/calls")
+FAKE_GRAPHQL_REMAINING=0 AGENTIC_LOOP_SOURCE="$PROJECT_ROOT" AGENTIC_LOOP_TARGET="$target" AGENTIC_LOOP_SKIP_START=1 "$PROJECT_ROOT/install.sh" >/dev/null
+tail -n "+$((calls_before + 1))" "$FAKE_GH_ROOT/calls" > "$TEST_ROOT/exhausted-install-calls.log"
+[[ $(grep -c $'\tapi graphql ' "$TEST_ROOT/exhausted-install-calls.log" || true) -eq 0 ]] || fail 'install queried GraphQL after observing exhausted quota'
 
 # Intake synchronization is immediate, idempotent, and persists temporary Projects failures for reconciliation.
 rm -f "$FAKE_GH_ROOT/$state_key.project-failures" "$(git -C "$target" rev-parse --absolute-git-dir)/agentic-loop/graphql-rate-limit"
@@ -2228,6 +2293,167 @@ degraded_json=$(FAKE_METRICS_EVENTS_FAIL=1 "$target/bin/agentic-loop" metrics --
 metrics_text=$("$target/bin/agentic-loop" metrics --days "$days" --as-of "$as_of")
 [[ $metrics_text == *'転帰:'* ]] || fail 'metrics text format did not render a summary'
 [[ $metrics_text != *'Fake issue'* && $metrics_text != *'worker=w'* ]] || fail 'metrics text format leaked private data'
+
+fi
+
+if [[ $TEST_GROUP == all || $TEST_GROUP == upgrade ]]; then
+
+# --- Foundation upgrade (bin/agentic-loop upgrade, scripts/upgrade-target.sh) ---
+# See docs/operations/upgrade.md / docs/decisions/0009-foundation-upgrade.md.
+
+upgrade_target=$(new_repository upgrade-target)
+AGENTIC_LOOP_SOURCE="$PROJECT_ROOT" AGENTIC_LOOP_TARGET="$upgrade_target" AGENTIC_LOOP_SKIP_START=1 "$PROJECT_ROOT/install.sh" >/dev/null
+[[ -f $upgrade_target/.agentic-loop/manifest.json ]] || fail 'install did not write a Foundation manifest'
+[[ $(yq -p json -o yaml '.mode' "$upgrade_target/.agentic-loop/manifest.json") == install ]] || fail 'manifest recorded the wrong install mode'
+[[ $(yq -p json -o yaml '.source.repository' "$upgrade_target/.agentic-loop/manifest.json") == 'wakuwaku3/agentic-loop-foundation' ]] || fail 'manifest recorded the wrong source repository'
+[[ $(yq -p json -o yaml '.source.revision' "$upgrade_target/.agentic-loop/manifest.json") =~ ^[0-9a-f]{40}$ ]] || fail 'manifest did not record a resolved 40-hex revision'
+[[ $(yq -p json -o yaml '.files | map(select(.class == "shared")) | length' "$upgrade_target/.agentic-loop/manifest.json") -gt 0 ]] || fail 'manifest recorded no shared files'
+[[ $(yq -p json -o yaml '.files | map(select(.class == "init")) | length' "$upgrade_target/.agentic-loop/manifest.json") -eq 0 ]] || fail 'an install-mode manifest must not record init-class files'
+git -C "$upgrade_target" add -A && git -C "$upgrade_target" commit --quiet -m 'install foundation' && git -C "$upgrade_target" push --quiet
+
+# A "new" Foundation revision: this checkout, plus a shared-file update and a
+# brand-new shared file, built by copying the working tree (so uncommitted
+# work in this checkout is exercised as the upgrade target, same as every
+# other install test above using AGENTIC_LOOP_SOURCE="$PROJECT_ROOT").
+new_source="$TEST_ROOT/foundation-v2"
+cp -a "$PROJECT_ROOT" "$new_source"
+rm -rf "$new_source/.git"
+printf '\n# upgraded\n' >> "$new_source/AGENTS.md"
+printf 'new doc\n' > "$new_source/docs/operations/new-feature.md"
+sed -i 's#docs/operations/upgrade.md#docs/operations/upgrade.md docs/operations/new-feature.md#' "$new_source/scripts/lib/foundation-files.sh"
+
+# Pristine: no upstream changes -> no-op dry-run, zero writes.
+before_status=$(git -C "$upgrade_target" status --porcelain)
+pristine_out=$("$upgrade_target/bin/agentic-loop" upgrade --source "$PROJECT_ROOT")
+[[ $pristine_out == *'変更はありません'* ]] || fail 'a pristine upgrade dry-run reported spurious changes'
+[[ $(git -C "$upgrade_target" status --porcelain) == "$before_status" ]] || fail 'a dry-run upgrade modified the working tree'
+
+# Normal update: dry-run reports it, changes nothing, --apply reflects it.
+update_out=$("$upgrade_target/bin/agentic-loop" upgrade --source "$new_source")
+[[ $update_out == *'[update] AGENTS.md'* ]] || fail 'dry-run did not report the AGENTS.md update'
+[[ $update_out == *'[add] docs/operations/new-feature.md'* ]] || fail 'dry-run did not report the new shared file as an addition'
+[[ $(git -C "$upgrade_target" status --porcelain) == "$before_status" ]] || fail 'a dry-run upgrade with pending changes modified the working tree'
+"$upgrade_target/bin/agentic-loop" upgrade --source "$new_source" --apply --skip-verify >/dev/null || fail 'apply of a safe update failed'
+assert_contains "$upgrade_target/AGENTS.md" '# upgraded' 'apply did not update AGENTS.md'
+[[ -f $upgrade_target/docs/operations/new-feature.md ]] || fail 'apply did not add the new shared file'
+[[ $(yq -p json -o yaml '.source.revision' "$upgrade_target/.agentic-loop/manifest.json") == unknown ]] || fail 'manifest should record "unknown" for an unpinned --source without its own Git history'
+git -C "$upgrade_target" add -A && git -C "$upgrade_target" commit --quiet -m 'apply update'
+rerun_out=$("$upgrade_target/bin/agentic-loop" upgrade --source "$new_source")
+[[ $rerun_out == *'変更はありません'* ]] || fail 'rerunning upgrade after a completed update was not a no-op'
+
+# revision must be explicit: no --revision/--source and an unpinned config -> exit 2.
+rc=0
+"$upgrade_target/bin/agentic-loop" upgrade >/dev/null 2>&1 || rc=$?
+[[ $rc -eq 2 ]] || fail "expected exit 2 when no revision is configured or given, got $rc"
+
+# Supervisor running -> --apply is refused, nothing changes. A live pid file
+# is faked directly (rather than a real `start`/`stop` cycle) to keep this
+# scenario fast; upgrade-target.sh only checks $STATE_ROOT/supervisor.pid.
+mkdir -p "$upgrade_target/.git/agentic-loop"
+printf '%s\n' "$$" > "$upgrade_target/.git/agentic-loop/supervisor.pid"
+rc=0
+"$upgrade_target/bin/agentic-loop" upgrade --source "$new_source" --apply --skip-verify >/dev/null 2>&1 || rc=$?
+[[ $rc -eq 2 ]] || fail "expected exit 2 while the Supervisor is running, got $rc"
+rm -f "$upgrade_target/.git/agentic-loop/supervisor.pid"
+
+# User-edited conflict: never silently overwritten; --overwrite adopts it explicitly.
+conflict_target=$(new_repository conflict-target)
+AGENTIC_LOOP_SOURCE="$PROJECT_ROOT" AGENTIC_LOOP_TARGET="$conflict_target" AGENTIC_LOOP_SKIP_START=1 "$PROJECT_ROOT/install.sh" >/dev/null
+git -C "$conflict_target" add -A && git -C "$conflict_target" commit --quiet -m install && git -C "$conflict_target" push --quiet
+printf '\n# locally customized\n' >> "$conflict_target/AGENTS.md"
+git -C "$conflict_target" add AGENTS.md && git -C "$conflict_target" commit --quiet -m 'local edit'
+conflict_out=$("$conflict_target/bin/agentic-loop" upgrade --source "$new_source")
+[[ $conflict_out == *'[conflict] AGENTS.md'* ]] || fail 'dry-run did not report the user-edited AGENTS.md as a conflict'
+"$conflict_target/bin/agentic-loop" upgrade --source "$new_source" --apply --skip-verify >/dev/null || fail 'apply with a conflict failed unexpectedly'
+assert_contains "$conflict_target/AGENTS.md" 'locally customized' 'apply silently overwrote a user-edited file'
+[[ -f $conflict_target/AGENTS.md.agentic-loop-new ]] || fail 'apply did not stage the new content alongside a conflicting file'
+git -C "$conflict_target" add -A && git -C "$conflict_target" commit --quiet -m 'after conflict apply'
+"$conflict_target/bin/agentic-loop" upgrade --source "$new_source" --apply --overwrite AGENTS.md --skip-verify >/dev/null || fail 'apply with --overwrite failed'
+assert_contains "$conflict_target/AGENTS.md" '# upgraded' '--overwrite did not adopt the new content'
+[[ -f $conflict_target/AGENTS.md.agentic-loop-new ]] && fail '--overwrite left a stale .agentic-loop-new file behind'
+
+# class:init files are seeded once and never touched by upgrade, even on drift.
+init_target=$(empty_repository init-target)
+AGENTIC_LOOP_SOURCE="$PROJECT_ROOT" AGENTIC_LOOP_TARGET="$init_target" AGENTIC_LOOP_SKIP_START=1 "$PROJECT_ROOT/install.sh" >/dev/null
+git -C "$init_target" add -A && git -C "$init_target" commit --quiet -m 'init install' && git -C "$init_target" push --quiet -u origin main
+printf '\n# upstream readme change\n' >> "$new_source/README.md"
+init_out=$("$init_target/bin/agentic-loop" upgrade --source "$new_source")
+[[ $init_out == *'[init-notice] README.md'* ]] || fail 'dry-run did not report an init-owned file with upstream drift'
+"$init_target/bin/agentic-loop" upgrade --source "$new_source" --apply --skip-verify >/dev/null || fail 'apply with an init-owned drift failed'
+if grep -Fq 'upstream readme change' "$init_target/README.md"; then fail 'apply modified a user-owned init file'; fi
+
+# Old install predating manifest.json: a pending config migration is detected,
+# applied idempotently, pins the applied revision, and bumps migration_level.
+old_source="$TEST_ROOT/foundation-v0"
+cp -a "$PROJECT_ROOT" "$old_source"
+sed -i '/^\[foundation\]$/,$d' "$old_source/.agentic-loop.toml"
+migration_target=$(new_repository migration-target)
+AGENTIC_LOOP_SOURCE="$old_source" AGENTIC_LOOP_TARGET="$migration_target" AGENTIC_LOOP_SKIP_START=1 "$PROJECT_ROOT/install.sh" >/dev/null
+if grep -Fq '[foundation]' "$migration_target/.agentic-loop.toml"; then fail 'pre-upgrade fixture unexpectedly already has a [foundation] section'; fi
+git -C "$migration_target" add -A && git -C "$migration_target" commit --quiet -m 'pre-upgrade install' && git -C "$migration_target" push --quiet
+migration_out=$("$migration_target/bin/agentic-loop" upgrade --source "$PROJECT_ROOT")
+[[ $migration_out == *'[migration] 0001-foundation-config-section'* ]] || fail 'dry-run did not report the pending config migration'
+"$migration_target/bin/agentic-loop" upgrade --source "$PROJECT_ROOT" --apply --skip-verify >/dev/null || fail 'apply of a pending migration failed'
+grep -Fq '[foundation]' "$migration_target/.agentic-loop.toml" || fail 'migration did not add the [foundation] section'
+resolved_revision=$(git -C "$PROJECT_ROOT" rev-parse HEAD)
+assert_contains "$migration_target/.agentic-loop.toml" "revision = \"$resolved_revision\"" 'migration apply did not pin the applied revision'
+[[ $(yq -p json -o yaml '.migration_level' "$migration_target/.agentic-loop/manifest.json") -eq 1 ]] || fail 'manifest migration_level was not bumped after applying the migration'
+migration_rerun=$("$migration_target/bin/agentic-loop" upgrade --source "$PROJECT_ROOT")
+[[ $migration_rerun == *'変更はありません'* ]] || fail 'rerunning upgrade after a completed migration was not a no-op'
+
+# Approval gate: a breaking/irreversible migration blocks --apply until --approve.
+approval_source="$TEST_ROOT/foundation-breaking"
+cp -a "$PROJECT_ROOT" "$approval_source"
+rm -rf "$approval_source/.git"
+cat > "$approval_source/scripts/upgrade/migrations/9999-test-breaking.sh" <<'BREAKING_MIGRATION'
+#!/usr/bin/env bash
+# id: 9999-test-breaking
+# risk: breaking
+# reversible: no
+# approval: required
+# summary: テスト専用のbreaking migration。
+# recovery: 対応不要(テスト専用)。
+set -euo pipefail
+target=$1
+mode=$2
+marker="$target/.agentic-loop-test-breaking-applied"
+case $mode in
+  check) [[ -f $marker ]] && exit 0 || exit 1 ;;
+  apply) : > "$marker" ;;
+esac
+BREAKING_MIGRATION
+chmod +x "$approval_source/scripts/upgrade/migrations/9999-test-breaking.sh"
+approval_target=$(new_repository approval-target)
+AGENTIC_LOOP_SOURCE="$PROJECT_ROOT" AGENTIC_LOOP_TARGET="$approval_target" AGENTIC_LOOP_SKIP_START=1 "$PROJECT_ROOT/install.sh" >/dev/null
+git -C "$approval_target" add -A && git -C "$approval_target" commit --quiet -m install && git -C "$approval_target" push --quiet
+approval_out=$("$approval_target/bin/agentic-loop" upgrade --source "$approval_source")
+[[ $approval_out == *'承認が必要'* ]] || fail 'dry-run did not surface the pending approval requirement'
+rc=0
+"$approval_target/bin/agentic-loop" upgrade --source "$approval_source" --apply --skip-verify >/dev/null 2>&1 || rc=$?
+[[ $rc -eq 3 ]] || fail "expected exit 3 when a breaking migration is not approved, got $rc"
+[[ -f $approval_target/.agentic-loop-test-breaking-applied ]] && fail 'apply changed state despite a missing approval'
+[[ -z $(git -C "$approval_target" status --porcelain) ]] || fail 'a rejected apply left the working tree dirty'
+"$approval_target/bin/agentic-loop" upgrade --source "$approval_source" --apply --approve --skip-verify >/dev/null || fail 'apply with --approve failed'
+[[ -f $approval_target/.agentic-loop-test-breaking-applied ]] || fail '--approve did not apply the breaking migration'
+
+# Verify failure: applied state is kept (not silently reverted), doctor flags
+# the unfinished upgrade, and --rollback restores the pre-apply state via Git.
+verify_target=$(new_repository verify-target)
+AGENTIC_LOOP_SOURCE="$PROJECT_ROOT" AGENTIC_LOOP_TARGET="$verify_target" AGENTIC_LOOP_SKIP_START=1 "$PROJECT_ROOT/install.sh" >/dev/null
+git -C "$verify_target" add -A && git -C "$verify_target" commit --quiet -m install && git -C "$verify_target" push --quiet
+rc=0
+FAKE_DEVBOX_FAIL=1 "$verify_target/bin/agentic-loop" upgrade --source "$new_source" --apply >/dev/null 2>&1 || rc=$?
+[[ $rc -eq 1 ]] || fail "expected exit 1 when post-apply verification fails, got $rc"
+assert_contains "$verify_target/AGENTS.md" '# upgraded' 'a verify failure should still leave the applied content in place'
+[[ -f $verify_target/.git/agentic-loop/upgrade-last-apply.json ]] || fail 'a verify failure did not leave a resumable apply record'
+interrupted_check=$( ("$verify_target/bin/agentic-loop" doctor --format json || true) | yq -p json '.checks[] | select(.name == "中断したupgrade") | .level')
+[[ $interrupted_check == failure ]] || fail 'doctor should report the unfinished upgrade as a failure'
+"$verify_target/bin/agentic-loop" upgrade --rollback || fail 'rollback failed'
+git -C "$verify_target" diff --quiet -- AGENTS.md || fail 'rollback did not restore AGENTS.md'
+[[ ! -f $verify_target/docs/operations/new-feature.md ]] || fail 'rollback did not remove a newly added file'
+[[ ! -f $verify_target/.git/agentic-loop/upgrade-last-apply.json ]] || fail 'rollback did not clear the apply record'
+interrupted_check_after=$( ("$verify_target/bin/agentic-loop" doctor --format json || true) | yq -p json '.checks[] | select(.name == "中断したupgrade") | .level')
+[[ $interrupted_check_after == success ]] || fail 'doctor should report the upgrade record cleared after rollback'
 
 fi
 

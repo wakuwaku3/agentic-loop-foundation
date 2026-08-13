@@ -3,24 +3,8 @@ set -euo pipefail
 
 readonly SOURCE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 readonly TARGET="${1:-.}"
-readonly SHARED_FILES=(
-  AGENTS.md .codex/config.toml docs/policies/cost.md docs/policies/testing.md docs/policies/external-environment.md docs/policies/development-environment.md docs/policies/ai-tool-neutrality.md
-  docs/policies/github-language.md docs/policies/validation-harness.md docs/policies/continuous-delivery.md
-  docs/decisions/0002-github-issue-queue.md docs/decisions/0003-supervisor-resilience-and-api-budget.md docs/decisions/0004-worker-resume-and-handoff.md docs/decisions/0005-status-observability.md docs/decisions/0006-worker-hang-timeout.md docs/decisions/0007-loop-metrics.md docs/decisions/0008-multi-host-claim.md docs/operations/issue-queue.md docs/operations/codebase-diagnosis.md docs/operations/loop-metrics.md
-  .agents/skills/submit-requirement/SKILL.md
-  .agents/skills/submit-requirement/agents/openai.yaml
-  .agents/skills/diagnose-codebase/SKILL.md
-  .agents/skills/diagnose-codebase/agents/openai.yaml
-  .claude/skills/submit-requirement/SKILL.md
-  .claude/skills/diagnose-codebase/SKILL.md
-  .agentic-loop/guard-secrets.sh .agentic-loop/update-main.sh .agentic-loop/diagnose-codebase.sh .agentic-loop.toml
-  .githooks/pre-commit .githooks/pre-push bin/agentic-loop bin/agentic-loop-diagnose
-)
-readonly INIT_FILES=(
-  README.md .editorconfig .gitignore Makefile install.sh devbox.json devbox.lock
-  docs/decisions/0001-minimal-foundation.md scripts/format.sh scripts/lint.sh scripts/check-environment.sh scripts/install-target.sh
-  tests/test-agentic-loop.sh .github/workflows/ci.yml
-)
+# shellcheck source=lib/foundation-files.sh
+source "$SOURCE_ROOT/scripts/lib/foundation-files.sh"
 
 fail() { printf 'install-target: %s\n' "$1" >&2; exit 1; }
 
@@ -42,7 +26,7 @@ effective_provider() {
 }
 
 preflight() {
-  local command_name provider provider_cli
+  local command_name provider provider_cli graphql_remaining
   for command_name in git gh yq devbox systemctl systemd-escape; do command -v "$command_name" >/dev/null 2>&1 || fail "$command_name is required"; done
   provider=$(effective_provider)
   case $provider in codex) provider_cli=codex ;; claude) provider_cli=claude ;; opencode) provider_cli=opencode ;; *) fail 'agent.provider must be codex, claude, or opencode' ;; esac
@@ -50,8 +34,14 @@ preflight() {
   git -C "$TARGET" rev-parse --git-dir >/dev/null 2>&1 || fail 'target must be a Git repository'
   git -C "$TARGET" remote get-url origin >/dev/null 2>&1 || fail 'origin remote is required'
   gh auth status >/dev/null 2>&1 || fail 'GitHub authentication is required; run gh auth login'
-  gh api graphql -f query='query { viewer { login projectsV2(first: 1) { totalCount } } }' >/dev/null 2>&1 ||
-    fail 'GitHub token needs repository access and project/read:project scopes'
+  graphql_remaining=$(gh api rate_limit --jq '.resources.graphql.remaining' 2>/dev/null) || fail 'cannot read GitHub API rate limit'
+  read -r graphql_remaining _ <<< "$graphql_remaining"
+  if [[ $graphql_remaining =~ ^[0-9]+$ && $graphql_remaining -gt 0 ]]; then
+    gh api graphql -f query='query { viewer { login projectsV2(first: 1) { totalCount } } }' >/dev/null 2>&1 ||
+      fail 'GitHub token needs repository access and project/read:project scopes'
+  else
+    printf 'GraphQL rate limitが枯渇しているため、Projects権限検査とsetupを延期します。\n' >&2
+  fi
   (cd "$TARGET" && gh repo view --json nameWithOwner --jq .nameWithOwner >/dev/null 2>&1) || fail 'cannot access the target GitHub repository'
   [[ $provider != codex ]] || codex exec --help >/dev/null 2>&1 || fail 'Codex CLI exec mode is required'
 }
@@ -77,7 +67,7 @@ record_runtime_path() {
 }
 
 main() {
-  local target=$TARGET mode=install file hook_path
+  local target=$TARGET mode=install file hook_path repository revision revision_ref migration_level entries='' history
   local -a files=("${SHARED_FILES[@]}")
   [[ -d $target ]] || fail "target is not a directory: $target"
   preflight
@@ -90,6 +80,13 @@ main() {
   for file in "${files[@]}"; do
     if [[ ! -e $target/$file ]]; then mkdir -p "$target/$(dirname "$file")"; cp "$SOURCE_ROOT/$file" "$target/$file"; fi
   done
+
+  repository=${AGENTIC_LOOP_REPOSITORY:-wakuwaku3/agentic-loop-foundation}
+  revision=${AGENTIC_LOOP_RESOLVED_REVISION:-}
+  [[ -n $revision ]] || revision=$(git -C "$SOURCE_ROOT" rev-parse HEAD 2>/dev/null || printf 'unknown')
+  revision_ref=${AGENTIC_LOOP_REVISION:-main}
+  migration_level=$(find "$SOURCE_ROOT/scripts/upgrade/migrations" -maxdepth 1 -name '[0-9][0-9][0-9][0-9]-*.sh' 2>/dev/null | wc -l | tr -d ' ')
+
   chmod +x "$target/bin/agentic-loop" "$target/bin/agentic-loop-diagnose" "$target/.agentic-loop/guard-secrets.sh" "$target/.agentic-loop/update-main.sh" "$target/.agentic-loop/diagnose-codebase.sh" "$target/.githooks/pre-commit" "$target/.githooks/pre-push"
   [[ $mode == init ]] && chmod +x "$target/install.sh" "$target/scripts/"*.sh "$target/tests/"*.sh
   git -C "$target" config --local core.hooksPath .githooks
@@ -97,6 +94,11 @@ main() {
   "$target/bin/agentic-loop" setup
   "$target/.agentic-loop/update-main.sh" install "$target"
   "$target/.agentic-loop/diagnose-codebase.sh" install "$target"
+  for file in "${SHARED_FILES[@]}"; do entries+="$file"$'\t'"shared"$'\n'; done
+  if [[ $mode == init ]]; then for file in "${INIT_FILES[@]}"; do entries+="$file"$'\t'"init"$'\n'; done; fi
+  history=$(printf '{"at":%s,"from_revision":"none","to_revision":"%s","from_level":0,"to_level":%s,"steps":[],"result":"installed"}' "$(date +%s)" "$(foundation_json_escape "$revision")" "$migration_level")
+  foundation_manifest_write "$target" "$mode" "$repository" "$revision" "$revision_ref" "$migration_level" "$entries" "$history"
+
   if [[ ${AGENTIC_LOOP_SKIP_START:-0} != 1 ]]; then "$target/bin/agentic-loop" start; fi
   printf 'Agentic loop installed (%s) in %s\n' "$mode" "$(cd "$target" && pwd)"
 }
