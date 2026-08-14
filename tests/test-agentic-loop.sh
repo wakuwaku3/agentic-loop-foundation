@@ -550,14 +550,40 @@ cat > "$FAKE_BIN/devbox" <<'FAKE_DEVBOX'
 set -euo pipefail
 printf '%s\n' "$*" >> "$FAKE_GH_ROOT/devbox-calls"
 if [[ ${1:-} == run && ${2:-} == --config && ${4:-} == -- ]]; then
+  [[ ${FAKE_DEVBOX_FAIL:-0} == 0 ]] || exit 1
+  config_dir=$3
+  run_path="$FAKE_BIN:$TEST_HOST_PATH"
+  # Simulate a real Devbox virtenv's on-disk shape (a profile symlink chain
+  # pointing at a "store" directory) for any --config directory that carries
+  # its own devbox.json, except PROJECT_ROOT itself: install-target.sh's
+  # bootstrap of *this* script legitimately uses --config PROJECT_ROOT (see
+  # install.sh), and this repository's own working tree must stay untouched by
+  # the test suite. Deleting the store directory (not the symlink chain) lets
+  # tests simulate nix GC realistically: the profile symlink dangles exactly
+  # as it would for real.
+  if [[ -f $config_dir/devbox.json && $config_dir != "$PROJECT_ROOT" ]]; then
+    store_dir="$FAKE_GH_ROOT/devbox-store/${config_dir//\//_}"
+    if [[ ! -d $store_dir/bin ]]; then
+      real_bin=$(PATH="$TEST_HOST_PATH" command -v yq); real_bin=${real_bin%/*}
+      mkdir -p "$store_dir/bin"
+      for real_tool in "$real_bin"/*; do
+        [[ -e $real_tool ]] || continue
+        ln -sfn "$real_tool" "$store_dir/bin/${real_tool##*/}"
+      done
+    fi
+    mkdir -p "$config_dir/.devbox/nix/profile"
+    ln -sfn "$store_dir" "$config_dir/.devbox/nix/profile/default-1-link"
+    ln -sfn default-1-link "$config_dir/.devbox/nix/profile/default"
+    run_path="$config_dir/.devbox/nix/profile/default/bin:$run_path"
+  fi
   shift 4
-  PATH="$FAKE_BIN:$TEST_HOST_PATH" exec "$@"
+  PATH="$run_path" exec "$@"
 fi
 [[ ${FAKE_DEVBOX_FAIL:-0} == 0 ]] || exit 1
 exit 0
 FAKE_DEVBOX
 chmod +x "$FAKE_BIN/gh" "$FAKE_BIN/codex" "$FAKE_BIN/claude" "$FAKE_BIN/opencode" "$FAKE_BIN/systemctl" "$FAKE_BIN/systemd-escape" "$FAKE_BIN/devbox"
-export PATH="$FAKE_BIN:$PATH" FAKE_BIN FAKE_GH_ROOT TEST_HOST_PATH XDG_CONFIG_HOME="$TEST_ROOT/config"
+export PATH="$FAKE_BIN:$PATH" FAKE_BIN FAKE_GH_ROOT TEST_HOST_PATH PROJECT_ROOT XDG_CONFIG_HOME="$TEST_ROOT/config"
 
 new_repository() {
   local name=$1 target bare
@@ -2269,7 +2295,11 @@ assert_contains "$empty/README.md" 'category:improvement' 'installed README.md d
 # Devbox definition instead of requiring an unpinned host installation.
 bootstrap_bin="$TEST_ROOT/bootstrap-bin"
 mkdir -p "$bootstrap_bin"
-for command_name in bash dirname git devbox mktemp rm; do ln -s "$(command -v "$command_name")" "$bootstrap_bin/$command_name"; done
+# mkdir/ln are not part of the yq-bootstrap contract being tested here; they
+# are only needed so the fake devbox test double (tests/test-agentic-loop.sh
+# itself, not the real devbox binary) can materialize its simulated profile
+# directory when invoked under this restricted PATH.
+for command_name in bash dirname git devbox mktemp rm mkdir ln; do ln -s "$(command -v "$command_name")" "$bootstrap_bin/$command_name"; done
 bootstrap=$(new_repository bootstrap-project)
 env PATH="$bootstrap_bin" FAKE_BIN="$FAKE_BIN" TEST_HOST_PATH="$TEST_HOST_PATH" FAKE_GH_ROOT="$FAKE_GH_ROOT" \
 AGENTIC_LOOP_SOURCE="$PROJECT_ROOT" AGENTIC_LOOP_TARGET="$bootstrap" AGENTIC_LOOP_SKIP_START=1 \
@@ -2281,6 +2311,101 @@ bootstrap_state="$(git -C "$bootstrap" rev-parse --absolute-git-dir)/agentic-loo
 bootstrap_status=$(env PATH="$bootstrap_bin" FAKE_BIN="$FAKE_BIN" TEST_HOST_PATH="$TEST_HOST_PATH" FAKE_GH_ROOT="$FAKE_GH_ROOT" \
   XDG_CONFIG_HOME="$XDG_CONFIG_HOME" "$bootstrap/bin/agentic-loop" status)
 grep -Eq '^(running|stopped)$' <<< "$bootstrap_status" || fail 'installed CLI did not restore its runtime dependencies from an ordinary shell'
+
+# install owns a persistent Devbox virtenv under state_root/runtime (distinct
+# from whatever --config directory bootstrapped this very install), and
+# records its bin directory first so pinned tools (yq, git) resolve there
+# indefinitely instead of through a directory nix GC might reclaim (#150).
+bootstrap_runtime_dir="$bootstrap_state/runtime"
+bootstrap_profile_bin="$bootstrap_runtime_dir/.devbox/nix/profile/default/bin"
+bootstrap_runtime_path=$(cat "$bootstrap_state/runtime.path")
+[[ ${bootstrap_runtime_path%%:*} == "$bootstrap_profile_bin" ]] || fail 'runtime.path does not start with the persistent Devbox profile bin directory'
+[[ -x $bootstrap_profile_bin/yq ]] || fail 'the persistent Devbox profile did not provide yq'
+assert_contains "$FAKE_GH_ROOT/devbox-calls" "run --config $bootstrap_runtime_dir -- true" 'install did not provision the persistent Devbox runtime'
+
+# The persistent runtime must survive even if the (possibly transient) source
+# tree install-target.sh itself ran from is deleted after install, since that
+# is exactly what the documented curl|bash install does to its mktemp
+# extraction directory. Reproduce that by pointing AGENTIC_LOOP_SOURCE at a
+# disposable copy of this project, then deleting it once install is done.
+ephemeral_source="$TEST_ROOT/ephemeral-source"
+mkdir -p "$ephemeral_source"
+cp -r "$PROJECT_ROOT/." "$ephemeral_source/"
+rm -rf "$ephemeral_source/.git"
+git -C "$ephemeral_source" init --quiet
+git -C "$ephemeral_source" config user.name Test
+git -C "$ephemeral_source" config user.email test@example.invalid
+git -C "$ephemeral_source" add -A
+git -C "$ephemeral_source" commit --quiet -m seed
+ephemeral=$(new_repository ephemeral-project)
+env PATH="$bootstrap_bin" FAKE_BIN="$FAKE_BIN" TEST_HOST_PATH="$TEST_HOST_PATH" FAKE_GH_ROOT="$FAKE_GH_ROOT" \
+AGENTIC_LOOP_SOURCE="$ephemeral_source" AGENTIC_LOOP_TARGET="$ephemeral" AGENTIC_LOOP_SKIP_START=1 \
+  "$PROJECT_ROOT/install.sh"
+ephemeral_state="$(git -C "$ephemeral" rev-parse --absolute-git-dir)/agentic-loop"
+[[ -s $ephemeral_state/runtime.path ]] || fail 'install did not record runtime.path when bootstrapped from a transient source tree'
+if grep -Fq "$ephemeral_source" "$ephemeral_state/runtime.path"; then
+  fail 'runtime.path recorded a directory under the transient bootstrap source tree instead of the persistent runtime'
+fi
+rm -rf "$ephemeral_source"
+ephemeral_status=$(env PATH="$bootstrap_bin" FAKE_BIN="$FAKE_BIN" TEST_HOST_PATH="$TEST_HOST_PATH" FAKE_GH_ROOT="$FAKE_GH_ROOT" \
+  XDG_CONFIG_HOME="$XDG_CONFIG_HOME" "$ephemeral/bin/agentic-loop" status)
+grep -Eq '^(running|stopped)$' <<< "$ephemeral_status" || fail 'installed CLI could not restore yq after its transient bootstrap source tree was deleted'
+
+# An "ordinary shell" has everyday coreutils/git but never installed yq
+# directly (that is the whole premise of this Foundation's Devbox pinning);
+# model it precisely instead of reusing the narrower bootstrap_bin fixture,
+# since the self-heal tests below need real mkdir/ln to still work.
+ordinary_bin="$TEST_ROOT/ordinary-bin"
+mkdir -p "$ordinary_bin"
+ordinary_real_bin=$(command -v yq); ordinary_real_bin=${ordinary_real_bin%/*}
+for real_tool in "$ordinary_real_bin"/*; do
+  tool_name=${real_tool##*/}
+  [[ $tool_name == yq ]] || ln -sf "$real_tool" "$ordinary_bin/$tool_name"
+done
+for fake_tool in gh devbox codex claude opencode systemctl systemd-escape; do ln -sf "$FAKE_BIN/$fake_tool" "$ordinary_bin/$fake_tool"; done
+
+# Even the persistent, gcroot-protected profile can in principle be destroyed
+# by a sufficiently aggressive external nix GC. Simulate that by deleting the
+# fake "store" directory the persistent profile symlinks resolve through
+# (leaving the profile symlink dangling, exactly like real nix) and confirm
+# a single self-heal re-provision recovers it from an ordinary shell.
+ephemeral_runtime_dir="$ephemeral_state/runtime"
+ephemeral_store_dir="$FAKE_GH_ROOT/devbox-store/${ephemeral_runtime_dir//\//_}"
+[[ -d $ephemeral_store_dir ]] || fail 'internal test error: simulated persistent Devbox store not found'
+rm -rf "$ephemeral_store_dir"
+devbox_calls_before_heal=$(wc -l < "$FAKE_GH_ROOT/devbox-calls")
+healed_status=$(env PATH="$ordinary_bin" FAKE_BIN="$FAKE_BIN" TEST_HOST_PATH="$TEST_HOST_PATH" FAKE_GH_ROOT="$FAKE_GH_ROOT" \
+  XDG_CONFIG_HOME="$XDG_CONFIG_HOME" "$ephemeral/bin/agentic-loop" status)
+grep -Eq '^(running|stopped)$' <<< "$healed_status" || fail 'self-heal did not restore yq after the persistent Devbox runtime was garbage-collected'
+tail -n "+$((devbox_calls_before_heal + 1))" "$FAKE_GH_ROOT/devbox-calls" | grep -Fq "run --config $ephemeral_runtime_dir -- true" ||
+  fail 'a broken persistent runtime did not trigger a self-heal re-provision attempt'
+
+# When self-heal itself cannot succeed (Devbox fails to reprovision), the CLI
+# must fail loudly with recovery guidance rather than a bare "yq is required".
+rm -rf "$ephemeral_store_dir"
+if env PATH="$ordinary_bin" FAKE_BIN="$FAKE_BIN" TEST_HOST_PATH="$TEST_HOST_PATH" FAKE_GH_ROOT="$FAKE_GH_ROOT" FAKE_DEVBOX_FAIL=1 \
+  XDG_CONFIG_HOME="$XDG_CONFIG_HOME" "$ephemeral/bin/agentic-loop" status >"$TEST_ROOT/self-heal-failure.out" 2>&1; then
+  fail 'status succeeded despite an unrecoverable persistent Devbox runtime'
+fi
+assert_contains "$TEST_ROOT/self-heal-failure.out" 'devbox run --config' 'unrecoverable runtime failure did not include a recovery command'
+
+# doctor reports the pinned runtime as healthy right after install, and flags
+# it (without modifying anything or crashing) once the profile is severed.
+bootstrap_doctor_json=$(env PATH="$ordinary_bin" FAKE_BIN="$FAKE_BIN" TEST_HOST_PATH="$TEST_HOST_PATH" FAKE_GH_ROOT="$FAKE_GH_ROOT" \
+  XDG_CONFIG_HOME="$XDG_CONFIG_HOME" "$bootstrap/bin/agentic-loop" doctor --format json || true)
+grep -Fq '{"level":"success","name":"固定runtime"' <<< "$bootstrap_doctor_json" || fail 'doctor did not report the pinned runtime as healthy after install'
+bootstrap_profile_link="$bootstrap_runtime_dir/.devbox/nix/profile/default"
+bootstrap_profile_store="$FAKE_GH_ROOT/devbox-store/${bootstrap_runtime_dir//\//_}"
+rm -rf "$bootstrap_profile_store"
+[[ -L $bootstrap_profile_link && ! -e $bootstrap_profile_link ]] || fail 'internal test error: profile link is not dangling as expected'
+# FAKE_DEVBOX_FAIL=1 keeps this doctor call's own self-heal attempt from
+# quietly repairing the profile before doctor_collect inspects it, so the
+# failure classification below reflects doctor's own check, not self-heal.
+if env PATH="$ordinary_bin" FAKE_BIN="$FAKE_BIN" TEST_HOST_PATH="$TEST_HOST_PATH" FAKE_GH_ROOT="$FAKE_GH_ROOT" FAKE_DEVBOX_FAIL=1 \
+  XDG_CONFIG_HOME="$XDG_CONFIG_HOME" "$bootstrap/bin/agentic-loop" doctor >"$TEST_ROOT/severed-doctor.out"; then
+  fail 'doctor accepted a severed persistent Devbox profile'
+fi
+grep -Fq '[失敗] 固定runtime' "$TEST_ROOT/severed-doctor.out" || fail 'doctor did not classify the severed persistent Devbox profile as a failure'
 
 no_devbox_bin="$TEST_ROOT/no-devbox-bin"
 mkdir -p "$no_devbox_bin"
