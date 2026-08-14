@@ -551,7 +551,11 @@ set -euo pipefail
 printf '%s\n' "$*" >> "$FAKE_GH_ROOT/devbox-calls"
 if [[ ${1:-} == run && ${2:-} == --config && ${4:-} == -- ]]; then
   shift 4
-  PATH="$FAKE_BIN:$TEST_HOST_PATH" exec "$@"
+  run_path="$FAKE_BIN:$TEST_HOST_PATH"
+  # Simulate yq living only in the pinned Devbox profile, which the documented
+  # curl|bash install extracts into a mktemp directory it deletes on exit.
+  [[ -z ${FAKE_DEVBOX_YQ_DIR:-} ]] || run_path="$FAKE_DEVBOX_YQ_DIR:$run_path"
+  PATH="$run_path" exec "$@"
 fi
 [[ ${FAKE_DEVBOX_FAIL:-0} == 0 ]] || exit 1
 exit 0
@@ -2281,6 +2285,25 @@ bootstrap_state="$(git -C "$bootstrap" rev-parse --absolute-git-dir)/agentic-loo
 bootstrap_status=$(env PATH="$bootstrap_bin" FAKE_BIN="$FAKE_BIN" TEST_HOST_PATH="$TEST_HOST_PATH" FAKE_GH_ROOT="$FAKE_GH_ROOT" \
   XDG_CONFIG_HOME="$XDG_CONFIG_HOME" "$bootstrap/bin/agentic-loop" status)
 grep -Eq '^(running|stopped)$' <<< "$bootstrap_status" || fail 'installed CLI did not restore its runtime dependencies from an ordinary shell'
+
+# When yq is reachable only through an ephemeral Devbox profile directory that
+# install.sh deletes on exit (the curl|bash path extracts into mktemp), the
+# recorded runtime PATH must resolve yq's persistent real location, not the
+# vanished symlink directory. See record_runtime_path in install-target.sh.
+ephemeral_yq="$TEST_ROOT/ephemeral-yq"
+mkdir -p "$ephemeral_yq"
+ln -s "$(command -v yq)" "$ephemeral_yq/yq"
+ephemeral=$(new_repository ephemeral-yq-project)
+env PATH="$bootstrap_bin" FAKE_BIN="$FAKE_BIN" TEST_HOST_PATH="$TEST_HOST_PATH" FAKE_GH_ROOT="$FAKE_GH_ROOT" \
+  FAKE_DEVBOX_YQ_DIR="$ephemeral_yq" \
+  AGENTIC_LOOP_SOURCE="$PROJECT_ROOT" AGENTIC_LOOP_TARGET="$ephemeral" AGENTIC_LOOP_SKIP_START=1 \
+  "$PROJECT_ROOT/install.sh"
+ephemeral_state="$(git -C "$ephemeral" rev-parse --absolute-git-dir)/agentic-loop"
+rm -rf "$ephemeral_yq"
+if grep -Fq "$ephemeral_yq" "$ephemeral_state/runtime.path"; then fail 'install recorded the ephemeral yq directory instead of its persistent location'; fi
+ephemeral_status=$(env PATH="$bootstrap_bin" FAKE_BIN="$FAKE_BIN" TEST_HOST_PATH="$TEST_HOST_PATH" FAKE_GH_ROOT="$FAKE_GH_ROOT" \
+  XDG_CONFIG_HOME="$XDG_CONFIG_HOME" "$ephemeral/bin/agentic-loop" status)
+grep -Eq '^(running|stopped)$' <<< "$ephemeral_status" || fail 'installed CLI could not restore yq after its ephemeral Devbox profile directory was removed'
 
 no_devbox_bin="$TEST_ROOT/no-devbox-bin"
 mkdir -p "$no_devbox_bin"

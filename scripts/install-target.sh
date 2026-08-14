@@ -46,19 +46,29 @@ preflight() {
   [[ $provider != codex ]] || codex exec --help >/dev/null 2>&1 || fail 'Codex CLI exec mode is required'
 }
 
+# Resolve a command to the directory of its real binary. `command -v` on a
+# devbox-bootstrapped yq points at an ephemeral profile symlink under the
+# temporary install source tree, which install.sh deletes on exit; recording
+# that directory leaves runtime.path pointing at nothing. Following the symlink
+# to the underlying store path (which survives) keeps yq resolvable afterward.
+resolve_command_dir() {
+  local command_path resolved
+  command_path=$(command -v "$1") || return 1
+  resolved=$(readlink -f "$command_path" 2>/dev/null) || resolved=$command_path
+  (cd "$(dirname "$resolved")" && pwd)
+}
+
 record_runtime_path() {
-  local state_root runtime_file command_name command_path command_dir runtime_path='' provider provider_cli
+  local state_root runtime_file command_name command_dir runtime_path='' provider provider_cli
   state_root="$(git -C "$TARGET" rev-parse --path-format=absolute --git-common-dir)/agentic-loop"
   runtime_file="$state_root/runtime.path"
   for command_name in git gh yq devbox systemctl systemd-escape; do
-    command_path=$(command -v "$command_name")
-    command_dir=$(cd "$(dirname "$command_path")" && pwd)
+    command_dir=$(resolve_command_dir "$command_name")
     case ":$runtime_path:" in *":$command_dir:"*) ;; *) runtime_path="${runtime_path:+$runtime_path:}$command_dir" ;; esac
   done
   provider=$(effective_provider)
   case $provider in codex) provider_cli=codex ;; claude) provider_cli=claude ;; opencode) provider_cli=opencode ;; esac
-  command_path=$(command -v "$provider_cli")
-  command_dir=$(cd "$(dirname "$command_path")" && pwd)
+  command_dir=$(resolve_command_dir "$provider_cli")
   case ":$runtime_path:" in *":$command_dir:"*) ;; *) runtime_path="$runtime_path:$command_dir" ;; esac
   [[ $runtime_path != *$'\n'* && $runtime_path != *$'\r'* ]] || fail 'runtime PATH contains an unsafe newline'
   mkdir -p "$state_root"
