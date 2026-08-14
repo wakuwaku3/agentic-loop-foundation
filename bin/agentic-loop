@@ -7,6 +7,7 @@ readonly SCRIPT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 readonly REPO_ROOT="$(git -C "$SCRIPT_ROOT" rev-parse --show-toplevel 2>/dev/null || printf '%s' "$SCRIPT_ROOT")"
 readonly STATE_ROOT="$(git -C "$REPO_ROOT" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || printf '%s/.git' "$REPO_ROOT")/agentic-loop"
 readonly RUNTIME_PATH_FILE="$STATE_ROOT/runtime.path"
+readonly RUNTIME_ROOT="$STATE_ROOT/runtime"
 
 # Installation records the verified tool directories outside the worktree.
 # Restore them before configuration parsing so public commands work from an
@@ -18,6 +19,17 @@ if [[ -r $RUNTIME_PATH_FILE ]]; then
     export PATH="$runtime_path:$PATH"
   fi
   unset runtime_path
+fi
+
+# The recorded PATH normally makes yq resolvable with no extra work. If the
+# install-owned Devbox profile it points at was nonetheless GC'd (an operator
+# ran a broader nix GC than the gcroot was meant to survive), rebuild it once
+# and retry before giving up; this is the only place this script pays for a
+# devbox invocation, and only on this already-broken path.
+if ! command -v yq >/dev/null 2>&1 && [[ -f $RUNTIME_ROOT/devbox.json ]] && command -v devbox >/dev/null 2>&1; then
+  if devbox run --config "$RUNTIME_ROOT" -- true >/dev/null 2>&1; then
+    export PATH="$RUNTIME_ROOT/.devbox/nix/profile/default/bin:$PATH"
+  fi
 fi
 readonly WORKTREE_ROOT="$(dirname "$REPO_ROOT")/$(basename "$REPO_ROOT")-worktrees"
 readonly CONFIG_FILE="$REPO_ROOT/.agentic-loop.toml"
@@ -87,7 +99,7 @@ config_props() {
 load_config() {
   local line key value props
   [[ -r $CONFIG_FILE ]] || return 0
-  command -v yq >/dev/null 2>&1 || { CONFIG_ERROR='yq is required to read .agentic-loop.toml'; return 1; }
+  command -v yq >/dev/null 2>&1 || { CONFIG_ERROR="yq is required to read .agentic-loop.toml; the pinned runtime that provides it could not be restored. Recovery: run \`devbox run --config $RUNTIME_ROOT -- true\` to rebuild it, or re-run install.sh."; return 1; }
   props=$(config_props 2>/dev/null) || { CONFIG_ERROR='cannot parse .agentic-loop.toml'; return 1; }
   CONFIG_PROPS=$props
   while IFS= read -r line; do
@@ -1522,6 +1534,33 @@ doctor_collect() {
   done
   if command -v devbox >/dev/null 2>&1; then doctor_add success 'Devbox' '固定環境の共通検証入口を利用できます。' '対応は不要です。'
   else doctor_add failure 'Devbox' '`devbox run --pure check` を実行できません。' 'https://www.jetify.com/devbox/docs/installing_devbox/ を参照してDevboxを導入してください。'; fi
+
+  local runtime_profile="$RUNTIME_ROOT/.devbox/nix/profile/default" runtime_dirs_ok=1 runtime_dir
+  if [[ -r $RUNTIME_PATH_FILE ]]; then
+    local -a runtime_dirs=()
+    IFS=: read -r -a runtime_dirs < "$RUNTIME_PATH_FILE"
+    for runtime_dir in "${runtime_dirs[@]}"; do [[ -d $runtime_dir ]] || runtime_dirs_ok=0; done
+    if [[ -L $runtime_profile && ! -e $runtime_profile ]]; then runtime_dirs_ok=0; fi
+    if (( runtime_dirs_ok )); then
+      doctor_add success '固定runtime' 'runtime.pathの記録先と永続Devbox profileが健全です。' '対応は不要です。'
+    else
+      doctor_add failure '固定runtime' 'runtime.pathが指すtoolディレクトリまたは永続Devbox profileが失われています。yqなどの起動に失敗する恐れがあります。' 'bin/agentic-loop の任意コマンドを実行すると自己修復を試みます。改善しない場合は install.sh を再実行してください。'
+    fi
+    if command -v nix-store >/dev/null 2>&1; then
+      local yq_bin="$runtime_profile/bin/yq" yq_store='' gc_protected=0
+      if [[ -x $yq_bin ]] && yq_store=$(readlink -f "$yq_bin" 2>/dev/null) && [[ -n $yq_store ]] &&
+        nix-store --query --roots "$yq_store" 2>/dev/null | grep -Fq "$runtime_profile"; then
+        gc_protected=1
+      fi
+      if (( gc_protected )); then
+        doctor_add success '固定runtimeのGC保護' 'yqの実体がnix-storeのgcrootとして保護されています。' '対応は不要です。'
+      else
+        doctor_add warning '固定runtimeのGC保護' 'nix-collect-garbage実行後にyqなどが失われる可能性があります。' 'install.sh を再実行し、永続Devbox profileを再生成してください。'
+      fi
+    fi
+  else
+    doctor_add warning '固定runtime' 'nix GCから保護された永続runtimeがまだ生成されていません。' 'install.sh を再実行してください。'
+  fi
 
   hooks=$(git -C "$REPO_ROOT" config --get core.hooksPath 2>/dev/null || true)
   if [[ $hooks == .githooks && -x $REPO_ROOT/.githooks/pre-commit && -x $REPO_ROOT/.githooks/pre-push ]]; then doctor_add success 'Git hooks' 'secret guardとpush前検証が有効です。' '対応は不要です。'

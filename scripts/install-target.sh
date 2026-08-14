@@ -46,20 +46,62 @@ preflight() {
   [[ $provider != codex ]] || codex exec --help >/dev/null 2>&1 || fail 'Codex CLI exec mode is required'
 }
 
+# Provision (or refresh) an install-owned Devbox virtenv at
+# <state_root>/runtime, pinned to this Foundation source's own devbox.json /
+# devbox.lock. Unlike the transient --config directory install.sh may have
+# used to bootstrap yq for this very script (which can be a mktemp tree
+# deleted when install.sh exits, or otherwise not owned by this target),
+# state_root lives under the target's own git-common-dir and is never removed
+# by install/uninstall, so the Devbox profile symlink created here is a nix
+# GC root that survives indefinitely. Prints the profile's bin directory.
+provision_runtime_virtenv() {
+  local state_root=$1 runtime_dir profile_bin file
+  runtime_dir="$state_root/runtime"
+  mkdir -p "$runtime_dir"
+  for file in devbox.json devbox.lock; do
+    if [[ ! -f "$runtime_dir/$file" ]] || ! cmp -s "$SOURCE_ROOT/$file" "$runtime_dir/$file"; then
+      cp "$SOURCE_ROOT/$file" "$runtime_dir/$file"
+    fi
+  done
+  devbox run --config "$runtime_dir" -- true || fail "failed to provision the persistent Devbox runtime at $runtime_dir"
+  profile_bin="$runtime_dir/.devbox/nix/profile/default/bin"
+  [[ -x "$profile_bin/yq" ]] || fail "persistent Devbox runtime did not produce yq at $profile_bin (Devbox's internal profile layout may have changed)"
+  printf '%s' "$profile_bin"
+}
+
+# Record the verified tool directories that bin/agentic-loop restores onto
+# PATH at startup (see bin/agentic-loop's preamble). The install-owned
+# virtenv's bin directory is recorded first so pinned tools (yq, git) resolve
+# there and survive nix GC indefinitely. Remaining commands are recorded by
+# their current logical directory (not resolved to a nix store realpath):
+# doing so keeps host-installed tools (gh, devbox, provider CLIs) tracking
+# whatever the host's own package manager or update mechanism points them at,
+# rather than pinning to a store path that becomes stale the moment the host
+# updates that tool. A command resolving only under the (possibly transient)
+# --config directory this very script was bootstrapped from is never recorded
+# directly; if the persistent virtenv cannot supply it either, install fails
+# loudly instead of silently recording a directory likely to vanish.
 record_runtime_path() {
-  local state_root runtime_file command_name command_path command_dir runtime_path='' provider provider_cli
+  local state_root runtime_file command_name command_path command_dir runtime_path provider provider_cli profile_bin ephemeral_prefix
   state_root="$(git -C "$TARGET" rev-parse --path-format=absolute --git-common-dir)/agentic-loop"
   runtime_file="$state_root/runtime.path"
-  for command_name in git gh yq devbox systemctl systemd-escape; do
-    command_path=$(command -v "$command_name")
-    command_dir=$(cd "$(dirname "$command_path")" && pwd)
-    case ":$runtime_path:" in *":$command_dir:"*) ;; *) runtime_path="${runtime_path:+$runtime_path:}$command_dir" ;; esac
-  done
+  profile_bin=$(provision_runtime_virtenv "$state_root")
+  runtime_path="$profile_bin"
+  ephemeral_prefix="$SOURCE_ROOT/.devbox"
   provider=$(effective_provider)
   case $provider in codex) provider_cli=codex ;; claude) provider_cli=claude ;; opencode) provider_cli=opencode ;; esac
-  command_path=$(command -v "$provider_cli")
-  command_dir=$(cd "$(dirname "$command_path")" && pwd)
-  case ":$runtime_path:" in *":$command_dir:"*) ;; *) runtime_path="$runtime_path:$command_dir" ;; esac
+  for command_name in git gh devbox systemctl systemd-escape "$provider_cli"; do
+    command_path=$(command -v "$command_name")
+    command_dir=$(cd "$(dirname "$command_path")" && pwd)
+    case $command_dir in
+      "$ephemeral_prefix"/*)
+        [[ -x "$profile_bin/$command_name" ]] ||
+          fail "cannot record a stable directory for $command_name: it only resolves under the transient bootstrap Devbox environment ($command_dir). Install $command_name on the host, or add it to devbox.json so the persistent runtime can supply it."
+        continue
+        ;;
+    esac
+    case ":$runtime_path:" in *":$command_dir:"*) ;; *) runtime_path="$runtime_path:$command_dir" ;; esac
+  done
   [[ $runtime_path != *$'\n'* && $runtime_path != *$'\r'* ]] || fail 'runtime PATH contains an unsafe newline'
   mkdir -p "$state_root"
   printf '%s\n' "$runtime_path" > "$runtime_file.tmp"
