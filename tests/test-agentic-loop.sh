@@ -59,13 +59,28 @@ diagnosis_issues="$FAKE_GH_ROOT/$key.diagnosis-issues"
 metrics_issues="$FAKE_GH_ROOT/$key.metrics-issues"
 metrics_events="$FAKE_GH_ROOT/$key.metrics-events"
 metrics_pulls="$FAKE_GH_ROOT/$key.metrics-pulls"
-printf '%s\t%s\n' "$PWD" "$*" >> "$FAKE_GH_ROOT/calls"
+# Never record a bearer token in the call log: the opencode-go usage API key
+# must not leak even into the test harness transcript.
+log_args=("$@")
+for ((i=0; i<${#log_args[@]}; i++)); do
+  if [[ ${log_args[$i]} == -H && ${log_args[$((i+1))]:-} == 'Authorization: Bearer '* ]]; then
+    log_args[$((i+1))]='Authorization: Bearer [REDACTED]'
+  fi
+done
+printf '%s\t%s\n' "$PWD" "${log_args[*]}" >> "$FAKE_GH_ROOT/calls"
 if [[ $* == *--slurp* && $* == *--jq* ]]; then
   printf 'the `--slurp` option is not supported with `--jq`\n' >&2
   exit 1
 fi
 case "${1:-} ${2:-}" in
   'auth status') [[ ${FAKE_GH_AUTH_FAIL:-0} == 0 ]] ;;
+  'api https://'*)
+    # OpenCode Go usage API (Issue #155). Tests control the response with
+    # FAKE_GO_USAGE_FILE (default: a modest, non-exhausted usage).
+    if [[ ${FAKE_GO_USAGE_FAIL:-0} == 1 ]]; then printf 'HTTP 500: Service Unavailable\n' >&2; exit 1; fi
+    if [[ -n ${FAKE_GO_USAGE_FILE:-} && -r $FAKE_GO_USAGE_FILE ]]; then cat "$FAKE_GO_USAGE_FILE"
+    else printf '%s\n' '{"usage":{"rolling":{"status":"ok","percent":10,"resetsAt":"2026-08-16T14:00:07.328Z"},"weekly":{"status":"ok","percent":4,"resetsAt":"2026-08-17T00:00:00.328Z"},"monthly":{"status":"ok","percent":2,"resetsAt":"2026-09-16T08:12:28.328Z"}}}'; fi
+    ;;
   'api repos/'*)
     [[ $2 != */ ]] || { printf 'HTTP 404: Not Found\n' >&2; exit 1; }
     rest_failures="$FAKE_GH_ROOT/$key.rest-failures"
@@ -525,13 +540,30 @@ printf '%s\n' "$*" >> "$FAKE_GH_ROOT/opencode-calls"
 [[ ${1:-} == run ]] || { printf 'opencode: unknown command\n' >&2; exit 2; }
 [[ $* == *--auto* ]] || { printf 'opencode worker must auto-approve permissions\n' >&2; exit 2; }
 sleep "${FAKE_OPENCODE_SLEEP:-0}"
+# Per-invocation result override for --auto runs (numbered like the Codex
+# fake), so a test can sequence e.g. "overloaded" then "completed". Unset slots
+# keep the ordinary default response.
+result_var=FAKE_OPENCODE_RESULT
+if [[ $* == *--auto* ]]; then
+  auto_count_file="$FAKE_GH_ROOT/opencode-auto-count"
+  auto_count=$(($(cat "$auto_count_file" 2>/dev/null || printf 0) + 1))
+  printf '%s\n' "$auto_count" > "$auto_count_file"
+  result_var="FAKE_OPENCODE_EXEC_RESULT_$auto_count"
+  if [[ -v $result_var ]]; then
+    opencode_result=${!result_var}
+  else
+    opencode_result=${FAKE_OPENCODE_RESULT:-AGENTIC_LOOP_RESULT=completed}
+  fi
+else
+  opencode_result=${FAKE_OPENCODE_RESULT:-AGENTIC_LOOP_RESULT=completed}
+fi
 # With --format json the worker reads the sentinel from a text part and token
 # telemetry from a step-finish part; otherwise it prints the plain final message.
 if [[ $* == *'--format json'* ]]; then
-  printf '{"part":{"type":"text","text":"%s"}}\n' "${FAKE_OPENCODE_RESULT:-AGENTIC_LOOP_RESULT=completed}"
+  printf '{"part":{"type":"text","text":"%s"}}\n' "$opencode_result"
   printf '{"part":{"type":"step-finish","tokens":{"input":200,"output":50,"reasoning":5,"cache":{"read":10,"write":0}},"cost":0.02}}\n'
 else
-  printf '%s\n' "${FAKE_OPENCODE_RESULT:-AGENTIC_LOOP_RESULT=completed}"
+  printf '%s\n' "$opencode_result"
 fi
 FAKE_OPENCODE
 cat > "$FAKE_BIN/systemctl" <<'FAKE_SYSTEMCTL'
@@ -1189,22 +1221,25 @@ AGENTIC_LOOP_RUN_ONCE=1 FAKE_CODEX_RESULT='AGENTIC_LOOP_RESULT=declined' "$targe
 grep -Eq '^71 needs-input open' "$state" || fail 'declined Issue was not moved to needs-input for authorized disposition'
 assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:declined' 'decline was not recorded'
 
-# A token/rate-limit exhaustion re-queues the Issue (never failed) and pauses the
-# supervisor; claiming resumes once the exhaustion clears.
+# A token/rate-limit exhaustion re-queues the Issue (never failed) and pauses
+# the supervisor; claiming resumes once the pool's exhaustion clears.
 write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=3 STOP_TIMEOUT=10 STALE_DAYS=30
-rm -f "$state_root/agent-exhausted" "$FAKE_GH_ROOT/codex-exec-count"
+rm -f "$state_root/agent-exhausted" "$state_root/pools/codex/exhausted" "$state_root/all-pools-paused" "$FAKE_GH_ROOT/codex-exec-count"
 printf '60 queued open none 2026-01-01T00:00:00Z\n' > "$state"
 : > "$FAKE_GH_ROOT/$state_key.comments"
 AGENTIC_LOOP_RUN_ONCE=1 FAKE_CODEX_RESULT='rate limit reached' "$target/bin/agentic-loop" _supervise
-grep -Eq '^60 queued open' "$state" || fail 'exhaustion should re-queue the Issue, not fail it'
+grep -Eq '^60 queued open' "$state" || { echo '---DEBUG STATE---'; cat "$state"; echo '---DEBUG STATE_ROOT---'; find "$state_root" -maxdepth 3 -type f 2>/dev/null; echo '---DEBUG LOG---'; cat "$state_root/logs/issue-60.log" 2>/dev/null | tail -40; echo '---DEBUG COMMENTS---'; cat "$FAKE_GH_ROOT/$state_key.comments" 2>/dev/null; fail 'exhaustion should re-queue the Issue, not fail it'; }
 if grep -Eq '^60 failed' "$state"; then fail 'exhaustion must not mark the Issue failed'; fi
-[[ -r $state_root/agent-exhausted ]] || fail 'exhaustion pause marker was not written'
+[[ -r $state_root/pools/codex/exhausted ]] || fail 'pool exhaustion pause marker was not written'
+[[ ! -r $state_root/agent-exhausted ]] || fail 'partial pool exhaustion must not write the global marker'
 assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:exhausted' 'exhaustion was not recorded'
-# Paused: the next pass does not claim while exhausted.
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'pool=codex' 'exhaustion comment did not record the exhausted pool'
+# Paused: with the only pool exhausted the next pass does not claim.
 AGENTIC_LOOP_RUN_ONCE=1 FAKE_CODEX_SLEEP=1 "$target/bin/agentic-loop" _supervise
 grep -Eq '^60 queued open' "$state" || fail 'exhaustion pause did not hold the Issue in queue'
-# Recovery: clearing the marker resumes claiming to completion.
-rm -f "$state_root/agent-exhausted"
+[[ -e $state_root/all-pools-paused ]] || fail 'all-pools pause was not synthesized from the pool markers'
+# Recovery: clearing the pool marker resumes claiming to completion.
+rm -f "$state_root/pools/codex/exhausted"
 AGENTIC_LOOP_RUN_ONCE=1 FAKE_CODEX_SLEEP=1 "$target/bin/agentic-loop" _supervise
 grep -Eq '^60 completed closed' "$state" || fail 'claiming did not resume after exhaustion cleared'
 
@@ -1221,6 +1256,275 @@ rm -f "$state_root/graphql-rate-limit"
 FAKE_CORE_REMAINING=5000 AGENTIC_LOOP_RUN_ONCE=1 FAKE_CODEX_SLEEP=1 "$target/bin/agentic-loop" _supervise
 grep -Eq '^61 completed closed' "$state" || fail 'claiming did not resume after REST(core) budget recovered'
 [[ ! -e $state_root/core-budget-paused ]] || fail 'core budget pause marker was not cleared on recovery'
+
+# --- Pool/tier priority fallback and per-pool exhaustion (Issue #155) ---
+# Test fixtures: an opencode-go auth key (value must never leak) and a usage
+# fixture dir the fake gh serves as the OpenCode Go usage API.
+mkdir -p "$TEST_ROOT/godata/opencode"
+printf '{"opencode-go":{"type":"api","key":"fake-gosecret-key-0123456789"}}\n' > "$TEST_ROOT/godata/opencode/auth.json"
+
+# Tier priority: plan runs the first tier's model; exec keeps the scalar model,
+# and the selected pool/model is recorded on the usage comment.
+cat > "$target/.agentic-loop.toml" <<'TIER_TOML'
+[agent]
+provider = "codex"
+
+[agent.plan]
+[[agent.plan.tiers]]
+pool = "plus"
+provider = "codex"
+reasoning_effort = "high"
+models = [{ model = "gpt-5.6-sol", max_usage_percent = 60 }]
+
+[[agent.plan.tiers]]
+pool = "gogo"
+provider = "opencode"
+reasoning_effort = "high"
+models = [{ model = "opencode-go/gpt-5.6-luna", max_usage_percent = 60 }]
+
+[agent.exec]
+provider = "codex"
+model = "gpt-5.6-terra"
+reasoning_effort = "low"
+
+[queue]
+poll_seconds = 1
+max_workers = 1
+lease_seconds = 3
+stop_timeout = 10
+stale_days = 30
+TIER_TOML
+printf '301 queued open none 2026-01-01T00:00:00Z\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+: > "$FAKE_GH_ROOT/codex-calls"
+rm -f "$FAKE_GH_ROOT/codex-exec-count"
+AGENTIC_LOOP_RUN_ONCE=1 FAKE_CODEX_SLEEP=1 "$target/bin/agentic-loop" _supervise
+grep -Eq '^301 completed closed' "$state" || fail 'tier-priority Issue did not complete'
+assert_contains "$FAKE_GH_ROOT/codex-calls" '-c model=gpt-5.6-sol' 'plan did not use the first tier model'
+assert_contains "$FAKE_GH_ROOT/codex-calls" '-c model=gpt-5.6-terra' 'exec did not keep the scalar model'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'pool=plus' 'plan usage did not record the selected pool'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'model=gpt-5.6-sol' 'plan usage did not record the selected model'
+
+# Pool exhaustion skips only that pool: with the plus pool exhausted, plan falls
+# back to the opencode (gogo) tier and the Issue still completes (no pause).
+printf '302 queued open none 2026-01-01T00:00:00Z\n' > "$state"
+rm -rf "$state_root/pools"
+mkdir -p "$state_root/pools/plus"
+printf '%s\n' "$(( $(date +%s) + 600 ))" > "$state_root/pools/plus/exhausted"
+: > "$FAKE_GH_ROOT/codex-calls"
+: > "$FAKE_GH_ROOT/opencode-calls"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+AGENTIC_LOOP_RUN_ONCE=1 FAKE_OPENCODE_SLEEP=1 "$target/bin/agentic-loop" _supervise
+grep -Eq '^302 completed closed' "$state" || fail 'pool-exhausted fallback Issue did not complete'
+[[ $(grep -c -- '--sandbox read-only' "$FAKE_GH_ROOT/codex-calls") -eq 0 ]] || fail 'exhausted plan pool was not skipped'
+assert_contains "$FAKE_GH_ROOT/opencode-calls" 'run --auto' 'plan did not fall back to the opencode tier'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'stage=plan' 'fallback plan usage was not recorded'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'provider=opencode' 'fallback plan did not record the opencode provider'
+[[ ! -e $state_root/all-pools-paused ]] || fail 'partial pool exhaustion must not pause the supervisor'
+rm -rf "$state_root/pools"
+
+# Model-specific failure (overloaded) moves to the next model in the same pool
+# instead of marking the pool exhausted or pausing globally.
+cat > "$target/.agentic-loop.toml" <<'MODEL_TOML'
+[agent.plan]
+provider = "codex"
+model = "gpt-5.6-sol"
+reasoning_effort = "high"
+
+[agent.exec]
+[[agent.exec.tiers]]
+pool = "gogo"
+provider = "opencode"
+reasoning_effort = "low"
+models = [
+  { model = "opencode-go/gpt-5.6-luna", max_usage_percent = 60 },
+  { model = "opencode-go/deepseek-v4-pro" },
+]
+
+[queue]
+poll_seconds = 1
+max_workers = 1
+lease_seconds = 3
+stop_timeout = 10
+stale_days = 30
+MODEL_TOML
+printf '303 queued open none 2026-01-01T00:00:00Z\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+: > "$FAKE_GH_ROOT/opencode-calls"
+rm -f "$FAKE_GH_ROOT/opencode-auto-count" "$FAKE_GH_ROOT/codex-exec-count"
+FAKE_OPENCODE_EXEC_RESULT_1='overloaded' FAKE_OPENCODE_EXEC_RESULT_2='AGENTIC_LOOP_RESULT=completed' AGENTIC_LOOP_RUN_ONCE=1 FAKE_CODEX_SLEEP=1 "$target/bin/agentic-loop" _supervise
+grep -Eq '^303 completed closed' "$state" || fail 'model-failure fallback Issue did not complete'
+assert_contains "$FAKE_GH_ROOT/opencode-calls" '--model opencode-go/gpt-5.6-luna' 'model-failure retry did not start on the first model'
+assert_contains "$FAKE_GH_ROOT/opencode-calls" '--model opencode-go/deepseek-v4-pro' 'model-failure retry did not switch to the next model'
+[[ ! -r $state_root/pools/gogo/exhausted ]] || fail 'model-specific failure must not mark the pool exhausted'
+[[ ! -r $state_root/agent-exhausted ]] || fail 'model-specific failure must not write the global exhaustion marker'
+if grep -Fq 'agentic-loop:replan' "$FAKE_GH_ROOT/$state_key.comments"; then fail 'model-failure fallback triggered a replan'; fi
+
+# Usage-threshold demotion and recovery: above max_usage_percent the pool's next
+# model runs; when usage drops the preferred model returns (read via the fake
+# OpenCode Go usage API).
+cat > "$target/.agentic-loop.toml" <<'USAGE_TOML'
+[agent.plan]
+provider = "codex"
+model = "gpt-5.6-sol"
+reasoning_effort = "high"
+
+[agent.exec]
+[[agent.exec.tiers]]
+pool = "gogo"
+provider = "opencode"
+reasoning_effort = "low"
+models = [
+  { model = "opencode-go/gpt-5.6-luna", max_usage_percent = 60 },
+  { model = "opencode-go/deepseek-v4-pro" },
+]
+
+[queue]
+poll_seconds = 1
+max_workers = 1
+lease_seconds = 3
+stop_timeout = 10
+stale_days = 30
+USAGE_TOML
+cat > "$TEST_ROOT/go-usage-high.json" <<'USAGE_HIGH'
+{"usage":{"rolling":{"status":"ok","percent":90,"resetsAt":"2026-08-16T14:00:07.328Z"},"weekly":{"status":"ok","percent":4,"resetsAt":"2026-08-17T00:00:00.328Z"},"monthly":{"status":"ok","percent":2,"resetsAt":"2026-09-16T08:12:28.328Z"}}}
+USAGE_HIGH
+cat > "$TEST_ROOT/go-usage-low.json" <<'USAGE_LOW'
+{"usage":{"rolling":{"status":"ok","percent":10,"resetsAt":"2026-08-16T14:00:07.328Z"},"weekly":{"status":"ok","percent":4,"resetsAt":"2026-08-17T00:00:00.328Z"},"monthly":{"status":"ok","percent":2,"resetsAt":"2026-09-16T08:12:28.328Z"}}}
+USAGE_LOW
+printf '304 queued open none 2026-01-01T00:00:00Z\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+: > "$FAKE_GH_ROOT/opencode-calls"
+rm -f "$FAKE_GH_ROOT/opencode-auto-count" "$FAKE_GH_ROOT/codex-exec-count" "$state_root/pools/usage-opencode"
+XDG_DATA_HOME="$TEST_ROOT/godata" FAKE_GO_USAGE_FILE="$TEST_ROOT/go-usage-high.json" FAKE_OPENCODE_EXEC_RESULT_1='AGENTIC_LOOP_RESULT=completed' AGENTIC_LOOP_RUN_ONCE=1 FAKE_CODEX_SLEEP=1 "$target/bin/agentic-loop" _supervise
+grep -Eq '^304 completed closed' "$state" || fail 'usage-demoted Issue did not complete'
+assert_contains "$FAKE_GH_ROOT/opencode-calls" '--model opencode-go/deepseek-v4-pro' 'usage over threshold did not demote to the cheaper model'
+if grep -Fq -- '--model opencode-go/gpt-5.6-luna' "$FAKE_GH_ROOT/opencode-calls"; then fail 'usage over threshold still ran the preferred model'; fi
+# Secret guard: the usage API key never leaks into comments, state, or the gh
+# call transcript (which redacts the Authorization header).
+if grep -rFq 'fake-gosecret-key-0123456789' "$state_root" "$FAKE_GH_ROOT/$state_key.comments" 2>/dev/null; then fail 'opencode-go usage key leaked into state or Issue comments'; fi
+if grep -Fq 'fake-gosecret-key-0123456789' "$FAKE_GH_ROOT/calls"; then fail 'opencode-go usage key leaked into the gh call log'; fi
+assert_contains "$FAKE_GH_ROOT/calls" 'Authorization: Bearer [REDACTED]' 'usage API Authorization header was not redacted in the gh call log'
+[[ -s $state_root/pools/usage-opencode ]] || fail 'usage cache was not written'
+if grep -Fq 'fake-gosecret-key-0123456789' "$state_root/pools/usage-opencode"; then fail 'usage cache contains the API key'; fi
+# Recovery: with usage back under the threshold the preferred model returns.
+printf '305 queued open none 2026-01-01T00:00:00Z\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+: > "$FAKE_GH_ROOT/opencode-calls"
+rm -f "$FAKE_GH_ROOT/opencode-auto-count" "$FAKE_GH_ROOT/codex-exec-count" "$state_root/pools/usage-opencode"
+XDG_DATA_HOME="$TEST_ROOT/godata" FAKE_GO_USAGE_FILE="$TEST_ROOT/go-usage-low.json" FAKE_OPENCODE_EXEC_RESULT_1='AGENTIC_LOOP_RESULT=completed' AGENTIC_LOOP_RUN_ONCE=1 FAKE_CODEX_SLEEP=1 "$target/bin/agentic-loop" _supervise
+grep -Eq '^305 completed closed' "$state" || fail 'usage-recovered Issue did not complete'
+assert_contains "$FAKE_GH_ROOT/opencode-calls" '--model opencode-go/gpt-5.6-luna' 'usage recovery did not restore the preferred model'
+
+# All pools unavailable: only then is claiming globally paused and the Issue
+# stays queued (never failed); clearing the pools resumes to completion.
+cat > "$target/.agentic-loop.toml" <<'ALLPOOLS_TOML'
+[agent]
+provider = "codex"
+
+[agent.plan]
+[[agent.plan.tiers]]
+pool = "plus"
+provider = "codex"
+reasoning_effort = "high"
+models = [{ model = "gpt-5.6-sol" }]
+
+[[agent.plan.tiers]]
+pool = "gogo"
+provider = "opencode"
+reasoning_effort = "high"
+models = [{ model = "opencode-go/gpt-5.6-luna" }]
+
+[agent.exec]
+provider = "codex"
+model = "gpt-5.6-terra"
+
+[queue]
+poll_seconds = 1
+max_workers = 1
+lease_seconds = 3
+stop_timeout = 10
+stale_days = 30
+ALLPOOLS_TOML
+cat > "$TEST_ROOT/go-usage-exhausted.json" <<'USAGE_EXHAUSTED'
+{"usage":{"rolling":{"status":"exhausted","percent":100,"resetsAt":"2026-08-16T14:00:07.328Z"},"weekly":{"status":"ok","percent":4,"resetsAt":"2026-08-17T00:00:00.328Z"},"monthly":{"status":"ok","percent":2,"resetsAt":"2026-09-16T08:12:28.328Z"}}}
+USAGE_EXHAUSTED
+printf '306 queued open none 2026-01-01T00:00:00Z\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+rm -rf "$state_root/pools"
+mkdir -p "$state_root/pools/plus" "$state_root/pools/gogo" "$state_root/pools/codex"
+for pool in plus gogo codex; do printf '%s\n' "$(( $(date +%s) + 600 ))" > "$state_root/pools/$pool/exhausted"; done
+XDG_DATA_HOME="$TEST_ROOT/godata" FAKE_GO_USAGE_FILE="$TEST_ROOT/go-usage-exhausted.json" AGENTIC_LOOP_RUN_ONCE=1 FAKE_CODEX_SLEEP=1 "$target/bin/agentic-loop" _supervise
+grep -Eq '^306 queued open' "$state" || fail 'all-pools exhaustion did not keep the Issue queued'
+[[ -e $state_root/all-pools-paused ]] || fail 'all-pools pause was not synthesized from the pool markers'
+XDG_DATA_HOME="$TEST_ROOT/godata" FAKE_GO_USAGE_FILE="$TEST_ROOT/go-usage-exhausted.json" AGENTIC_LOOP_RUN_ONCE=1 FAKE_CODEX_SLEEP=1 "$target/bin/agentic-loop" _supervise
+grep -Eq '^306 queued open' "$state" || fail 'all-pools pause did not hold the Issue in queue'
+rm -rf "$state_root/pools"
+rm -f "$state_root/agent-exhausted" "$state_root/all-pools-paused" "$state_root/pools/usage-opencode"
+AGENTIC_LOOP_RUN_ONCE=1 FAKE_CODEX_SLEEP=1 "$target/bin/agentic-loop" _supervise
+grep -Eq '^306 completed closed' "$state" || fail 'claiming did not resume after all pools recovered'
+
+# Backward compatibility: a scalar-only config normalizes to a single implicit
+# tier whose pool is the provider name, and still completes plan/exec.
+cat > "$target/.agentic-loop.toml" <<'SCALAR_TOML'
+[agent]
+provider = "codex"
+
+[agent.plan]
+model = "gpt-5.6-sol"
+reasoning_effort = "high"
+
+[agent.exec]
+model = "gpt-5.6-terra"
+reasoning_effort = "low"
+
+[queue]
+poll_seconds = 1
+max_workers = 1
+lease_seconds = 3
+stop_timeout = 10
+stale_days = 30
+SCALAR_TOML
+scalar_pick=$("$target/bin/agentic-loop" _pick-tier plan)
+if ! grep -Fq 'pool=codex' <<< "$scalar_pick"; then fail 'scalar config did not normalize to the provider pool'; fi
+if ! grep -Fq 'model=gpt-5.6-sol' <<< "$scalar_pick"; then fail 'scalar config did not keep the scalar model'; fi
+if ! grep -Fq 'reasoning_effort=high' <<< "$scalar_pick"; then fail 'scalar config did not keep the plan reasoning effort'; fi
+printf '307 queued open none 2026-01-01T00:00:00Z\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+rm -f "$FAKE_GH_ROOT/codex-exec-count"
+AGENTIC_LOOP_RUN_ONCE=1 FAKE_CODEX_SLEEP=1 "$target/bin/agentic-loop" _supervise
+grep -Eq '^307 completed closed' "$state" || fail 'scalar-only Issue did not complete'
+
+# Diagnosis honors tiers: the first diagnose tier's provider/model is used.
+cp "$target/.agentic-loop.toml" "$target/.agentic-loop.toml.bak"
+cat > "$target/.agentic-loop.toml" <<'DTOML'
+[agent.diagnose]
+[[agent.diagnose.tiers]]
+pool = "gogo"
+provider = "opencode"
+reasoning_effort = "low"
+models = [{ model = "opencode-go/gpt-5.6-luna" }]
+DTOML
+: > "$FAKE_GH_ROOT/opencode-calls"
+"$target/bin/agentic-loop-diagnose" >/dev/null
+# shellcheck disable=SC2016 # The dollar-prefixed value is a literal skill invocation.
+assert_contains "$FAKE_GH_ROOT/opencode-calls" 'Use $diagnose-codebase' 'diagnosis did not use the first diagnose tier'
+assert_contains "$FAKE_GH_ROOT/opencode-calls" '--model opencode-go/gpt-5.6-luna' 'diagnosis did not pass the tier model'
+mv "$target/.agentic-loop.toml.bak" "$target/.agentic-loop.toml"
+
+# doctor validates the tiers schema: unknown providers and out-of-range
+# max_usage_percent are reported as failures.
+cp "$target/.agentic-loop.toml" "$target/.agentic-loop.toml.bak"
+cat > "$target/.agentic-loop.toml" <<'BADTOML'
+[agent.plan]
+[[agent.plan.tiers]]
+pool = "plus"
+provider = "bogus"
+models = [{ model = "m1", max_usage_percent = 120 }]
+BADTOML
+doctor_out=$("$target/bin/agentic-loop" doctor || true)
+grep -Fq '[失敗] tiers設定 (plan)' <<< "$doctor_out" || fail 'doctor did not flag the invalid tiers schema'
+mv "$target/.agentic-loop.toml.bak" "$target/.agentic-loop.toml"
 
 # --- Change-scope conflict avoidance (Issue #44) ---
 
@@ -2129,9 +2433,9 @@ mv "$target/.agentic-loop.toml.valid" "$target/.agentic-loop.toml"
 # conflict status test above).
 write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=2 LEASE_SECONDS=30 STOP_TIMEOUT=10 STALE_DAYS=30
 rm -f "$state_root/supervisor.pid" "$state_root/stop.requested" "$state_root/project-pending" \
-      "$state_root/budget-paused" "$state_root/core-budget-paused" "$state_root/agent-exhausted"
+      "$state_root/budget-paused" "$state_root/core-budget-paused" "$state_root/agent-exhausted" "$state_root/all-pools-paused"
 rmdir "$state_root/supervisor.lock" 2>/dev/null || true
-rm -rf "$state_root/workers" "$state_root/scope" "$state_root/conflict" "$state_root/dependency" "$state_root/attempts"
+rm -rf "$state_root/pools" "$state_root/workers" "$state_root/scope" "$state_root/conflict" "$state_root/dependency" "$state_root/attempts"
 # Earlier scenarios in this file intentionally leave worktrees/branches behind
 # (they test worker() resume/cleanup behavior); clear them so the idle
 # scenario below starts from a genuinely anomaly-free baseline.

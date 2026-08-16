@@ -178,6 +178,8 @@ state_label() { printf 'agent:%s' "$1"; }
 # read-only) then a cheaper exec stage, so expensive reasoning is spent on
 # planning rather than on every edit.
 config_value() { awk -F ' = ' -v k="$1" '$1 == k {print $2; exit}' <<< "$CONFIG_PROPS"; }
+config_prefix_lines() { grep "^$1" <<< "$CONFIG_PROPS" || true; }
+config_has_prefix() { [[ -n $(config_prefix_lines "$1") ]]; }
 
 agent_default_provider() {
   local provider=${AGENT_PROVIDER:-}
@@ -213,8 +215,68 @@ provider_ready() {
     *) return 1 ;;
   esac
 }
-# The distinct providers actually used across the worker phases.
-agent_used_providers() { printf '%s\n%s\n' "$(agent_phase_provider plan)" "$(agent_phase_provider exec)" | sort -u; }
+
+# --- Pool/tier priority selection (Issue #155) ---
+#
+# A phase may declare ordered `tiers`. Each tier binds a subscription pool
+# (quota boundary) to one provider and an ordered `models` list; a model's
+# `max_usage_percent` demotes it to the next model when the pool usage crosses
+# the threshold, and an exhausted pool skips the whole tier. Phases without
+# tiers keep the scalar provider/model/reasoning_effort keys, normalized below
+# to a single implicit tier whose pool is the provider name (backward
+# compatible). `yq -p toml -o props` renders the nested arrays as
+# `agent.<phase>.tiers.<i>.pool`, `...tiers.<i>.models.<j>.model`, etc.; this
+# normalization is the single place those dotted keys are interpreted.
+agent_pool_sanitize() { printf '%s' "$1" | tr -c 'A-Za-z0-9_-' '_'; }
+agent_phase_has_tiers() { config_has_prefix "agent.$1.tiers."; }
+agent_tier_indices() {
+  local phase=$1
+  config_prefix_lines "agent.$phase.tiers." | sed -E 's/^agent\.[^.]+\.tiers\.([0-9]+)\..*/\1/' | sort -un
+}
+agent_model_indices() {
+  local phase=$1 tier=$2
+  config_prefix_lines "agent.$phase.tiers.$tier.models." | sed -E 's/^agent\.[^.]+\.tiers\.[0-9]+\.models\.([0-9]+)\..*/\1/' | sort -un
+}
+
+# Emit every candidate for a phase, ordered by (tier_index, model_index), one
+# row per line, fields separated by a non-whitespace control character so empty
+# fields (unset model / max_usage_percent) survive read without IFS collapsing:
+#   tier_index<FS>model_index<FS>pool<FS>provider<FS>model<FS>effort<FS>max_usage_percent
+readonly CAND_FS=$'\x1f'
+agent_phase_tiers() {
+  local phase=$1 tier mi pool provider model effort max
+  if agent_phase_has_tiers "$phase"; then
+    for tier in $(agent_tier_indices "$phase"); do
+      pool=$(config_value "agent.$phase.tiers.$tier.pool")
+      provider=$(config_value "agent.$phase.tiers.$tier.provider")
+      [[ -n $provider ]] || provider=$(agent_default_provider)
+      [[ -n $pool ]] || pool=$provider
+      effort=$(config_value "agent.$phase.tiers.$tier.reasoning_effort")
+      [[ -n $effort ]] || effort=$(agent_phase_effort "$phase")
+      for mi in $(agent_model_indices "$phase" "$tier"); do
+        model=$(config_value "agent.$phase.tiers.$tier.models.$mi.model")
+        max=$(config_value "agent.$phase.tiers.$tier.models.$mi.max_usage_percent")
+        printf '%s%s%s%s%s%s%s%s%s%s%s%s%s\n' "$tier" "$CAND_FS" "$mi" "$CAND_FS" "$pool" "$CAND_FS" "$provider" "$CAND_FS" "$model" "$CAND_FS" "$effort" "$CAND_FS" "$max"
+      done
+    done
+  else
+    provider=$(agent_phase_provider "$phase")
+    printf '%s%s%s%s%s%s%s%s%s%s%s%s%s\n' "0" "$CAND_FS" "0" "$CAND_FS" "$provider" "$CAND_FS" "$provider" "$CAND_FS" "$(agent_phase_model "$phase")" "$CAND_FS" "$(agent_phase_effort "$phase")" "$CAND_FS" ""
+  fi
+}
+
+agent_candidate_count() { agent_phase_tiers "$1" | grep -c . || true; }
+
+# The distinct providers actually used across the worker phases, including
+# every fallback tier, so install/preflight/systemd PATH cover all CLIs.
+agent_used_providers() {
+  local phase provider
+  for phase in plan exec diagnose; do
+    while IFS="$CAND_FS" read -r _ _ _ provider _ _ _; do
+      [[ -n $provider ]] && printf '%s\n' "$provider"
+    done < <(agent_phase_tiers "$phase")
+  done | sort -u
+}
 
 # Weekly (secondary) rate-limit usage percent from the newest Codex session log.
 # Codex writes token_count events to ~/.codex/sessions; the schema is
@@ -228,6 +290,206 @@ codex_weekly_used_percent() {
   pct=$(yq -p json -o tsv 'select(.payload.type == "token_count") | .payload.rate_limits.secondary.used_percent' "$file" 2>/dev/null | grep -E '^[0-9]+(\.[0-9]+)?$' | tail -n 1)
   [[ -n $pct ]] || return 1
   printf '%s' "$pct"
+}
+
+# Best-effort usage percent (0-100) for the OpenCode Go subscription from its
+# read-only usage API. The API key is read from ~/.local/share/opencode/auth.json
+# (`opencode-go` entry) and is never written to logs, comments, or state files.
+# The pinned runtime has no curl, so the request rides `gh api` (always present,
+# which can proxy any HTTPS URL). Returns non-zero when unreadable so callers
+# fail open. Results are cached to keep the supervisor poll cheap.
+opencode_go_usage_percent() {
+  local auth_file key response percent status
+  auth_file="${XDG_DATA_HOME:-$HOME/.local/share}/opencode/auth.json"
+  [[ -r $auth_file ]] || return 1
+  key=$(yq -p json -r '."opencode-go".key // ""' "$auth_file" 2>/dev/null)
+  [[ -n $key ]] || return 1
+  command -v gh >/dev/null 2>&1 || return 1
+  if command -v timeout >/dev/null 2>&1; then
+    response=$(timeout 20 gh api "https://opencode.ai/zen/go/v1/usage" -H "Authorization: Bearer $key" 2>/dev/null) || return 1
+  else
+    response=$(gh api "https://opencode.ai/zen/go/v1/usage" -H "Authorization: Bearer $key" 2>/dev/null) || return 1
+  fi
+  percent=$(printf '%s\n' "$response" | yq -p json -o tsv '[.usage.rolling.percent // 0, .usage.weekly.percent // 0, .usage.monthly.percent // 0] | max' - 2>/dev/null)
+  [[ $percent =~ ^[0-9]+(\.[0-9]+)?$ ]] || return 1
+  status=$(printf '%s\n' "$response" | yq -p json -o tsv '[.usage.rolling.status // "", .usage.weekly.status // "", .usage.monthly.status // ""] | join(",")' - 2>/dev/null)
+  # An explicitly exhausted window is the binding constraint regardless of the
+  # numeric percent (treat as fully spent).
+  if grep -qiE '(^|,)exhausted(,|$)' <<< "$status"; then printf '100\n'; else printf '%s\n' "$percent"; fi
+}
+
+# Cached wrapper around opencode_go_usage_percent: the usage API is read at most
+# once per USAGE_CACHE_SECONDS, and a failure is remembered so a network outage
+# does not hammer the API every poll. The cache holds only the numeric percent
+# (no key/token) under STATE_ROOT/pools/.
+readonly USAGE_CACHE_SECONDS=300
+opencode_go_usage_cached() {
+  local cache_file="$STATE_ROOT/pools/usage-opencode" now fetched percent
+  now=$(date +%s)
+  if [[ -r $cache_file ]]; then
+    IFS=$'\t' read -r fetched percent < "$cache_file" 2>/dev/null || true
+    if [[ $fetched =~ ^[0-9]+$ ]] && (( now - fetched < USAGE_CACHE_SECONDS )); then
+      [[ $percent =~ ^[0-9]+(\.[0-9]+)?$ ]] || return 1
+      printf '%s' "$percent"
+      return 0
+    fi
+  fi
+  if ! percent=$(opencode_go_usage_percent); then
+    mkdir -p "$STATE_ROOT/pools"
+    printf '%s\t\n' "$now" > "$cache_file.tmp" 2>/dev/null && mv "$cache_file.tmp" "$cache_file" 2>/dev/null || true
+    return 1
+  fi
+  mkdir -p "$STATE_ROOT/pools"
+  printf '%s\t%s\n' "$now" "$percent" > "$cache_file.tmp" 2>/dev/null && mv "$cache_file.tmp" "$cache_file" 2>/dev/null || true
+  printf '%s' "$percent"
+}
+
+# Measure one provider's pool usage: 0-100 on stdout, non-zero when unreadable.
+agent_provider_usage_percent() {
+  case $1 in
+    codex) codex_weekly_used_percent || return 1 ;;
+    opencode) opencode_go_usage_cached || return 1 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Tri-state usage health for pool recovery: recovered|exhausted|unreadable.
+agent_provider_usage_state() {
+  local provider=$1 pct
+  pct=$(agent_provider_usage_percent "$provider") || { printf 'unreadable\n'; return 0; }
+  if awk -v p="$pct" 'BEGIN { exit !(p >= 100) }'; then printf 'exhausted\n'; else printf 'recovered\n'; fi
+}
+
+# --- Pool exhaustion and recovery (Issue #155) ---
+# Exhaustion is recorded per pool (subscription) under STATE_ROOT/pools/<pool>/
+# (Git-ignored, key/token-free). Recovery is usage-measured where possible and
+# otherwise falls back to the fixed EXHAUSTION_PAUSE_SECONDS cooldown.
+
+agent_pool_marker() { printf '%s/pools/%s/exhausted' "$STATE_ROOT" "$(agent_pool_sanitize "$1")"; }
+
+# The distinct pools referenced by any phase (sanitized, for `for` loops).
+agent_all_pools() {
+  local phase pool
+  for phase in plan exec diagnose; do
+    while IFS="$CAND_FS" read -r _ _ pool _ _ _ _; do
+      [[ -n $pool ]] && printf '%s\n' "$(agent_pool_sanitize "$pool")"
+    done < <(agent_phase_tiers "$phase")
+  done | sort -u
+}
+
+# The providers that consume a pool's shared quota (for usage-based recovery).
+agent_pool_providers() {
+  local wanted=$1 phase pool provider
+  for phase in plan exec diagnose; do
+    while IFS="$CAND_FS" read -r _ _ pool provider _ _ _; do
+      [[ -n $provider && $(agent_pool_sanitize "$pool") == "$wanted" ]] && printf '%s\n' "$provider"
+    done < <(agent_phase_tiers "$phase")
+  done | sort -u
+}
+
+# Whether the pool is currently marked exhausted, without attempting recovery
+# (pure marker check; status uses this so it never touches the usage API).
+agent_pool_marker_active() {
+  local pool=$1 resume now marker
+  marker=$(agent_pool_marker "$pool")
+  [[ -r $marker ]] || return 1
+  read -r resume < "$marker" || true
+  now=$(date +%s)
+  [[ $resume =~ ^[0-9]+$ ]] && (( now >= resume )) && return 1
+  return 0
+}
+
+# Usage-based early recovery: true when at least one provider of the pool is
+# measurably recovered and none is measurably exhausted. Unmeasurable providers
+# defer to the cooldown below.
+agent_pool_usage_recovered() {
+  local pool=$1 provider recovered=0
+  for provider in $(agent_pool_providers "$pool"); do
+    case $(agent_provider_usage_state "$provider") in
+      recovered) recovered=1 ;;
+      exhausted) return 1 ;;
+    esac
+  done
+  (( recovered == 1 ))
+}
+
+# Whether the pool is currently exhausted, attempting recovery first (usage
+# measurement, then cooldown expiry). Returns 0 when exhausted.
+agent_pool_exhausted() {
+  local pool=$1 marker resume now
+  marker=$(agent_pool_marker "$pool")
+  [[ -r $marker ]] || return 1
+  if agent_pool_usage_recovered "$pool"; then rm -f "$marker"; return 1; fi
+  read -r resume < "$marker" || true
+  now=$(date +%s)
+  if [[ $resume =~ ^[0-9]+$ ]] && (( now >= resume )); then rm -f "$marker"; return 1; fi
+  return 0
+}
+
+# Record that a pool's quota is spent so the picker skips it and the supervisor
+# pauses claiming only when every pool becomes unavailable.
+agent_mark_pool_exhausted() {
+  local pool=$1 marker
+  marker=$(agent_pool_marker "$pool")
+  mkdir -p "$(dirname "$marker")"
+  printf '%s\n' "$(( $(date +%s) + EXHAUSTION_PAUSE_SECONDS ))" > "$marker"
+}
+
+# Pick the best currently-usable candidate for a phase: the first tier whose
+# pool is not exhausted, then the first model whose measured pool usage does not
+# exceed its max_usage_percent (unset = unlimited, unmeasurable = fail open).
+# `tried` is a comma-separated list of "tier:model" keys already attempted in
+# this stage, so a model-specific failure moves on instead of looping. Emits
+# key=value lines and returns 0, or returns 1 when no candidate is usable.
+agent_pick_tier() {
+  local phase=$1 tried=${2:-} pool provider model effort tier midx max row key pct
+  while IFS="$CAND_FS" read -r tier midx pool provider model effort max; do
+    [[ -n $provider ]] || continue
+    key="$tier:$midx"
+    [[ $tried =~ (^|,)"$key"(,|$) ]] && continue
+    agent_pool_exhausted "$pool" && continue
+    if [[ -n $max && $max =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+      if pct=$(agent_provider_usage_percent "$provider"); then
+        if awk -v p="$pct" -v m="$max" 'BEGIN { exit !(p > m) }'; then continue; fi
+      fi
+    fi
+    printf 'pool=%s\nprovider=%s\nmodel=%s\nreasoning_effort=%s\ntier_index=%s\nmodel_index=%s\n' \
+      "$pool" "$provider" "$model" "$effort" "$tier" "$midx"
+    return 0
+  done < <(agent_phase_tiers "$phase")
+  return 1
+}
+
+# Load key=value candidate lines (agent_pick_tier output, on stdin) into globals.
+agent_candidate_load() {
+  local line key value
+  CAND_POOL='' CAND_PROVIDER='' CAND_MODEL='' CAND_EFFORT='' CAND_TIER='' CAND_MODEL_IDX=''
+  while IFS='=' read -r key value; do
+    case $key in
+      pool) CAND_POOL=$value ;;
+      provider) CAND_PROVIDER=$value ;;
+      model) CAND_MODEL=$value ;;
+      reasoning_effort) CAND_EFFORT=$value ;;
+      tier_index) CAND_TIER=$value ;;
+      model_index) CAND_MODEL_IDX=$value ;;
+    esac
+  done
+}
+
+# Best-effort "next likely candidate" for a phase without live usage
+# measurement (status must stay network-free): the first candidate whose pool is
+# not currently marked exhausted. Sets NC_POOL/NC_PROVIDER/NC_MODEL/NC_TIER/
+# NC_MODEL_IDX and returns 0, or returns 1 when none is available.
+agent_next_candidate_nominal() {
+  local phase=$1 tier midx pool provider model effort max
+  NC_POOL='' NC_PROVIDER='' NC_MODEL='' NC_TIER='' NC_MODEL_IDX=''
+  while IFS="$CAND_FS" read -r tier midx pool provider model effort max; do
+    [[ -n $provider ]] || continue
+    agent_pool_marker_active "$pool" && continue
+    NC_POOL=$pool; NC_PROVIDER=$provider; NC_MODEL=$model; NC_TIER=$tier; NC_MODEL_IDX=$midx
+    return 0
+  done < <(agent_phase_tiers "$phase")
+  return 1
 }
 
 # Decide whether a new Issue may be claimed while leaving an emergency reserve.
@@ -272,33 +534,68 @@ core_budget_note_pause() {
   return 1
 }
 
-# Detect whether a stage failed because the provider's token/rate budget is spent
-# (a usage-limit signature, or a non-zero exit with no result), rather than the
-# task being genuinely unworkable. Such a stop must not fail the Issue.
-agent_result_is_exhausted() {
+# Classify a stage result: pool-quota exhaustion vs model-specific failure.
+# Pool exhaustion (quota / 429 / usage limit / insufficient_quota / credit
+# balance, or a non-zero exit with no output -- the latter kept for backward
+# compatibility) pauses that pool and re-queues the Issue. `overloaded` and
+# model-resolution failures are model-specific: the stage moves to the next
+# model in the pool instead of treating the whole subscription as spent.
+agent_result_is_pool_exhausted() {
   local result_file=$1 exit_code=$2
-  [[ -r $result_file ]] && grep -qiE 'usage limit|rate.?limit|overloaded|too many requests|(^|[^0-9])429([^0-9]|$)|insufficient_quota|quota exceeded|credit balance' "$result_file" && return 0
+  [[ -r $result_file ]] && grep -qiE 'usage limit|rate.?limit|too many requests|(^|[^0-9])429([^0-9]|$)|insufficient_quota|quota exceeded|credit balance' "$result_file" && return 0
   (( exit_code != 0 )) && [[ ! -s $result_file ]] && return 0
   return 1
 }
+agent_result_is_model_failure() {
+  local result_file=$1
+  [[ -r $result_file ]] && grep -qiE 'overloaded|model.*not found|unknown model|invalid model|model.*not supported' "$result_file"
+}
+# Backward-compatible alias: pool exhaustion is the terminal "exhausted"
+# outcome (Issue re-queued; the supervisor pauses only when every pool is
+# unavailable).
+agent_result_is_exhausted() { agent_result_is_pool_exhausted "$@"; }
 
 # Record that the provider budget is exhausted so the supervisor stops claiming
-# until it likely recovers, instead of burning Issues into agent:failed.
+# until it likely recovers, instead of burning Issues into agent:failed. This
+# global marker records the "every candidate pool is unavailable" case; per-pool
+# exhaustion uses agent_mark_pool_exhausted.
 agent_mark_exhausted() {
   mkdir -p "$STATE_ROOT"
   printf '%s\n' "$(( $(date +%s) + EXHAUSTION_PAUSE_SECONDS ))" > "$STATE_ROOT/agent-exhausted"
 }
 
-# Pause claiming while a recent worker reported an exhausted budget; resume once
-# the pause window elapses so recovery is automatic.
+# Pause claiming while no pool is usable: a fresh global marker (written when a
+# worker found no candidate at all), or every referenced pool currently
+# exhausted. A pool recovers through usage measurement or its fixed cooldown, so
+# a single spent pool never stops claiming -- the picker simply uses another
+# pool. Announce transitions once to keep the supervisor log quiet.
 exhaustion_note_pause() {
-  local marker="$STATE_ROOT/agent-exhausted" resume now
-  [[ -r $marker ]] || return 0
-  read -r resume < "$marker" || true
-  now=$(date +%s)
-  if [[ $resume =~ ^[0-9]+$ ]] && (( now < resume )); then return 1; fi
-  rm -f "$marker"
-  say 'token/rate limitの回復待ち時間が経過したため、Issueのclaimを再開します。' >&2
+  local marker="$STATE_ROOT/agent-exhausted" resume now pool all_pools=1 global_active=0 pools=''
+  if [[ -r $marker ]]; then
+    read -r resume < "$marker" || true
+    now=$(date +%s)
+    if [[ $resume =~ ^[0-9]+$ ]] && (( now < resume )); then global_active=1; else rm -f "$marker"; fi
+  fi
+  pools=$(agent_all_pools)
+  if [[ -n $pools ]]; then
+    for pool in $pools; do
+      agent_pool_exhausted "$pool" || all_pools=0
+    done
+  else
+    all_pools=0
+  fi
+  if (( global_active == 1 || all_pools == 1 )); then
+    if [[ ! -e $STATE_ROOT/all-pools-paused ]]; then
+      mkdir -p "$STATE_ROOT"
+      : > "$STATE_ROOT/all-pools-paused"
+      say '全プールが利用不可のため、Issueのclaimを一時停止します。' >&2
+    fi
+    return 1
+  fi
+  if [[ -e $STATE_ROOT/all-pools-paused ]]; then
+    rm -f "$STATE_ROOT/all-pools-paused"
+    say 'いずれかのプールで枠が回復したため、Issueのclaimを再開します。' >&2
+  fi
   return 0
 }
 # Run one worker stage confined to the dedicated worktree. stage=plan only
@@ -308,12 +605,11 @@ exhaustion_note_pause() {
 # message is written to result_file, where the caller reads the plan text or the
 # AGENTIC_LOOP_RESULT sentinel.
 agent_run_stage() {
-  local stage=$1 worktree=$2 git_common_dir=$3 agents_dir=$4 result_file=$5 usage_file=$6 prompt=$7 provider model effort raw_result
-  provider=$(agent_phase_provider "$stage")
-  model=$(agent_phase_model "$stage")
+  local stage=$1 worktree=$2 git_common_dir=$3 agents_dir=$4 result_file=$5 usage_file=$6 prompt=$7 pool=$8 provider=$9 model=${10} effort=${11} raw_result
   raw_result="${result_file}.raw.$$"
   : > "$usage_file"
   printf 'provider=%s\nstage=%s\n' "$provider" "$stage" >> "$usage_file"
+  [[ -n $pool ]] && printf 'pool=%s\n' "$pool" >> "$usage_file"
   [[ -n $model ]] && printf 'model=%s\n' "$model" >> "$usage_file"
   case $provider in
     claude)
@@ -353,7 +649,6 @@ agent_run_stage() {
       rm -f "$raw_result"
       ;;
     *)
-      effort=$(agent_phase_effort "$stage")
       printf 'reasoning_effort=%s\n' "$effort" >> "$usage_file"
       local -a codex_args
       if [[ $stage == plan ]]; then
@@ -434,6 +729,7 @@ agent_post_usage() {
   # plan/exec duration must be reconstructable from the marker alone.
   summary="<!-- agentic-loop:usage worker=$worker stage=${usage[stage]:-unknown} provider=${usage[provider]:-unknown} seconds=$seconds exit=$exit_code -->\nToken使用量（分析用）: provider=${usage[provider]:-unknown}"
   [[ -n ${usage[stage]:-} ]] && summary+=" stage=${usage[stage]}"
+  [[ -n ${usage[pool]:-} ]] && summary+=" pool=${usage[pool]}"
   [[ -n ${usage[model]:-} ]] && summary+=" model=${usage[model]}"
   [[ -n ${usage[reasoning_effort]:-} ]] && summary+=" reasoning_effort=${usage[reasoning_effort]}"
   [[ -n ${usage[tokens_input]:-} ]] && summary+=" 入力=${usage[tokens_input]}tok"
@@ -443,6 +739,51 @@ agent_post_usage() {
   [[ -n ${usage[cost_usd]:-} ]] && summary+=" cost=\$${usage[cost_usd]}"
   summary+=" 所要=${seconds}s exit=${exit_code}"
   comment_issue "$issue" "$summary" || true
+}
+
+# Run one stage with automatic tier/pool/model fallback (Issue #155). Rounds
+# across every candidate until one succeeds or the failure is classified; a
+# pool-quota exhaustion marks that pool, while a model-specific failure (e.g.
+# overloaded) moves to the next candidate in the same pool first. Sets the
+# globals STAGE_RC (0 normal / 1 pool exhausted / 2 no candidate usable at all /
+# 3 every candidate failed with a model-specific error) and STAGE_EXIT_CODE
+# (last provider exit; result_file keeps the last output).
+run_stage_candidates() {
+  local phase=$1 worktree=$2 git_common_dir=$3 agents_dir=$4 result_file=$5 usage_file=$6 prompt=$7
+  local tried='' picked key max_tries tries
+  max_tries=$(agent_candidate_count "$phase")
+  (( max_tries >= 1 )) || max_tries=1
+  tries=0
+  while :; do
+    STAGE_RC=0
+    if ! picked=$(agent_pick_tier "$phase" "$tried"); then
+      STAGE_EXIT_CODE=1
+      if (( tries == 0 )); then STAGE_RC=2; else STAGE_RC=3; fi
+      return $STAGE_RC
+    fi
+    agent_candidate_load <<< "$picked"
+    key="$CAND_TIER:$CAND_MODEL_IDX"
+    tried+="${tried:+,}$key"
+    tries=$((tries + 1))
+    STAGE_EXIT_CODE=0
+    agent_run_stage "$phase" "$worktree" "$git_common_dir" "$agents_dir" "$result_file" "$usage_file" "$prompt" \
+      "$CAND_POOL" "$CAND_PROVIDER" "$CAND_MODEL" "$CAND_EFFORT" || STAGE_EXIT_CODE=$?
+    if agent_result_is_pool_exhausted "$result_file" "$STAGE_EXIT_CODE"; then
+      LAST_EXHAUSTED_POOL=$CAND_POOL
+      agent_mark_pool_exhausted "$CAND_POOL"
+      STAGE_RC=1
+      return 1
+    fi
+    if agent_result_is_model_failure "$result_file" "$STAGE_EXIT_CODE"; then
+      if (( tries < max_tries )); then
+        say "モデル固有の失敗のため次の候補へ切り替えます: pool=$CAND_POOL provider=$CAND_PROVIDER model=$CAND_MODEL" >&2
+        continue
+      fi
+      STAGE_RC=3
+      return 3
+    fi
+    return 0
+  done
 }
 
 load_config || { [[ ${1:-} == doctor ]] || fail "$CONFIG_ERROR"; }
@@ -985,8 +1326,13 @@ status_claim_pause_reasons() {
   if [[ -r $STATE_ROOT/agent-exhausted ]]; then
     local resume=''
     read -r resume < "$STATE_ROOT/agent-exhausted" || true
-    [[ $resume =~ ^[0-9]+$ ]] && (( $(date +%s) < resume )) && reasons+=('provider利用上限からの回復待ち')
+    [[ $resume =~ ^[0-9]+$ ]] && (( $(date +%s) < resume )) && reasons+=('全プール利用不可')
   fi
+  [[ -e $STATE_ROOT/all-pools-paused ]] && reasons+=('全プール利用不可')
+  local pool
+  for pool in $(agent_all_pools); do
+    if agent_pool_marker_active "$pool"; then reasons+=("pool=$pool 枯渇（回復待ち）"); fi
+  done
   [[ -e $STATE_ROOT/stop.requested ]] && reasons+=('stop要求によるdrain中')
   (( ${#reasons[@]} == 0 )) && return 0
   local IFS=,
@@ -1216,6 +1562,16 @@ status_render_text_state_line() {
 status_render_text() {
   if pid_alive; then say "running (pid $(cat "$STATE_ROOT/supervisor.pid"), max workers $MAX_WORKERS)"; else say 'stopped'; fi
 
+  local phase
+  for phase in plan exec; do
+    if agent_next_candidate_nominal "$phase"; then
+      printf '次の%s候補: pool=%s provider=%s model=%s (tier=%s, model_index=%s)\n' \
+        "$phase" "$NC_POOL" "$NC_PROVIDER" "$NC_MODEL" "$NC_TIER" "$NC_MODEL_IDX"
+    else
+      printf '次の%s候補: なし（全プール利用不可）\n' "$phase"
+    fi
+  done
+
   local i issue title suffix
   if (( STATUS_GITHUB_OK == 0 )); then
     say 'Running Issues: 不明（GitHub取得不能）'
@@ -1319,6 +1675,19 @@ status_render_json() {
   else
     printf '"supervisor":{"state":"stopped","pid":null,"max_workers":%s},' "$MAX_WORKERS"
   fi
+
+  printf '"next_candidates":{'
+  local phase sep=''
+  for phase in plan exec; do
+    if agent_next_candidate_nominal "$phase"; then
+      printf '%s"%s":{"pool":"%s","provider":"%s","model":"%s","tier":%s,"model_index":%s}' "$sep" "$phase" \
+        "$(json_escape "$NC_POOL")" "$(json_escape "$NC_PROVIDER")" "$(json_escape "$NC_MODEL")" "$NC_TIER" "$NC_MODEL_IDX"
+    else
+      printf '%s"%s":{"pool":null,"provider":null,"model":null,"tier":null,"model_index":null}' "$sep" "$phase"
+    fi
+    sep=','
+  done
+  printf '},'
 
   printf '"workers":['
   sep=''
@@ -1531,6 +1900,47 @@ doctor_collect() {
     if ! provider_valid "$phase_provider"; then doctor_add failure "AI CLI ($phase_provider)" "provider $phase_provider は未対応です。" 'agent.provider / agent.plan.provider / agent.exec.provider を codex、claude、opencode のいずれかに設定してください。'
     elif provider_ready "$phase_provider"; then doctor_add success "AI CLI ($phase_provider)" 'Issue workerを起動できます。' '対応は不要です。'
     else doctor_add failure "AI CLI ($phase_provider)" 'Issue workerを安全に起動できません。' "$phase_provider CLIを導入または更新し、ログインしてください。"; fi
+  done
+
+  # Tiers schema validation (Issue #155): unknown providers and invalid
+  # max_usage_percent are failures; a tier with no models is a warning (it
+  # silently contributes no candidates).
+  local tier_phase tier_provider tier_max tier_i tier_empty=0
+  for tier_phase in plan exec diagnose; do
+    while IFS="$CAND_FS" read -r _ _ _ tier_provider _ _ tier_max; do
+      [[ -n $tier_provider ]] || continue
+      if ! provider_valid "$tier_provider"; then
+        doctor_add failure "tiers設定 ($tier_phase)" "tierのprovider $tier_provider は未対応です。" 'agent.*.tiers[].provider を codex、claude、opencode のいずれかに設定してください。'
+      fi
+      if [[ -n $tier_max ]] && { ! [[ $tier_max =~ ^[0-9]+(\.[0-9]+)?$ ]] || ! awk -v m="$tier_max" 'BEGIN { exit !(m >= 0 && m <= 100) }'; }; then
+        doctor_add failure "tiers設定 ($tier_phase)" "models[].max_usage_percent は0〜100の数値にしてください（現在: ${tier_max:-空}）。" 'agent.*.tiers[].models[].max_usage_percent を0〜100の数値に修正してください。'
+      fi
+    done < <(agent_phase_tiers "$tier_phase")
+    if agent_phase_has_tiers "$tier_phase"; then
+      tier_empty=0
+      for tier_i in $(agent_tier_indices "$tier_phase"); do
+        [[ -z $(agent_model_indices "$tier_phase" "$tier_i") ]] && tier_empty=1
+      done
+      if (( tier_empty )); then
+        doctor_add warning "tiers設定 ($tier_phase)" 'models配列が空のtierがあります。そのtierは候補にならず実質無視されます。' 'agent.*.tiers[].models に少なくとも1つのmodelを指定してください。'
+      fi
+    fi
+  done
+  if agent_used_providers | grep -qx opencode; then
+    local go_auth go_has=0
+    go_auth="${XDG_DATA_HOME:-$HOME/.local/share}/opencode/auth.json"
+    if [[ -r $go_auth ]] && [[ -n $(yq -p json -r '."opencode-go".key // ""' "$go_auth" 2>/dev/null) ]]; then go_has=1; fi
+    if (( go_has )); then
+      doctor_add success 'OpenCode Go usage' 'opencode-go のusage認証keyの存在を確認しました（値は表示しません）。' '対応は不要です。'
+    else
+      doctor_add warning 'OpenCode Go usage' 'opencode-go のusage API認証keyが見つかりません。枠枯渇の回復検知は固定cooldownにフォールバックします。' 'opencode CLI で opencode-go アカウントにログインしてください（key値はリポジトリへ保存しません）。'
+    fi
+  fi
+  local pool
+  for pool in $(agent_all_pools); do
+    if agent_pool_marker_active "$pool"; then
+      doctor_add warning "プール $pool" '枠枯渇中です。回復するまでこのプールは選択から外れます。' "cooldownまたはusage回復後に自動復帰します。緊急復帰させたい場合は \`.git/agentic-loop/pools/$pool/exhausted\` を削除してください。"
+    fi
   done
   if command -v devbox >/dev/null 2>&1; then doctor_add success 'Devbox' '固定環境の共通検証入口を利用できます。' '対応は不要です。'
   else doctor_add failure 'Devbox' '`devbox run --pure check` を実行できません。' 'https://www.jetify.com/devbox/docs/installing_devbox/ を参照してDevboxを導入してください。'; fi
@@ -4121,12 +4531,18 @@ worker() {
     while :; do sleep $((LEASE_SECONDS / 3 + 1)); lease_heartbeat "$issue" "$worker" || true; done
   ) & heartbeat_pid=$!
   local plan_usage="$STATE_ROOT/issue-$issue-plan-usage.txt" exec_usage="$STATE_ROOT/issue-$issue-usage.txt"
-  local plan_file="$STATE_ROOT/issue-$issue-plan.txt" attempt=0 protocol_retry=0 max_retries started failure_context='' exhausted=0
+  local plan_file="$STATE_ROOT/issue-$issue-plan.txt" attempt=0 protocol_retry=0 max_retries started failure_context='' exhausted=0 exec_rc picked
   local resume_context; resume_context=$(resume_context_block "$branch")
   max_retries=$(agent_plan_max_retries)
   while :; do
     started=$(date +%s)
-    agent_run_stage plan "$worktree" "$git_common_dir" "$agents_dir" "$plan_file" "$plan_usage" "$(plan_prompt "$issue" "$repository" "$failure_context" "$resume_context")" || true
+    if picked=$(agent_pick_tier plan 2>/dev/null); then
+      agent_candidate_load <<< "$picked"
+      agent_run_stage plan "$worktree" "$git_common_dir" "$agents_dir" "$plan_file" "$plan_usage" "$(plan_prompt "$issue" "$repository" "$failure_context" "$resume_context")" "$CAND_POOL" "$CAND_PROVIDER" "$CAND_MODEL" "$CAND_EFFORT" || true
+    else
+      : > "$plan_file"
+      say 'plan段で利用可能な候補がないため、plan結果なしでexecへ進みます。' >&2
+    fi
     agent_post_usage "$issue" "$worker" "$plan_usage" 0 "$(($(date +%s) - started))"
     worker_refine_scope_from_plan "$issue" "$plan_file"
     if [[ -n $(decomposition_manifest_from_plan "$plan_file") ]]; then
@@ -4147,24 +4563,43 @@ worker() {
         return 0
       fi
     fi
-    exit_code=0
     started=$(date +%s)
-    agent_run_stage exec "$worktree" "$git_common_dir" "$agents_dir" "$result" "$exec_usage" "$(exec_prompt "$issue" "$repository" "$plan_file" "$resume_context")" || exit_code=$?
+    exec_rc=0
+    run_stage_candidates exec "$worktree" "$git_common_dir" "$agents_dir" "$result" "$exec_usage" "$(exec_prompt "$issue" "$repository" "$plan_file" "$resume_context")" || exec_rc=$?
+    exec_rc=$STAGE_RC
+    exit_code=$STAGE_EXIT_CODE
     agent_post_usage "$issue" "$worker" "$exec_usage" "$exit_code" "$(($(date +%s) - started))"
     worker_refine_scope_from_diff "$issue" "$worktree" "$default_branch"
+    # A pool-quota exhaustion (or no usable candidate at all) is not a task
+    # failure: mark what we can and re-queue the Issue so the next claim tries
+    # the next pool/model without burning attempts. Every candidate failing
+    # with a model-specific error (STAGE_RC=3) is transient like a task
+    # failure: it flows into the bounded replan/failed path below.
+    if (( exec_rc == 1 || exec_rc == 2 )); then
+      if (( exec_rc == 2 )); then agent_mark_exhausted; fi
+      exhausted=1
+      break
+    fi
     # A clean provider exit without a terminal marker is a protocol violation,
     # not an implementation failure. Retry exec once with the same plan before
     # spending a flagship replan; a second violation deterministically fails.
-    if [[ $exit_code -eq 0 ]] && ! agent_result_is_exhausted "$result" "$exit_code" && ! agent_result_terminal_marker "$result" >/dev/null; then
+    if (( exec_rc == 0 )) && [[ $exit_code -eq 0 ]] && ! agent_result_terminal_marker "$result" >/dev/null; then
       if (( protocol_retry == 0 )); then
         protocol_retry=1
         comment_issue "$issue" "<!-- agentic-loop:protocol-retry worker=$worker attempt=1 -->\nexec段が終了markerなしで正常終了しました。再計画せず同じ計画でexecを1回だけ再実行し、同一turn内の待機完遂と終了marker返却を求めます。" || true
         started=$(date +%s)
-        exit_code=0
-        agent_run_stage exec "$worktree" "$git_common_dir" "$agents_dir" "$result" "$exec_usage" "$(exec_prompt "$issue" "$repository" "$plan_file" "$resume_context")
-前回のexecは有効な終了markerなしで終了しました。同じ計画を継続し、外部待機をこのturn内で完遂したうえで、指定された終了markerを最後の非空行として必ず返してください。" || exit_code=$?
+        exec_rc=0
+        run_stage_candidates exec "$worktree" "$git_common_dir" "$agents_dir" "$result" "$exec_usage" "$(exec_prompt "$issue" "$repository" "$plan_file" "$resume_context")
+前回のexecは有効な終了markerなしで終了しました。同じ計画を継続し、外部待機をこのturn内で完遂したうえで、指定された終了markerを最後の非空行として必ず返してください。" || exec_rc=$?
+        exec_rc=$STAGE_RC
+        exit_code=$STAGE_EXIT_CODE
         agent_post_usage "$issue" "$worker" "$exec_usage" "$exit_code" "$(($(date +%s) - started))"
         worker_refine_scope_from_diff "$issue" "$worktree" "$default_branch"
+        if (( exec_rc == 1 || exec_rc == 2 )); then
+          if (( exec_rc == 2 )); then agent_mark_exhausted; fi
+          exhausted=1
+          break
+        fi
       fi
       if [[ $exit_code -eq 0 ]] && ! agent_result_terminal_marker "$result" >/dev/null; then
         break
@@ -4173,8 +4608,6 @@ worker() {
     { [[ $exit_code -eq 0 ]] && agent_result_is "$result" completed; } && break
     { [[ $exit_code -eq 0 ]] && agent_result_is "$result" needs-input; } && break
     { [[ $exit_code -eq 0 ]] && agent_result_is "$result" declined; } && break
-    # A spent token/rate budget is not a task failure: stop retrying immediately.
-    if agent_result_is_exhausted "$result" "$exit_code"; then exhausted=1; break; fi
     (( attempt >= max_retries )) && break
     attempt=$((attempt + 1))
     failure_context=$(tail -c 2000 "$result" 2>/dev/null || true)
@@ -4213,10 +4646,9 @@ worker() {
     comment_issue "$issue" "<!-- agentic-loop:declined worker=$worker -->\nWorkerはこのIssueを実施不要または実施不能と提案しました（理由は直前のcommentを参照）。worker自身はcloseしません。認可済みの運用者が確認し、必要なら \`bin/agentic-loop dispose $issue --reason cancelled\` 等で終了してください。"
   elif (( exhausted )); then
     clear_attempts "$issue"
-    agent_mark_exhausted
     set_issue_state "$issue" queued
     project_sync_state "$issue" queued
-    comment_issue "$issue" "<!-- agentic-loop:exhausted worker=$worker -->\nprovider の利用上限（token/rate limit）に達したため、Issueを failed にせず再キューし、Supervisorのclaimを一時停止します。上限回復後に自動再開します。"
+    comment_issue "$issue" "<!-- agentic-loop:exhausted worker=$worker pool=${LAST_EXHAUSTED_POOL:-} -->\nprovider の利用上限（token/rate limit）に達したため、Issueを failed にせず再キューします。全プールが利用不可の間だけSupervisorのclaimを一時停止し、枠回復後に自動再開します。"
   else
     set_issue_state "$issue" failed
     project_sync_state "$issue" failed
@@ -4241,6 +4673,7 @@ main() {
     upgrade) cmd_upgrade "$@" ;;
     _service) [[ $# -eq 1 ]] || exit 2; cmd_service ;;
     _supervise) supervise ;;
+    _pick-tier) [[ $# -eq 2 ]] || exit 2; agent_pick_tier "$2" || exit $? ;;
     _worker) [[ $# -eq 3 ]] || exit 2; worker "$2" "$3" ;;
     *) usage; exit 2 ;;
   esac

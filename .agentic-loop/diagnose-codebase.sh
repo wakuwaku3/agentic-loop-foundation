@@ -79,22 +79,35 @@ EOF
 }
 
 run_diagnosis() {
-  local root state_root lock_file result_file repository props provider model effort prompt
+  local root state_root lock_file result_file repository props provider model effort pick
   command -v yq >/dev/null 2>&1 || fail 'yq is required'
   command -v gh >/dev/null 2>&1 || fail 'gh is required'
   command -v flock >/dev/null 2>&1 || fail 'flock is required'
   root=$(repository_root "$1")
-  # Resolve the diagnose provider from .agentic-loop.toml ([agent.diagnose],
-  # falling back to [agent].provider then codex). Only Codex enforces read-only
-  # through its sandbox; other providers rely on the prompt below.
+  # Resolve the diagnose tier from .agentic-loop.toml: prefer `_pick-tier` (the
+  # queue CLI's pool/tier priority, Issue #155), then fall back to the scalar
+  # [agent.diagnose] keys, [agent].provider, then codex. Only Codex enforces
+  # read-only through its sandbox; other providers rely on the prompt below.
   props=$(diagnose_props "$root")
-  provider=$(diagnose_value "$props" 'agent.diagnose.provider')
-  [[ -n $provider ]] || provider=$(diagnose_value "$props" 'agent.provider')
-  provider=${provider:-codex}
+  provider='' model='' effort=''
+  if [[ -x $root/bin/agentic-loop ]]; then
+    pick=$("$root/bin/agentic-loop" _pick-tier diagnose 2>/dev/null) || pick=''
+  fi
+  if [[ -n $pick ]]; then
+    provider=$(awk -F= '$1 == "provider" {print $2; exit}' <<< "$pick")
+    model=$(awk -F= '$1 == "model" {print $2; exit}' <<< "$pick")
+    effort=$(awk -F= '$1 == "reasoning_effort" {print $2; exit}' <<< "$pick")
+  fi
+  if [[ -z $provider ]]; then
+    provider=$(diagnose_value "$props" 'agent.diagnose.provider')
+    [[ -n $provider ]] || provider=$(diagnose_value "$props" 'agent.provider')
+    provider=${provider:-codex}
+    model=$(diagnose_value "$props" 'agent.diagnose.model')
+    effort=$(diagnose_value "$props" 'agent.diagnose.reasoning_effort')
+  fi
+  effort=${effort:-low}
   case $provider in codex | claude | opencode) ;; *) fail "unsupported diagnose provider: $provider" ;; esac
   command -v "$provider" >/dev/null 2>&1 || fail "$provider is required"
-  model=$(diagnose_value "$props" 'agent.diagnose.model')
-  effort=$(diagnose_value "$props" 'agent.diagnose.reasoning_effort'); effort=${effort:-low}
   repository=$(cd "$root" && gh repo view --json nameWithOwner --jq .nameWithOwner) || fail 'GitHub authentication and repository access are required'
   state_root="$(git -C "$root" rev-parse --path-format=absolute --git-common-dir)/agentic-loop"
   mkdir -p "$state_root"

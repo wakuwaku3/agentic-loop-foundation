@@ -143,6 +143,12 @@ grep -Fq 'exec終了プロトコルと外部待機' docs/operations/issue-queue.
 grep -Fq -- '--sandbox read-only' bin/agentic-loop || { printf 'Plan stage does not run read-only.\n' >&2; exit 1; }
 grep -Fq 'agent_phase_effort' bin/agentic-loop || { printf 'Plan and exec reasoning effort is not tiered.\n' >&2; exit 1; }
 grep -Fq 'agent_phase_provider' bin/agentic-loop || { printf 'Per-phase provider selection is missing.\n' >&2; exit 1; }
+grep -Fq 'agent_pick_tier' bin/agentic-loop || { printf 'Pool/tier priority selection is missing.\n' >&2; exit 1; }
+grep -Fq 'agent_mark_pool_exhausted' bin/agentic-loop || { printf 'Per-pool exhaustion marking is missing.\n' >&2; exit 1; }
+grep -Fq 'agent_result_is_model_failure' bin/agentic-loop || { printf 'Model-specific failure classification is missing.\n' >&2; exit 1; }
+grep -Fq 'opencode.ai/zen/go/v1/usage' bin/agentic-loop || { printf 'OpenCode Go usage API measurement is missing.\n' >&2; exit 1; }
+grep -Fq '_pick-tier' bin/agentic-loop .agentic-loop/diagnose-codebase.sh || { printf 'Shared tier picker is not wired into diagnosis.\n' >&2; exit 1; }
+grep -Fq 'docs/decisions/0012-provider-pool-fallback.md' scripts/lib/foundation-files.sh || { printf 'Pool-fallback ADR is not distributed.\n' >&2; exit 1; }
 grep -Fq 'budget_allows_claim' bin/agentic-loop || { printf 'Budget guard is missing.\n' >&2; exit 1; }
 grep -Fq 'retry_failed' bin/agentic-loop || { printf 'Transient-failure retry is missing.\n' >&2; exit 1; }
 grep -Fq 'exhaustion_note_pause' bin/agentic-loop || { printf 'Token-exhaustion pause is missing.\n' >&2; exit 1; }
