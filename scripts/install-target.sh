@@ -144,6 +144,13 @@ main() {
   history=$(printf '{"at":%s,"from_revision":"none","to_revision":"%s","from_level":0,"to_level":%s,"steps":[],"result":"installed"}' "$(date +%s)" "$(foundation_json_escape "$revision")" "$migration_level")
   foundation_manifest_write "$target" "$mode" "$repository" "$revision" "$revision_ref" "$migration_level" "$entries" "$history"
 
+  # The manifest is the machine-generated record install leaves in the target
+  # (see docs/operations/upgrade.md); verify it immediately so a broken write
+  # can never silently mislabel which revision is installed. main sync
+  # tolerates exactly this manifest-only change and upgrade relies on it.
+  [[ $(yq -p json -o yaml '.source.revision // ""' "$target/.agentic-loop/manifest.json" 2>/dev/null) == "$revision" ]] ||
+    fail "installed manifest does not record the applied revision: $revision"
+
   if [[ ${AGENTIC_LOOP_SKIP_START:-0} != 1 ]]; then "$target/bin/agentic-loop" start; fi
   printf 'Agentic loop installed (%s) in %s\n' "$mode" "$(cd "$target" && pwd)"
 }

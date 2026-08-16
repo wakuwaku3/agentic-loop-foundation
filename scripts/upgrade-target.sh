@@ -284,6 +284,12 @@ new_history_entry=$(printf '{"at":%s,"from_revision":"%s","to_revision":"%s","fr
 if [[ -n $old_history ]]; then history="$old_history,$new_history_entry"; else history="$new_history_entry"; fi
 foundation_manifest_write "$TARGET" "${OLD_MODE:-install}" "$REPOSITORY" "$NEW_REVISION" "${AGENTIC_LOOP_REVISION:-$NEW_REVISION}" "$new_migration_level" "$entries" "$history"
 
+# Verify the rewritten manifest records exactly the revision this upgrade
+# applied, so a broken write never leaves the installed-revision record stale
+# (main sync tolerates this manifest-only change; upgrade/rollback rely on it).
+[[ $(yq -p json -o yaml '.source.revision // ""' "$MANIFEST" 2>/dev/null) == "$NEW_REVISION" ]] ||
+  fail "upgrade manifest does not record the applied revision: $NEW_REVISION"
+
 # --- Post-apply verification: doctor, then the configured full check ------
 verify_failed=0
 post_doctor_failures=$(doctor_failures_relevant_to_upgrade)

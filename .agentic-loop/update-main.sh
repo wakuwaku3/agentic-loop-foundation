@@ -68,6 +68,15 @@ EOF
   printf 'Periodic main updates enabled for %s\n' "$main_root"
 }
 
+# Machine-generated changes that sync may safely fast-forward across: only a
+# tracked .agentic-loop/manifest.json rewritten by install/upgrade to record
+# the applied revision. Prints every other dirty change (empty means the only
+# dirt is that manifest, which a fast-forward preserves untouched). Any user or
+# Foundation content is refused, exactly as before this tolerance existed.
+dirty_beyond_manifest() {
+  git -C "$1" status --porcelain | awk '$0 == " M .agentic-loop/manifest.json" { next } { print }'
+}
+
 sync_main() {
   local repository=$1 lock_file
   command -v flock >/dev/null 2>&1 || fail 'flock is required'
@@ -76,11 +85,18 @@ sync_main() {
   mkdir -p "$(dirname "$lock_file")"
   exec 9> "$lock_file"
   flock -n 9 || fail 'another main update is already running'
-  [[ -z $(git -C "$repository" status --porcelain) ]] || fail 'refusing to update a dirty main worktree'
+  [[ -z $(dirty_beyond_manifest "$repository") ]] || fail 'refusing to update a dirty main worktree'
   git -C "$repository" fetch --quiet origin main
-  [[ -z $(git -C "$repository" status --porcelain) ]] || fail 'main worktree changed while fetching'
+  [[ -z $(dirty_beyond_manifest "$repository") ]] || fail 'main worktree changed while fetching'
   git -C "$repository" merge-base --is-ancestor HEAD refs/remotes/origin/main ||
     fail 'refusing to update a main branch that is ahead of or diverged from origin/main'
+  # A locally rewritten manifest and incoming manifest changes both claim to be
+  # the record of what is installed; no automatic resolution is safe, so fail
+  # loudly instead of letting the merge pick one silently.
+  if [[ -n $(git -C "$repository" status --porcelain | grep -x ' M .agentic-loop/manifest.json' || true) ]] &&
+    ! git -C "$repository" diff --quiet HEAD refs/remotes/origin/main -- .agentic-loop/manifest.json; then
+    fail 'origin/main rewrites .agentic-loop/manifest.json; commit or restore the local manifest before syncing'
+  fi
   git -C "$repository" merge --quiet --ff-only refs/remotes/origin/main
 }
 
