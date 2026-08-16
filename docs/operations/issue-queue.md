@@ -32,6 +32,8 @@ Project同期やview修復はbest-effortであり、失敗をstderrへ記録し�
 ```sh
 bin/agentic-loop start
 bin/agentic-loop status
+bin/agentic-loop status --watch
+bin/agentic-loop tail
 bin/agentic-loop stop
 bin/agentic-loop doctor
 bin/agentic-loop metrics
@@ -42,6 +44,10 @@ bin/agentic-loop upgrade
 
 `bin/agentic-loop status`（[ADR 0005](../decisions/0005-status-observability.md)）は、Supervisorの生死だけでなく、running Issueの詳細、queuedの件数と次のclaim候補、needs-input/failed/in-review/blocked/staleの件数とURL、運用上の異常を1つの入口にまとめた運用snapshotである。常に読み取り専用（GitHubへの書き込み・Git作業ツリーの変更を一切行わない）で、GitHub REST(core)呼び出しは1回の実行あたり最大2回（open Issue全件のsnapshotと、closedな`agent:stale`の一覧）に抑え、GraphQL・Projects APIは呼ばない。引数不正時のみ終了code 2で、それ以外は異常があっても常に終了code 0（合否判定は`doctor`の責務）。
 
+`bin/agentic-loop status --watch [N]`は既定2秒（Nは正の整数）のtickで同じtext snapshotを端末に再描画する。tick間はGitHub snapshot/staleを**メモリ上のTTL cache**（既定60秒）で再利用するため、refreshあたりのREST(core)読み取りは従来と同じ最大2回のままで、TTL内の連続tickはlocal state（`workers/*`、worker logのmtime、supervisor pid）だけを読む。`--format json`と`--watch`の併用はできない（usage→exit 2）。SIGINT/SIGTERM（Ctrl-C等）で終了code 0で止まる。
+
+`bin/agentic-loop tail [--issue N] [--follow]`は、`$STATE_ROOT/events.log`（append-only。`epoch<TAB>issue番号|supervisor<TAB>code<TAB>stage-or-`、codeは`progress`/`claim`/`recover`/`timeout`/`stop`/`start`のenum）を時刻整形して流す読み取り専用コマンドである。REST(core)読み取りは0回で、GitHub・作業ツリーへ書き込まない。`--issue N`で特定Issueだけに絞り込み、`--follow`で追尾（ログのinode回転にも追従）。worker log本文・Issue本文・コメントは一切読まない・出さない。
+
 ### 認可済みの終了・統合
 
 `dispose ISSUE --reason cancelled|superseded|duplicate|merged [--target ISSUE]` は唯一の終了入口である。実行者はGitHub認証済みで対象repositoryのwrite/maintain/admin権限を持つ必要がある。`cancelled` は要求撤回、`superseded` は後続Issueへの置換、`duplicate` は同一成果の重複、`merged` は異なる要求の統合を表す。後三者はopenで未終了の同一repository Issueを `--target` として必要とし、自己参照を拒否する。
@@ -49,10 +55,10 @@ bin/agentic-loop upgrade
 running/in-reviewはまず`agent:stopping`へ遷移し、所有hostのworker process groupをTERM、`stop_timeout`後にのみKILLする。dirty worktree、未push commit、local/remote branchは保持する。終端化は`state_reason=not_planned`でcloseし、理由・実行者・統合先・時刻のmarkerと日本語説明を両Issueに残す。統合先は元Issue本文・コメント・依存関係を要求として調査する。終了済みIssueはSupervisorがclaim/retry/recovery経路からqueuedへ戻さない。再開は同じ認可を必要とする `resume ISSUE` だけで、履歴を保持してopen + `agent:queued` に戻す。merge済みPRを持つcompleted Issueはdisposeせず、revertまたは後続Issueを作成する。
 
 - **Supervisor**: 稼働状態、pid、`max_workers`（既存の1行目の文言は不変）。
-- **Running Issues**: Issue番号・title・`(phase: ...)`・`(scope: ...)`に加え、`(started: 開始epoch, elapsed: 経過秒)`・`(timeout_at: 上限到達epoch[、超過なら「超過」]。`worker_timeout_seconds=0`では非表示)`・`(heartbeat: 最終heartbeat epoch)`・`(lease_expires: 期限epoch[、期限切れなら「期限切れ」])`・`(worktree: path[、dirty/diverged、または「なし」])`・`(pr: #番号 state=... checks=...)`を、追加のGitHub呼び出しなしでlocal state（`workers/<issue>.started`・`.lease`・`.resume`、scope cache）から表示する。他host所有などlocal stateがない場合は「不明」と明示する。
+- **Running Issues**: Issue番号・title・`(phase: ...)`・`(scope: ...)`に加え、`(started: 開始epoch, elapsed: 経過秒)`・`(timeout_at: 上限到達epoch[、超過なら「超過」]。`worker_timeout_seconds=0`では非表示)`・`(heartbeat: 最終heartbeat epoch)`・`(lease_expires: 期限epoch[、期限切れなら「期限切れ」])`・`(worktree: path[、dirty/diverged、または「なし」])`・`(pr: #番号 state=... checks=...)`を、追加のGitHub呼び出しなしでlocal state（`workers/<issue>.started`・`.lease`・`.resume`、scope cache）から表示する。加えて、workerがlocalへ書くprogress marker（`workers/<issue>.progress`、`epoch\tstage\tseq`。stageはenumのみ）から `(stage: plan|exec|...)`・`(progress: Ns ago)`・`(health: healthy|stalled|timeout)`を表示する。`health`は`timeout`（`worker_timeout_seconds`超過）> `stalled`（最後の進行から既定300秒超過）> `healthy`の順で、local stateのない他host所有Issueは`unknown`（「不明」）。色分けはTTYかつ`NO_COLOR`未設定のときだけANSI、pipe/JSONは無色。progress markerはworkerがstage境界と自ホスト制御区間で書く（heartbeatは更新しない）。worker logのmtimeは本文を読まずに副シグナルとして採用し、provider待ちの長考をstalledと誤判定しない。
 - **キュー / 次のclaim候補**: queued総数とclaim可能数、および`claim_next`と同じ順序（category rank→priority rank→created_at→Issue番号）の上位候補を、claimされない理由code（`scope-conflict`／`retry-cooldown`／`claim-paused`）付きで表示する。依存関係の再検証はしない（`agent:blocked`のIssueはqueuedに現れないため対象外であり、これはコスト方針上のbest-effortな割り切りである）。また、各phaseで次に選ばれる `pool` / `provider` / `model`（`agent_pick_tier` のlocal計算。usage実測はせず、pool markerと設定からの推論に限定）と、プール別のclaim pause理由（`pool=<pool> 枯渇（回復待ち）`、`全プール利用不可`）を表示する。
 - **状態サマリ**: `needs-input`／`failed`／`in-review`／`blocked`／`stale`の件数と、`https://github.com/OWNER/REPO/issues/N`形式のURL一覧（`stale`は直近100件までで打ち切りがある場合は明示する）。
-- **警告**: staleなsupervisor pid/lock、期限切れlease、実行時間上限を超過したlocal worker（`worker-timeout`。次回pollで停止し自動的に再試行キューへ戻る）、local stateのないrunning Issue（`worker-missing`、多端末運用では正常）、GitHub上でrunningでないlocal worker（`worker-orphan`）、対応するrunning Issueのない残存worktree/branch、破損したlocal state file、Project同期の再試行待ち、claim一時停止中、をすべてlocal stateの読み取りだけで検出する。
+- **警告**: staleなsupervisor pid/lock、期限切れlease、実行時間上限を超過したlocal worker（`worker-timeout`。次回pollで停止し自動的に再試行キューへ戻る）、stall（`worker-stalled`。最後の進行から300秒以上経過しているが上限は未超過。観測のみで自動停止はしない）、local stateのないrunning Issue（`worker-missing`、多端末運用では正常）、GitHub上でrunningでないlocal worker（`worker-orphan`）、対応するrunning Issueのない残存worktree/branch、破損したlocal state file、Project同期の再試行待ち、claim一時停止中、をすべてlocal stateの読み取りだけで検出する。
 
 token、worker log本文、Issue本文・コメント、providerのresult fileは一切読まない・表示しない。
 
@@ -60,13 +66,15 @@ token、worker log本文、Issue本文・コメント、providerのresult file�
 bin/agentic-loop status --format json
 ```
 
-`--format json`は`schema_version: 1`の単一JSONを1行で出す。主なキーは`supervisor`、`workers`（running Issueごとの詳細）、`queue`（`queued`・`claimable`・`candidates`）、`waits`（scope/dependency待ち）、`states`（needs-input/failed/in-review/blocked/staleの件数とIssue一覧）、`anomalies`（`level`/`code`/`subject`/`detail`）、`github_available`（GitHub取得に失敗した場合は`false`になり、それ以外のフィールドはlocalの情報のみを反映する）。
+`--format json`は`schema_version: 1`の単一JSONを1行で出す。主なキーは`supervisor`、`workers`（running Issueごとの詳細。既存の`started_at`/`elapsed_seconds`/`timeout_at`/`timeout_exceeded`/`heartbeat_at`/`lease_expires_at`/`lease_expired`/`worktree`/`worktree_exists`/`dirty`/`diverged`/`branch`/`pr`/`pr_url`/`pr_state`/`checks`/`local_state`/`phase`に加え、後方互換で`stage`・`progress_at`・`progress_age_seconds`・`health`）、`queue`（`queued`・`claimable`・`candidates`）、`waits`（scope/dependency待ち）、`states`（needs-input/failed/in-review/blocked/staleの件数とIssue一覧）、`anomalies`（`level`/`code`/`subject`/`detail`）、`github_available`（GitHub取得に失敗した場合は`false`になり、それ以外のフィールドはlocalの情報のみを反映する）。
+
+token、worker log本文、Issue本文・コメント、providerのresult fileは`status`/`--watch`/`tail`のいずれも読まない・表示しない。progress markerとevents.logはenumのみを保存するため、providerの自由文はここに混入しえない。
 
 #### `status` / `doctor` / `metrics` / `upgrade` / Projects Viewの責務分担
 
 | 入口 | 目的 | 実行頻度・コスト | 合否判定 |
 | --- | --- | --- | --- |
-| `status` | いま何が動き、何を待ち、次に何が来るかの運用snapshot | 対話Agentの受付手順からも毎回呼べる（REST(core)読み取り最大2回、GraphQL/Projects 0回、書き込み0回） | 常に終了code 0（異常はwarning/infoとして列挙するのみ） |
+| `status` | いま何が動き、何を待ち、次に何が来るかの運用snapshot（`--watch [N]`は既定2秒tick、`tail`はevents.logを時刻付きで表示） | 対話Agentの受付手順からも毎回呼べる（REST(core)読み取り最大2回、GraphQL/Projects 0回、書き込み0回。watchはTTL cache既定60秒でrefreshあたり同じ最大2回、`tail`は0回） | 常に終了code 0（異常はwarning/infoとして列挙するのみ） |
 | `doctor` | 導入・復旧のための環境健全性診断（認証・権限・CLI・Devbox・hooks・systemd・Project設定・設定値・残存状態・Foundation manifest/revision pin/中断したupgrade） | 導入時・障害時に実行 | 必須項目の失敗で終了code 1 |
 | `metrics` | 過去の傾向（待ち時間・失敗率・手戻り・稼働率）の再現可能な集計（[運用ドキュメント](loop-metrics.md)） | 利用者が任意の頻度で実行（REST(core)読み取り最大3回、GraphQL/Projects 0回、書き込み0回） | 常に終了code 0（合否判定は`doctor`の責務） |
 | `upgrade` | 導入済みFoundationの安全な更新（[運用ドキュメント](upgrade.md)、[ADR 0009](../decisions/0009-foundation-upgrade.md)） | 運用者が明示実行（Supervisor停止中のみ`--apply`可）。既定はdry-runでGitHub書き込み0回 | 承認未済は終了code 3、適用・検証失敗は1、引数不正は2 |

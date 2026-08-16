@@ -60,6 +60,20 @@ readonly DECOMPOSITION_MAX_DESCENDANTS=20
 # legitimate work (plan+exec+PR review can easily take an hour); doctor warns
 # but does not fail, since some deployments may accept the risk deliberately.
 readonly WORKER_TIMEOUT_MIN_SAFE_SECONDS=1800
+# Local-only progress observability (see docs/decisions/0005): a worker marks
+# its stage boundaries in workers/<issue>.progress and mirrors a safe enum row
+# into events.log; status/watch/tail read those (plus the worker log's mtime as
+# a secondary signal) with zero GitHub calls. A worker whose last progress is
+# older than STATUS_STALL_SECONDS is surfaced as stalled (observation only --
+# automatic termination stays the worker_timeout_seconds domain of ADR 0006).
+readonly STATUS_STALL_SECONDS=300
+readonly STATUS_WATCH_DEFAULT_SECONDS=2
+readonly STATUS_GITHUB_TTL_SECONDS=60
+readonly TAIL_MAX_LINES=100
+# Only enum stages are persisted, so a provider's free-form text can never be
+# smuggled into local state or the events stream (secret boundary).
+readonly PROGRESS_STAGES=(claim resume worktree plan exec replan checks review merge cleanup 'done' failed needs-input queued blocked stopped)
+readonly EVENTS_LOG="$STATE_ROOT/events.log"
 readonly PROJECT_OPERATION_BUDGET=25
 readonly PROJECT_RECONCILE_BATCH=10
 
@@ -790,7 +804,7 @@ load_config || { [[ ${1:-} == doctor ]] || fail "$CONFIG_ERROR"; }
 
 usage() {
   cat >&2 <<EOF
-Usage: $PROGRAM_NAME {setup|sync-issue ISSUE|dispose ISSUE --reason cancelled|superseded|duplicate|merged [--target ISSUE]|resume ISSUE|start|stop|status [--format json]|doctor [--format json]|metrics [--days N] [--as-of EPOCH] [--format json]|upgrade [--source PATH|--revision SHA] [--apply] [--approve] [--rollback] [--skip-verify] [--overwrite PATH]... [--format json]}
+Usage: $PROGRAM_NAME {setup|sync-issue ISSUE|dispose ISSUE --reason cancelled|superseded|duplicate|merged [--target ISSUE]|resume ISSUE|start|stop|status [--format json] [--watch [N]]|doctor [--format json]|metrics [--days N] [--as-of EPOCH] [--format json]|tail [--issue N] [--follow]|upgrade [--source PATH|--revision SHA] [--apply] [--approve] [--rollback] [--skip-verify] [--overwrite PATH]... [--format json]}
 
   setup   Create or reuse this repository's labels and Project
   sync-issue  Add one Issue to the Project now, or queue a retry
@@ -799,8 +813,10 @@ Usage: $PROGRAM_NAME {setup|sync-issue ISSUE|dispose ISSUE --reason cancelled|su
   start   Start one background supervisor for this repository
   stop    Stop claiming work and drain running workers
   status  Show what is running, queued, waiting, and any anomalies (always exit 0)
+          status --watch [N] re-renders every N seconds (default 2) using a TTL cache
   doctor  Read-only checks with remediation guidance (exit 1 on failures)
   metrics Read-only queue/lifecycle metrics over recent history (always exit 0)
+  tail    Stream supervisor/worker stage/progress events with timestamps (REST 0)
   upgrade Preview (default) or apply a Foundation update; see docs/operations/upgrade.md
 EOF
 }
@@ -1354,6 +1370,58 @@ status_supervisor_lock_stale() {
   return 0
 }
 
+# Classify a running Issue's progress into healthy/stalled/timeout/unknown from
+# purely local state (see docs/decisions/0005). timeout wins over everything
+# once STATUS_RUN_TIMEOUT_EXCEEDED is set (mirroring the existing worker-timeout
+# anomaly); a worker without any local progress signal stays unknown. The worker
+# log's mtime is used as a secondary signal (its body is never read), so a
+# provider thinking inside a stage boundary does not flip to stalled. Sets
+# STATUS_RUN_STAGE / STATUS_RUN_PROGRESS_AGE / STATUS_RUN_PROGRESS_AT /
+# STATUS_RUN_HEALTH.
+status_progress_health() {
+  local issue=$1 timeout_exceeded=${2:-0} now age log_mtime
+  now=$(date +%s)
+  STATUS_RUN_STAGE='' STATUS_RUN_PROGRESS_AGE='' STATUS_RUN_PROGRESS_AT='' STATUS_RUN_HEALTH=unknown
+  if (( timeout_exceeded )); then
+    STATUS_RUN_HEALTH=timeout
+    return 0
+  fi
+  age=''
+  if progress_read "$issue"; then
+    STATUS_RUN_STAGE=$PROGRESS_STAGE
+    age=$((now - PROGRESS_EPOCH))
+  fi
+  if log_mtime=$(worker_log_mtime "$issue"); then
+    if [[ -z $age ]] || (( now - log_mtime < age )); then age=$((now - log_mtime)); fi
+  fi
+  [[ -n $age ]] || return 0
+  STATUS_RUN_PROGRESS_AGE=$age
+  STATUS_RUN_PROGRESS_AT=$((now - age))
+  if (( age < STATUS_STALL_SECONDS )); then STATUS_RUN_HEALTH=healthy; else STATUS_RUN_HEALTH=stalled; fi
+  return 0
+}
+
+# ANSI color for a health band, only on a TTY and never with NO_COLOR set;
+# piped text, JSON and CI output stay colorless.
+status_health_color() {
+  [[ -t 1 && -z ${NO_COLOR:-} ]] || { printf '%s' "$1"; return 0; }
+  case $1 in
+    healthy) printf '\033[32m%s\033[0m' "$1" ;;
+    stalled) printf '\033[33m%s\033[0m' "$1" ;;
+    timeout) printf '\033[31m%s\033[0m' "$1" ;;
+    *) printf '%s' "$1" ;;
+  esac
+}
+
+# Whether the GitHub snapshot cache (in-memory raw TSV + fetched_at) is still
+# within STATUS_GITHUB_TTL_SECONDS. `status --watch` relies on this so ticks
+# between refreshes cost zero REST(core) reads (see docs/decisions/0005).
+status_cache_fresh() {
+  local fetched=$1
+  [[ $fetched =~ ^[0-9]+$ ]] || return 1
+  (( $(date +%s) - fetched < STATUS_GITHUB_TTL_SECONDS ))
+}
+
 # Populate the STATUS_RUN_* globals for one running Issue purely from local
 # state (phase cache, scope cache, .started, .lease, .resume): no additional
 # REST call. Missing local state (e.g. another host owns the Issue) leaves
@@ -1375,6 +1443,8 @@ status_running_detail() {
     STATUS_RUN_TIMEOUT_AT=$((STATUS_RUN_STARTED + WORKER_TIMEOUT_SECONDS))
     (( now >= STATUS_RUN_TIMEOUT_AT )) && STATUS_RUN_TIMEOUT_EXCEEDED=1
   fi
+  STATUS_RUN_STAGE='' STATUS_RUN_PROGRESS_AGE='' STATUS_RUN_PROGRESS_AT='' STATUS_RUN_HEALTH=unknown
+  status_progress_health "$issue" "$STATUS_RUN_TIMEOUT_EXCEEDED"
   LEASE_ID='' LEASE_EXPIRES='' LEASE_HEARTBEAT=''
   lease_read "$issue" || true
   STATUS_RUN_LEASE_EXPIRES=$LEASE_EXPIRES
@@ -1452,11 +1522,17 @@ status_collect_anomalies() {
       read -r started < "$(worker_started_file "$issue")" || started=''
       [[ $started =~ ^[0-9]+$ ]] || anomaly_add warning local-state-corrupt "#$issue" "workers/$issue.started の内容が不正です。"
     fi
+    local to_exceeded=0 elapsed
     if (( WORKER_TIMEOUT_SECONDS > 0 )) && worker_pid_live "$issue"; then
-      local elapsed
       elapsed=$(worker_elapsed_seconds "$issue" 2>/dev/null || true)
-      [[ $elapsed =~ ^[0-9]+$ ]] && (( elapsed >= WORKER_TIMEOUT_SECONDS )) && \
+      if [[ $elapsed =~ ^[0-9]+$ ]] && (( elapsed >= WORKER_TIMEOUT_SECONDS )); then
+        to_exceeded=1
         anomaly_add warning worker-timeout "#$issue" "実行時間上限（${WORKER_TIMEOUT_SECONDS}秒）を超過しています（経過 ${elapsed}秒）。次回pollで停止し自動的に再試行します。"
+      fi
+    fi
+    status_progress_health "$issue" "$to_exceeded"
+    if [[ $STATUS_RUN_HEALTH == stalled ]]; then
+      anomaly_add warning worker-stalled "#$issue" "最後の進行から ${STATUS_RUN_PROGRESS_AGE}秒経過しています（stall閾値 ${STATUS_STALL_SECONDS}秒）。観測のみで自動停止はしません（停止はworker_timeout_secondsの役割）。"
     fi
     LEASE_ID='' LEASE_EXPIRES='' LEASE_HEARTBEAT=''
     if lease_read "$issue"; then
@@ -1507,9 +1583,14 @@ status_collect_anomalies() {
 status_collect_snapshot() {
   STATUS_GITHUB_OK=1
   local raw num title state catrank priorank created
-  if ! raw=$(status_snapshot_fetch); then
+  if status_cache_fresh "$STATUS_SNAPSHOT_FETCHED"; then
+    raw=$STATUS_SNAPSHOT_RAW
+  elif ! raw=$(status_snapshot_fetch); then
     STATUS_GITHUB_OK=0
     return 0
+  else
+    STATUS_SNAPSHOT_RAW=$raw
+    STATUS_SNAPSHOT_FETCHED=$(date +%s)
   fi
   while IFS=$'\t' read -r num title state catrank priorank created; do
     [[ -n $num ]] || continue
@@ -1527,7 +1608,14 @@ status_collect_snapshot() {
 
 status_collect_stale() {
   local raw num title count=0
-  raw=$(status_stale_fetch) || return 0
+  if status_cache_fresh "$STATUS_STALE_FETCHED"; then
+    raw=$STATUS_STALE_RAW
+  elif ! raw=$(status_stale_fetch); then
+    return 0
+  else
+    STATUS_STALE_RAW=$raw
+    STATUS_STALE_FETCHED=$(date +%s)
+  fi
   while IFS=$'\t' read -r num title; do
     [[ -n $num ]] || continue
     STALE_NUM+=("$num"); STALE_TITLE+=("$title")
@@ -1581,6 +1669,9 @@ status_render_text() {
       issue=${RUN_NUM[$i]}; title=${RUN_TITLE[$i]}
       status_running_detail "$issue"
       suffix=''
+      [[ -n $STATUS_RUN_STAGE ]] && suffix+=" (stage: $STATUS_RUN_STAGE)"
+      [[ -n $STATUS_RUN_PROGRESS_AGE ]] && suffix+=" (progress: ${STATUS_RUN_PROGRESS_AGE}s ago)"
+      [[ -n $STATUS_RUN_HEALTH ]] && suffix+=" (health: $(status_health_color "$STATUS_RUN_HEALTH"))"
       [[ -n $STATUS_RUN_PHASE ]] && suffix+=" (phase: $STATUS_RUN_PHASE)"
       [[ -n $STATUS_RUN_SCOPE ]] && suffix+=" (scope: $(paste -sd', ' - <<< "$STATUS_RUN_SCOPE"))"
       [[ -n $STATUS_RUN_STARTED ]] && suffix+=" (started: $STATUS_RUN_STARTED, elapsed: ${STATUS_RUN_ELAPSED}s)"
@@ -1702,7 +1793,7 @@ status_render_json() {
         scope_sep=','
       done <<< "$STATUS_RUN_SCOPE"
     fi
-    printf '],"started_at":%s,"elapsed_seconds":%s,"timeout_at":%s,"timeout_exceeded":%s,"heartbeat_at":%s,"lease_expires_at":%s,"lease_expired":%s,"worktree":"%s","worktree_exists":%s,"dirty":%s,"diverged":%s,"branch":"%s","pr":%s,"pr_url":"%s","pr_state":"%s","checks":"%s","local_state":%s}' \
+    printf '],"started_at":%s,"elapsed_seconds":%s,"timeout_at":%s,"timeout_exceeded":%s,"heartbeat_at":%s,"lease_expires_at":%s,"lease_expired":%s,"worktree":"%s","worktree_exists":%s,"dirty":%s,"diverged":%s,"branch":"%s","pr":%s,"pr_url":"%s","pr_state":"%s","checks":"%s","local_state":%s,"stage":"%s","progress_at":%s,"progress_age_seconds":%s,"health":"%s"}' \
       "${STATUS_RUN_STARTED:-null}" "${STATUS_RUN_ELAPSED:-null}" "${STATUS_RUN_TIMEOUT_AT:-null}" \
       "$( ((STATUS_RUN_TIMEOUT_EXCEEDED)) && printf true || printf false )" \
       "${STATUS_RUN_HEARTBEAT:-null}" "${STATUS_RUN_LEASE_EXPIRES:-null}" \
@@ -1711,7 +1802,8 @@ status_render_json() {
       "$( ((STATUS_RUN_DIRTY)) && printf true || printf false )" "$( ((STATUS_RUN_DIVERGED)) && printf true || printf false )" \
       "$(json_escape "$STATUS_RUN_BRANCH")" \
       "${STATUS_RUN_PR:-null}" "$(json_escape "$STATUS_RUN_PR_URL")" "$(json_escape "$STATUS_RUN_PR_STATE")" "$(json_escape "$STATUS_RUN_CHECKS")" \
-      "$( ((STATUS_RUN_LOCAL)) && printf true || printf false )"
+      "$( ((STATUS_RUN_LOCAL)) && printf true || printf false )" \
+      "$(json_escape "$STATUS_RUN_STAGE")" "${STATUS_RUN_PROGRESS_AT:-null}" "${STATUS_RUN_PROGRESS_AGE:-null}" "$(json_escape "$STATUS_RUN_HEALTH")"
     sep=','
   done
   printf '],'
@@ -1784,22 +1876,154 @@ status_render_json() {
   printf ']}\n'
 }
 
+# Reset every per-render status array/flag. Called once per tick so watch loops
+# can reuse the same in-memory GitHub TTL cache without re-fetching.
+status_arrays_reset() {
+  RUN_NUM=() RUN_TITLE=()
+  QUEUE_NUM=() QUEUE_TITLE=() QUEUE_CATRANK=() QUEUE_PRIORANK=() QUEUE_CREATED=()
+  NEEDSINPUT_NUM=() NEEDSINPUT_TITLE=() FAILED_NUM=() FAILED_TITLE=() INREVIEW_NUM=() INREVIEW_TITLE=() BLOCKED_NUM=() BLOCKED_TITLE=()
+  STALE_NUM=() STALE_TITLE=()
+  ANOMALY_LEVEL=() ANOMALY_CODE=() ANOMALY_SUBJECT=() ANOMALY_DETAIL=()
+  STATUS_GITHUB_OK=1 STATUS_STALE_TRUNCATED=0
+}
+
+# One `status --watch` tick: clear the screen (TTY only), then render the same
+# text snapshot as plain `status`. Everything between refreshes reads only local
+# state (workers/*, log mtime, supervisor pid), so consecutive ticks cost zero
+# REST(core) reads while the GitHub TTL cache is fresh.
+status_render_watch() {
+  [[ -t 1 ]] && printf '\033[H\033[2J'
+  status_render_text
+}
+
+# `status --watch [N]`: re-render every N seconds (default STATUS_WATCH_DEFAULT_
+# SECONDS). SIGINT/SIGTERM exit 0. AGENTIC_LOOP_WATCH_ITERATIONS bounds the loop
+# for deterministic tests without weakening the production loop.
+status_watch() {
+  local watch_seconds=$1 iterations=${AGENTIC_LOOP_WATCH_ITERATIONS:-} interrupted=0
+  trap 'interrupted=1' INT TERM
+  while (( interrupted == 0 )); do
+    status_arrays_reset
+    status_collect_snapshot
+    status_collect_stale
+    status_collect_anomalies
+    status_render_watch
+    if [[ -n $iterations ]]; then
+      (( iterations <= 1 )) && break
+      iterations=$((iterations - 1))
+    fi
+    sleep "$watch_seconds"
+  done
+  return 0
+}
+
 cmd_status() {
-  local format=text
-  if [[ $# -gt 1 ]]; then
-    [[ $# -eq 3 && $2 == --format && $3 == json ]] || { usage; return 2; }
-    format=json
+  local format=text watch=0 watch_seconds=$STATUS_WATCH_DEFAULT_SECONDS
+  while (( $# > 0 )); do
+    case $1 in
+      --format)
+        [[ $2 == json ]] || { usage; return 2; }
+        format=json; shift 2 ;;
+      --watch)
+        watch=1; shift
+        if (( $# > 0 )) && [[ $1 =~ ^[0-9]+$ ]]; then watch_seconds=$1; shift; fi ;;
+      *) usage; return 2 ;;
+    esac
+  done
+  (( watch_seconds >= 1 )) || { usage; return 2; }
+  if (( watch )) && [[ $format == json ]]; then
+    usage; return 2
   fi
   declare -ga RUN_NUM=() RUN_TITLE=()
   declare -ga QUEUE_NUM=() QUEUE_TITLE=() QUEUE_CATRANK=() QUEUE_PRIORANK=() QUEUE_CREATED=()
   declare -ga NEEDSINPUT_NUM=() NEEDSINPUT_TITLE=() FAILED_NUM=() FAILED_TITLE=() INREVIEW_NUM=() INREVIEW_TITLE=() BLOCKED_NUM=() BLOCKED_TITLE=()
   declare -ga STALE_NUM=() STALE_TITLE=()
   declare -ga ANOMALY_LEVEL=() ANOMALY_CODE=() ANOMALY_SUBJECT=() ANOMALY_DETAIL=()
-  declare -g STATUS_GITHUB_OK=1 STATUS_STALE_TRUNCATED=0
-  status_collect_snapshot
-  status_collect_stale
-  status_collect_anomalies
-  if [[ $format == json ]]; then status_render_json; else status_render_text; fi
+  declare -g STATUS_GITHUB_OK=1 STATUS_STALE_TRUNCATED=0 STATUS_SNAPSHOT_RAW='' STATUS_SNAPSHOT_FETCHED='' STATUS_STALE_RAW='' STATUS_STALE_FETCHED=''
+  if (( watch )); then
+    status_watch "$watch_seconds"
+  else
+    status_collect_snapshot
+    status_collect_stale
+    status_collect_anomalies
+    if [[ $format == json ]]; then status_render_json; else status_render_text; fi
+  fi
+  return 0
+}
+
+# --- tail: stream supervisor/worker progress events (see docs/decisions/0005) ---
+# Reads only the append-only events.log in Git-common state: REST(core) 0,
+# no GitHub/worktree writes, and never reads log or Issue bodies (secret-safe).
+tail_event_line() {
+  local epoch=$1 subject=$2 code=$3 stage=$4 when
+  [[ $epoch =~ ^[0-9]+$ ]] || return 0
+  when=$(date -d "@$epoch" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || printf '%s' "$epoch")
+  printf '%s  %-11s  %-8s  %s\n' "$when" "$subject" "$code" "${stage:--}"
+}
+
+# Print events from $offset bytes onward in $file (empty file/missing -> no-op),
+# optionally filtered to one Issue. Events go straight to stdout; the new byte
+# offset is published in TAIL_NEW_OFFSET so the caller never captures (and thus
+# swallows) the display lines in a command substitution.
+tail_print_events() {
+  local file=$1 offset=$2 issue=$3 size content line epoch subject code stage
+  TAIL_NEW_OFFSET=0
+  [[ -r $file ]] || return 0
+  size=$(wc -c < "$file" 2>/dev/null || printf 0)
+  (( size < offset )) && offset=0
+  if (( size > offset )); then
+    content=$(tail -c +"$((offset + 1))" "$file" 2>/dev/null || true)
+    while IFS= read -r line; do
+      IFS=$'\t' read -r epoch subject code stage <<< "$line"
+      [[ $epoch =~ ^[0-9]+$ ]] || continue
+      if [[ -z $issue || $subject == "$issue" ]]; then
+        tail_event_line "$epoch" "$subject" "$code" "${stage:--}"
+      fi
+    done <<< "$content"
+  fi
+  TAIL_NEW_OFFSET=$size
+}
+
+# `tail --follow`: print new events as they are appended (rotated logs are
+# detected by inode change; the offset then restarts). SIGINT/SIGTERM exit 0.
+tail_follow() {
+  local issue=$1 file=$EVENTS_LOG offset=0 inode='' new_inode interrupted=0
+  trap 'interrupted=1' INT TERM
+  while (( interrupted == 0 )); do
+    tail_print_events "$file" "$offset" "$issue"
+    offset=$TAIL_NEW_OFFSET
+    new_inode=$(stat -c %i "$file" 2>/dev/null || printf 0)
+    if [[ -n $inode && $new_inode != "$inode" ]]; then inode=$new_inode; offset=0; fi
+    [[ -z $inode ]] && inode=$new_inode
+    sleep 1
+  done
+  return 0
+}
+
+cmd_tail() {
+  local issue='' follow=0
+  while (( $# > 0 )); do
+    case $1 in
+      --issue) [[ $# -ge 2 && $2 =~ ^[0-9]+$ ]] || { usage; return 2; }; issue=$2; shift 2 ;;
+      --follow | -f) follow=1; shift ;;
+      *) usage; return 2 ;;
+    esac
+  done
+  if (( follow )); then
+    tail_follow "$issue"
+    return 0
+  fi
+  local line epoch subject code stage
+  if [[ -n $issue ]]; then
+    tail -n "$TAIL_MAX_LINES" "$EVENTS_LOG" 2>/dev/null | while IFS=$'\t' read -r epoch subject code stage; do
+      [[ $subject == "$issue" ]] || continue
+      tail_event_line "$epoch" "$subject" "$code" "${stage:--}"
+    done
+  else
+    tail -n "$TAIL_MAX_LINES" "$EVENTS_LOG" 2>/dev/null | while IFS=$'\t' read -r epoch subject code stage; do
+      tail_event_line "$epoch" "$subject" "$code" "${stage:--}"
+    done
+  fi
   return 0
 }
 
@@ -3005,6 +3229,73 @@ recent_lease_since() {
 lease_file() { printf '%s\n' "$STATE_ROOT/workers/$1.lease"; }
 worker_started_file() { printf '%s/workers/%s.started' "$STATE_ROOT" "$1"; }
 worker_resume_file() { printf '%s/workers/%s.resume' "$STATE_ROOT" "$1"; }
+worker_progress_file() { printf '%s/workers/%s.progress' "$STATE_ROOT" "$1"; }
+
+# --- Local progress observability (see docs/decisions/0005) ---
+# Everything here writes only to Git-common state (never GitHub or the work
+# tree) and only persists the PROGRESS_STAGES enum, so the markers and the
+# events stream cannot carry secrets or provider output.
+
+progress_stage_valid() {
+  local s
+  for s in "${PROGRESS_STAGES[@]}"; do [[ $1 == "$s" ]] && return 0; done
+  return 1
+}
+
+# Append one secret-safe event row to the shared append-only events.log:
+# epoch<TAB>subject<TAB>code<TAB>stage-or-. subject is an Issue number or
+# "supervisor"; code and stage are strict enums. Failure is never fatal.
+event_append() {
+  local subject=$1 code=$2 stage=${3:-}
+  [[ $subject == supervisor || $subject =~ ^[0-9]+$ ]] || return 0
+  case $code in progress | claim | recover | timeout | stop | start) ;; *) return 0 ;; esac
+  [[ -z $stage || $stage == - ]] || progress_stage_valid "$stage" || return 0
+  mkdir -p "$STATE_ROOT"
+  printf '%s\t%s\t%s\t%s\n' "$(date +%s)" "$subject" "$code" "${stage:--}" >> "$EVENTS_LOG" 2>/dev/null || true
+}
+
+# Write the local progress marker for one Issue (epoch, stage, monotonic seq)
+# and mirror the transition into events.log. seq grows on every touch so `tail`
+# can detect a change even when a stage repeats. Never touches GitHub.
+progress_write() {
+  local issue=$1 stage=$2 file seq=0 now
+  progress_stage_valid "$stage" || return 1
+  file=$(worker_progress_file "$issue")
+  if [[ -r $file ]]; then
+    IFS=$'\t' read -r _ _ seq < "$file" 2>/dev/null || seq=0
+    [[ $seq =~ ^[0-9]+$ ]] || seq=0
+  fi
+  seq=$((seq + 1))
+  now=$(date +%s)
+  mkdir -p "$(dirname "$file")"
+  printf '%s\t%s\t%s\n' "$now" "$stage" "$seq" > "$file"
+  event_append "$issue" progress "$stage"
+}
+
+# Best-effort convenience wrapper used by the worker at stage boundaries. The
+# heartbeat loop deliberately does NOT touch progress: liveness and progress
+# must stay independent so a stalled worker cannot keep itself healthy.
+progress_touch() { progress_write "$1" "$2" || true; }
+
+# Read the local progress marker into PROGRESS_EPOCH / PROGRESS_STAGE. Returns
+# 1 (leaving both empty) when absent or corrupt.
+progress_read() {
+  local file
+  PROGRESS_EPOCH='' PROGRESS_STAGE=''
+  file=$(worker_progress_file "$1")
+  [[ -r $file ]] || return 1
+  IFS=$'\t' read -r PROGRESS_EPOCH PROGRESS_STAGE _ < "$file" 2>/dev/null || return 1
+  [[ $PROGRESS_EPOCH =~ ^[0-9]+$ ]] || { PROGRESS_EPOCH=''; PROGRESS_STAGE=''; return 1; }
+}
+
+# Secondary progress signal: the worker log's mtime. The body is never read --
+# `tail`/`status` only learn that the worker wrote recently, never what it
+# wrote (secret boundary).
+worker_log_mtime() {
+  local mtime
+  mtime=$(stat -c %Y "$STATE_ROOT/logs/issue-$1.log" 2>/dev/null) || return 1
+  printf '%s\n' "$mtime"
+}
 
 # Seconds since this Issue's local worker began: prefers the .started marker
 # (written right after claim), falling back to the pidfile's mtime when
@@ -3026,13 +3317,13 @@ worker_elapsed_seconds() {
   printf '%s\n' "$((now - mtime))"
 }
 
-# Remove a worker's local bookkeeping (pid + lease + phase + started + resume
-# caches) together. The handoff-comment id mapping is intentionally not
+# Remove a worker's local bookkeeping (pid + lease + phase + started + resume +
+# progress caches) together. The handoff-comment id mapping is intentionally not
 # cleared here: it must survive across worker lifecycles so the next worker
 # keeps updating the same durable comment instead of creating a new one (see
 # docs/decisions/0004).
 clear_worker_local() {
-  rm -f "$STATE_ROOT/workers/$1.pid" "$(lease_file "$1")" "$(worker_phase_file "$1")" "$(worker_started_file "$1")" "$(worker_resume_file "$1")"
+  rm -f "$STATE_ROOT/workers/$1.pid" "$(lease_file "$1")" "$(worker_phase_file "$1")" "$(worker_started_file "$1")" "$(worker_resume_file "$1")" "$(worker_progress_file "$1")"
 }
 worker_phase_file() { printf '%s/workers/%s.phase' "$STATE_ROOT" "$1"; }
 
@@ -3087,6 +3378,7 @@ claim_acquire() {
   fi
   mkdir -p "$STATE_ROOT/workers"
   printf '%s\t%s\t%s\n' "$id" "$expires" "$now" > "$(lease_file "$issue")"
+  event_append "$issue" claim -
 }
 
 # End this host's durable ownership before deliberately re-queueing an Issue.
@@ -3191,6 +3483,7 @@ recover_expired() {
       set_issue_state "$issue" queued
       comment_issue "$issue" '<!-- agentic-loop:recovered -->\n担当workerの終了、またはリース期限切れを検出したため、Issueを安全にキューへ戻しました。'
     fi
+    event_append "$issue" recover -
   done < <(snapshot_state_rows running | cut -f1 || repo_api issues --method GET -f state=open -f labels="$(state_label running)" -f per_page=100 --paginate --jq '.[] | select(.pull_request == null) | .number' 2>/dev/null || true)
 }
 
@@ -3228,6 +3521,7 @@ enforce_worker_timeout() {
     comment_issue "$issue" "<!-- agentic-loop:worker-timeout issue=$issue elapsed=${elapsed}s limit=${WORKER_TIMEOUT_SECONDS}s -->\nこのIssueのworkerはlease heartbeatが有効なまま実行時間上限（${WORKER_TIMEOUT_SECONDS}秒）を超えたため、ハングしたと判断してプロセスグループごと停止しました（経過 ${elapsed}秒）。自動的な再試行キューへ戻します。誤検知が疑われる場合は \`.agentic-loop.toml\` の \`queue.worker_timeout_seconds\` を見直してください。" || true
     set_issue_state "$issue" failed || true
     project_sync_state "$issue" failed || true
+    event_append "$issue" timeout -
   done
   shopt -u nullglob
 }
@@ -3866,6 +4160,7 @@ worker_count() {
 # the Issue on the next supervisor start.
 supervisor_graceful_shutdown() {
   : > "$STATE_ROOT/stop.requested" 2>/dev/null || true
+  event_append supervisor stop -
   local pidfile issue pid
   shopt -s nullglob
   for pidfile in "$STATE_ROOT"/workers/*.pid; do
@@ -3903,6 +4198,7 @@ supervise() {
   trap 'supervisor_graceful_shutdown; exit 0' TERM INT
   mkdir -p "$STATE_ROOT/workers"
   printf '%s\n' "$$" > "$STATE_ROOT/supervisor.pid"
+  event_append supervisor start -
   local idle_streak=0 poll_interval=$POLL_SECONDS
   # Best-effort maintenance must never crash the supervisor (see docs/decisions/
   # 0003): a transient GitHub error (secondary rate limit / HTTP 403 / 5xx)
@@ -4450,11 +4746,13 @@ worker() {
   worker_confirm_running_label "$issue" || { clear_worker_local "$issue"; return 0; }
   mkdir -p "$STATE_ROOT/workers"
   date +%s > "$(worker_started_file "$issue")" 2>/dev/null || true
+  progress_touch "$issue" claim
   repository=$(repo_name)
   default_branch=$(repo_api '' --jq .default_branch)
   branch="agent/issue-$issue"
   worktree="$WORKTREE_ROOT/issue-$issue"
   if ! git -C "$REPO_ROOT" fetch origin "$default_branch"; then
+    progress_touch "$issue" failed
     set_issue_state "$issue" failed || true
     comment_issue "$issue" "<!-- agentic-loop:failed worker=$worker -->\n最新のdefault branchをfetchできませんでした。リポジトリへのアクセスが復旧した後、このIssueは安全に再キューできます。" || true
     clear_worker_local "$issue"
@@ -4463,14 +4761,17 @@ worker() {
 
   resume_probe "$issue" "$branch" "$worktree" "$default_branch" "$repository"
   resume_handoff_write "$issue" "$branch"
+  progress_touch "$issue" resume
   case $RESUME_PHASE in
     unsafe-foreign)
+      progress_touch "$issue" failed
       set_issue_state "$issue" failed || true
       comment_issue "$issue" "<!-- agentic-loop:failed worker=$worker reason=foreign-artifact -->\n専用worktreeまたはbranch \`$branch\` が別Issueの成果物、または想定外の状態で使用中のため、workerを起動しませんでした。既存のworktree/branch/commitは変更していません。\`git worktree list\` と \`git branch -a\` の出力を確認し、競合を解消した上で \`agent:queued\` を付け直してください。" || true
       clear_worker_local "$issue"
       return 0
       ;;
     needs-decision)
+      progress_touch "$issue" needs-input
       set_issue_state "$issue" needs-input || true
       project_sync_state "$issue" needs-input || true
       comment_issue "$issue" "$(resume_needs_decision_body "$worker" "$branch")" || true
@@ -4486,11 +4787,13 @@ worker() {
       fi
       if [[ $cleaned -eq 1 ]]; then
         clear_attempts "$issue"
+        progress_touch "$issue" 'done'
         set_issue_state "$issue" completed
         project_sync_state "$issue" completed
         comment_issue "$issue" "<!-- agentic-loop:completed pr=$RESUME_PR resumed=1 -->\n再開時の検査で、対応PR $RESUME_PR_URL が既にmerge済みであることを確認しました（providerは起動していません）。専用worktreeとlocal branch \`$branch\` を削除しました。remote branchは復旧とGitHubのPR設定との責務分離のため、Supervisorからは削除しません。"
         repo_api "issues/$issue" --method PATCH -f state=closed >/dev/null
       else
+        progress_touch "$issue" failed
         set_issue_state "$issue" failed
         project_sync_state "$issue" failed
         comment_issue "$issue" "<!-- agentic-loop:failed worker=$worker reason=merge-or-cleanup resumed=1 -->\n再開時の検査でPR $RESUME_PR_URL のmergeを確認しましたが、安全なcleanupを完了できませんでした。Issueはcloseせず、既存のworktree/branchを保持します。原因確認後に再試行するには \`agent:queued\` を再度付与してください。"
@@ -4508,20 +4811,24 @@ worker() {
       git -C "$REPO_ROOT" worktree add -b "$branch" "$worktree" "origin/$default_branch" || exit_code=$?
     fi
     if [[ $exit_code -ne 0 ]]; then
+      progress_touch "$issue" failed
       set_issue_state "$issue" failed || true
       comment_issue "$issue" "<!-- agentic-loop:failed worker=$worker -->\n専用worktreeを準備できませんでした。調査できるように既存のbranch dataは保持しています。" || true
       clear_worker_local "$issue"
       return 0
     fi
   fi
+  progress_touch "$issue" worktree
   result="$STATE_ROOT/issue-$issue-result.txt"
   if ! git_common_dir=$(resolve_worker_git_common_dir "$worktree"); then
+    progress_touch "$issue" failed
     set_issue_state "$issue" failed || true
     comment_issue "$issue" "<!-- agentic-loop:failed worker=$worker -->\n専用worktreeのGit common directoryを安全に解決できなかったため、workerを起動しませんでした。追加の書き込み可能pathは許可していません。Git metadataとworktreeの整合性を確認・復旧した後、このIssueを安全に再キューしてください。" || true
     clear_worker_local "$issue"
     return 0
   fi
   if ! agents_dir=$(resolve_worker_agents_dir "$worktree"); then
+    progress_touch "$issue" failed
     set_issue_state "$issue" failed || true
     comment_issue "$issue" "<!-- agentic-loop:failed worker=$worker -->\n専用worktreeの.agents directoryを安全に解決できなかったため、workerを起動しませんでした。保護対象のrepository pathは書き込み可能にしていません。.agents directoryを安全な通常directoryとして復旧した後、このIssueを安全に再キューしてください。" || true
     clear_worker_local "$issue"
@@ -4536,6 +4843,7 @@ worker() {
   max_retries=$(agent_plan_max_retries)
   while :; do
     started=$(date +%s)
+    progress_touch "$issue" plan
     if picked=$(agent_pick_tier plan 2>/dev/null); then
       agent_candidate_load <<< "$picked"
       agent_run_stage plan "$worktree" "$git_common_dir" "$agents_dir" "$plan_file" "$plan_usage" "$(plan_prompt "$issue" "$repository" "$failure_context" "$resume_context")" "$CAND_POOL" "$CAND_PROVIDER" "$CAND_MODEL" "$CAND_EFFORT" || true
@@ -4552,11 +4860,13 @@ worker() {
         if decomposition_materialize "$issue" "$plan_file"; then
           kill "$heartbeat_pid" 2>/dev/null || true; wait "$heartbeat_pid" 2>/dev/null || true
           lease_release "$issue" "$worker"
+          progress_touch "$issue" blocked
           set_issue_state "$issue" blocked; project_sync_state "$issue" blocked || true
           comment_issue "$issue" '<!-- agentic-loop:decomposition-wait -->\n子Issueを公開しました。親は子の検証済み完了後に既存の依存回復処理で再キューされ、統合検証だけを実行します。' || true
           scope_cache_clear "$issue"; clear_conflict_wait "$issue"; clear_worker_local "$issue"
           return 0
         fi
+        progress_touch "$issue" needs-input
         set_issue_state "$issue" needs-input; project_sync_state "$issue" needs-input || true
         comment_issue "$issue" '<!-- agentic-loop:decomposition-invalid -->\n分解manifestをGitHub変更前に検証または構成できませんでした。子Issueはqueueへ公開していません。manifestのscope・依存DAG・受け入れ条件・GitHub sub-issues権限を確認してください。' || true
         kill "$heartbeat_pid" 2>/dev/null || true; wait "$heartbeat_pid" 2>/dev/null || true; lease_release "$issue" "$worker"; clear_worker_local "$issue"
@@ -4565,6 +4875,7 @@ worker() {
     fi
     started=$(date +%s)
     exec_rc=0
+    progress_touch "$issue" exec
     run_stage_candidates exec "$worktree" "$git_common_dir" "$agents_dir" "$result" "$exec_usage" "$(exec_prompt "$issue" "$repository" "$plan_file" "$resume_context")" || exec_rc=$?
     exec_rc=$STAGE_RC
     exit_code=$STAGE_EXIT_CODE
@@ -4589,6 +4900,7 @@ worker() {
         comment_issue "$issue" "<!-- agentic-loop:protocol-retry worker=$worker attempt=1 -->\nexec段が終了markerなしで正常終了しました。再計画せず同じ計画でexecを1回だけ再実行し、同一turn内の待機完遂と終了marker返却を求めます。" || true
         started=$(date +%s)
         exec_rc=0
+        progress_touch "$issue" exec
         run_stage_candidates exec "$worktree" "$git_common_dir" "$agents_dir" "$result" "$exec_usage" "$(exec_prompt "$issue" "$repository" "$plan_file" "$resume_context")
 前回のexecは有効な終了markerなしで終了しました。同じ計画を継続し、外部待機をこのturn内で完遂したうえで、指定された終了markerを最後の非空行として必ず返してください。" || exec_rc=$?
         exec_rc=$STAGE_RC
@@ -4611,6 +4923,7 @@ worker() {
     (( attempt >= max_retries )) && break
     attempt=$((attempt + 1))
     failure_context=$(tail -c 2000 "$result" 2>/dev/null || true)
+    progress_touch "$issue" replan
     comment_issue "$issue" "<!-- agentic-loop:replan worker=$worker attempt=$attempt -->\nexec段が完了条件を満たさなかったため、flagshipモデルで計画を見直して再実行します（$attempt/$max_retries）。" || true
   done
   kill "$heartbeat_pid" 2>/dev/null || true
@@ -4622,34 +4935,42 @@ worker() {
   lease_release "$issue" "$worker"
   project_add_pull_requests "$branch"
   if [[ $exit_code -eq 0 ]] && agent_result_is "$result" completed; then
+    progress_touch "$issue" merge
     IFS=$'\t' read -r merged_pr merged_oid < <(repo_api pulls --method GET -f state=closed -f head="${repository%%/*}:$branch" -f per_page=100 --jq 'map(select(.merged_at != null and .head.ref == "'"$branch"'")) | first | [.html_url, .head.sha] | @tsv' 2>/dev/null || true) || true
+    progress_touch "$issue" cleanup
     if [[ -n $merged_pr && $merged_oid =~ ^[0-9a-fA-F]{40}$ ]] && cleanup_completed_worker "$worktree" "$branch" "$merged_oid"; then
       clear_attempts "$issue"
+      progress_touch "$issue" 'done'
       set_issue_state "$issue" completed
       project_sync_state "$issue" completed
       comment_issue "$issue" "<!-- agentic-loop:completed pr=$merged_pr -->\nWorker \`$worker\` の完了報告と対応PRのmergeをGitHubで確認し、専用worktreeとlocal branch \`$branch\` を削除しました: $merged_pr\nremote branchは復旧とGitHubのPR設定との責務分離のため、Supervisorからは削除しません。"
       repo_api "issues/$issue" --method PATCH -f state=closed >/dev/null
     else
       exit_code=1
+      progress_touch "$issue" failed
       set_issue_state "$issue" failed
       project_sync_state "$issue" failed
       comment_issue "$issue" "<!-- agentic-loop:failed worker=$worker reason=merge-or-cleanup -->\nWorkerは完了を報告しましたが、branch \`$branch\` のmerge済みPRと一致するcommitを確認できないか、安全なcleanupを完了できませんでした。Issueはcloseせず、残っているworktreeまたはbranch dataを保持します。原因確認後に再試行するには \`agent:queued\` を再度付与してください。"
     fi
   elif [[ $exit_code -eq 0 ]] && agent_result_is "$result" needs-input; then
+    progress_touch "$issue" needs-input
     set_issue_state "$issue" needs-input
     project_sync_state "$issue" needs-input
     comment_issue "$issue" "<!-- agentic-loop:needs-input worker=$worker -->\n重大な決定または権限が必要です。直前のworker commentを確認し、自動的に再キューするにはここへ返信してください。"
   elif [[ $exit_code -eq 0 ]] && agent_result_is "$result" declined; then
     clear_attempts "$issue"
+    progress_touch "$issue" needs-input
     set_issue_state "$issue" needs-input
     project_sync_state "$issue" needs-input
     comment_issue "$issue" "<!-- agentic-loop:declined worker=$worker -->\nWorkerはこのIssueを実施不要または実施不能と提案しました（理由は直前のcommentを参照）。worker自身はcloseしません。認可済みの運用者が確認し、必要なら \`bin/agentic-loop dispose $issue --reason cancelled\` 等で終了してください。"
   elif (( exhausted )); then
     clear_attempts "$issue"
+    progress_touch "$issue" queued
     set_issue_state "$issue" queued
     project_sync_state "$issue" queued
     comment_issue "$issue" "<!-- agentic-loop:exhausted worker=$worker pool=${LAST_EXHAUSTED_POOL:-} -->\nprovider の利用上限（token/rate limit）に達したため、Issueを failed にせず再キューします。全プールが利用不可の間だけSupervisorのclaimを一時停止し、枠回復後に自動再開します。"
   else
+    progress_touch "$issue" failed
     set_issue_state "$issue" failed
     project_sync_state "$issue" failed
     comment_issue "$issue" "<!-- agentic-loop:failed worker=$worker exit=$exit_code -->\nWorkerは検証済みのmergeを完了せずに停止しました。Logはlocalにのみ保持され、秘密情報はここに転記されません。Supervisorが自動的に再試行し、上限回数に達したら解決不能とみなしてcloseします。"
@@ -4667,9 +4988,10 @@ main() {
     resume) [[ $# -eq 2 ]] || fail 'resume requires one Issue number'; cmd_resume "$2" ;;
     start) [[ $# -eq 1 ]] || fail 'start takes no arguments'; cmd_start ;;
     stop) [[ $# -eq 1 ]] || fail 'stop takes no arguments'; cmd_stop ;;
-    status) cmd_status "$@" ;;
+    status) cmd_status "${@:2}" ;;
     doctor) cmd_doctor "$@" ;;
     metrics) cmd_metrics "$@" ;;
+    tail) cmd_tail "${@:2}" ;;
     upgrade) cmd_upgrade "$@" ;;
     _service) [[ $# -eq 1 ]] || exit 2; cmd_service ;;
     _supervise) supervise ;;
