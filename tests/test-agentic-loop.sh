@@ -50,6 +50,7 @@ state="$FAKE_GH_ROOT/$key.state"
 project="$FAKE_GH_ROOT/$key.project"
 project_items="$FAKE_GH_ROOT/$key.project-items"
 project_values="$FAKE_GH_ROOT/$key.project-values"
+project_page2="$FAKE_GH_ROOT/$key.project-page2"
 project_fields="$FAKE_GH_ROOT/$key.project-fields"
 project_link="$FAKE_GH_ROOT/$key.project-link"
 comments="$FAKE_GH_ROOT/$key.comments"
@@ -120,6 +121,11 @@ case "${1:-} ${2:-}" in
       cat "$metrics_pulls" 2>/dev/null || true
     elif [[ $endpoint == issues && $method == GET && $form_state == all && $wanted == agent:stale ]]; then
       awk '$2 == "stale" {print $1 "\t" "Fake issue " $1}' "$state" 2>/dev/null || true
+    elif [[ $endpoint == issues && $method == GET && $form_state == all && $* == *'.pull_request == null) | .number'* ]]; then
+      # bin/agentic-loop hint reconstruction (rebuild_project_hints) parses
+      # issue numbers only; the generic state=all branch below emits URLs for
+      # callers that ask for html_url instead.
+      awk '{print $1}' "$state" 2>/dev/null || true
     elif [[ $endpoint == issues && $method == GET && $form_state == all ]]; then
       awk -v slug="$slug" '{print "https://github.example/" slug "/issues/" $1}' "$state" 2>/dev/null || true
     elif [[ $endpoint == issues && $method == GET && $form_state == open && $* == *html_url* ]]; then
@@ -218,6 +224,12 @@ case "${1:-} ${2:-}" in
       issue=${BASH_REMATCH[1]}
       if [[ $method == PATCH && $form_state == closed ]]; then
         ( flock 9; awk -v n="$issue" '{if ($1 == n) $3="closed"; print}' "$state" > "$state.$$.tmp" && mv "$state.$$.tmp" "$state" ) 9> "$state.lock"
+      elif [[ $* == *'.updated_at'* && $* == *'.body // ""'* ]]; then
+        awk -v n="$issue" '$1 == n {
+          labels="agent:" $2; split($4,p,","); for(i in p) if(p[i] != "" && p[i] != "none") labels=labels ",priority:" p[i]; split($7,c,","); for(i in c) if(c[i] != "" && c[i] != "none") labels=labels ",category:" c[i]
+          body=""; if ($8 != "" && $8 != "none") { cmd="printf %s \"" $8 "\" | base64 -d"; cmd | getline body; close(cmd) }
+          printf "%s\037%s\037%s\037%s\n", $3, ($6 == "" || $6 == "none" ? "2026-01-01T00:00:00Z" : $6), labels, body
+        }' "$state"
       elif [[ $* == *'[.state, ([.labels[].name]'* ]]; then
         awk -v n="$issue" '$1 == n {printf "%s\tagent:%s\n", $3, $2}' "$state"
       elif [[ $* == *'.state_reason // ""'* ]]; then
@@ -271,12 +283,27 @@ case "${1:-} ${2:-}" in
     ;;
   'api graphql')
     if [[ $* == *'projectItems(first:20'* ]]; then
-      number=''; for arg in "$@"; do [[ $arg == number=* ]] && number=${arg#number=}; done
+      number=''; cursor=''
+      for arg in "$@"; do [[ $arg == number=* ]] && number=${arg#number=}; [[ $arg == cursor=* ]] && cursor=${arg#cursor=}; done
+      if [[ ${FAKE_PROJECT_CONTENT_FAIL:-0} == 1 ]]; then
+        printf '{"errors":[{"message":"forced GraphQL failure"}]}\n'
+        exit 1
+      fi
       if grep -Eq "/(issues|pull)/$number$" "$project_items" 2>/dev/null; then
-        status=''; category=''; blocked_b64=''
-        IFS=$'\t' read -r status category blocked_b64 < <(awk -F '\t' -v n="$number" '$1 == n {print $2 "\t" $3 "\t" $4; exit}' "$project_values" 2>/dev/null || true)
-        blocked=''; [[ -z $blocked_b64 ]] || blocked=$(base64 -d <<< "$blocked_b64")
-        printf 'PVTI_%s\x1f%s\x1f%s\x1f%s\n' "$number" "$status" "$category" "$blocked"
+        # A member is resolved immediately (possibly after one cursor hop when
+        # the fixture lists it on the second page).
+        if [[ -r $project_page2 ]] && grep -Fxq "$number" "$project_page2" && [[ -z $cursor ]]; then
+          printf 'NEXT\x1fpage2cursor\n'
+        else
+          status=''; category=''; blocked_b64=''
+          IFS=$'\t' read -r status category blocked_b64 < <(awk -F '\t' -v n="$number" '$1 == n {print $2 "\t" $3 "\t" $4; exit}' "$project_values" 2>/dev/null || true)
+          blocked=''; [[ -z $blocked_b64 ]] || blocked=$(base64 -d <<< "$blocked_b64")
+          printf 'PVTI_%s\x1f%s\x1f%s\x1f%s\nEND\n' "$number" "$status" "$category" "$blocked"
+        fi
+      else
+        # A confirmed non-member is a successful empty result (END), distinct
+        # from the forced failure above.  The real jq always emits this trailer.
+        printf 'END\n'
       fi
     elif [[ $* == *'repositories(first:100)'* ]]; then
       [[ -e $project_link ]] && cat "$project_link"
@@ -870,12 +897,11 @@ tail -n "+$((calls_before + 1))" "$FAKE_GH_ROOT/calls" > "$TEST_ROOT/converged-s
 [[ $(grep -c $'\tproject item-list ' "$TEST_ROOT/converged-setup-calls.log" || true) -eq 0 ]] || fail 'converged setup scanned every Project item'
 [[ $(grep -Ec $'\tproject (link|field-create|item-add|item-edit)' "$TEST_ROOT/converged-setup-calls.log" || true) -eq 0 ]] || fail 'converged setup performed a Project mutation'
 
-# A valid queued Issue performs no Project read or mutation on an idle
-# supervisor poll. Project-side drift repair is handled separately from the
-# rate-limit safety path.
-printf '92 queued open none 2026-01-01T00:00:00Z none improvement\n' > "$FAKE_GH_ROOT/$state_key.state"
+# An active Project member is reread on an idle supervisor poll so external
+# field drift can be repaired. A converged member still performs no mutation.
+printf '92 needs-input open none 2026-01-01T00:00:00Z none improvement\n' > "$FAKE_GH_ROOT/$state_key.state"
 printf 'https://github.com/acme/installed-project/issues/92\n' >> "$FAKE_GH_ROOT/$state_key.project-items"
-printf '92\tQueued\tImprovement\t\n' >> "$FAKE_GH_ROOT/$state_key.project-values"
+printf '92\tNeeds input\tImprovement\t\n' >> "$FAKE_GH_ROOT/$state_key.project-values"
 rm -f "$(git -C "$target" rev-parse --absolute-git-dir)/agentic-loop/graphql-rate-limit"
 calls_before=$(wc -l < "$FAKE_GH_ROOT/calls")
 FAKE_CORE_REMAINING=499 AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _supervise
@@ -885,7 +911,7 @@ if [[ $(grep -c $'\tproject item-edit ' "$TEST_ROOT/converged-idle-project-calls
   fail 'idle supervisor rewrote converged Project fields'
 fi
 
-[[ $(grep -c 'projectItems(first:20' "$TEST_ROOT/converged-idle-project-calls.log" || true) -eq 0 ]] || fail 'idle supervisor queried Project membership for a valid queued Issue'
+[[ $(grep -c 'projectItems(first:20' "$TEST_ROOT/converged-idle-project-calls.log" || true) -ge 1 ]] || fail 'idle supervisor did not reread Project membership for drift detection'
 [[ $(grep -Ec $'\tproject (item-add|item-edit)' "$TEST_ROOT/converged-idle-project-calls.log" || true) -eq 0 ]] || fail 'idle supervisor mutated Project data for a valid queued Issue'
 
 # Installation remains available while GraphQL is exhausted and does not make
@@ -905,12 +931,99 @@ tail -n "+$((calls_before + 1))" "$FAKE_GH_ROOT/calls" > "$TEST_ROOT/sync-issue-
 [[ $(grep -c 'projectItems(first:20' "$TEST_ROOT/sync-issue-project-calls.log" || true) -le 1 ]] || fail 'one Issue sync repeated its bounded Project membership query'
 [[ $(grep -c $'\tproject field-list ' "$TEST_ROOT/sync-issue-project-calls.log" || true) -le 1 ]] || fail 'one Issue sync fetched Project fields repeatedly'
 pending_project="$(git -C "$target" rev-parse --absolute-git-dir)/agentic-loop/project-pending"
-assert_contains "$pending_project" 'content https://github.com/acme/installed-project/issues/91' 'temporary Project failure was not persisted'
+assert_contains "$pending_project" '91' 'temporary Project failure was not persisted as an Issue hint'
 FAKE_PROJECT_FAILURES=1 "$target/bin/agentic-loop" sync-issue 91 >/dev/null
 [[ $(grep -Fxc 'https://github.com/acme/installed-project/issues/91' "$FAKE_GH_ROOT/$state_key.project-items") -eq 1 ]] || fail 'repeated immediate synchronization duplicated the Issue item'
-printf '91 inbox open none 2026-01-01T00:00:00Z\n' > "$FAKE_GH_ROOT/$state_key.state"
+printf '91 needs-input open none 2026-01-01T00:00:00Z none improvement\n92 needs-input open none 2026-01-01T00:00:00Z none improvement\n' > "$FAKE_GH_ROOT/$state_key.state"
 AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _supervise
-[[ ! -e $pending_project ]] || fail 'successful reconciliation did not clear the Project retry queue'
+if [[ -e $pending_project ]] && grep -Fxq '91' "$pending_project"; then
+  fail 'successful reconciliation did not acknowledge the Project retry hint'
+fi
+
+# Crash-safety (E3): a failed reconciliation never bulk-moves the queue.  The
+# offending entry survives, and a later successful pass acknowledges it.  A
+# re-enqueue that arrives while an Issue is in flight is also retained (never
+# deduplicated away), so an event between read and ack cannot be lost.
+rm -f "$(git -C "$target" rev-parse --absolute-git-dir)/agentic-loop/graphql-rate-limit" "$pending_project"
+printf '93 needs-input open none 2026-01-01T00:00:00Z none improvement\n' > "$FAKE_GH_ROOT/$state_key.state"
+printf 'https://github.com/acme/installed-project/issues/93\n' >> "$FAKE_GH_ROOT/$state_key.project-items"
+printf '93\tQueued\tImprovement\t\n' >> "$FAKE_GH_ROOT/$state_key.project-values"
+calls_before=$(wc -l < "$FAKE_GH_ROOT/calls")
+FAKE_PROJECT_CONTENT_FAIL=1 AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _supervise
+tail -n "+$((calls_before + 1))" "$FAKE_GH_ROOT/calls" > "$TEST_ROOT/crash-fail-calls.log"
+grep -Fxq '93' "$pending_project" || fail 'failed reconciliation dropped the pending entry'
+[[ $(grep -c $'\tproject item-edit ' "$TEST_ROOT/crash-fail-calls.log" || true) -eq 0 ]] || fail 'failed reconciliation still mutated Project data'
+# A duplicate appended while the entry is in flight is kept for the next pass.
+printf '93\n' > "$(git -C "$target" rev-parse --absolute-git-dir)/agentic-loop/project-pending.inflight"
+"$target/bin/agentic-loop" sync-issue 93 >/dev/null
+[[ $(grep -c '^93$' "$pending_project") -ge 2 ]] || fail 'in-flight re-enqueue was deduplicated away'
+rm -f "$(git -C "$target" rev-parse --absolute-git-dir)/agentic-loop/graphql-rate-limit"
+AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _supervise
+if [[ -e $pending_project ]] && grep -Fxq '93' "$pending_project"; then
+  cat "$pending_project" >&2
+  fail 'recovered reconciliation did not acknowledge the pending entry'
+fi
+
+# API failure is distinct from "not a member" (E4): a GraphQL error performs no
+# item-add/item-edit and the hint is retried, not acknowledged as a no-op.
+rm -f "$(git -C "$target" rev-parse --absolute-git-dir)/agentic-loop/graphql-rate-limit" "$pending_project"
+calls_before=$(wc -l < "$FAKE_GH_ROOT/calls")
+FAKE_PROJECT_CONTENT_FAIL=1 AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _supervise
+tail -n "+$((calls_before + 1))" "$FAKE_GH_ROOT/calls" > "$TEST_ROOT/api-fail-vs-nonmember-calls.log"
+[[ $(grep -c $'\tproject item-add ' "$TEST_ROOT/api-fail-vs-nonmember-calls.log" || true) -eq 0 ]] || fail 'GraphQL error triggered an item-add'
+[[ $(grep -c $'\tproject item-edit ' "$TEST_ROOT/api-fail-vs-nonmember-calls.log" || true) -eq 0 ]] || fail 'GraphQL error triggered an item-edit'
+grep -Fxq '93' "$pending_project" || fail 'GraphQL error was not persisted for retry'
+# A successful empty ("not a member") result is acknowledged as a no-op: it is
+# not item-added and the hint is not retried forever.
+rm -f "$(git -C "$target" rev-parse --absolute-git-dir)/agentic-loop/graphql-rate-limit" "$pending_project"
+printf '94 needs-input open none 2026-01-01T00:00:00Z none improvement\n' > "$FAKE_GH_ROOT/$state_key.state"
+calls_before=$(wc -l < "$FAKE_GH_ROOT/calls")
+AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _supervise
+tail -n "+$((calls_before + 1))" "$FAKE_GH_ROOT/calls" > "$TEST_ROOT/nonmember-calls.log"
+[[ $(grep -c $'\tproject item-add ' "$TEST_ROOT/nonmember-calls.log" || true) -eq 0 ]] || fail 'field reconciler item-added a non-member'
+if [[ -e $pending_project ]] && grep -Fxq '94' "$pending_project"; then
+  fail 'not-a-member result was not acknowledged as a no-op'
+fi
+
+# Pagination (E5): a member whose item only appears on the second page is
+# resolved through the cursor without ever scanning the whole Project.
+rm -f "$(git -C "$target" rev-parse --absolute-git-dir)/agentic-loop/graphql-rate-limit" "$pending_project" "$FAKE_GH_ROOT/$state_key.project-page2"
+printf '95 needs-input open none 2026-01-01T00:00:00Z none improvement\n' > "$FAKE_GH_ROOT/$state_key.state"
+printf 'https://github.com/acme/installed-project/issues/95\n' >> "$FAKE_GH_ROOT/$state_key.project-items"
+printf '95\tQueued\tImprovement\t\n' >> "$FAKE_GH_ROOT/$state_key.project-values"
+printf '95\n' > "$FAKE_GH_ROOT/$state_key.project-page2"
+calls_before=$(wc -l < "$FAKE_GH_ROOT/calls")
+AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _supervise
+tail -n "+$((calls_before + 1))" "$FAKE_GH_ROOT/calls" > "$TEST_ROOT/paging-calls.log"
+[[ $(grep -c $'\tproject item-list ' "$TEST_ROOT/paging-calls.log" || true) -eq 0 ]] || fail 'paginated resolve scanned the whole Project item list'
+[[ $(grep -c 'cursor=page2cursor' "$TEST_ROOT/paging-calls.log" || true) -ge 1 ]] || fail 'page-2 cursor was not followed'
+[[ $(grep -c $'\tproject item-edit ' "$TEST_ROOT/paging-calls.log" || true) -ge 1 ]] || fail 'page-2 member was not reconciled'
+
+# External drift (E6): a Project field diverged outside the loop is repaired on
+# the next supervisor pass and not touched again once converged.
+rm -f "$(git -C "$target" rev-parse --absolute-git-dir)/agentic-loop/graphql-rate-limit" "$pending_project" "$FAKE_GH_ROOT/$state_key.project-page2"
+printf '96 needs-input open none 2026-01-01T00:00:00Z none improvement\n' > "$FAKE_GH_ROOT/$state_key.state"
+printf 'https://github.com/acme/installed-project/issues/96\n' >> "$FAKE_GH_ROOT/$state_key.project-items"
+printf '96\tQueued\tImprovement\t\n' >> "$FAKE_GH_ROOT/$state_key.project-values"
+calls_before=$(wc -l < "$FAKE_GH_ROOT/calls")
+AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _supervise
+tail -n "+$((calls_before + 1))" "$FAKE_GH_ROOT/calls" > "$TEST_ROOT/drift-repair-calls.log"
+[[ $(grep -c $'\tproject item-edit ' "$TEST_ROOT/drift-repair-calls.log" || true) -ge 1 ]] || fail 'external Project drift was not repaired'
+calls_before=$(wc -l < "$FAKE_GH_ROOT/calls")
+AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _supervise
+tail -n "+$((calls_before + 1))" "$FAKE_GH_ROOT/calls" > "$TEST_ROOT/drift-converged-calls.log"
+[[ $(grep -c $'\tproject item-edit ' "$TEST_ROOT/drift-converged-calls.log" || true) -eq 0 ]] || fail 'converged member was edited again'
+
+# Hint reconstruction (E7): deleting the local project-pending does not lose
+# convergence; the supervisor rebuilds hints from the Label source of truth.
+rm -f "$(git -C "$target" rev-parse --absolute-git-dir)/agentic-loop/graphql-rate-limit" "$pending_project"
+printf '97 needs-input open none 2026-01-01T00:00:00Z none improvement\n' > "$FAKE_GH_ROOT/$state_key.state"
+printf 'https://github.com/acme/installed-project/issues/97\n' >> "$FAKE_GH_ROOT/$state_key.project-items"
+printf '97\tQueued\tImprovement\t\n' >> "$FAKE_GH_ROOT/$state_key.project-values"
+calls_before=$(wc -l < "$FAKE_GH_ROOT/calls")
+AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _supervise
+tail -n "+$((calls_before + 1))" "$FAKE_GH_ROOT/calls" > "$TEST_ROOT/hints-rebuild-calls.log"
+[[ $(grep -c $'\tproject item-edit ' "$TEST_ROOT/hints-rebuild-calls.log" || true) -ge 1 ]] || fail 'deleted hint was not rebuilt and reconverged'
 
 # Projects APIの一時的または権限制約による失敗はIssueキューのsetupを停止しない。
 FAKE_PROJECT_VIEW_UPDATE_FAILURE=1 AGENTIC_LOOP_SKIP_START=1 "$target/bin/agentic-loop" setup >/dev/null

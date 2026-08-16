@@ -164,7 +164,13 @@ Supervisorは1 poll内の状態別処理をOpen Issue snapshot最大2回（maint
 
 GraphQL枯渇時もREST APIのquotaは別に確認できる。`gh api rate_limit --jq '.resources | {graphql,core}'` で現在値を確認する。GraphQLのreset前にSupervisorを繰り返し再起動したり、`gh issue list --limit 1000` や `gh project item-list --limit 1000` を手動で反復したりしない。
 
-Project同期はProject全itemを走査しない。状態遷移で必要になったIssue/PRだけを `projectItems(first:20)` で照会し、そのプロセス内で現在の `Agent status`、`Category`、`Blocked by` をcacheする。desired valueと現在値が一致するfieldは更新せず、driftがあるfieldだけを更新する。正しいcategory Labelを持つqueued Issueのidle pollと、収束済みinstall再実行はProject itemの照会・mutationを発生させない。一時障害の再試行も1 pollあたり10件に制限し、各Projects操作の前には通常reserveに加えて25 pointの操作余裕を要求する。GraphQL quotaが不足する場合もinstallはLabelとREST Issueキューの導入を継続し、Projects権限検査とProject setupをreset後まで延期する。
+Project同期はProject全itemを走査しない。対象Issue/PRのcontentから `projectItems(first:20)` を直接照会し、pageInfoに従って必要な場合だけcursorを進める。Project IDとfield/option IDだけをプロセス内metadata cacheに置き、item IDとfield値はreconcileごとに再読込する。desired valueと現在値が一致するfieldは更新せず、driftがあるfieldだけを更新する。一時障害の再試行は1 pollあたり10件に制限し、各Projects操作の前には通常reserveに加えて25 pointの操作余裕を要求する。
+
+Projectはbest-effortな投影先であり、唯一の正本はGitHub IssueのLabelである。`Agent status` は唯一の `agent:*` Label（`queued`→Queued、`running`→Running、`needs-input`→Needs input、`in-review`→In review、`completed`→Done、その他の終端・保留状態も同名の選択肢）から、`Category` は唯一の `category:*` Label（`loop-continuity`→Loop continuity、各incident→対応するincident、`feature`→Feature、`improvement`→Improvement）から導出する。`Blocked by` は最新のnative dependency/bodyの `Blocked by:` と現在のscope競合から導出する。Labelが欠落・複数、またはIssue REST取得に失敗した場合はProjectを書き換えない。
+
+`project-pending` はIssue番号だけを保存する再試行ヒントであり、過去の状態・カテゴリ・noteを保存しない。Supervisor起動時にはopen/closedを含むIssue snapshotからヒントを再構築するため、ファイルの消失、host間の重複、強制終了は正しさに影響しない。各番号は、最新Labelの取得、対象itemの取得、必要なmutation、mutation後のfield再読込、Issue `updated_at` の再確認に成功した場合だけackする。途中終了、reserve不足、REST/GraphQL失敗はentryを残す。
+
+GraphQLの`errors`、repository/content欠落、ページ取得失敗は「未所属」とは区別する失敗であり、item-addやitem-editを実行しない。正常な未所属もfield reconcilerは変更しない。membershipの追加とAuto-addは #114 の責務であり、Auto-addでitemが現れた次回reconcileでfieldを投影する。複数hostはsingle-writerロックを置かず、同じ最新Labelからdesired valueを導出して現在値が一致すればmutationしない冪等収束に統一する。書込みの前後でLabel更新を検査するため、競合した古いsnapshotはackされず次回同期で収束する。外部でProject fieldが変更された場合は、次の `sync-issue` またはSupervisor再起動・再試行で再読込して修復し、適用後に読み戻して確認する。
 
 REST APIはrate limit、secondary rate limit、HTTP 429/5xx、timeout、connection resetなど明示的な一時障害だけを指数backoffで既定3回まで再試行する。認証・権限・入力不正など恒久的な4xxや、冪等性を確認できない操作を無制限に再試行しない。retry回数と待機は日本語でlocal logへ記録し、秘密やresponse本文はIssueへ転載しない。上限到達後は既存のlease、worktree、branchを保持し、Supervisor再起動時のlease復旧で再調査できる。
 

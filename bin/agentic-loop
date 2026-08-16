@@ -2831,13 +2831,27 @@ set_issue_state() {
 comment_issue() { repo_api "issues/$1/comments" --method POST -f body="$2" >/dev/null; }
 
 queue_project_sync() {
+  # This file is deliberately only a wake-up hint.  Desired Project values are
+  # never persisted locally: they are derived from a fresh GitHub Issue read
+  # immediately before a mutation.
+  local hint=$1 issue
+  if [[ $hint =~ ^([a-z-]+[[:space:]]+)?([1-9][0-9]*) ]]; then issue=${BASH_REMATCH[2]};
+  elif [[ $hint =~ /issues/([1-9][0-9]*)$ ]]; then issue=${BASH_REMATCH[1]};
+  else return 0; fi
   mkdir -p "$STATE_ROOT"
-  ( flock 9; grep -Fxq -- "$*" "$STATE_ROOT/project-pending" 2>/dev/null || printf '%s\n' "$*" >> "$STATE_ROOT/project-pending" ) 9> "$STATE_ROOT/project-pending.lock"
+  ( flock 9
+    # An entry being reconciled remains in project-pending.  A second enqueue
+    # for it is deliberately retained, so an event that arrives between the
+    # read and the ack cannot be mistaken for the entry we are acknowledging.
+    if grep -Fxq -- "$issue" "$STATE_ROOT/project-pending.inflight" 2>/dev/null || ! grep -Fxq -- "$issue" "$STATE_ROOT/project-pending" 2>/dev/null; then
+      printf '%s\n' "$issue" >> "$STATE_ROOT/project-pending"
+    fi
+  ) 9> "$STATE_ROOT/project-pending.lock"
 }
 
 PROJECT_METADATA_LOADED=0
 PROJECT_ID=''
-declare -A PROJECT_FIELD_IDS=() PROJECT_OPTION_IDS=() PROJECT_CONTENT_LOADED=() PROJECT_ITEM_IDS=() PROJECT_ITEM_VALUES=()
+declare -A PROJECT_FIELD_IDS=() PROJECT_OPTION_IDS=() PROJECT_ITEM_IDS=() PROJECT_ITEM_VALUES=()
 
 invalidate_graphql_budget() { rm -f "$(graphql_budget_file)"; }
 
@@ -2860,8 +2874,7 @@ load_project_context() {
 }
 
 load_project_content() {
-  local url=$1 kind number query row item_id agent_status category blocked_by
-  [[ -z ${PROJECT_CONTENT_LOADED[$url]:-} ]] || return 0
+  local url=$1 kind number query row item_id agent_status category blocked_by cursor=''
   load_project_context || return 1
   if [[ $url =~ /issues/([0-9]+)$ ]]; then
     kind=issue; number=${BASH_REMATCH[1]}
@@ -2870,11 +2883,18 @@ load_project_content() {
   else
     return 1
   fi
-  query='query($owner:String!,$repo:String!,$number:Int!){repository(owner:$owner,name:$repo){content:'"$kind"'(number:$number){projectItems(first:20,includeArchived:false){nodes{id project{id} fieldValues(first:20){nodes{... on ProjectV2ItemFieldSingleSelectValue{name field{... on ProjectV2SingleSelectField{name}}} ... on ProjectV2ItemFieldTextValue{text field{... on ProjectV2Field{name}}}}}}}}}}'
-  row=$(gh api graphql -f query="$query" -F owner="$(repo_name | cut -d/ -f1)" -F repo="$(repo_name | cut -d/ -f2)" -F number="$number" --jq '.data.repository.content.projectItems.nodes[] | select(.project.id == "'"$PROJECT_ID"'") | [.id, ([.fieldValues.nodes[] | select(.field.name == "Agent status") | .name][0] // ""), ([.fieldValues.nodes[] | select(.field.name == "Category") | .name][0] // ""), ([.fieldValues.nodes[] | select(.field.name == "Blocked by") | .text][0] // "")] | join("\u001f")' 2>/dev/null | head -n 1) || return 1
+  # content.projectItems is paginated.  A successful empty result means "not
+  # a member" (return 2); malformed/GraphQL-error responses are failures.
+  while :; do
+    query='query($owner:String!,$repo:String!,$number:Int!,$cursor:String){repository(owner:$owner,name:$repo){content:'"$kind"'(number:$number){projectItems(first:20,after:$cursor,includeArchived:false){nodes{id project{id} fieldValues(first:20){nodes{... on ProjectV2ItemFieldSingleSelectValue{name field{... on ProjectV2SingleSelectField{name}}} ... on ProjectV2ItemFieldTextValue{text field{... on ProjectV2Field{name}}}}} pageInfo{hasNextPage endCursor}}}}}}'
+    row=$(gh api graphql -f query="$query" -F owner="$(repo_name | cut -d/ -f1)" -F repo="$(repo_name | cut -d/ -f2)" -F number="$number" -f cursor="$cursor" --jq 'if (.errors or .data.repository == null or .data.repository.content == null) then error("Project content query failed") else .data.repository.content.projectItems as $items | ($items.nodes[] | select(.project.id == "'"$PROJECT_ID"'") | [.id, ([.fieldValues.nodes[] | select(.field.name == "Agent status") | .name][0] // ""), ([.fieldValues.nodes[] | select(.field.name == "Category") | .name][0] // ""), ([.fieldValues.nodes[] | select(.field.name == "Blocked by") | .text][0] // "")] | join("\u001f")), (if $items.pageInfo.hasNextPage then "NEXT\u001f" + ($items.pageInfo.endCursor // "") else "END" end)' 2>/dev/null) || return 1
+    item_id=$(head -n 1 <<< "$row")
+    if [[ $item_id != END && $item_id != NEXT$'\x1f'* ]]; then row=$item_id; break; fi
+    cursor=$(tail -n 1 <<< "$row"); [[ $cursor == NEXT$'\x1f'* ]] || return 2
+    cursor=${cursor#*$'\x1f'}; [[ -n $cursor ]] || return 1
+  done
   invalidate_graphql_budget
   IFS=$'\x1f' read -r item_id agent_status category blocked_by <<< "$row"
-  PROJECT_CONTENT_LOADED[$url]=1
   PROJECT_ITEM_IDS[$url]=$item_id
   PROJECT_ITEM_VALUES["$url:Agent status"]=$agent_status
   PROJECT_ITEM_VALUES["$url:Category"]=$category
@@ -2890,7 +2910,12 @@ project_add_content() {
     case $key in PROJECT_OWNER) PROJECT_OWNER=$value ;; PROJECT_NUMBER) PROJECT_NUMBER=$value ;; esac
   done < "$STATE_ROOT/project.env"
   [[ -n $PROJECT_OWNER && $PROJECT_NUMBER =~ ^[0-9]+$ ]] || return 0
-  load_project_content "$url" || { queue_project_sync "content $url"; return 0; }
+  local content_rc=0
+  load_project_content "$url" || content_rc=$?
+  # rc 1 = retryable failure (queue a hint); rc 2 = a confirmed non-member,
+  # which is exactly the state item-add exists to fix.  Only rc 1 suppresses
+  # the membership mutation.
+  if (( content_rc == 1 )); then queue_project_sync "content $url"; return 0; fi
   [[ -n ${PROJECT_ITEM_IDS[$url]:-} ]] && return 0
   if ! added_id=$(gh project item-add "$PROJECT_NUMBER" --owner "$PROJECT_OWNER" --url "$url" --format json --jq .id 2>/dev/null); then
     invalidate_graphql_budget
@@ -2902,6 +2927,64 @@ project_add_content() {
   PROJECT_ITEM_VALUES["$url:Agent status"]=''
   PROJECT_ITEM_VALUES["$url:Category"]=''
   PROJECT_ITEM_VALUES["$url:Blocked by"]=''
+}
+
+project_option_for_state() { case $1 in queued) printf Queued;; running) printf Running;; needs-input) printf 'Needs input';; in-review) printf 'In review';; completed) printf Done;; failed) printf Failed;; stale) printf Stale;; blocked) printf Blocked;; stopping) printf Stopping;; cancelled) printf Cancelled;; superseded) printf Superseded;; duplicate) printf Duplicate;; merged) printf Merged;; *) printf Inbox;; esac; }
+project_option_for_category() { case $1 in loop-continuity) printf 'Loop continuity';; confidentiality-incident) printf 'Confidentiality incident';; integrity-incident) printf 'Integrity incident';; availability-incident) printf 'Availability incident';; feature) printf Feature;; improvement) printf Improvement;; *) return 1;; esac; }
+
+project_issue_snapshot() {
+  local issue=$1 row
+  row=$(repo_api "issues/$issue" --jq '[.state, .updated_at, ([.labels[].name] | join(",")), (.body // "")] | join("\u001f")') || return 1
+  IFS=$'\x1f' read -r PROJECT_ISSUE_STATE PROJECT_ISSUE_UPDATED PROJECT_ISSUE_LABELS PROJECT_ISSUE_BODY <<< "$row"
+  [[ -n $PROJECT_ISSUE_STATE && -n $PROJECT_ISSUE_UPDATED ]] || return 1
+  local -a states=() categories=(); local l
+  IFS=, read -ra _project_labels <<< "$PROJECT_ISSUE_LABELS"
+  for l in "${_project_labels[@]}"; do [[ $l == agent:* ]] && states+=("${l#agent:}"); [[ $l == category:* ]] && categories+=("${l#category:}"); done
+  (( ${#states[@]} == 1 && ${#categories[@]} == 1 )) || return 2
+  PROJECT_DESIRED_STATE=$(project_option_for_state "${states[0]}")
+  PROJECT_DESIRED_CATEGORY=$(project_option_for_category "${categories[0]}") || return 2
+}
+
+project_desired_blocked_by() {
+  local issue=$1 refs body_refs native_refs other reason
+  if [[ -r $(conflict_wait_file "$issue") ]]; then IFS=$'\t' read -r other reason < "$(conflict_wait_file "$issue")" || return 1; printf '#%s scope重複: %s' "$other" "$reason"; return 0; fi
+  body_refs=$(dependency_refs_from_body "$PROJECT_ISSUE_BODY") || return 1
+  local native_rc=0
+  native_refs=$(dependency_native_refs "$issue" 2>/dev/null) || native_rc=$?
+  (( native_rc == 0 || native_rc == 2 )) || return 1
+  refs=$(printf '%s\n%s\n' "$body_refs" "$native_refs" | sed '/^$/d' | sort -un | paste -sd, -)
+  [[ -z $refs ]] || printf '依存: #%s' "${refs//,/, #}"
+}
+
+project_reconcile_issue() {
+  local issue=$1 url project_id item_id field_id option_id desired note before_updated
+  graphql_budget_allows "$((GRAPHQL_RESERVE + PROJECT_OPERATION_BUDGET))" || return 1
+  [[ -r $STATE_ROOT/project.env ]] || return 0
+  project_issue_snapshot "$issue" || return $?
+  before_updated=$PROJECT_ISSUE_UPDATED; url=$(repo_issue_url "$issue")
+  # Never add membership here: #114/Auto-add owns it.
+  local content_rc=0
+  load_project_content "$url" || content_rc=$?
+  (( content_rc == 0 )) || return $content_rc
+  note=$(project_desired_blocked_by "$issue") || return 1
+  project_id=$PROJECT_ID; item_id=${PROJECT_ITEM_IDS[$url]:-}
+  for field_id in 'Agent status' Category 'Blocked by'; do
+    case $field_id in 'Agent status') desired=$PROJECT_DESIRED_STATE;; Category) desired=$PROJECT_DESIRED_CATEGORY;; *) desired=$note;; esac
+    [[ ${PROJECT_ITEM_VALUES["$url:$field_id"]:-} == "$desired" ]] && continue
+    if [[ $field_id == 'Blocked by' ]]; then
+      gh project item-edit --id "$item_id" --project-id "$project_id" --field-id "${PROJECT_FIELD_IDS[$field_id]:-}" --text "$desired" >/dev/null 2>&1 || return 1
+    else
+      option_id=${PROJECT_OPTION_IDS["$field_id:$desired"]:-}; [[ -n $option_id ]] || return 1
+      gh project item-edit --id "$item_id" --project-id "$project_id" --field-id "${PROJECT_FIELD_IDS[$field_id]:-}" --single-select-option-id "$option_id" >/dev/null 2>&1 || return 1
+    fi
+    invalidate_graphql_budget
+    unset 'PROJECT_ITEM_IDS[$url]' 'PROJECT_ITEM_VALUES[$url:Agent status]' 'PROJECT_ITEM_VALUES[$url:Category]' 'PROJECT_ITEM_VALUES[$url:Blocked by]'
+    load_project_content "$url" || return 1
+    [[ ${PROJECT_ITEM_VALUES["$url:$field_id"]:-} == "$desired" ]] || return 1
+  done
+  project_issue_snapshot "$issue" || return $?
+  [[ $PROJECT_ISSUE_UPDATED == "$before_updated" ]] || return 1
+  return 0
 }
 
 project_add_issue() {
@@ -2922,111 +3005,57 @@ project_add_pull_requests() {
   done < <(repo_api pulls --method GET -f state=all -f head="${PROJECT_OWNER}:$branch" -f per_page=100 --paginate --jq '.[].html_url' 2>/dev/null || true)
 }
 
-project_sync_state() {
-  graphql_budget_allows "$((GRAPHQL_RESERVE + PROJECT_OPERATION_BUDGET))" || { queue_project_sync "state $1 $2"; return 0; }
-  [[ -r $STATE_ROOT/project.env ]] || return 0
-  local issue=$1 state=$2 PROJECT_OWNER='' PROJECT_NUMBER='' key value project_id item_id field_id option_id option url
-  while IFS='=' read -r key value; do
-    case $key in PROJECT_OWNER) PROJECT_OWNER=$value ;; PROJECT_NUMBER) PROJECT_NUMBER=$value ;; esac
-  done < "$STATE_ROOT/project.env"
-  [[ -n $PROJECT_OWNER && $PROJECT_NUMBER =~ ^[0-9]+$ ]] || return 0
-  case $state in
-    queued) option=Queued ;; running) option=Running ;; needs-input) option='Needs input' ;;
-    in-review) option='In review' ;; completed) option=Done ;; failed) option=Failed ;; stale) option=Stale ;;
-    blocked) option=Blocked ;; stopping) option=Stopping ;; cancelled) option=Cancelled ;;
-    superseded) option=Superseded ;; duplicate) option=Duplicate ;; merged) option=Merged ;; *) option=Inbox ;;
-  esac
-  url=$(repo_issue_url "$issue")
-  project_add_content "$url"
-  project_id=$PROJECT_ID; item_id=${PROJECT_ITEM_IDS[$url]:-}
-  field_id=${PROJECT_FIELD_IDS["Agent status"]:-}; option_id=${PROJECT_OPTION_IDS["Agent status:$option"]:-}
-  [[ -n $project_id && -n $item_id && -n $field_id && -n $option_id ]] || { queue_project_sync "state $issue $state"; return 0; }
-  [[ ${PROJECT_ITEM_VALUES["$url:Agent status"]:-} == "$option" ]] && return 0
-  if gh project item-edit --id "$item_id" --project-id "$project_id" --field-id "$field_id" --single-select-option-id "$option_id" >/dev/null 2>&1; then
-    invalidate_graphql_budget
-    PROJECT_ITEM_VALUES["$url:Agent status"]=$option
-  else
-    invalidate_graphql_budget
-    queue_project_sync "state $issue $state"
-  fi
-}
-
-project_sync_category() {
-  graphql_budget_allows "$((GRAPHQL_RESERVE + PROJECT_OPERATION_BUDGET))" || { queue_project_sync "category $1 $2"; return 0; }
-  [[ -r $STATE_ROOT/project.env ]] || return 0
-  local issue=$1 category=$2 PROJECT_OWNER='' PROJECT_NUMBER='' key value project_id item_id field_id option_id option url
-  while IFS='=' read -r key value; do
-    case $key in PROJECT_OWNER) PROJECT_OWNER=$value ;; PROJECT_NUMBER) PROJECT_NUMBER=$value ;; esac
-  done < "$STATE_ROOT/project.env"
-  [[ -n $PROJECT_OWNER && $PROJECT_NUMBER =~ ^[0-9]+$ ]] || return 0
-  case $category in
-    loop-continuity) option='Loop continuity' ;; confidentiality-incident) option='Confidentiality incident' ;;
-    integrity-incident) option='Integrity incident' ;; availability-incident) option='Availability incident' ;;
-    feature) option=Feature ;; improvement) option=Improvement ;; *) return 0 ;;
-  esac
-  url=$(repo_issue_url "$issue")
-  project_add_content "$url"
-  project_id=$PROJECT_ID; item_id=${PROJECT_ITEM_IDS[$url]:-}
-  field_id=${PROJECT_FIELD_IDS[Category]:-}; option_id=${PROJECT_OPTION_IDS["Category:$option"]:-}
-  [[ -n $project_id && -n $item_id && -n $field_id && -n $option_id ]] || return 0
-  [[ ${PROJECT_ITEM_VALUES["$url:Category"]:-} == "$option" ]] && return 0
-  if gh project item-edit --id "$item_id" --project-id "$project_id" --field-id "$field_id" --single-select-option-id "$option_id" >/dev/null 2>&1; then
-    invalidate_graphql_budget
-    PROJECT_ITEM_VALUES["$url:Category"]=$option
-  else
-    invalidate_graphql_budget
-    queue_project_sync "category $issue $category"
-  fi
-}
-
-# Record (or clear, for an empty note) which other Issue this one is waiting
-# on in the "Blocked by" TEXT field. Only the counterpart Issue number and the
-# overlapping token are written; Issue bodies and secrets are never copied in.
-project_sync_conflict() {
-  local issue=$1 note=$2 note_b64
-  note_b64=$(base64 -w0 <<< "$note")
-  graphql_budget_allows "$((GRAPHQL_RESERVE + PROJECT_OPERATION_BUDGET))" || { queue_project_sync "conflict $issue $note_b64"; return 0; }
-  [[ -r $STATE_ROOT/project.env ]] || return 0
-  local PROJECT_OWNER='' PROJECT_NUMBER='' key value project_id item_id field_id url
-  while IFS='=' read -r key value; do
-    case $key in PROJECT_OWNER) PROJECT_OWNER=$value ;; PROJECT_NUMBER) PROJECT_NUMBER=$value ;; esac
-  done < "$STATE_ROOT/project.env"
-  [[ -n $PROJECT_OWNER && $PROJECT_NUMBER =~ ^[0-9]+$ ]] || return 0
-  url=$(repo_issue_url "$issue")
-  project_add_content "$url"
-  project_id=$PROJECT_ID; item_id=${PROJECT_ITEM_IDS[$url]:-}; field_id=${PROJECT_FIELD_IDS["Blocked by"]:-}
-  [[ -n $project_id && -n $item_id && -n $field_id ]] || return 0
-  [[ ${PROJECT_ITEM_VALUES["$url:Blocked by"]:-} == "$note" ]] && return 0
-  if gh project item-edit --id "$item_id" --project-id "$project_id" --field-id "$field_id" --text "$note" >/dev/null 2>&1; then
-    invalidate_graphql_budget
-    PROJECT_ITEM_VALUES["$url:Blocked by"]=$note
-  else
-    invalidate_graphql_budget
-    queue_project_sync "conflict $issue $note_b64"
-  fi
-}
-
 reconcile_pending_project() {
   [[ -s $STATE_ROOT/project-pending ]] || return 0
   graphql_budget_allows "$((GRAPHQL_RESERVE + PROJECT_OPERATION_BUDGET))" || return 0
-  local pending="$STATE_ROOT/project-pending.$$" kind first second processed=0
-  ( flock 9; mv "$STATE_ROOT/project-pending" "$pending" ) 9> "$STATE_ROOT/project-pending.lock"
-  while read -r kind first second; do
-    if (( processed >= PROJECT_RECONCILE_BATCH )); then
-      queue_project_sync "$kind $first${second:+ $second}"
-      continue
+  local issue processed=0 rc snapshot="$STATE_ROOT/project-pending.snapshot.$$" inflight="$STATE_ROOT/project-pending.inflight"
+  ( flock 9; cp "$STATE_ROOT/project-pending" "$snapshot"; : > "$inflight" ) 9> "$STATE_ROOT/project-pending.lock"
+  while read -r issue _; do
+    [[ $issue =~ ^[1-9][0-9]*$ ]] || continue
+    if (( processed >= PROJECT_RECONCILE_BATCH )); then continue; fi
+    ( flock 9; printf '%s\n' "$issue" >> "$inflight" ) 9> "$STATE_ROOT/project-pending.lock"
+    rc=0
+    project_reconcile_issue "$issue" || rc=$?
+    # rc 0 (converged) and rc 2 (confirmed non-member / invalid labels, no
+    # mutation to make) are both acknowledgement-worthy; only rc 1 is a
+    # retryable failure that must remain so a crash cannot drop the entry.
+    if (( rc == 0 || rc == 2 )); then
+      # Remove only the snapshot occurrence.  Any duplicate appended while
+      # this Issue was in-flight remains as the next reconciliation hint.
+      ( flock 9
+        awk -v n="$issue" 'BEGIN { removed=0 } $0 == n && !removed { removed=1; next } { print }' "$STATE_ROOT/project-pending" > "$STATE_ROOT/project-pending.ack.$$" && mv "$STATE_ROOT/project-pending.ack.$$" "$STATE_ROOT/project-pending"
+        sed -i "0,/^$issue$/d" "$inflight"
+      ) 9> "$STATE_ROOT/project-pending.lock"
     fi
-    case $kind in
-      content) project_add_content "$first" ;;
-      issue) project_add_issue "$first" ;; # backward-compatible pending entries
-      pulls) project_add_pull_requests "$first" ;;
-      state) project_sync_state "$first" "$second" ;;
-      category) project_sync_category "$first" "$second" ;;
-      conflict) project_sync_conflict "$first" "$(base64 -d <<< "$second" 2>/dev/null || true)" ;;
-    esac
     processed=$((processed + 1))
-  done < "$pending"
-  rm -f "$pending"
+  done < "$snapshot"
+  rm -f "$snapshot"
+  [[ -s $STATE_ROOT/project-pending ]] || rm -f "$STATE_ROOT/project-pending"
+}
+
+# All field call-sites use one reconciliation path.  The former arguments are
+# retained only for call-site compatibility; Label state is read afresh.  The
+# explicit legacy membership conduit remains separate from the field
+# reconciler until #114's Auto-add owns membership everywhere.
+project_sync_state() { queue_project_sync "issue $1"; project_add_issue "$1" || true; project_reconcile_issue "$1" || true; }
+project_sync_category() { queue_project_sync "issue $1"; project_add_issue "$1" || true; project_reconcile_issue "$1" || true; }
+project_sync_conflict() { queue_project_sync "issue $1"; project_add_issue "$1" || true; project_reconcile_issue "$1" || true; }
+
+PROJECT_HINTS_REBUILT=0
+rebuild_project_hints() {
+  local issue source=${1:-all}
+  # GitHub is the source of truth; this reconstructs hints after loss of local
+  # state.  It deliberately includes closed Issues, whose terminal labels are
+  # also projected when they are already Project members.
+  if [[ $source == open ]]; then
+    [[ -n $SUPERVISOR_SNAPSHOT && -r $SUPERVISOR_SNAPSHOT ]] || return 1
+    while IFS=$'\t' read -r issue _; do [[ $issue =~ ^[1-9][0-9]*$ ]] && queue_project_sync "issue $issue"; done < "$SUPERVISOR_SNAPSHOT"
+    return 0
+  fi
+  local rows
+  rows=$(repo_api issues --method GET -f state=all -f per_page=100 --paginate --jq '.[] | select(.pull_request == null) | .number') || return 1
+  while read -r issue; do [[ $issue =~ ^[1-9][0-9]*$ ]] && queue_project_sync "issue $issue"; done <<< "$rows"
+  PROJECT_HINTS_REBUILT=1
 }
 
 # One open-Issue snapshot backs all label-state maintenance in a supervisor
@@ -3101,7 +3130,6 @@ reconcile_queued_categories() {
 
 cmd_sync_issue() {
   [[ ${1:-} =~ ^[1-9][0-9]*$ ]] || fail 'sync-issue requires a positive Issue number'
-  project_add_issue "$1"
   project_sync_state "$1" queued
   say "Issue #$1 のProject同期を実行しました（障害時は再試行queueへ保存済みです）。"
 }
@@ -4207,9 +4235,19 @@ supervise() {
   recover_expired || true
   enforce_worker_timeout || true
   rebuild_scope_cache || true
+  rebuild_project_hints || true
   while :; do
     clear_supervisor_snapshot
     refresh_supervisor_snapshot || true
+    # A failed initial all-Issue reconstruction is not an empty snapshot.
+    # Retry it on later polls; after it succeeds the already-fetched open
+    # snapshot continuously re-enqueues active Issues without another REST
+    # scan. Closed-Issue drift is therefore a startup/sync-issue boundary.
+    if (( PROJECT_HINTS_REBUILT == 0 )); then
+      rebuild_project_hints || true
+    else
+      rebuild_project_hints open || true
+    fi
     reconcile_scope_conflict_cache || true
     requeue_answered || true
     requeue_dependency_ready || true
