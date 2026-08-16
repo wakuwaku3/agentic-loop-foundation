@@ -50,7 +50,7 @@ running/in-reviewはまず`agent:stopping`へ遷移し、所有hostのworker pro
 
 - **Supervisor**: 稼働状態、pid、`max_workers`（既存の1行目の文言は不変）。
 - **Running Issues**: Issue番号・title・`(phase: ...)`・`(scope: ...)`に加え、`(started: 開始epoch, elapsed: 経過秒)`・`(timeout_at: 上限到達epoch[、超過なら「超過」]。`worker_timeout_seconds=0`では非表示)`・`(heartbeat: 最終heartbeat epoch)`・`(lease_expires: 期限epoch[、期限切れなら「期限切れ」])`・`(worktree: path[、dirty/diverged、または「なし」])`・`(pr: #番号 state=... checks=...)`を、追加のGitHub呼び出しなしでlocal state（`workers/<issue>.started`・`.lease`・`.resume`、scope cache）から表示する。他host所有などlocal stateがない場合は「不明」と明示する。
-- **キュー / 次のclaim候補**: queued総数とclaim可能数、および`claim_next`と同じ順序（category rank→priority rank→created_at→Issue番号）の上位候補を、claimされない理由code（`scope-conflict`／`retry-cooldown`／`claim-paused`）付きで表示する。依存関係の再検証はしない（`agent:blocked`のIssueはqueuedに現れないため対象外であり、これはコスト方針上のbest-effortな割り切りである）。
+- **キュー / 次のclaim候補**: queued総数とclaim可能数、および`claim_next`と同じ順序（category rank→priority rank→created_at→Issue番号）の上位候補を、claimされない理由code（`scope-conflict`／`retry-cooldown`／`claim-paused`）付きで表示する。依存関係の再検証はしない（`agent:blocked`のIssueはqueuedに現れないため対象外であり、これはコスト方針上のbest-effortな割り切りである）。また、各phaseで次に選ばれる `pool` / `provider` / `model`（`agent_pick_tier` のlocal計算。usage実測はせず、pool markerと設定からの推論に限定）と、プール別のclaim pause理由（`pool=<pool> 枯渇（回復待ち）`、`全プール利用不可`）を表示する。
 - **状態サマリ**: `needs-input`／`failed`／`in-review`／`blocked`／`stale`の件数と、`https://github.com/OWNER/REPO/issues/N`形式のURL一覧（`stale`は直近100件までで打ち切りがある場合は明示する）。
 - **警告**: staleなsupervisor pid/lock、期限切れlease、実行時間上限を超過したlocal worker（`worker-timeout`。次回pollで停止し自動的に再試行キューへ戻る）、local stateのないrunning Issue（`worker-missing`、多端末運用では正常）、GitHub上でrunningでないlocal worker（`worker-orphan`）、対応するrunning Issueのない残存worktree/branch、破損したlocal state file、Project同期の再試行待ち、claim一時停止中、をすべてlocal stateの読み取りだけで検出する。
 
@@ -74,7 +74,7 @@ bin/agentic-loop status --format json
 
 ### 事前診断
 
-`bin/agentic-loop doctor` は、`status` の稼働状況表示より広い導入・復旧向けの読み取り専用診断である。GitHub認証とrepository権限、origin/default branch、plan段・exec段が使用する各AI CLI（`codex`／`claude`／`opencode`、それぞれ `AI CLI (<provider>)` として個別に検査）、Devbox、hooks、Supervisor、systemd user service/timer、Project設定、設定値、残存worktree/branch/logを検査し、成功・警告・失敗、影響、復旧方法を日本語で出力する。Projectとtimerは任意の可視化・自動運用機能なので利用不能時は警告とし、GitHub Issueキュー、固定検証環境、hooks、Supervisorなど処理に必須の条件は失敗とする。
+`bin/agentic-loop doctor` は、`status` の稼働状況表示より広い導入・復旧向けの読み取り専用診断である。GitHub認証とrepository権限、origin/default branch、plan段・exec段・diagnoseが使用する各AI CLI（`codex`／`claude`／`opencode`、tiersを含む全providerをそれぞれ `AI CLI (<provider>)` として個別に検査）、tiersスキーマ（未知provider・空models・不正な `max_usage_percent`）、opencode go usage APIの認証keyの有無（値は表示しない。なければusage実測が使えずcooldownフォールバックになるwarning）、プール枯渇marker、Devbox、hooks、Supervisor、systemd user service/timer、Project設定、設定値、残存worktree/branch/logを検査し、成功・警告・失敗、影響、復旧方法を日本語で出力する。Projectとtimerは任意の可視化・自動運用機能なので利用不能時は警告とし、GitHub Issueキュー、固定検証環境、hooks、Supervisorなど処理に必須の条件は失敗とする。
 
 通常形式と `--format json` はどちらも状態を変更せず、token本体や認証commandの詳細を表示しない。JSONの `schema_version` は1で、`summary` と `checks` を返す。必須診断に失敗がなければ終了code 0、1件以上あれば1、引数不正は2である。警告だけでは自動監視を失敗させない。修復は診断から自動実行せず、表示された `setup`、`start`、install再実行などを利用者が別途明示して実行する。
 
@@ -119,7 +119,36 @@ Supervisor停止中でも、キューのファイル、対象repositoryとIssue�
 
 読み取り専用要求と運用操作はその場で続行する。通常の変更要求は、専用branch/worktreeを利用でき、追加費用・秘密・破壊的操作に関する判断が不要な場合に限り、キューが利用不能であることを明示してworker workflowを同期実行する。それ以外は復旧方法または必要な判断を正確に提示して停止する。明示された同期・直接実行も同じworker workflowと不変条件に従う。
 
-`.agentic-loop.toml` の `[queue]` で `poll_seconds`、`max_workers`、`lease_seconds`、`stop_timeout`、`stale_days`、`graphql_reserve`、`rate_limit_cache_seconds`、`api_retry_attempts`、`api_retry_base_seconds`、`max_attempts`、`retry_cooldown_seconds`、`worker_timeout_seconds`、`unknown_scope`、`exclusive_paths` を変更できる。個人環境向けの上書きは git 管理外の `.agentic-loop.local.toml` に同じキーを書けば、キー単位で優先される。設定はTOMLで、読み取りには `yq` を用いる。既定の並列数は4とし、これを超えてむやみに増やさない。worker失敗の多くはtoken枯渇やセッション中断などの一時的要因であるため、失敗したIssueは即座にagent:failedへ留め置かない。Supervisorの`retry_failed`が、開いている全てのagent:failed（過去分・追跡外を含む）を`[queue].max_attempts`（既定3、総試行回数）まで`[queue].retry_cooldown_seconds`（既定600秒）のクールダウンを挟んで自動的にagent:queuedへ戻して再試行し、上限に達したら解決不能とみなしてIssueをcloseする。人手でのラベル付け替えは不要。workerが実施不要または実施不能と判断した場合は`AGENTIC_LOOP_RESULT=declined`でIssueをcloseできる。providerのtoken/rate limitに達した失敗はIssueをfailedにせずagent:queuedへ戻し、Supervisorはclaimを一定時間（`EXHAUSTION_PAUSE_SECONDS`）一時停止して上限回復後に自動再開する。`[budget].weekly_reserve_percent` は緊急枠の確保用で、週次利用率が `100 - 値` を超える間はSupervisorが新規Issueのclaimを一時停止し、回復すると再開する。利用率はheadlessで取得できるCodexのセッションログ（最新の `token_count` の `secondary.used_percent`）から読むbest-effortで、取得できない場合やCodex以外のproviderのみの場合はfail open（claim継続）とする。0で無効化できる。増加はCodex契約上の制限、Git競合、端末資源を確認してから行う。stopは新規claimを止め、workerをdrainする。`STOP_TIMEOUT=0` は完了まで待つ。
+`.agentic-loop.toml` の `[queue]` で `poll_seconds`、`max_workers`、`lease_seconds`、`stop_timeout`、`stale_days`、`graphql_reserve`、`rate_limit_cache_seconds`、`api_retry_attempts`、`api_retry_base_seconds`、`max_attempts`、`retry_cooldown_seconds`、`worker_timeout_seconds`、`unknown_scope`、`exclusive_paths` を変更できる。個人環境向けの上書きは git 管理外の `.agentic-loop.local.toml` に同じキーを書けば、キー単位で優先される。設定はTOMLで、読み取りには `yq` を用いる。既定の並列数は4とし、これを超えてむやみに増やさない。worker失敗の多くはtoken枯渇やセッション中断などの一時的要因であるため、失敗したIssueは即座にagent:failedへ留め置かない。Supervisorの`retry_failed`が、開いている全てのagent:failed（過去分・追跡外を含む）を`[queue].max_attempts`（既定3、総試行回数）まで`[queue].retry_cooldown_seconds`（既定600秒）のクールダウンを挟んで自動的にagent:queuedへ戻して再試行し、上限に達したら解決不能とみなしてIssueをcloseする。人手でのラベル付け替えは不要。workerが実施不要または実施不能と判断した場合は`AGENTIC_LOOP_RESULT=declined`でIssueをcloseできる。`[budget].weekly_reserve_percent` は緊急枠の確保用で、週次利用率が `100 - 値` を超える間はSupervisorが新規Issueのclaimを一時停止し、回復すると再開する。利用率はheadlessで取得できるCodexのセッションログ（最新の `token_count` の `secondary.used_percent`）から読むbest-effortで、取得できない場合やCodex以外のproviderのみの場合はfail open（claim継続）とする。0で無効化できる。増加はCodex契約上の制限、Git競合、端末資源を確認してから行う。stopは新規claimを止め、workerをdrainする。`STOP_TIMEOUT=0` は完了まで待つ。
+
+### プール・モデルの優先順位と枠枯渇・回復（[ADR 0012](../decisions/0012-provider-pool-fallback.md)）
+
+plan/exec/diagnoseの各phaseは、`[[agent.<phase>.tiers]]` で「プール（=サブスク、quota境界）」と「プール内モデル（優先順位）」の2階層を宣言できる。実行時（`agent_pick_tier <phase>`）は、枯渇していない最上位プールの、使用率閾値（`max_usage_percent`）を超えていない最上位モデルを選ぶ。
+
+```toml
+[agent.plan]
+[[agent.plan.tiers]]
+pool = "plus"
+provider = "codex"
+reasoning_effort = "high"
+models = [{ model = "gpt-5.6-sol", max_usage_percent = 60 }]
+
+[[agent.plan.tiers]]
+pool = "gogo"
+provider = "opencode"
+reasoning_effort = "high"
+models = [
+  { model = "opencode-go/gpt-5.6-luna", max_usage_percent = 60 },
+  { model = "opencode-go/kimi-k2.7-code", max_usage_percent = 85 },
+  { model = "opencode-go/deepseek-v4-pro" },   # 閾値省略 = 最後まで使う
+]
+```
+
+`tiers` 未設定のphaseは、従来のscalar `provider` / `model` / `reasoning_effort` を「暗黙pool=provider名、models 1件、max_usageなし」の1 tierとして解釈する（後方互換）。`[agent].provider` 継承も現行どおり。
+
+枠の枯渇・回復はプール単位で記録する。workerがプール枯渇（quota / 429 / usage limit / `insufficient_quota` / credit balance）と分類した失敗では、該当プールのmarker（`.git/agentic-loop/pools/<pool>/exhausted`）に回復予定epochを書き、Issueを `agent:queued` へ戻す（attemptsはクリア）。次回claimで `agent_pick_tier` が次のプール・モデルを選ぶため、部分枯渇では他プールで継続する。**グローバルpause（`agent-exhausted`）は全候補プールが同時に利用不可のときだけ**発動し、statusにはプール別または「全プール利用不可」の理由が表示される。プール使用率の実測は、codexはセッションログ、opencode goは `GET https://opencode.ai/zen/go/v1/usage`（`~/.local/share/opencode/auth.json` の `opencode-go` keyで認証、key値はIssue/PR/logへ転記しない）から読み、読めない場合は `EXHAUSTION_PAUSE_SECONDS` の固定cooldownにフォールバックする。回復は「usage実測で回復」→「cooldown経過」の順でmarkerを削除して優先候補へ戻る。usage APIは `USAGE_CACHE_SECONDS`（300秒）で間引きされる。
+
+モデル固有失敗（`overloaded`、model解決失敗など）はプール枯渇ではなく、**同一プール内の次モデル**へ同一stage内で即時切り替える。`max_usage_percent` はプール内モデル降格用で、`budget.weekly_reserve_percent`（緊急枠のclaim全体pause）とは役割が異なる。空result + 非0 exitは後方互換のためプール枯渇寄りとして扱う。
 
 SupervisorとworkerはGit common stateにGraphQLの残量・reset時刻を短時間cacheして共有する。Issue一覧、Label、comment、heartbeat、PRのmerge確認などloopのcore操作はREST APIを使い、GraphQLはbest-effortのProjects操作だけに限定する。残量が `GRAPHQL_RESERVE` 以下ならProjects item・field同期だけを抑制し、Issue Labelを正本とするqueue処理は継続する。reset後は次のProjects操作が最新残量を再取得し、冪等な同期を再開する。既定値は500であり、0にすると残量によるProjects保護を無効化する。
 
@@ -242,5 +271,6 @@ Providerを起動する直前に `worker_confirm_running_label()` がGitHub上�
 
 - `needs-input`: 人の判断が必要（branchの分岐、merge済みPRとのcommit不一致、権限不足など）。返信で自動的にqueuedへ戻る。
 - `failed`: 再試行で回復しうる（一時的なAPI障害、破損metadata、別Issueの成果物との競合など）。`retry_failed` が自動的に再試行し、`max_attempts` 到達で解決不能とみなしcloseする。
-- `exhausted`（`agent:queued` へ戻る）: providerのtoken/rate limitに達した場合。Issueをfailedにせず再キューし、Supervisorのclaimを一時停止する。
+- `exhausted`（`agent:queued` へ戻る）: プール枯渇（quota / 429 / usage limit / `insufficient_quota` / credit balance、および後方互換のため空result + 非0 exit）。該当プールのmarkerを書き、全プールが利用不可の間だけSupervisorのclaimを一時停止する。部分枯渇では次claimで他プールが使われる（[ADR 0012](../decisions/0012-provider-pool-fallback.md)）。
+- モデル固有失敗（`overloaded`、model解決失敗）: プール枯渇にしない。同一stage内で同プールの次モデルへ切り替える。
 - `declined`（close）: workerが実施不要または実施不能と判断した場合。

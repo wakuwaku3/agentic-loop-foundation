@@ -50,6 +50,29 @@ provider = "opencode"
 model = "anthropic/claude-sonnet-4"
 ```
 
+**プール・モデルの優先順位付きフォールバック**（[ADR 0012](docs/decisions/0012-provider-pool-fallback.md)）も使えます。`[[agent.<phase>.tiers]]` で「プール（=サブスク、quota境界）」と「プール内モデル（優先順位）」を宣言し、枠を使い切ったら次のプール・モデルへ移り、回復したら優先候補へ戻ります。
+
+```toml
+[agent.plan]
+[[agent.plan.tiers]]
+pool = "plus"
+provider = "codex"
+reasoning_effort = "high"
+models = [{ model = "gpt-5-codex", max_usage_percent = 60 }]
+
+[[agent.plan.tiers]]
+pool = "gogo"
+provider = "opencode"
+reasoning_effort = "high"
+models = [
+  { model = "opencode-go/gpt-5.6-luna", max_usage_percent = 60 },
+  { model = "opencode-go/kimi-k2.7-code", max_usage_percent = 85 },
+  { model = "opencode-go/deepseek-v4-pro" },  # 閾値省略 = 最後まで使う
+]
+```
+
+`tiers` 未設定のphaseは従来のscalar設定と等価です（後方互換）。枠枯渇の回復検知は、codexはセッションログ、opencode goは `GET https://opencode.ai/zen/go/v1/usage`（`~/.local/share/opencode/auth.json` の `opencode-go` keyで認証。key値はリポジトリ・ログ・Issue/PRへ転記されません）から実測し、読めない場合は固定cooldownにフォールバックします。全プールが利用不可のときだけclaimが一時停止され、`status` にプール別または「全プール利用不可」の理由と次に選ばれる候補が表示されます。
+
 個人環境の上書きは git 管理外の `.agentic-loop.local.toml` に同じキーを書けば、キー単位で優先されます（例: 手元ではexecもcodexにする）。
 
 Claudeとopencodeは（Codexと異なり）OS levelのsandboxを持たないため、書き込みの隔離は専用worktreeと秘密情報guard hookに依存します。opencodeは `opencode run --auto --format json --dir <worktree>` で作業ディレクトリに限定して実行し、step-finishイベントからtoken/コストを記録します。設定を変えたら `bin/agentic-loop start`（またはSupervisor再起動）で反映します。
