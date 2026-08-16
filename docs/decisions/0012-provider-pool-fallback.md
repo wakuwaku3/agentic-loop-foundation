@@ -8,6 +8,8 @@
 - グローバルpause（`agent-exhausted`）は**全候補プールが同時に利用不可のときだけ**発動する。部分枯渇では他プールでclaim・実行を継続する。
 - プール使用率の実測は、codexが既存のセッションログ（`secondary.used_percent`）、opencode goが `GET https://opencode.ai/zen/go/v1/usage`（`~/.local/share/opencode/auth.json` の `opencode-go` keyで認証）を用いる。読めない場合はfail-open（使用率判定をスキップ）し、回復判定はcooldownにフォールバックする。
 - 失敗分類を分割する。quota / 429 / usage limit / `insufficient_quota` / credit balance（および後方互換のため「空result + 非0 exit」）はプール枯渇、`overloaded` やmodel解決失敗は**モデル固有失敗**として同プール内の次モデルへ移す。モデル固有失敗をプール枯渇扱いにしない。
+- **同一stage内フォールバック**: プール枯渇を検知したらそのプールをmarkerし、**同じstageのループで次の候補へ`continue`する**（Issueを一度requeueして次claimを待つ必要はない）。全候補が枯渇したときだけ `STAGE_RC=1` でrequeueし、候補が最初から無いときだけ `STAGE_RC=2` でグローバルpauseする。plan段もexec段と同じ `run_stage_candidates` を使う。
+- **provider exit codeの保持**: `agent_run_stage` はusage抽出の成否に関わらずproviderのexit statusを返す。Codexのようにusage limitをstderrのみに出し `--output-last-message` を空にするCLIでは、resultが空のときstderrをresultへ折りたたみ、分類matcherが文言を読めるようにする。
 - `budget.weekly_reserve_percent`（緊急枠のclaim全体pause）は残す。`max_usage_percent` はプール内モデル降格用で役割を分離する。
 - scalar `provider` / `model` / `reasoning_effort` は「暗黙pool=provider名、models 1件、max_usageなし」の1 tierに正規化し、後方互換を保つ。既定のcommitted設定はscalarのまま。
 
