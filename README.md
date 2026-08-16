@@ -91,6 +91,8 @@ Claudeとopencodeは（Codexと異なり）OS levelのsandboxを持たないた�
 bin/agentic-loop start
 bin/agentic-loop stop
 bin/agentic-loop status
+bin/agentic-loop status --watch
+bin/agentic-loop tail
 bin/agentic-loop doctor
 bin/agentic-loop metrics
 bin/agentic-loop upgrade
@@ -98,7 +100,7 @@ bin/agentic-loop upgrade
 
 これらはinstall時に記録された固定runtime PATHを自動的に復元するため、`devbox run`、`devbox shell`、direnv、ホストへの`yq`導入を意識せず、そのまま実行できます。記録先はGit管理外のrepository local state（`.git/agentic-loop/runtime.path`）です。installは`.git/agentic-loop/runtime`配下に、このFoundation自身の`devbox.json`/`devbox.lock`で固定した永続Devbox仮想環境を所有し、その`bin`ディレクトリを先頭に記録します。これはtarget自身のgit-common-dir配下でinstall/uninstallを跨いで残り続けるため、nixのGC rootとして継続的に保護され、install時の一時的なbootstrap環境（削除され得る）とは独立です（[ADR 0011](docs/decisions/0011-installed-runtime-profile.md)）。何らかの理由でこの永続環境自体が失われた場合も、次回コマンド実行時に一度だけ自動的に再構築を試みます（自己修復）。それでも復旧できない場合のみ、復旧手順を含むエラーで終了します。`start` が生成するSupervisorのsystemd serviceにも同じ固定ツールのPATHが設定されます。
 
-`status` はSupervisorの稼働状態に加え、running Issueごとの経過時間・最終heartbeat・lease期限・worktree・関連PR、queuedの件数と次のclaim候補、needs-input/failed/in-review/blocked/staleの件数とURL、staleなsupervisor pidや期限切れleaseなどの運用上の異常を1つの入口にまとめます（[0005](docs/decisions/0005-status-observability.md)）。常に読み取り専用で、GitHub呼び出しは1回の実行あたり最大2回に抑え、異常があっても終了code 0のままです（合否判定は `doctor` の責務）。自動化からは `bin/agentic-loop status --format json` を使用できます。詳細は [Issueキュー運用](docs/operations/issue-queue.md) を参照してください。
+`status` はSupervisorの稼働状態に加え、running Issueごとの経過時間・最終heartbeat・lease期限・worktree・関連PR・進行stage（plan/exec等）・最終進行からの秒・healthy/stalled/timeoutのhealth帯、queuedの件数と次のclaim候補、needs-input/failed/in-review/blocked/staleの件数とURL、staleなsupervisor pidや期限切れleaseなどの運用上の異常を1つの入口にまとめます（[0005](docs/decisions/0005-status-observability.md)）。常に読み取り専用で、GitHub呼び出しは1回の実行あたり最大2回に抑え、異常があっても終了code 0のままです（合否判定は `doctor` の責務）。`status --watch [N]`は既定2秒tickで端末を更新し、TTL cache（既定60秒）によりwatch中のREST読み取りを抑えます。`tail [--issue N] [--follow]`はSupervisor/workerの遷移・progressイベントを時刻付きで流します（REST 0回）。自動化からは `bin/agentic-loop status --format json` を使用できます。詳細は [Issueキュー運用](docs/operations/issue-queue.md) を参照してください。
 
 不要になったIssueはLabelを手で置換せず、認可済みの運用者が `bin/agentic-loop dispose 123 --reason cancelled`、または `--reason superseded|duplicate|merged --target 456` を実行します。write/maintain/admin権限をRESTで確認し、監査marker、Project状態、GitHubの `not_planned` closeを一貫して記録します。`resume 123` は同じ認可を確認して履歴を残したままqueuedへ戻します。詳細は [ADR 0010](docs/decisions/0010-authorized-issue-disposition.md) を参照してください。
 

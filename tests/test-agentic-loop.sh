@@ -183,6 +183,14 @@ case "${1:-} ${2:-}" in
         if (( cid >= 1 && cid <= ${#comment_lines[@]} )); then
           comment_lines[cid-1]="${comment_lines[cid-1]%% *} $body"
           printf '%s\n' "${comment_lines[@]}" > "$comments"
+        else
+          # Real GitHub 404s a PATCH for a comment that no longer exists; the
+          # scripts' PATCH-in-place callers then fall back to creating a fresh
+          # durable comment. A silent no-op here would mask a stale cached id
+          # (e.g. a resume after an earlier worker's lifecycle) and drop the
+          # new handoff/lease comment entirely.
+          printf 'HTTP 404: Not Found\n' >&2
+          exit 1
         fi
       ) 9> "$comments.lock"
     elif [[ $endpoint =~ ^issues/([0-9]+)/comments$ ]]; then
@@ -2588,6 +2596,126 @@ grep -Fq 'residual-worktree' <<< "$status_output" && fail 'status kept flagging 
 : > "$state"
 : > "$FAKE_GH_ROOT/$state_key.comments"
 rm -rf "$state_root/workers"
+
+# --- local progress observability (Issue #159) ---
+# A running Issue with a fresh progress marker shows stage / seconds-ago /
+# health in text and JSON, with zero additional GitHub calls.
+printf '80 running open\n81 running open\n82 running open\n83 running open\n' > "$state"
+mkdir -p "$state_root/workers" "$state_root/logs"
+now=$(date +%s)
+printf '%s\n' "$((now - 60))" > "$state_root/workers/80.started"
+printf '%s\tplan\t5\n' "$((now - 10))" > "$state_root/workers/80.progress"
+printf '%s\n' "$((now - 100))" > "$state_root/workers/81.started"
+printf '%s\texec\t9\n' "$((now - 400))" > "$state_root/workers/81.progress"
+printf '%s\n' "$((now - 20000))" > "$state_root/workers/82.started"
+# Issue 83 intentionally has no local state at all (other-host scenario).
+progress_status_before=$(git -C "$target" status --porcelain)
+progress_calls_before=$(wc -l < "$FAKE_GH_ROOT/calls")
+progress_output=$("$target/bin/agentic-loop" status); progress_rc=$?
+(( progress_rc == 0 )) || fail 'progress status did not exit 0'
+grep -Fq '#80' <<< "$progress_output" || fail 'progress status did not list the fresh-worker Issue'
+grep -Fq 'stage: plan' <<< "$progress_output" || fail 'progress status did not show the stage from the progress marker'
+grep -Fq 'progress: 1' <<< "$progress_output" || fail 'progress status did not show seconds since last progress'
+grep -Fq 'health: healthy' <<< "$progress_output" || fail 'progress status did not mark a fresh worker healthy'
+grep -Fq '#81' <<< "$progress_output" || fail 'progress status did not list the stalled Issue'
+grep -Fq 'health: stalled' <<< "$progress_output" || fail 'progress status did not mark an idle worker stalled'
+grep -Fq 'worker-stalled' <<< "$progress_output" || fail 'progress status did not report the worker-stalled anomaly'
+grep -Fq '#82' <<< "$progress_output" || fail 'progress status did not list the timed-out Issue'
+grep -Fq 'health: timeout' <<< "$progress_output" || fail 'progress status did not mark an over-timeout worker as timed out'
+grep -Fq '#83' <<< "$progress_output" || fail 'progress status did not list the other-host Issue'
+grep -Fq 'health: unknown' <<< "$progress_output" || fail 'progress status did not leave a stateless Issue as unknown'
+[[ $(git -C "$target" status --porcelain) == "$progress_status_before" ]] || fail 'progress status modified the repository working tree'
+progress_delta=$(tail -n +"$((progress_calls_before + 1))" "$FAKE_GH_ROOT/calls")
+(( $(grep -c $'\tapi repos/' <<< "$progress_delta" || true) <= 2 )) || fail 'progress status exceeded the 2-read REST budget'
+(( $(grep -Ec -- '--method (POST|PUT|PATCH)|	api graphql|	api rate_limit|	project ' <<< "$progress_delta" || true) == 0 )) || fail 'progress status made a write or GraphQL/Projects/rate_limit call'
+
+progress_json=$("$target/bin/agentic-loop" status --format json)
+printf '%s' "$progress_json" | yq -p json -o json >/dev/null || fail 'progress status --format json did not produce valid JSON'
+[[ $(printf '%s' "$progress_json" | yq -p json '.workers[] | select(.issue == 80) | .stage') == plan ]] || fail 'progress status JSON did not report the stage'
+[[ $(printf '%s' "$progress_json" | yq -p json '.workers[] | select(.issue == 80) | .progress_age_seconds') -ge 8 ]] || fail 'progress status JSON did not report the seconds since last progress'
+[[ $(printf '%s' "$progress_json" | yq -p json '.workers[] | select(.issue == 80) | .health') == healthy ]] || fail 'progress status JSON did not mark the fresh worker healthy'
+[[ $(printf '%s' "$progress_json" | yq -p json '.workers[] | select(.issue == 80) | .progress_at') =~ ^[0-9]+$ ]] || fail 'progress status JSON did not report the progress timestamp'
+[[ $(printf '%s' "$progress_json" | yq -p json '.workers[] | select(.issue == 81) | .health') == stalled ]] || fail 'progress status JSON did not mark the idle worker stalled'
+[[ $(printf '%s' "$progress_json" | yq -p json '.workers[] | select(.issue == 82) | .health') == timeout ]] || fail 'progress status JSON did not mark the over-timeout worker timed out'
+[[ $(printf '%s' "$progress_json" | yq -p json '.workers[] | select(.issue == 83) | .health') == unknown ]] || fail 'progress status JSON did not leave the stateless Issue unknown'
+[[ $(printf '%s' "$progress_json" | yq -p json '.anomalies[] | select(.code == "worker-stalled") | .subject') == '#81' ]] || fail 'progress status JSON did not report the worker-stalled anomaly'
+[[ $(printf '%s' "$progress_json" | yq -p json '.workers[] | select(.issue == 80) | .phase') == '' ]] || fail 'progress status JSON changed the existing phase field contract'
+
+# `status --watch` re-renders text on a tick and reuses the GitHub snapshot
+# within the TTL: two iterations make only the initial 2 REST(core) reads and
+# zero writes, and the repository stays untouched.
+printf '%s running open\n' '84' > "$state"
+mkdir -p "$state_root/workers"
+printf '%s\n' "$((now - 30))" > "$state_root/workers/84.started"
+printf '%s\texec\t3\n' "$((now - 5))" > "$state_root/workers/84.progress"
+watch_status_before=$(git -C "$target" status --porcelain)
+watch_calls_before=$(wc -l < "$FAKE_GH_ROOT/calls")
+AGENTIC_LOOP_WATCH_ITERATIONS=2 "$target/bin/agentic-loop" status --watch 1 > "$TEST_ROOT/watch.out" 2>&1; watch_rc=$?
+watch_output=$(cat "$TEST_ROOT/watch.out"); rm -f "$TEST_ROOT/watch.out"
+(( watch_rc == 0 )) || fail 'status --watch did not exit 0'
+grep -Fq 'health: healthy' <<< "$watch_output" || fail 'status --watch did not render a health band'
+grep -Fq 'stage: exec' <<< "$watch_output" || fail 'status --watch did not render the progress stage'
+watch_delta=$(tail -n +"$((watch_calls_before + 1))" "$FAKE_GH_ROOT/calls")
+(( $(grep -c $'\tapi repos/' <<< "$watch_delta" || true) <= 2 )) || fail "status --watch exceeded the TTL REST budget (got $(grep -c $'\tapi repos/' <<< "$watch_delta" || true))"
+(( $(grep -Ec -- '--method (POST|PUT|PATCH)|	api graphql|	api rate_limit|	project ' <<< "$watch_delta" || true) == 0 )) || fail 'status --watch made a write or GraphQL/Projects/rate_limit call'
+[[ $(git -C "$target" status --porcelain) == "$watch_status_before" ]] || fail 'status --watch modified the repository working tree'
+
+# Argument validation: watch interval must be a positive integer and watch is
+# text-only; unknown flags exit 2 without rendering.
+if "$target/bin/agentic-loop" status --watch -1 >/dev/null 2>&1; then fail 'status --watch accepted a negative interval'; fi
+if "$target/bin/agentic-loop" status --watch 0 >/dev/null 2>&1; then fail 'status --watch accepted a zero interval'; fi
+if "$target/bin/agentic-loop" status --watch abc >/dev/null 2>&1; then fail 'status --watch accepted a non-numeric interval'; fi
+if "$target/bin/agentic-loop" status --format json --watch 1 >/dev/null 2>&1; then fail 'status --format json --watch was not rejected'; fi
+if "$target/bin/agentic-loop" status --bogus >/dev/null 2>&1; then fail 'status accepted an unknown flag'; fi
+
+# `tail` streams the append-only events log (timestamp, subject, code, stage)
+# with zero REST reads and never shows log/Issue bodies.
+: > "$state_root/events.log"
+{
+  printf '%s\t80\tprogress\tplan\n' "$((now - 10))"
+  printf '%s\tsupervisor\tstart\t-\n' "$((now - 20))"
+  printf '%s\t81\tprogress\texec\n' "$((now - 5))"
+} >> "$state_root/events.log"
+tail_calls_before=$(wc -l < "$FAKE_GH_ROOT/calls")
+tail_output=$("$target/bin/agentic-loop" tail); tail_rc=$?
+(( tail_rc == 0 )) || fail 'tail did not exit 0'
+grep -Fq 'progress' <<< "$tail_output" || fail 'tail did not show progress events'
+grep -Fq 'supervisor' <<< "$tail_output" || fail 'tail did not show supervisor events'
+grep -Fq 'plan' <<< "$tail_output" || fail 'tail did not show the plan stage'
+grep -Fq 'exec' <<< "$tail_output" || fail 'tail did not show the exec stage'
+grep -Fq '2026' <<< "$tail_output" || fail 'tail did not format event timestamps'
+tail_issue_output=$("$target/bin/agentic-loop" tail --issue 80)
+grep -Fq 'plan' <<< "$tail_issue_output" || fail 'tail --issue did not show the matching Issue events'
+! grep -Fq 'exec' <<< "$tail_issue_output" || fail 'tail --issue leaked another Issue events'
+tail_delta=$(tail -n +"$((tail_calls_before + 1))" "$FAKE_GH_ROOT/calls")
+[[ -z $tail_delta ]] || fail 'tail made a GitHub call'
+if "$target/bin/agentic-loop" tail --issue abc >/dev/null 2>&1; then fail 'tail --issue accepted a non-numeric value'; fi
+if "$target/bin/agentic-loop" tail --bogus >/dev/null 2>&1; then fail 'tail accepted an unknown flag'; fi
+
+# `tail --follow` prints existing events and streams newly appended ones, then
+# exits 0 on SIGTERM (the whole run is REST 0).
+tail_follow_calls_before=$(wc -l < "$FAKE_GH_ROOT/calls")
+"$target/bin/agentic-loop" tail --follow > "$TEST_ROOT/tail-follow.out" 2>&1 &
+tail_follow_pid=$!
+sleep 1
+printf '%s\t84\tprogress\tmerge\n' "$((now))" >> "$state_root/events.log"
+sleep 1
+kill -TERM "$tail_follow_pid" 2>/dev/null || true
+wait "$tail_follow_pid" 2>/dev/null || true
+grep -Fq 'progress' "$TEST_ROOT/tail-follow.out" || fail 'tail --follow did not print existing events'
+grep -Fq 'merge' "$TEST_ROOT/tail-follow.out" || fail 'tail --follow did not stream newly appended events'
+[[ $(tail -n +"$((tail_follow_calls_before + 1))" "$FAKE_GH_ROOT/calls") == '' ]] || fail 'tail --follow made a GitHub call'
+rm -f "$state_root/events.log" "$TEST_ROOT/tail-follow.out"
+
+# A finished worker's progress marker is removed together with its other local
+# state (clear_worker_local), so no stale marker survives the lifecycle.
+printf '4 running open\n5 running open\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+FAKE_CODEX_RESULT=AGENTIC_LOOP_RESULT=needs-input "$target/bin/agentic-loop" _worker 4 test-worker
+FAKE_CODEX_RESULT=AGENTIC_LOOP_RESULT=failed "$target/bin/agentic-loop" _worker 5 test-worker
+[[ ! -e $state_root/workers/4.progress ]] || fail 'a finished worker left its .progress marker behind'
+[[ ! -e $state_root/workers/5.progress ]] || fail 'a failed worker left its .progress marker behind'
+rm -rf "$state_root/workers" "$state_root/logs"
 
 fi
 

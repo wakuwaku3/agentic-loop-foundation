@@ -43,6 +43,7 @@ worker側にstage単位（plan/exec）のタイムアウトを別途持たせる
 - `max_workers=1` の運用でも、ハングした1件が後続のqueued Issueのclaimを妨げなくなる。
 - 上限内で正常に完了するworkerは一切停止されない。
 - `status`（text/JSON）に `timeout_at` と超過警告 `worker-timeout` が現れ、運用者はGitHub Issueを見ずに超過を把握できる。
+- 「上限内だが無進捗」のworkerについては、本ADRの自動停止対象外のまま観測だけを提供する。進捗の観測は[0005](0005-status-observability.md)側のprogress marker / `status --watch` / `tail`（`healthy`/`stalled`/`timeout`の3帯、`worker-stalled`警告）が担い、stall検出に基づく自動停止・自動再queueは本ADRの時間上限に委ねる（stall帯は警告表示に留める）。
 
 ## 対象外
 
