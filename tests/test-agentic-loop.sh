@@ -548,7 +548,26 @@ if (( workspace_write )); then
   result_var="FAKE_CODEX_EXEC_RESULT_$exec_count"
 fi
 if [[ -v $result_var ]]; then result=${!result_var}; else result=${FAKE_CODEX_RESULT:-AGENTIC_LOOP_RESULT=completed}; fi
-printf '%s\n' "$result" > "$output"
+# Realistic Codex usage-limit path: the CLI exits non-zero and writes the
+# diagnostic only to stderr, leaving --output-last-message empty. Tests set
+# FAKE_CODEX_EXIT (or FAKE_CODEX_EXEC_EXIT_<n> for numbered exec calls) and
+# FAKE_CODEX_STDERR to exercise the real classification path.
+exit_var=FAKE_CODEX_EXIT
+stderr_var=FAKE_CODEX_STDERR
+if (( workspace_write )); then
+  if [[ -v FAKE_CODEX_EXEC_EXIT_$exec_count ]]; then exit_var="FAKE_CODEX_EXEC_EXIT_$exec_count"; fi
+  if [[ -v FAKE_CODEX_EXEC_STDERR_$exec_count ]]; then stderr_var="FAKE_CODEX_EXEC_STDERR_$exec_count"; fi
+fi
+fake_exit=0
+if [[ -v $exit_var ]]; then fake_exit=${!exit_var}; fi
+if [[ -v $stderr_var && -n ${!stderr_var} ]]; then
+  printf '%s\n' "${!stderr_var}" >&2
+  # Empty last-message file matches real Codex on hard failure.
+  : > "$output"
+else
+  printf '%s\n' "$result" > "$output"
+fi
+exit "$fake_exit"
 FAKE_CODEX
 cat > "$FAKE_BIN/claude" <<'FAKE_CLAUDE'
 #!/usr/bin/env bash
@@ -1646,6 +1665,121 @@ BADTOML
 doctor_out=$("$target/bin/agentic-loop" doctor || true)
 grep -Fq '[失敗] tiers設定 (plan)' <<< "$doctor_out" || fail 'doctor did not flag the invalid tiers schema'
 mv "$target/.agentic-loop.toml.bak" "$target/.agentic-loop.toml"
+
+# Runtime pool exhaustion falls through to the next tier inside the same stage
+# (plan and exec). Codex's real usage-limit path exits non-zero and writes the
+# diagnostic only to stderr with an empty --output-last-message; the worker
+# must still classify it, mark the plus pool exhausted, and finish on gogo
+# without requeueing or failing the Issue.
+cat > "$target/.agentic-loop.toml" <<'RUNTIME_FALLBACK_TOML'
+[agent]
+provider = "codex"
+
+[agent.plan]
+[[agent.plan.tiers]]
+pool = "plus"
+provider = "codex"
+reasoning_effort = "high"
+models = [{ model = "gpt-5.6-sol" }]
+
+[[agent.plan.tiers]]
+pool = "gogo"
+provider = "opencode"
+reasoning_effort = "high"
+models = [{ model = "opencode-go/gpt-5.6-luna" }]
+
+[agent.exec]
+[[agent.exec.tiers]]
+pool = "plus"
+provider = "codex"
+reasoning_effort = "low"
+models = [{ model = "gpt-5.6-terra" }]
+
+[[agent.exec.tiers]]
+pool = "gogo"
+provider = "opencode"
+reasoning_effort = "low"
+models = [{ model = "opencode-go/deepseek-v4-flash" }]
+
+[queue]
+poll_seconds = 1
+max_workers = 1
+lease_seconds = 3
+stop_timeout = 10
+stale_days = 30
+RUNTIME_FALLBACK_TOML
+printf '308 queued open none 2026-01-01T00:00:00Z\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+: > "$FAKE_GH_ROOT/codex-calls"
+: > "$FAKE_GH_ROOT/opencode-calls"
+rm -rf "$state_root/pools"
+rm -f "$FAKE_GH_ROOT/codex-exec-count" "$FAKE_GH_ROOT/opencode-auto-count" \
+  "$state_root/agent-exhausted" "$state_root/all-pools-paused"
+FAKE_CODEX_EXIT=1 \
+FAKE_CODEX_STDERR="ERROR: You've hit your usage limit. Upgrade to Pro or try again later." \
+FAKE_OPENCODE_EXEC_RESULT_1='plan body from gogo
+<!-- agentic-loop:scope paths=bin/agentic-loop -->' \
+FAKE_OPENCODE_EXEC_RESULT_2='AGENTIC_LOOP_RESULT=completed' \
+AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _supervise
+grep -Eq '^308 completed closed' "$state" || fail 'runtime pool exhaustion did not fall back and complete'
+[[ -r $state_root/pools/plus/exhausted ]] || fail 'runtime exhaustion did not mark the plus pool'
+[[ ! -r $state_root/pools/gogo/exhausted ]] || fail 'runtime exhaustion must not mark the fallback pool'
+[[ ! -e $state_root/all-pools-paused ]] || fail 'partial runtime exhaustion must not pause the supervisor'
+if grep -Fq 'agentic-loop:failed' "$FAKE_GH_ROOT/$state_key.comments"; then fail 'runtime exhaustion must not fail the Issue'; fi
+if grep -Fq 'agentic-loop:exhausted' "$FAKE_GH_ROOT/$state_key.comments"; then fail 'in-stage fallback must not requeue as exhausted'; fi
+assert_contains "$FAKE_GH_ROOT/opencode-calls" '--model opencode-go/gpt-5.6-luna' 'plan did not fall back to gogo after runtime exhaustion'
+assert_contains "$FAKE_GH_ROOT/opencode-calls" '--model opencode-go/deepseek-v4-flash' 'exec did not fall back to gogo after runtime exhaustion'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'provider=opencode' 'fallback usage did not record the opencode provider'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'pool=gogo' 'fallback usage did not record the gogo pool'
+# Codex was attempted (and failed) before the fallback; it must not be the
+# provider of the successful completion path.
+[[ $(grep -c -- '--sandbox read-only' "$FAKE_GH_ROOT/codex-calls" || true) -ge 1 ]] || fail 'runtime exhaustion never attempted the preferred plan pool'
+[[ $(grep -c -- '--sandbox workspace-write' "$FAKE_GH_ROOT/codex-calls" || true) -eq 0 ]] || fail 'exec still ran on the exhausted plus pool after plan marked it'
+
+# status next-candidate preview must honor pool exhaustion markers (network-
+# free, same contract as agent_pick_tier) so operators see the real fallback.
+rm -rf "$state_root/pools"
+mkdir -p "$state_root/pools/plus"
+printf '%s\n' "$(( $(date +%s) + 600 ))" > "$state_root/pools/plus/exhausted"
+status_out=$("$target/bin/agentic-loop" status)
+grep -Fq '次のplan候補: pool=gogo provider=opencode model=opencode-go/gpt-5.6-luna' <<< "$status_out" \
+  || fail "status did not show the fallback plan candidate after plus exhaustion (got: $(printf '%s' "$status_out" | head -n 5 | tr '\n' '|'))"
+grep -Fq '次のexec候補: pool=gogo provider=opencode model=opencode-go/deepseek-v4-flash' <<< "$status_out" \
+  || fail 'status did not show the fallback exec candidate after plus exhaustion'
+status_json=$("$target/bin/agentic-loop" status --format json)
+[[ $(printf '%s' "$status_json" | yq -p json '.next_candidates.plan.pool') == gogo ]] \
+  || fail 'status JSON did not report the fallback plan pool'
+[[ $(printf '%s' "$status_json" | yq -p json '.next_candidates.plan.provider') == opencode ]] \
+  || fail 'status JSON did not report the fallback plan provider'
+[[ $(printf '%s' "$status_json" | yq -p json '.next_candidates.plan.model') == opencode-go/gpt-5.6-luna ]] \
+  || fail 'status JSON did not report the fallback plan model'
+[[ $(printf '%s' "$status_json" | yq -p json '.next_candidates.exec.pool') == gogo ]] \
+  || fail 'status JSON did not report the fallback exec pool'
+[[ $(printf '%s' "$status_json" | yq -p json '.next_candidates.exec.model') == opencode-go/deepseek-v4-flash ]] \
+  || fail 'status JSON did not report the fallback exec model'
+# Clearing the marker restores the preferred candidate.
+rm -rf "$state_root/pools"
+status_out=$("$target/bin/agentic-loop" status)
+grep -Fq '次のplan候補: pool=plus provider=codex model=gpt-5.6-sol' <<< "$status_out" \
+  || fail 'status did not restore the preferred plan candidate after recovery'
+grep -Fq '次のexec候補: pool=plus provider=codex model=gpt-5.6-terra' <<< "$status_out" \
+  || fail 'status did not restore the preferred exec candidate after recovery'
+# Empty-result + non-zero exit (Codex hard failure with no last message) is
+# still classified as pool exhaustion even without a matching body, so a
+# single-pool config requeues rather than failing.
+write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=3 STOP_TIMEOUT=10 STALE_DAYS=30
+printf '309 queued open none 2026-01-01T00:00:00Z\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+rm -rf "$state_root/pools"
+rm -f "$state_root/agent-exhausted" "$state_root/all-pools-paused" "$FAKE_GH_ROOT/codex-exec-count"
+FAKE_CODEX_EXIT=1 FAKE_CODEX_STDERR="ERROR: You've hit your usage limit." \
+AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _supervise
+grep -Eq '^309 queued open' "$state" || fail 'empty-result usage-limit exit did not requeue the Issue'
+if grep -Eq '^309 failed' "$state"; then fail 'empty-result usage-limit exit must not fail the Issue'; fi
+[[ -r $state_root/pools/codex/exhausted ]] || fail 'empty-result usage-limit exit did not mark the codex pool'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:exhausted' 'empty-result usage-limit exit was not recorded as exhausted'
+rm -rf "$state_root/pools"
+rm -f "$state_root/agent-exhausted" "$state_root/all-pools-paused"
 
 # --- Change-scope conflict avoidance (Issue #44) ---
 

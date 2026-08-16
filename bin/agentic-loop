@@ -617,11 +617,19 @@ exhaustion_note_pause() {
 # it with workspace-write, granting only the resolved Git common directory and
 # protected .agents directory. Never bypass secret-guard hooks. The final agent
 # message is written to result_file, where the caller reads the plan text or the
-# AGENTIC_LOOP_RESULT sentinel.
+# AGENTIC_LOOP_RESULT sentinel. The provider's exit status is preserved (usage
+# extraction is best-effort and must not mask it): callers classify pool
+# exhaustion from that status plus result_file contents. Providers that emit
+# hard failures only on stderr (notably Codex usage-limit) leave an empty
+# --output-last-message file; stderr is folded into result_file when empty so
+# the pool/model matchers still see the text.
 agent_run_stage() {
-  local stage=$1 worktree=$2 git_common_dir=$3 agents_dir=$4 result_file=$5 usage_file=$6 prompt=$7 pool=$8 provider=$9 model=${10} effort=${11} raw_result
+  local stage=$1 worktree=$2 git_common_dir=$3 agents_dir=$4 result_file=$5 usage_file=$6 prompt=$7 pool=$8 provider=$9 model=${10} effort=${11} raw_result stderr_file provider_rc=0
   raw_result="${result_file}.raw.$$"
+  stderr_file="${result_file}.stderr.$$"
   : > "$usage_file"
+  : > "$result_file"
+  : > "$stderr_file"
   printf 'provider=%s\nstage=%s\n' "$provider" "$stage" >> "$usage_file"
   [[ -n $pool ]] && printf 'pool=%s\n' "$pool" >> "$usage_file"
   [[ -n $model ]] && printf 'model=%s\n' "$model" >> "$usage_file"
@@ -634,11 +642,11 @@ agent_run_stage() {
       # no OS sandbox, so the plan stage relies on the prompt to avoid writes.
       local -a claude_args=(--print --output-format json --dangerously-skip-permissions --add-dir "$git_common_dir" --add-dir "$agents_dir")
       [[ -n $model ]] && claude_args+=(--model "$model")
-      (cd "$worktree" && claude "${claude_args[@]}" "$prompt") > "$raw_result"
+      (cd "$worktree" && claude "${claude_args[@]}" "$prompt") > "$raw_result" 2>"$stderr_file" || provider_rc=$?
       agent_usage_from_claude_json "$raw_result" >> "$usage_file" || true
       # Claude's final assistant response is the JSON result field, not the
       # surrounding transport object.
-      yq -r '.result // ""' "$raw_result" > "$result_file" || cp "$raw_result" "$result_file"
+      yq -r '.result // ""' "$raw_result" > "$result_file" 2>/dev/null || cp "$raw_result" "$result_file"
       rm -f "$raw_result"
       ;;
     opencode)
@@ -649,7 +657,7 @@ agent_run_stage() {
       # substring, and step-finish parts carry token/cost telemetry.
       local -a opencode_args=(run --auto --format json --dir "$worktree")
       [[ -n $model ]] && opencode_args+=(--model "$model")
-      opencode "${opencode_args[@]}" "$prompt" > "$raw_result"
+      opencode "${opencode_args[@]}" "$prompt" > "$raw_result" 2>"$stderr_file" || provider_rc=$?
       agent_usage_from_opencode_json "$raw_result" >> "$usage_file" || true
       # opencode streams several JSON events; only the last text part is the
       # final assistant response, while step-finish is telemetry.
@@ -672,10 +680,17 @@ agent_run_stage() {
       fi
       [[ -n $model ]] && codex_args+=(-c "model=$model")
       [[ -n $effort ]] && codex_args+=(-c "model_reasoning_effort=$effort")
-      codex "${codex_args[@]}" -C "$worktree" --output-last-message "$result_file" "$prompt"
+      # Codex puts the assistant last message in --output-last-message; hard
+      # failures such as usage limit go only to stderr with a non-zero exit.
+      codex "${codex_args[@]}" -C "$worktree" --output-last-message "$result_file" "$prompt" 2>"$stderr_file" || provider_rc=$?
       agent_usage_from_codex_sessions "$worktree" >> "$usage_file" || true
       ;;
   esac
+  if [[ ! -s $result_file && -s $stderr_file ]]; then
+    cp "$stderr_file" "$result_file"
+  fi
+  rm -f "$stderr_file"
+  return "$provider_rc"
 }
 
 # Extract token and cost fields from a Claude --output-format json payload using
@@ -757,14 +772,16 @@ agent_post_usage() {
 
 # Run one stage with automatic tier/pool/model fallback (Issue #155). Rounds
 # across every candidate until one succeeds or the failure is classified; a
-# pool-quota exhaustion marks that pool, while a model-specific failure (e.g.
-# overloaded) moves to the next candidate in the same pool first. Sets the
-# globals STAGE_RC (0 normal / 1 pool exhausted / 2 no candidate usable at all /
-# 3 every candidate failed with a model-specific error) and STAGE_EXIT_CODE
-# (last provider exit; result_file keeps the last output).
+# pool-quota exhaustion marks that pool and continues to the next pool/model in
+# the same stage (so a spent plus pool falls through to gogo without requeueing
+# the Issue first), while a model-specific failure (e.g. overloaded) moves to
+# the next candidate in the same pool first. Sets the globals STAGE_RC
+# (0 normal / 1 pool exhausted with no remaining candidate / 2 no candidate
+# usable at all / 3 every candidate failed with a model-specific error) and
+# STAGE_EXIT_CODE (last provider exit; result_file keeps the last output).
 run_stage_candidates() {
   local phase=$1 worktree=$2 git_common_dir=$3 agents_dir=$4 result_file=$5 usage_file=$6 prompt=$7
-  local tried='' picked key max_tries tries
+  local tried='' picked key max_tries tries pool_saw_exhausted=0
   max_tries=$(agent_candidate_count "$phase")
   (( max_tries >= 1 )) || max_tries=1
   tries=0
@@ -772,7 +789,9 @@ run_stage_candidates() {
     STAGE_RC=0
     if ! picked=$(agent_pick_tier "$phase" "$tried"); then
       STAGE_EXIT_CODE=1
-      if (( tries == 0 )); then STAGE_RC=2; else STAGE_RC=3; fi
+      if (( tries == 0 )); then STAGE_RC=2
+      elif (( pool_saw_exhausted == 1 )); then STAGE_RC=1
+      else STAGE_RC=3; fi
       return $STAGE_RC
     fi
     agent_candidate_load <<< "$picked"
@@ -785,12 +804,25 @@ run_stage_candidates() {
     if agent_result_is_pool_exhausted "$result_file" "$STAGE_EXIT_CODE"; then
       LAST_EXHAUSTED_POOL=$CAND_POOL
       agent_mark_pool_exhausted "$CAND_POOL"
-      STAGE_RC=1
-      return 1
+      pool_saw_exhausted=1
+      say "プール枠枯渇のため次の候補へ切り替えます: pool=$CAND_POOL provider=$CAND_PROVIDER model=$CAND_MODEL" >&2
+      continue
     fi
     if agent_result_is_model_failure "$result_file" "$STAGE_EXIT_CODE"; then
       if (( tries < max_tries )); then
         say "モデル固有の失敗のため次の候補へ切り替えます: pool=$CAND_POOL provider=$CAND_PROVIDER model=$CAND_MODEL" >&2
+        continue
+      fi
+      STAGE_RC=3
+      return 3
+    fi
+    # Non-zero exit that is neither pool exhaustion nor a model-specific
+    # failure is still a stage failure: keep trying remaining candidates so a
+    # transient provider crash does not skip the fallback chain, and only give
+    # up once every candidate has been attempted.
+    if (( STAGE_EXIT_CODE != 0 )); then
+      if (( tries < max_tries )); then
+        say "候補が非0終了したため次の候補へ切り替えます: pool=$CAND_POOL provider=$CAND_PROVIDER model=$CAND_MODEL exit=$STAGE_EXIT_CODE" >&2
         continue
       fi
       STAGE_RC=3
@@ -4876,20 +4908,29 @@ worker() {
     while :; do sleep $((LEASE_SECONDS / 3 + 1)); lease_heartbeat "$issue" "$worker" || true; done
   ) & heartbeat_pid=$!
   local plan_usage="$STATE_ROOT/issue-$issue-plan-usage.txt" exec_usage="$STATE_ROOT/issue-$issue-usage.txt"
-  local plan_file="$STATE_ROOT/issue-$issue-plan.txt" attempt=0 protocol_retry=0 max_retries started failure_context='' exhausted=0 exec_rc picked
+  local plan_file="$STATE_ROOT/issue-$issue-plan.txt" attempt=0 protocol_retry=0 max_retries started failure_context='' exhausted=0 exec_rc plan_rc
   local resume_context; resume_context=$(resume_context_block "$branch")
   max_retries=$(agent_plan_max_retries)
   while :; do
     started=$(date +%s)
     progress_touch "$issue" plan
-    if picked=$(agent_pick_tier plan 2>/dev/null); then
-      agent_candidate_load <<< "$picked"
-      agent_run_stage plan "$worktree" "$git_common_dir" "$agents_dir" "$plan_file" "$plan_usage" "$(plan_prompt "$issue" "$repository" "$failure_context" "$resume_context")" "$CAND_POOL" "$CAND_PROVIDER" "$CAND_MODEL" "$CAND_EFFORT" || true
-    else
-      : > "$plan_file"
-      say 'plan段で利用可能な候補がないため、plan結果なしでexecへ進みます。' >&2
+    plan_rc=0
+    run_stage_candidates plan "$worktree" "$git_common_dir" "$agents_dir" "$plan_file" "$plan_usage" "$(plan_prompt "$issue" "$repository" "$failure_context" "$resume_context")" || plan_rc=$?
+    plan_rc=$STAGE_RC
+    agent_post_usage "$issue" "$worker" "$plan_usage" "$STAGE_EXIT_CODE" "$(($(date +%s) - started))"
+    # Pool exhaustion (or no usable candidate) on plan is not a task failure:
+    # re-queue without burning attempts so the next claim can use a recovered
+    # pool. Do not proceed to exec while every pool is spent.
+    if (( plan_rc == 1 || plan_rc == 2 )); then
+      if (( plan_rc == 2 )); then agent_mark_exhausted; fi
+      exhausted=1
+      exit_code=$STAGE_EXIT_CODE
+      break
     fi
-    agent_post_usage "$issue" "$worker" "$plan_usage" 0 "$(($(date +%s) - started))"
+    if (( plan_rc != 0 )); then
+      : > "$plan_file"
+      say 'plan段の全候補が失敗したため、plan結果なしでexecへ進みます。' >&2
+    fi
     worker_refine_scope_from_plan "$issue" "$plan_file"
     if [[ -n $(decomposition_manifest_from_plan "$plan_file") ]]; then
       local existing_children
