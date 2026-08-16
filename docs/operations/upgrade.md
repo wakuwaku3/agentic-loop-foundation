@@ -49,6 +49,26 @@ install/upgradeの度に、target repositoryへ`.agentic-loop/manifest.json`を�
 - `class: init`(同`INIT_FILES`、`mode: init`で導入されたrepositoryのみ): 新規repository向けの一度きりの種。**upgradeは絶対に書き込まない**。上流に変更があっても通知するだけ。
 - `manifest.json`が無い(#50より前の導入、または削除された)場合、upgradeは全fileの内容を新revisionと直接比較し、一致しないものはすべて競合として扱う(無断上書きしない)。
 
+### manifestは機械生成の未commit変更として残る
+
+install/upgradeは適用したrevisionを`manifest.json`へ書き込むが、この変更は**自動ではcommitしない**。利用者が置いた未commit変更を巻き込まないためである。そのためinstall/upgrade直後のworktreeは、`manifest.json`だけがdirtyになる(利用者の変更やFoundation管理fileに差分が無い場合)。
+
+`.agentic-loop/update-main.sh sync`はこの**manifest単独の生成差分を許容**する。`git status --porcelain`の差分が` M .agentic-loop/manifest.json`だけなら、fast-forwardを中止せず、ローカルのmanifest内容(適用済みrevisionの記録)を保持したまま`origin/main`へ進める。manifestを破棄・上書きせず、`git merge --ff-only`が差分を温存する性質を利用している。
+
+逆に、manifest以外の未commit変更(利用者の編集、Foundation管理fileの変更など)が1つでもある場合、および`origin/main`が`HEAD`のancestorでない場合(ahead・分岐)は、従来どおり`refusing to update a dirty main worktree`／`refusing to update a main branch that is ahead of or diverged from origin/main`で同期を拒否し、対象worktreeとbranchを変更しない。加えて、ローカルのmanifestがdirtyな状態で`origin/main`側も`manifest.json`を書き換えている場合は、どちらのrevisionを正とするか自動では決められないため明示的に拒否する。
+
+同期が拒否された場合の復旧手順:
+
+```sh
+# 自分が置いた変更を残したい場合: commitする
+git add <自分の変更>
+git commit -m "..."    # .agentic-loop/manifest.jsonは巻き込まない
+# 機械生成のmanifest差分だけを破棄してよい場合
+git checkout -- .agentic-loop/manifest.json
+# その後、同期を再実行する
+.agentic-loop/update-main.sh sync .
+```
+
 ## upgradeの判定(file単位)
 
 各`SHARED_FILES`のpathを、旧manifestのhash・targetの現在のhash・新revisionのhashの3値で分類する(`.agentic-loop.toml`は対象外。後述の設定migrationで扱う)。
@@ -97,7 +117,8 @@ migrationの`risk`が`breaking`/`irreversible`/`cost`/`permission`のいずれ�
 
 1. この回の適用で新規追加したpathを削除する。
 2. この回の適用で変更・削除したpathを`git checkout HEAD --`で復元する。
-3. 適用記録(`.git/agentic-loop/upgrade-last-apply.json`、非commit)を削除する。
+3. 適用に伴って書き換えた`.agentic-loop/manifest.json`も`HEAD`から復元し、適用前のrevision記録・`history`を維持する。
+4. 適用記録(`.git/agentic-loop/upgrade-last-apply.json`、非commit)を削除する。
 
 この記録が残っている(＝適用後検証が完了していない)間、`doctor`は失敗として報告する。
 

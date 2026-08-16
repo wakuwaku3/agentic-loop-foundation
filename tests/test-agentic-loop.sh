@@ -739,6 +739,33 @@ git -C "$publisher" push --quiet
 same_head=$(git -C "$target" rev-parse HEAD)
 "$target/.agentic-loop/update-main.sh" sync "$target"
 [[ $(git -C "$target" rev-parse HEAD) == "$same_head" ]] || fail 'periodic updater changed an already synchronized main'
+# A machine-generated manifest rewrite (what install/upgrade leave behind) must
+# not stall main sync: fast-forward proceeds and preserves the rewritten
+# manifest, so the installed-revision record is never silently dropped.
+yq -p json -o json '.installed_at = 1' "$target/.agentic-loop/manifest.json" > "$target/.agentic-loop/manifest.json.new"
+mv "$target/.agentic-loop/manifest.json.new" "$target/.agentic-loop/manifest.json"
+[[ $(git -C "$target" status --porcelain) == ' M .agentic-loop/manifest.json' ]] || fail 'fixture: expected a manifest-only dirty state'
+printf 'second remote update\n' > "$publisher/remote2.txt"
+git -C "$publisher" add remote2.txt
+git -C "$publisher" commit --quiet -m 'second update'
+git -C "$publisher" push --quiet
+manifest_before=$(cat "$target/.agentic-loop/manifest.json")
+"$target/.agentic-loop/update-main.sh" sync "$target"
+[[ -f $target/remote2.txt ]] || fail 'periodic updater did not fast-forward main with a manifest-only dirty state'
+[[ $(cat "$target/.agentic-loop/manifest.json") == "$manifest_before" ]] || fail 'sync dropped the locally rewritten manifest'
+# A manifest rewrite combined with any other user change is still refused.
+printf 'user work\n' > "$target/user.txt"
+if "$target/.agentic-loop/update-main.sh" sync "$target" >/dev/null 2>&1; then fail 'periodic updater accepted user changes alongside a rewritten manifest'; fi
+rm "$target/user.txt"
+# Incoming manifest changes over a locally rewritten manifest have no safe
+# automatic resolution: refused without touching HEAD.
+printf '\n# upstream rewrite\n' >> "$publisher/.agentic-loop/manifest.json"
+git -C "$publisher" add .agentic-loop/manifest.json
+git -C "$publisher" commit --quiet -m 'upstream manifest rewrite'
+git -C "$publisher" push --quiet
+before_head=$(git -C "$target" rev-parse HEAD)
+if "$target/.agentic-loop/update-main.sh" sync "$target" >/dev/null 2>&1; then fail 'periodic updater merged an incoming manifest rewrite over a locally rewritten manifest'; fi
+[[ $(git -C "$target" rev-parse HEAD) == "$before_head" ]] || fail 'refused sync still changed HEAD'
 printf 'local work\n' > "$target/local.txt"
 if "$target/.agentic-loop/update-main.sh" sync "$target" >/dev/null 2>&1; then fail 'periodic updater accepted a dirty main worktree'; fi
 rm "$target/local.txt"
@@ -763,6 +790,11 @@ git -C "$target" reset --quiet --hard refs/remotes/origin/main
 printf '88 inbox open none 2025-01-01T00:00:00Z\n89 inbox closed none 2025-01-02T00:00:00Z\n' > "$FAKE_GH_ROOT/$state_key.state"
 calls_before=$(wc -l < "$FAKE_GH_ROOT/calls")
 AGENTIC_LOOP_SOURCE="$PROJECT_ROOT" AGENTIC_LOOP_TARGET="$target" AGENTIC_LOOP_SKIP_START=1 "$PROJECT_ROOT/install.sh"
+# A reinstall on a clean main leaves exactly one machine-generated worktree
+# change: the manifest recording the applied revision. That is the state main
+# sync tolerates (verified above), so install never silently stalls sync.
+[[ $(git -C "$target" status --porcelain) == ' M .agentic-loop/manifest.json' ]] || fail 'reinstall left unexpected worktree changes beyond the manifest'
+[[ $(yq -p json -o yaml '.source.revision // ""' "$target/.agentic-loop/manifest.json" 2>/dev/null) =~ ^[0-9a-f]{40}$ ]] || fail 'reinstall manifest did not record the applied revision'
 tail -n "+$((calls_before + 1))" "$FAKE_GH_ROOT/calls" > "$TEST_ROOT/reinstall-calls.log"
 [[ $(grep -c $'\tapi graphql ' "$TEST_ROOT/reinstall-calls.log" || true) -eq 1 ]] || fail 'reinstall repeated GraphQL work beyond its permission check'
 [[ $(grep -Ec $'\tproject (list|view|field-list|link|field-create|item-add|item-edit)' "$TEST_ROOT/reinstall-calls.log" || true) -eq 0 ]] || fail 'reinstall scanned or mutated the existing Project'
@@ -2769,6 +2801,7 @@ migration_out=$("$migration_target/bin/agentic-loop" upgrade --source "$PROJECT_
 grep -Fq '[foundation]' "$migration_target/.agentic-loop.toml" || fail 'migration did not add the [foundation] section'
 resolved_revision=$(git -C "$PROJECT_ROOT" rev-parse HEAD)
 assert_contains "$migration_target/.agentic-loop.toml" "revision = \"$resolved_revision\"" 'migration apply did not pin the applied revision'
+[[ $(yq -p json -o yaml '.source.revision' "$migration_target/.agentic-loop/manifest.json") == "$resolved_revision" ]] || fail 'upgrade manifest did not record the applied revision'
 [[ $(yq -p json -o yaml '.migration_level' "$migration_target/.agentic-loop/manifest.json") -eq 1 ]] || fail 'manifest migration_level was not bumped after applying the migration'
 migration_rerun=$("$migration_target/bin/agentic-loop" upgrade --source "$PROJECT_ROOT")
 [[ $migration_rerun == *'変更はありません'* ]] || fail 'rerunning upgrade after a completed migration was not a no-op'
@@ -2822,6 +2855,7 @@ interrupted_check=$( ("$verify_target/bin/agentic-loop" doctor --format json || 
 [[ $interrupted_check == failure ]] || fail 'doctor should report the unfinished upgrade as a failure'
 "$verify_target/bin/agentic-loop" upgrade --rollback || fail 'rollback failed'
 git -C "$verify_target" diff --quiet -- AGENTS.md || fail 'rollback did not restore AGENTS.md'
+git -C "$verify_target" diff --quiet -- .agentic-loop/manifest.json || fail 'rollback did not restore the installed-revision manifest'
 [[ ! -f $verify_target/docs/operations/new-feature.md ]] || fail 'rollback did not remove a newly added file'
 [[ ! -f $verify_target/.git/agentic-loop/upgrade-last-apply.json ]] || fail 'rollback did not clear the apply record'
 interrupted_check_after=$( ("$verify_target/bin/agentic-loop" doctor --format json || true) | yq -p json '.checks[] | select(.name == "中断したupgrade") | .level')
