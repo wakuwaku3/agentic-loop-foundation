@@ -1778,7 +1778,119 @@ grep -Eq '^309 queued open' "$state" || fail 'empty-result usage-limit exit did 
 if grep -Eq '^309 failed' "$state"; then fail 'empty-result usage-limit exit must not fail the Issue'; fi
 [[ -r $state_root/pools/codex/exhausted ]] || fail 'empty-result usage-limit exit did not mark the codex pool'
 assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:exhausted' 'empty-result usage-limit exit was not recorded as exhausted'
+# Provider-stated multi-day reset must outlive the short default pause: Codex
+# "try again at Aug 20th, 2026 9:27 PM" is stored as resume_epoch, status keeps
+# showing the fallback candidate, and a premature usage "recovered" reading
+# must not clear the marker before that epoch.
+cat > "$target/.agentic-loop.toml" <<'RESET_TOML'
+[agent]
+provider = "codex"
+
+[agent.plan]
+[[agent.plan.tiers]]
+pool = "plus"
+provider = "codex"
+reasoning_effort = "high"
+models = [{ model = "gpt-5.6-sol" }]
+
+[[agent.plan.tiers]]
+pool = "gogo"
+provider = "opencode"
+reasoning_effort = "high"
+models = [{ model = "opencode-go/gpt-5.6-luna" }]
+
+[agent.exec]
+[[agent.exec.tiers]]
+pool = "plus"
+provider = "codex"
+reasoning_effort = "low"
+models = [{ model = "gpt-5.6-terra" }]
+
+[[agent.exec.tiers]]
+pool = "gogo"
+provider = "opencode"
+reasoning_effort = "low"
+models = [{ model = "opencode-go/deepseek-v4-flash" }]
+
+[queue]
+poll_seconds = 1
+max_workers = 1
+lease_seconds = 3
+stop_timeout = 10
+stale_days = 30
+RESET_TOML
+printf '310 queued open none 2026-01-01T00:00:00Z\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+: > "$FAKE_GH_ROOT/codex-calls"
+: > "$FAKE_GH_ROOT/opencode-calls"
 rm -rf "$state_root/pools"
+rm -f "$FAKE_GH_ROOT/codex-exec-count" "$FAKE_GH_ROOT/opencode-auto-count" \
+  "$state_root/agent-exhausted" "$state_root/all-pools-paused"
+expected_reset=$(date -d 'Aug 20, 2026 9:27 PM' +%s)
+FAKE_CODEX_EXIT=1 \
+FAKE_CODEX_STDERR="ERROR: You've hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at Aug 20th, 2026 9:27 PM." \
+FAKE_OPENCODE_EXEC_RESULT_1='plan body from gogo
+<!-- agentic-loop:scope paths=bin/agentic-loop -->' \
+FAKE_OPENCODE_EXEC_RESULT_2='AGENTIC_LOOP_RESULT=completed' \
+AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _supervise
+grep -Eq '^310 completed closed' "$state" || fail 'reset-epoch exhaustion did not fall back and complete'
+[[ -r $state_root/pools/plus/exhausted ]] || fail 'reset-epoch exhaustion did not mark the plus pool'
+resume_epoch=$(cat "$state_root/pools/plus/exhausted")
+[[ $resume_epoch =~ ^[0-9]+$ ]] || fail 'plus exhausted marker is not a resume epoch'
+(( resume_epoch >= expected_reset - 120 && resume_epoch <= expected_reset + 120 )) \
+  || fail "plus exhausted marker did not honor provider reset (got $resume_epoch want ~$expected_reset)"
+(( resume_epoch > $(date +%s) + 1800 )) \
+  || fail 'provider reset epoch must outlive the short default pause'
+# status must keep advertising the fallback while the long marker is held.
+status_out=$("$target/bin/agentic-loop" status)
+grep -Fq '次のplan候補: pool=gogo provider=opencode model=opencode-go/gpt-5.6-luna' <<< "$status_out" \
+  || fail 'status dropped the fallback plan candidate before the provider reset epoch'
+grep -Fq '次のexec候補: pool=gogo provider=opencode model=opencode-go/deepseek-v4-flash' <<< "$status_out" \
+  || fail 'status dropped the fallback exec candidate before the provider reset epoch'
+# A second claim must not re-attempt the spent plus pool (marker still binding
+# even if a stale codex session log would read as "recovered").
+printf '311 queued open none 2026-01-01T00:00:00Z\n' > "$state"
+: > "$FAKE_GH_ROOT/codex-calls"
+: > "$FAKE_GH_ROOT/opencode-calls"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+rm -f "$FAKE_GH_ROOT/codex-exec-count" "$FAKE_GH_ROOT/opencode-auto-count"
+FAKE_OPENCODE_EXEC_RESULT_1='plan body from gogo
+<!-- agentic-loop:scope paths=bin/agentic-loop -->' \
+FAKE_OPENCODE_EXEC_RESULT_2='AGENTIC_LOOP_RESULT=completed' \
+AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _supervise
+grep -Eq '^311 completed closed' "$state" || fail 'second claim under long reset epoch did not complete on fallback'
+[[ $(grep -c -- '--sandbox read-only' "$FAKE_GH_ROOT/codex-calls" || true) -eq 0 ]] \
+  || fail 'long reset epoch still attempted the spent plus plan pool'
+[[ $(grep -c -- '--sandbox workspace-write' "$FAKE_GH_ROOT/codex-calls" || true) -eq 0 ]] \
+  || fail 'long reset epoch still attempted the spent plus exec pool'
+assert_contains "$FAKE_GH_ROOT/opencode-calls" '--model opencode-go/gpt-5.6-luna' 'second claim did not stay on gogo plan'
+# After resume_epoch, measured recovery clears the marker and restores plus.
+printf '%s\n' "$(( $(date +%s) - 10 ))" > "$state_root/pools/plus/exhausted"
+# codex weekly usage is unreadable in the fixture (no session log) so the
+# post-epoch path treats it as a safe retry clear; force a recovered reading
+# by writing a synthetic session log under a temporary CODEX_HOME.
+codex_home_reset="$TEST_ROOT/codex-home-reset"
+mkdir -p "$codex_home_reset/sessions"
+printf '%s\n' '{"payload":{"type":"token_count","rate_limits":{"secondary":{"used_percent":10}}}}' \
+  > "$codex_home_reset/sessions/rollout-reset.jsonl"
+export CODEX_HOME="$codex_home_reset"
+# status is marker-only (no usage probe); pick-tier is what clears. Drive it.
+pick=$("$target/bin/agentic-loop" _pick-tier plan)
+grep -Fq 'pool=plus' <<< "$pick" || fail 'post-epoch recovered usage did not restore the preferred plan pool'
+[[ ! -r $state_root/pools/plus/exhausted ]] || fail 'post-epoch recovered usage did not clear the plus marker'
+# Still-exhausted measurement after resume_epoch must extend, not clear.
+printf '%s\n' "$(( $(date +%s) - 10 ))" > "$state_root/pools/plus/exhausted"
+printf '%s\n' '{"payload":{"type":"token_count","rate_limits":{"secondary":{"used_percent":100}}}}' \
+  > "$codex_home_reset/sessions/rollout-reset.jsonl"
+before_extend=$(date +%s)
+pick=$("$target/bin/agentic-loop" _pick-tier plan)
+grep -Fq 'pool=gogo' <<< "$pick" || fail 'post-epoch still-exhausted usage did not keep the fallback pool'
+[[ -r $state_root/pools/plus/exhausted ]] || fail 'post-epoch still-exhausted usage cleared the plus marker'
+extended=$(cat "$state_root/pools/plus/exhausted")
+(( extended >= before_extend + 1800 - 5 )) \
+  || fail "post-epoch still-exhausted usage did not extend the marker (got $extended)"
+unset CODEX_HOME
+rm -rf "$state_root/pools" "$codex_home_reset"
 rm -f "$state_root/agent-exhausted" "$state_root/all-pools-paused"
 
 # --- Change-scope conflict avoidance (Issue #44) ---

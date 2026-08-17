@@ -4,7 +4,7 @@
 
 `plan` / `exec` / `diagnose` の各phaseは、`.agentic-loop.toml` で `[[agent.<phase>.tiers]]` により**プール（=サブスクリプション、quota境界）**と**プール内モデル（優先順位）**の2階層を宣言できる。実行時（`agent_pick_tier <phase>`）は、枯渇していない最上位プールの、使用率閾値（`max_usage_percent`）を超えていない最上位モデルを選ぶ。
 
-- 枠の枯渇・回復は**プール単位**で記録する。`STATE_ROOT/pools/<pool>/exhausted`（Git管理外、key/token非保存）に `resume_epoch` を書き、usage実測または固定cooldown（`EXHAUSTION_PAUSE_SECONDS`）経過で削除する。
+- 枠の枯渇・回復は**プール単位**で記録する。`STATE_ROOT/pools/<pool>/exhausted`（Git管理外、key/token非保存）に `resume_epoch` を書く。providerが具体的なreset時刻を返す場合（Codex `try again at …`、OpenCode `resetsAt`）はそのepochを優先し、無いときだけ固定cooldown（`EXHAUSTION_PAUSE_SECONDS`）を使う。`resume_epoch` 前はmarkerを消さない（短いcooldownで週次枯渇を切り捨てない）。`resume_epoch` 後はusage実測で回復確認できたとき、またはusageが読めないときの再試行として削除し、依然exhaustedならcooldown分延長する。
 - グローバルpause（`agent-exhausted`）は**全候補プールが同時に利用不可のときだけ**発動する。部分枯渇では他プールでclaim・実行を継続する。
 - プール使用率の実測は、codexが既存のセッションログ（`secondary.used_percent`）、opencode goが `GET https://opencode.ai/zen/go/v1/usage`（`~/.local/share/opencode/auth.json` の `opencode-go` keyで認証）を用いる。読めない場合はfail-open（使用率判定をスキップ）し、回復判定はcooldownにフォールバックする。
 - 失敗分類を分割する。quota / 429 / usage limit / `insufficient_quota` / credit balance（および後方互換のため「空result + 非0 exit」）はプール枯渇、`overloaded` やmodel解決失敗は**モデル固有失敗**として同プール内の次モデルへ移す。モデル固有失敗をプール枯渇扱いにしない。
@@ -24,7 +24,7 @@
 - usage APIのkey値はログ・Issue・PR・stateファイルへ一切出力しない。doctorはkeyの**存在**だけを検査し、キャッシュは `epoch<TAB>percent` のみ保持する。
 - 外部環境の操作は読み取り専用GETのみで、追加課金APIや新規有料serviceは導入しない。
 - 使用率が読めない場合のデフォルトはfail-open（claim継続・モデル降格なし）であり、誤ってclaimを止めない。usage APIへの呼び出しは `USAGE_CACHE_SECONDS`（300秒）で間引きし、失敗も同期限で記憶する。
-- プールmarkerの回復は「usage実測で回復を確認」→「cooldown経過」の順で行い、誤った早期復帰による枯渇ループは実測が「依然exhausted」を返す限り抑制される。
+- プールmarkerの回復は「providerが示したresume_epochまで保持」→「経過後にusage実測で回復確認／未読なら再試行／依然exhaustedなら延長」の順で行い、誤った早期復帰による枯渇ループを抑える。statusの次候補表示はmarkerをnetwork無しで読むだけなので、長いresume_epoch中はフォールバック先を出し続ける。
 
 ## 帰結
 
