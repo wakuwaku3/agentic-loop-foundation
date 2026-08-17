@@ -37,6 +37,20 @@ dependency_field() { printf 'Blocked by: %s' "$1" | base64 -w0; }
 
 mkdir -p "$FAKE_BIN" "$FAKE_GH_ROOT"
 
+# Disable git auto-maintenance globally for the whole harness: commit, push,
+# and receive-pack spawn `git maintenance run --auto --detach` in the
+# background, which repacks fixture repos while a later step clones them and
+# intermittently fails the clone with missing-object errors.
+mkdir -p "$TEST_ROOT/config/git"
+cat > "$TEST_ROOT/config/git/config" <<'GITCONFIG'
+[maintenance]
+	auto = false
+[gc]
+	auto = 0
+[receive]
+	autogc = false
+GITCONFIG
+
 if env -u DEV_ENVIRONMENT "$PROJECT_ROOT/scripts/check-environment.sh" >/dev/null 2>&1; then
   fail 'environment guard accepted an unpinned host environment'
 fi
@@ -511,6 +525,10 @@ if [[ ${FAKE_CODEX_GIT_OPERATIONS:-0} == 1 ]]; then
   git -C "$worktree" add worker.txt
   git -C "$worktree" commit --quiet -m 'worker change'
   git -C "$worktree" push --quiet origin HEAD:refs/heads/agent/issue-6
+fi
+if [[ ${FAKE_CODEX_GIT_RENAME:-0} == 1 ]]; then
+  git -C "$worktree" mv seed.txt seed-renamed.txt 2>/dev/null || true
+  git -C "$worktree" commit --quiet -m 'worker rename' 2>/dev/null || true
 fi
 if [[ ${FAKE_CODEX_COMMIT_ALL:-0} == 1 ]]; then
   git -C "$worktree" add -A
@@ -1895,28 +1913,21 @@ rm -f "$state_root/agent-exhausted" "$state_root/all-pools-paused"
 
 # --- Change-scope conflict avoidance (Issue #44) ---
 
-write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=2 LEASE_SECONDS=3 STOP_TIMEOUT=10 STALE_DAYS=30
+write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=3 LEASE_SECONDS=3 STOP_TIMEOUT=10 STALE_DAYS=30
 
-# Same file: two Issues declaring the same path conflict, so only the
-# higher-priority one is claimed; an independent-scope Issue is claimed
-# alongside it in the same pass instead of waiting its turn (no unnecessary
-# whole-repository serialization).
+# Same file without a structural flag: two Issues declaring the same path are a
+# soft overlap and run in parallel (any real conflict converges through the
+# existing rebase/re-validation path) instead of serializing; an independent-
+# scope Issue is claimed alongside them in the same pass.
 printf '201 queued open none 2026-01-01T00:00:00Z none none %s\n202 queued open none 2026-01-02T00:00:00Z none none %s\n203 queued open none 2026-01-03T00:00:00Z none none %s\n' \
   "$(scope_field 'paths=bin/agentic-loop')" "$(scope_field 'paths=bin/agentic-loop')" "$(scope_field 'paths=docs/operations')" > "$state"
 : > "$FAKE_GH_ROOT/$state_key.comments"
 AGENTIC_LOOP_RUN_ONCE=1 FAKE_CODEX_SLEEP=1 "$target/bin/agentic-loop" _supervise
-grep -Eq '^201 completed closed' "$state" || fail 'same-file scope: the first declared Issue was not claimed'
-grep -Eq '^203 completed closed' "$state" || fail 'independent-scope Issue was not claimed alongside a conflicting one'
-grep -Eq '^202 queued open' "$state" || fail 'same-file scope conflict was not detected'
-assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:scope-conflict issue=201 token=bin/agentic-loop' 'scope conflict was not recorded with the counterpart Issue and overlapping token'
-[[ -r $state_root/conflict/issue-202 ]] || fail 'conflict-wait state was not persisted for status/Project visibility'
-
-# The conflict resolves once the blocking Issue completes: no permanent
-# demotion (starvation) of the Issue that lost the earlier race.
-AGENTIC_LOOP_RUN_ONCE=1 FAKE_CODEX_SLEEP=1 "$target/bin/agentic-loop" _supervise
-grep -Eq '^202 completed closed' "$state" || fail 'same-file scope conflict was not retried to completion once resolved'
-assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:scope-resolved' 'conflict resolution was not recorded on the Issue'
-[[ ! -e $state_root/conflict/issue-202 ]] || fail 'resolved conflict-wait state was not cleared'
+grep -Eq '^201 completed closed' "$state" || fail 'same-path parallel: the first declared Issue was not claimed'
+grep -Eq '^202 completed closed' "$state" || fail 'same-path parallel: a same-path Issue stayed serialized behind the first (soft overlap must run in parallel)'
+grep -Eq '^203 completed closed' "$state" || fail 'independent-scope Issue was not claimed alongside the same-path pair'
+if grep -Fq 'agentic-loop:scope-conflict' "$FAKE_GH_ROOT/$state_key.comments"; then fail 'soft same-path overlap was wrongly serialized as a scope conflict'; fi
+[[ ! -e $state_root/conflict/issue-202 ]] || fail 'soft same-path overlap wrongly persisted a conflict-wait state'
 
 # Multi-host convergence: status must not display a machine-local wait after
 # another host has claimed the waiting Issue and completed its counterpart.
@@ -1933,14 +1944,14 @@ if grep -Fq '#91 競合相手 #54' <<< "$status_output"; then fail 'status displ
 # blocker; startup-only rebuilding is insufficient because the transition can
 # happen between polls. The queued Issue must be claimed without a restart.
 printf '54 running open none 2026-01-01T00:00:00Z none none %s\n70 queued open none 2026-01-02T00:00:00Z none none %s\n' \
-  "$(scope_field 'paths=bin/agentic-loop')" "$(scope_field 'paths=bin/agentic-loop')" > "$state"
+  "$(scope_field 'paths=bin/agentic-loop structural=1')" "$(scope_field 'paths=bin/agentic-loop')" > "$state"
 printf '54 <!-- agentic-loop:lease worker=remote-scope-fixture heartbeat=%s expires=%s -->\n' "$(date +%s)" "$(($(date +%s) + 3600))" > "$FAKE_GH_ROOT/$state_key.comments"
 rm -f "$state_root/conflict/issue-91" "$state_root/stop.requested"
 "$target/bin/agentic-loop" _supervise &
 scope_supervisor_pid=$!
 scope_wait_seen=0
 for _ in $(seq 1 40); do [[ -r $state_root/conflict/issue-70 ]] && { scope_wait_seen=1; break; }; sleep 0.1; done
-(( scope_wait_seen == 1 )) || fail 'multi-host fixture did not first persist the legitimate scope conflict'
+(( scope_wait_seen == 1 )) || fail 'multi-host fixture did not first persist the legitimate structural scope conflict'
 printf '54 completed closed none 2026-01-01T00:00:00Z none none %s\n70 queued open none 2026-01-02T00:00:00Z none none %s\n' \
   "$(scope_field 'paths=bin/agentic-loop')" "$(scope_field 'paths=bin/agentic-loop')" > "$state.transition"
 mv "$state.transition" "$state"
@@ -1969,15 +1980,33 @@ grep -Eq '^70 completed closed' "$state" || fail 'a stale scope cache entry dead
 [[ ! -e $state_root/conflict/issue-70 ]] || fail 'an undeclared Issue was wrongly held in conflict-wait by a phantom entry'
 [[ ! -e $state_root/scope/issue-71 ]] || fail 'a stale scope cache entry was not purged'
 
-# Same directory: a file nested under a declared directory scope conflicts
-# with it on a "/" path boundary, not merely a shared string prefix.
+# Same directory without a structural flag: a file nested under a declared
+# directory scope is a soft overlap (the "/"-boundary prefix check still finds
+# it) and runs in parallel, since a directory/prefix overlap only serializes a
+# structural change.
 printf '210 queued open none 2026-01-01T00:00:00Z none none %s\n211 queued open none 2026-01-02T00:00:00Z none none %s\n' \
   "$(scope_field 'paths=docs/')" "$(scope_field 'paths=docs/operations/issue-queue.md')" > "$state"
 : > "$FAKE_GH_ROOT/$state_key.comments"
 AGENTIC_LOOP_RUN_ONCE=1 FAKE_CODEX_SLEEP=1 "$target/bin/agentic-loop" _supervise
-grep -Eq '^210 completed closed' "$state" || fail 'same-directory scope: the directory-scoped Issue was not claimed'
-grep -Eq '^211 queued open' "$state" || fail 'same-directory scope conflict (nested file under a declared directory) was not detected'
-assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:scope-conflict issue=210' 'directory-scope conflict was not recorded'
+grep -Eq '^210 completed closed' "$state" || fail 'same-directory parallel: the directory-scoped Issue was not claimed'
+grep -Eq '^211 completed closed' "$state" || fail 'same-directory parallel: the nested-file Issue stayed serialized (soft overlap must run in parallel)'
+if grep -Fq 'agentic-loop:scope-conflict' "$FAKE_GH_ROOT/$state_key.comments"; then fail 'soft directory overlap was wrongly serialized as a scope conflict'; fi
+
+# One Issue declares structural=1 on the same path as another: the pair
+# serializes (hard conflict) with a structural reason, and the loser claims once
+# the structural change completes (no permanent starvation).
+printf '230 queued open none 2026-01-01T00:00:00Z none none %s\n231 queued open none 2026-01-02T00:00:00Z none none %s\n' \
+  "$(scope_field 'paths=docs structural=1')" "$(scope_field 'paths=docs')" > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+AGENTIC_LOOP_RUN_ONCE=1 FAKE_CODEX_SLEEP=1 "$target/bin/agentic-loop" _supervise
+grep -Eq '^230 completed closed' "$state" || fail 'structural scope: the declaring Issue was not claimed first'
+grep -Eq '^231 queued open' "$state" || fail 'structural scope: an overlapping-path Issue was not serialized behind the structural change'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:scope-conflict issue=230 token=structural:docs' 'structural conflict was not recorded with its reason token'
+[[ -r $state_root/conflict/issue-231 ]] || fail 'structural conflict-wait state was not persisted for status/Project visibility'
+AGENTIC_LOOP_RUN_ONCE=1 FAKE_CODEX_SLEEP=1 "$target/bin/agentic-loop" _supervise
+grep -Eq '^231 completed closed' "$state" || fail 'structural scope: the waiting Issue was not claimed once the structural change completed'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:scope-resolved' 'resolved structural conflict was not recorded on the Issue'
+[[ ! -e $state_root/conflict/issue-231 ]] || fail 'resolved structural conflict-wait state was not cleared'
 
 # Unknown scope: the safe default (isolated) allows only one undeclared-scope
 # Issue to run at a time, without needing to serialize the whole repository.
@@ -1988,6 +2017,47 @@ grep -Eq '^220 completed closed' "$state" || fail 'unknown scope: the first unde
 grep -Eq '^221 queued open' "$state" || fail 'default unknown_scope=isolated did not serialize undeclared-scope Issues'
 assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:scope-conflict issue=220 token=unknown' 'unknown-scope conflict was not recorded with its reason'
 
+# paths=* (whole repository) still serializes with everything, including a
+# narrower declared scope; the loser claims once the whole-repository Issue
+# completes.
+printf '225 queued open none 2026-01-01T00:00:00Z none none %s\n226 queued open none 2026-01-02T00:00:00Z none none %s\n' \
+  "$(scope_field 'paths=*')" "$(scope_field 'paths=bin/agentic-loop')" > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+AGENTIC_LOOP_RUN_ONCE=1 FAKE_CODEX_SLEEP=1 "$target/bin/agentic-loop" _supervise
+grep -Eq '^225 completed closed' "$state" || fail 'paths=*: the whole-repository Issue was not claimed'
+grep -Eq '^226 queued open' "$state" || fail 'paths=*: a narrower-scope Issue was not serialized behind the whole-repository Issue'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:scope-conflict issue=225 token=*' 'whole-repository conflict was not recorded with its reason'
+AGENTIC_LOOP_RUN_ONCE=1 FAKE_CODEX_SLEEP=1 "$target/bin/agentic-loop" _supervise
+grep -Eq '^226 completed closed' "$state" || fail 'paths=*: the waiting Issue was not claimed once the whole-repository Issue completed'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:scope-resolved' 'resolved whole-repository conflict was not recorded'
+
+# exclusive_paths escalation: a declared scope overlapping a configured shared
+# path is promoted to "*" and serializes against a narrower unrelated-scope
+# Issue.
+printf 'exclusive_paths = "docs/shared.md"\n' >> "$target/.agentic-loop.toml"
+printf '227 queued open none 2026-01-01T00:00:00Z none none %s\n228 queued open none 2026-01-02T00:00:00Z none none %s\n' \
+  "$(scope_field 'paths=docs/shared.md')" "$(scope_field 'paths=bin/agentic-loop')" > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+AGENTIC_LOOP_RUN_ONCE=1 FAKE_CODEX_SLEEP=1 "$target/bin/agentic-loop" _supervise
+grep -Eq '^227 completed closed' "$state" || fail 'exclusive_paths: the shared-path Issue was not claimed'
+grep -Eq '^228 queued open' "$state" || fail 'exclusive_paths: an unrelated Issue was not serialized behind the escalated shared path'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:scope-conflict issue=227 token=*' 'exclusive_paths escalation was not recorded with a * reason'
+AGENTIC_LOOP_RUN_ONCE=1 FAKE_CODEX_SLEEP=1 "$target/bin/agentic-loop" _supervise
+grep -Eq '^228 completed closed' "$state" || fail 'exclusive_paths: the waiting Issue was not claimed once the escalated shared path completed'
+
+# env: name match: an external environment cannot be rebased, so an exact
+# env: match always serializes, independent of any path overlap; the loser
+# claims once the environment-holding Issue completes.
+printf '229 queued open none 2026-01-01T00:00:00Z none none %s\n232 queued open none 2026-01-02T00:00:00Z none none %s\n' \
+  "$(scope_field 'paths=bin env=github-project')" "$(scope_field 'paths=lib env=github-project')" > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+AGENTIC_LOOP_RUN_ONCE=1 FAKE_CODEX_SLEEP=1 "$target/bin/agentic-loop" _supervise
+grep -Eq '^229 completed closed' "$state" || fail 'env: the environment-holding Issue was not claimed'
+grep -Eq '^232 queued open' "$state" || fail 'env: an Issue sharing an exact env name was not serialized behind the environment-holding Issue'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:scope-conflict issue=229 token=env:github-project' 'exact env: conflict was not recorded with its reason token'
+AGENTIC_LOOP_RUN_ONCE=1 FAKE_CODEX_SLEEP=1 "$target/bin/agentic-loop" _supervise
+grep -Eq '^232 completed closed' "$state" || fail 'env: the waiting Issue was not claimed once the environment-holding Issue completed'
+
 # unknown_scope=open disables conflict avoidance for undeclared-scope Issues.
 {
   printf '[queue]\npoll_seconds = 1\nmax_workers = 2\nlease_seconds = 3\nstop_timeout = 10\nstale_days = 30\n'
@@ -1997,20 +2067,21 @@ printf '222 queued open none 2026-01-01T00:00:00Z\n223 queued open none 2026-01-
 : > "$FAKE_GH_ROOT/$state_key.comments"
 AGENTIC_LOOP_RUN_ONCE=1 FAKE_CODEX_SLEEP=1 "$target/bin/agentic-loop" _supervise
 [[ $(awk '$2 == "completed" {count++} END {print count+0}' "$state") -eq 2 ]] || fail 'unknown_scope=open did not let undeclared-scope Issues run in parallel'
-write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=2 LEASE_SECONDS=3 STOP_TIMEOUT=10 STALE_DAYS=30
+write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=3 LEASE_SECONDS=3 STOP_TIMEOUT=10 STALE_DAYS=30
 
 # Running-scope re-evaluation: a queued Issue is blocked while a currently
-# running Issue's declared scope overlaps it. rebuild_scope_cache re-derives
-# every running Issue's effective scope from GitHub at each Supervisor
-# startup, so a later change to the running Issue's declared scope (exactly
-# what a real worker drives by posting a refined agentic-loop:scope marker
-# while it runs) is picked up automatically on the next poll cycle.
+# running Issue's declared scope structurally conflicts with it. rebuild_
+# scope_cache re-derives every running Issue's effective scope from GitHub at
+# each Supervisor startup, so a later change to the running Issue's declared
+# scope (exactly what a real worker drives by posting a refined
+# agentic-loop:scope marker while it runs) is picked up automatically on the
+# next poll cycle.
 printf '999 running open none 2026-01-01T00:00:00Z none none %s\n241 queued open none 2026-01-01T00:00:00Z none none %s\n' \
-  "$(scope_field 'paths=docs')" "$(scope_field 'paths=docs/operations')" > "$state"
+  "$(scope_field 'paths=docs structural=1')" "$(scope_field 'paths=docs/operations')" > "$state"
 printf '999 <!-- agentic-loop:lease worker=scope-running-fixture heartbeat=%s expires=%s -->\n' "$(date +%s)" "$(($(date +%s) + 3600))" > "$FAKE_GH_ROOT/$state_key.comments"
 AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _supervise
-grep -Eq '^241 queued open' "$state" || fail "queued Issue was claimed despite overlapping a running Issue's declared scope"
-assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:scope-conflict issue=999 token=docs' "conflict against a running Issue's declared scope was not recorded"
+grep -Eq '^241 queued open' "$state" || fail "queued Issue was claimed despite a structural conflict with a running Issue's declared scope"
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:scope-conflict issue=999 token=structural:docs' "structural conflict against a running Issue's declared scope was not recorded with its reason"
 printf '999 running open none 2026-01-01T00:00:00Z none none %s\n241 queued open none 2026-01-01T00:00:00Z none none %s\n' \
   "$(scope_field 'paths=bin')" "$(scope_field 'paths=docs/operations')" > "$state"
 AGENTIC_LOOP_RUN_ONCE=1 FAKE_CODEX_SLEEP=1 "$target/bin/agentic-loop" _supervise
@@ -2027,6 +2098,15 @@ grep -Eq '^250 completed closed' "$state" || fail 'plan-stage scope declaration 
 assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:scope tokens=path:docs/operations' 'plan-stage scope declaration was not recorded on the Issue'
 [[ ! -e $state_root/scope/issue-250 ]] || fail 'completed worker left a stale scope cache entry'
 
+# A rename measured from the worker's exec diff promotes the scope to
+# structural: the cache gains the `structural` sentinel plus the affected path,
+# so a subsequent Issue touching the renamed file is serialized behind it.
+printf '251 running open\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+FAKE_CODEX_GIT_RENAME=1 FAKE_CODEX_RESULT='AGENTIC_LOOP_RESULT=completed' "$target/bin/agentic-loop" _worker 251 rename-scope-worker
+grep -Eq '^251 completed closed' "$state" || fail 'rename-diff scope test Issue did not complete'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:scope tokens=path:seed-renamed.txt,structural' 'the worker did not record the renamed path and structural sentinel in its refined scope'
+
 # doctor rejects an invalid unknown_scope value.
 cp "$target/.agentic-loop.toml" "$target/.agentic-loop.toml.valid"
 printf '[queue]\nunknown_scope = "sometimes"\n' > "$target/.agentic-loop.toml"
@@ -2035,19 +2115,24 @@ grep -Fq '[失敗] 設定値: UNKNOWN_SCOPE' /tmp/agentic-loop-doctor-scope.$$ |
 mv "$target/.agentic-loop.toml.valid" "$target/.agentic-loop.toml"
 rm -f /tmp/agentic-loop-doctor-scope.$$
 
-# status surfaces each running Issue's effective scope and any conflict wait.
-# The Supervisor is deliberately left stopped: a live start would call
-# rebuild_scope_cache and overwrite this manually seeded fixture.
-printf '260 running open\n261 queued open\n' > "$state"
+# status surfaces each running Issue's effective scope (including a structural
+# sentinel) and any hard conflict wait with its reason. The Supervisor is
+# deliberately left stopped: a live start would call rebuild_scope_cache and
+# overwrite this manually seeded fixture.
+printf '260 running open\n261 queued open\n262 queued open\n' > "$state"
 mkdir -p "$state_root/scope" "$state_root/conflict"
-printf 'path:bin/agentic-loop' > "$state_root/scope/issue-260"
+printf 'path:bin/agentic-loop\nstructural' > "$state_root/scope/issue-260"
 printf '260\tbin/agentic-loop\n' > "$state_root/conflict/issue-261"
+printf '260\tstructural:bin/agentic-loop\n' > "$state_root/conflict/issue-262"
 status_output=$("$target/bin/agentic-loop" status)
-grep -Fq 'scope: path:bin/agentic-loop' <<< "$status_output" || fail 'status did not show the running Issue effective scope'
+grep -Fq 'scope: path:bin/agentic-loop,structural' <<< "$status_output" || fail 'status did not show the running Issue effective scope including structural'
 grep -Fq '競合待ちIssue:' <<< "$status_output" || fail 'status did not show a conflict-wait section'
 grep -Fq '#261' <<< "$status_output" || fail 'status did not name the waiting Issue'
 grep -Fq 'bin/agentic-loop' <<< "$status_output" || fail 'status did not name the overlapping token'
-rm -f "$state_root/scope/issue-260" "$state_root/conflict/issue-261"
+grep -Fq 'structural:bin/agentic-loop' <<< "$status_output" || fail 'status did not show the structural serialization reason'
+status_json=$("$target/bin/agentic-loop" status --format json)
+grep -Fq '"issue":262,"other":260,"reason":"structural:bin/agentic-loop"' <<< "$status_json" || fail 'status JSON did not report the structural serialization reason'
+rm -f "$state_root/scope/issue-260" "$state_root/conflict/issue-261" "$state_root/conflict/issue-262"
 
 # --- Issue dependency gating (Issue #41) ---
 
