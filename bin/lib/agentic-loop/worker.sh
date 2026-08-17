@@ -23,7 +23,7 @@ plan_prompt() {
   cat <<EOF
 $repository の GitHub Issue #$issue に対する実装計画を作成してください。
 Issueとそのコメントを要求として扱い、この専用worktreeとリポジトリを調査し、変更方針、影響範囲、検証手順、観測可能な受け入れ条件を日本語で具体化してください。このplan段階ではファイルの変更、commit、push、PR作成、GitHubの状態変更を行わず、最終メッセージに計画本文だけを出力してください。
-計画本文の最後の行に、変更が触れる見込みのpathとexternal環境を示すmarkerを1行だけ出力してください: \`<!-- agentic-loop:scope paths=path1,path2 env=name1,name2 -->\`。repository全体に及ぶ場合は \`paths=*\` としてください。見積もれない場合はこの行を省略してください（安全な既定動作にフォールバックします）。このmarkerはSupervisorが並列worker間の変更scope競合を避けるための機械可読情報であり、実装の一部ではありません。
+計画本文の最後の行に、変更が触れる見込みのpathとexternal環境を示すmarkerを1行だけ出力してください: \`<!-- agentic-loop:scope paths=path1,path2 env=name1,name2 -->\`。repository全体に及ぶ場合は \`paths=*\` としてください。fileのrename/moveやdirectory再編など構造的変更を含む計画では \`structural=1\` も付け加えてください（構造的変更はpathが重なる他Issueと直列化されます）。見積もれない場合はこの行を省略してください（安全な既定動作にフォールバックします）。このmarkerはSupervisorが並列worker間の変更scope競合を避けるための機械可読情報であり、実装の一部ではありません。
 一つのworkerで安全に完遂できない要求だけは、scopeが独立し個別にmerge・rollback・検証できる直接の子が2〜6件である場合に限り、計画の末尾（scope markerの前）へ JSON の \`agentic-loop:decomposition\` code blockを置けます。schema=1、mode=children、integration_acceptance_criteria、children（key/title/purpose/acceptance_criteria/scope/depends_on）を含めてください。keyは英小文字・数字・\`-\`のみで一意、scopeは既存scope markerと同じ \`paths=... env=...\` 形式、depends_onは同じmanifestのkeyだけです。循環、共有変更、上限超過、統合条件を定義できない場合はmanifestを出さず、通常の単一PRとして計画してください。
 EOF
   if [[ -n $failure_context ]]; then
@@ -154,10 +154,45 @@ worker_refine_scope_from_plan() {
 }
 
 
+# Detect structural changes in the measured diff between the default branch and
+# the worker's HEAD: explicit renames (git rename detection, -M) and directory
+# reorganizations where a parent directory gained and lost several files in one
+# pass. Emits the affected paths (renamed files and reorganized parent
+# directories) so worker_update_scope can union them with the ordinary measured
+# paths and mark the scope structural. Over-detection is safe: it only forces
+# serialization, never parallelism.
+worker_diff_structural() {
+  local worktree=$1 default_branch=$2 base=${3:-}
+  base=${base:-origin/$default_branch}
+  git -C "$worktree" diff --name-status -M "$base" HEAD 2>/dev/null |
+    awk -F '\t' '
+      function parent(p,  i) {
+        i = index(p, "/")
+        return (i ? substr(p, 1, i - 1) : p)
+      }
+      {
+        st = substr($1, 1, 1)
+        if (st == "R") { renames[parent($NF)]++; renamed[$NF] = 1 }
+        else if (st == "D") dels[parent($2)]++
+        else if (st == "A") adds[parent($2)]++
+      }
+      END {
+        for (d in renames) if (renames[d] >= 2) reorg[d] = 1
+        for (d in dels) if (dels[d] >= 2 && adds[d] >= 2) reorg[d] = 1
+        for (f in renamed) print f
+        for (d in reorg) print d
+      }'
+}
+
+
 worker_refine_scope_from_diff() {
-  local issue=$1 worktree=$2 default_branch=$3 measured
+  local issue=$1 worktree=$2 default_branch=$3 measured structural
   measured=$(git -C "$worktree" diff --name-only "origin/$default_branch" HEAD 2>/dev/null | sed 's#^#path:#' | sort -u)
   [[ -n $measured ]] || return 0
+  structural=$(worker_diff_structural "$worktree" "$default_branch")
+  if [[ -n $structural ]]; then
+    measured=$(printf '%s\nstructural\n%s\n' "$measured" "$(printf '%s\n' "$structural" | sed 's#^#path:#' | sort -u)" | sed '/^$/d' | sort -u)
+  fi
   worker_update_scope "$issue" "$(scope_apply_exclusive_paths "$measured")"
 }
 
