@@ -3000,32 +3000,59 @@ printf '%s' "$progress_json" | yq -p json -o json >/dev/null || fail 'progress s
 [[ $(printf '%s' "$progress_json" | yq -p json '.anomalies[] | select(.code == "worker-stalled") | .subject') == '#81' ]] || fail 'progress status JSON did not report the worker-stalled anomaly'
 [[ $(printf '%s' "$progress_json" | yq -p json '.workers[] | select(.issue == 80) | .phase') == '' ]] || fail 'progress status JSON changed the existing phase field contract'
 
-# `status --watch` re-renders text on a tick and reuses the GitHub snapshot
-# within the TTL: two iterations make only the initial 2 REST(core) reads and
-# zero writes, and the repository stays untouched.
-printf '%s running open\n' '84' > "$state"
-mkdir -p "$state_root/workers"
-printf '%s\n' "$((now - 30))" > "$state_root/workers/84.started"
-printf '%s\texec\t3\n' "$((now - 5))" > "$state_root/workers/84.progress"
-watch_status_before=$(git -C "$target" status --porcelain)
-watch_calls_before=$(wc -l < "$FAKE_GH_ROOT/calls")
-AGENTIC_LOOP_WATCH_ITERATIONS=2 "$target/bin/agentic-loop" status --watch 1 > "$TEST_ROOT/watch.out" 2>&1; watch_rc=$?
-watch_output=$(cat "$TEST_ROOT/watch.out"); rm -f "$TEST_ROOT/watch.out"
-(( watch_rc == 0 )) || fail 'status --watch did not exit 0'
-grep -Fq 'health: healthy' <<< "$watch_output" || fail 'status --watch did not render a health band'
-grep -Fq 'stage: exec' <<< "$watch_output" || fail 'status --watch did not render the progress stage'
-watch_delta=$(tail -n +"$((watch_calls_before + 1))" "$FAKE_GH_ROOT/calls")
-(( $(grep -c $'\tapi repos/' <<< "$watch_delta" || true) <= 2 )) || fail "status --watch exceeded the TTL REST budget (got $(grep -c $'\tapi repos/' <<< "$watch_delta" || true))"
-(( $(grep -Ec -- '--method (POST|PUT|PATCH)|	api graphql|	api rate_limit|	project ' <<< "$watch_delta" || true) == 0 )) || fail 'status --watch made a write or GraphQL/Projects/rate_limit call'
-[[ $(git -C "$target" status --porcelain) == "$watch_status_before" ]] || fail 'status --watch modified the repository working tree'
+# `status --watch` on a non-TTY (pipe/redirect) prints the recent events once
+# and exits without a follow loop: later appends are not streamed, and the run
+# makes zero GitHub calls and leaves the repository untouched.
+: > "$state_root/events.log"
+printf '%s\t80\tprogress\tplan\n' "$((now - 10))" >> "$state_root/events.log"
+printf '%s\tsupervisor\tstart\t-\n' "$((now - 20))" >> "$state_root/events.log"
+watch_once_status_before=$(git -C "$target" status --porcelain)
+watch_once_calls_before=$(wc -l < "$FAKE_GH_ROOT/calls")
+"$target/bin/agentic-loop" status --watch > "$TEST_ROOT/watch-once.out" 2>&1; watch_once_rc=$?
+(( watch_once_rc == 0 )) || fail 'status --watch did not exit 0 on a non-TTY'
+grep -Fq 'plan' "$TEST_ROOT/watch-once.out" || fail 'status --watch did not print existing events once'
+grep -Fq 'supervisor' "$TEST_ROOT/watch-once.out" || fail 'status --watch did not print all existing events once'
+"$target/bin/agentic-loop" status --watch > "$TEST_ROOT/watch-once.out" 2>&1 &
+watch_once_pid=$!
+sleep 0.5
+printf '%s\t84\tprogress\tmerge\n' "$((now))" >> "$state_root/events.log"
+sleep 1
+if kill -0 "$watch_once_pid" 2>/dev/null; then kill -TERM "$watch_once_pid" 2>/dev/null || true; wait "$watch_once_pid" 2>/dev/null || true; fail 'status --watch kept following on a non-TTY'; fi
+wait "$watch_once_pid" 2>/dev/null || true
+! grep -Fq 'merge' "$TEST_ROOT/watch-once.out" || fail 'status --watch streamed an event appended after its non-TTY exit'
+watch_once_delta=$(tail -n +"$((watch_once_calls_before + 1))" "$FAKE_GH_ROOT/calls")
+[[ -z $watch_once_delta ]] || fail 'status --watch made a GitHub call'
+[[ $(git -C "$target" status --porcelain) == "$watch_once_status_before" ]] || fail 'status --watch modified the repository working tree'
+rm -f "$TEST_ROOT/watch-once.out"
 
-# Argument validation: watch interval must be a positive integer and watch is
-# text-only; unknown flags exit 2 without rendering.
+# `status --watch` on a TTY follows events.log like tail -f: existing events
+# print first, appended events stream in, and SIGTERM exits 0 (REST 0, repo
+# untouched). A pseudo-terminal via `script` makes stdout a TTY.
+watch_tty_status_before=$(git -C "$target" status --porcelain)
+watch_tty_calls_before=$(wc -l < "$FAKE_GH_ROOT/calls")
+script -q -c "$target/bin/agentic-loop status --watch" /dev/null > "$TEST_ROOT/watch-tty.out" 2>&1 &
+watch_tty_pid=$!
+sleep 1
+printf '%s\t85\tprogress\tcleanup\n' "$((now))" >> "$state_root/events.log"
+sleep 1
+kill -TERM "$watch_tty_pid" 2>/dev/null || true
+wait "$watch_tty_pid" 2>/dev/null || true; watch_tty_rc=$?
+(( watch_tty_rc == 0 )) || fail 'status --watch (TTY) did not exit 0 on SIGTERM'
+grep -Fq 'plan' "$TEST_ROOT/watch-tty.out" || fail 'status --watch (TTY) did not print existing events'
+grep -Fq 'cleanup' "$TEST_ROOT/watch-tty.out" || fail 'status --watch (TTY) did not stream newly appended events'
+watch_tty_delta=$(tail -n +"$((watch_tty_calls_before + 1))" "$FAKE_GH_ROOT/calls")
+[[ -z $watch_tty_delta ]] || fail 'status --watch (TTY) made a GitHub call'
+[[ $(git -C "$target" status --porcelain) == "$watch_tty_status_before" ]] || fail 'status --watch (TTY) modified the repository working tree'
+rm -f "$TEST_ROOT/watch-tty.out"
+
+# Argument validation: the legacy watch interval must still be a positive
+# integer and watch is text-only; unknown flags exit 2 without rendering.
 if "$target/bin/agentic-loop" status --watch -1 >/dev/null 2>&1; then fail 'status --watch accepted a negative interval'; fi
 if "$target/bin/agentic-loop" status --watch 0 >/dev/null 2>&1; then fail 'status --watch accepted a zero interval'; fi
 if "$target/bin/agentic-loop" status --watch abc >/dev/null 2>&1; then fail 'status --watch accepted a non-numeric interval'; fi
 if "$target/bin/agentic-loop" status --format json --watch 1 >/dev/null 2>&1; then fail 'status --format json --watch was not rejected'; fi
 if "$target/bin/agentic-loop" status --bogus >/dev/null 2>&1; then fail 'status accepted an unknown flag'; fi
+rm -f "$state_root/events.log"
 
 # `tail` streams the append-only events log (timestamp, subject, code, stage)
 # with zero REST reads and never shows log/Issue bodies.

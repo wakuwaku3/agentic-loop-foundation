@@ -636,46 +636,18 @@ status_render_json() {
 }
 
 
-# Reset every per-render status array/flag. Called once per tick so watch loops
-# can reuse the same in-memory GitHub TTL cache without re-fetching.
-status_arrays_reset() {
-  RUN_NUM=() RUN_TITLE=()
-  QUEUE_NUM=() QUEUE_TITLE=() QUEUE_CATRANK=() QUEUE_PRIORANK=() QUEUE_CREATED=()
-  NEEDSINPUT_NUM=() NEEDSINPUT_TITLE=() FAILED_NUM=() FAILED_TITLE=() INREVIEW_NUM=() INREVIEW_TITLE=() BLOCKED_NUM=() BLOCKED_TITLE=()
-  STALE_NUM=() STALE_TITLE=()
-  ANOMALY_LEVEL=() ANOMALY_CODE=() ANOMALY_SUBJECT=() ANOMALY_DETAIL=()
-  STATUS_GITHUB_OK=1 STATUS_STALE_TRUNCATED=0
-}
-
-
-# One `status --watch` tick: clear the screen (TTY only), then render the same
-# text snapshot as plain `status`. Everything between refreshes reads only local
-# state (workers/*, log mtime, supervisor pid), so consecutive ticks cost zero
-# REST(core) reads while the GitHub TTL cache is fresh.
-status_render_watch() {
-  [[ -t 1 ]] && printf '\033[H\033[2J'
-  status_render_text
-}
-
-
-# `status --watch [N]`: re-render every N seconds (default STATUS_WATCH_DEFAULT_
-# SECONDS). SIGINT/SIGTERM exit 0. AGENTIC_LOOP_WATCH_ITERATIONS bounds the loop
-# for deterministic tests without weakening the production loop.
+# `status --watch [N]`: stream events.log instead of re-rendering the snapshot
+# (see docs/decisions/0005). On a TTY this is `tail --follow` over all Issues,
+# so worker stage/progress events flow by as they are appended; on a pipe or
+# redirect it prints the recent events once and exits (no loop). The legacy
+# interval [N] is accepted for backward compatibility and ignored. SIGINT/
+# SIGTERM exit 0 (inherited from tail_follow). GitHub/working tree untouched.
 status_watch() {
-  local watch_seconds=$1 iterations=${AGENTIC_LOOP_WATCH_ITERATIONS:-} interrupted=0
-  trap 'interrupted=1' INT TERM
-  while (( interrupted == 0 )); do
-    status_arrays_reset
-    status_collect_snapshot
-    status_collect_stale
-    status_collect_anomalies
-    status_render_watch
-    if [[ -n $iterations ]]; then
-      (( iterations <= 1 )) && break
-      iterations=$((iterations - 1))
-    fi
-    sleep "$watch_seconds"
-  done
+  if [[ -t 1 ]]; then
+    tail_follow ''
+  else
+    tail_recent ''
+  fi
   return 0
 }
 
@@ -697,20 +669,20 @@ cmd_status() {
   if (( watch )) && [[ $format == json ]]; then
     usage; return 2
   fi
+  if (( watch )); then
+    status_watch
+    return 0
+  fi
   declare -ga RUN_NUM=() RUN_TITLE=()
   declare -ga QUEUE_NUM=() QUEUE_TITLE=() QUEUE_CATRANK=() QUEUE_PRIORANK=() QUEUE_CREATED=()
   declare -ga NEEDSINPUT_NUM=() NEEDSINPUT_TITLE=() FAILED_NUM=() FAILED_TITLE=() INREVIEW_NUM=() INREVIEW_TITLE=() BLOCKED_NUM=() BLOCKED_TITLE=()
   declare -ga STALE_NUM=() STALE_TITLE=()
   declare -ga ANOMALY_LEVEL=() ANOMALY_CODE=() ANOMALY_SUBJECT=() ANOMALY_DETAIL=()
   declare -g STATUS_GITHUB_OK=1 STATUS_STALE_TRUNCATED=0 STATUS_SNAPSHOT_RAW='' STATUS_SNAPSHOT_FETCHED='' STATUS_STALE_RAW='' STATUS_STALE_FETCHED=''
-  if (( watch )); then
-    status_watch "$watch_seconds"
-  else
-    status_collect_snapshot
-    status_collect_stale
-    status_collect_anomalies
-    if [[ $format == json ]]; then status_render_json; else status_render_text; fi
-  fi
+  status_collect_snapshot
+  status_collect_stale
+  status_collect_anomalies
+  if [[ $format == json ]]; then status_render_json; else status_render_text; fi
   return 0
 }
 
@@ -767,6 +739,20 @@ tail_follow() {
 }
 
 
+# Print the most recent TAIL_MAX_LINES events once and return, optionally
+# filtered to one Issue: the non-follow half of `tail`, also used by
+# `status --watch` on a pipe/redirect so it never enters a follow loop.
+tail_recent() {
+  local issue=$1
+  [[ -r $EVENTS_LOG ]] || return 0
+  tail -n "$TAIL_MAX_LINES" "$EVENTS_LOG" 2>/dev/null | while IFS=$'\t' read -r epoch subject code stage; do
+    if [[ -z $issue || $subject == "$issue" ]]; then
+      tail_event_line "$epoch" "$subject" "$code" "${stage:--}"
+    fi
+  done
+}
+
+
 cmd_tail() {
   local issue='' follow=0
   while (( $# > 0 )); do
@@ -780,16 +766,6 @@ cmd_tail() {
     tail_follow "$issue"
     return 0
   fi
-  local line epoch subject code stage
-  if [[ -n $issue ]]; then
-    tail -n "$TAIL_MAX_LINES" "$EVENTS_LOG" 2>/dev/null | while IFS=$'\t' read -r epoch subject code stage; do
-      [[ $subject == "$issue" ]] || continue
-      tail_event_line "$epoch" "$subject" "$code" "${stage:--}"
-    done
-  else
-    tail -n "$TAIL_MAX_LINES" "$EVENTS_LOG" 2>/dev/null | while IFS=$'\t' read -r epoch subject code stage; do
-      tail_event_line "$epoch" "$subject" "$code" "${stage:--}"
-    done
-  fi
+  tail_recent "$issue"
   return 0
 }
