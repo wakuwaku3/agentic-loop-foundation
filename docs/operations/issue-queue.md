@@ -46,9 +46,9 @@ CLIの公開入口は変更後も `bin/agentic-loop` のままである（[ADR 0
 
 `bin/agentic-loop status`（[ADR 0005](../decisions/0005-status-observability.md)）は、Supervisorの生死だけでなく、running Issueの詳細、queuedの件数と次のclaim候補、needs-input/failed/in-review/blocked/staleの件数とURL、運用上の異常を1つの入口にまとめた運用snapshotである。常に読み取り専用（GitHubへの書き込み・Git作業ツリーの変更を一切行わない）で、GitHub REST(core)呼び出しは1回の実行あたり最大2回（open Issue全件のsnapshotと、closedな`agent:stale`の一覧）に抑え、GraphQL・Projects APIは呼ばない。引数不正時のみ終了code 2で、それ以外は異常があっても常に終了code 0（合否判定は`doctor`の責務）。
 
-`bin/agentic-loop status --watch [N]`は既定2秒（Nは正の整数）のtickで同じtext snapshotを端末に再描画する。tick間はGitHub snapshot/staleを**メモリ上のTTL cache**（既定60秒）で再利用するため、refreshあたりのREST(core)読み取りは従来と同じ最大2回のままで、TTL内の連続tickはlocal state（`workers/*`、worker logのmtime、supervisor pid）だけを読む。`--format json`と`--watch`の併用はできない（usage→exit 2）。SIGINT/SIGTERM（Ctrl-C等）で終了code 0で止まる。
+`bin/agentic-loop status --watch [N]`は、`$STATE_ROOT/events.log`（`tail`と同じappend-onlyのイベント列）を`tail -f`相当で連続表示する（[ADR 0005](../decisions/0005-status-observability.md)）。端末（TTY）では全Issueのイベントを追尾し、workerのstage/progress遷移が追加されるたびに流れる。pipe/リダイレクトでは既存イベントを直近最大`TAIL_MAX_LINES`件だけ1回出力して即終了する（followしない）。旧仕様の再描画間隔Nは後方互換のため正の整数として受け付けるが無視される。`--format json`と`--watch`の併用はできない（usage→exit 2）。SIGINT/SIGTERM（Ctrl-C等）で終了code 0で止まる。REST(core)読み取りは0回で、GitHub・作業ツリーへ書き込まない。TTL cacheを使った再描画は`status`単体の実装であり、`--watch`は使わない。
 
-`bin/agentic-loop tail [--issue N] [--follow]`は、`$STATE_ROOT/events.log`（append-only。`epoch<TAB>issue番号|supervisor<TAB>code<TAB>stage-or-`、codeは`progress`/`claim`/`recover`/`timeout`/`stop`/`start`のenum）を時刻整形して流す読み取り専用コマンドである。REST(core)読み取りは0回で、GitHub・作業ツリーへ書き込まない。`--issue N`で特定Issueだけに絞り込み、`--follow`で追尾（ログのinode回転にも追従）。worker log本文・Issue本文・コメントは一切読まない・出さない。
+`bin/agentic-loop tail [--issue N] [--follow]`は、`$STATE_ROOT/events.log`（append-only。`epoch<TAB>issue番号|supervisor<TAB>code<TAB>stage-or-`、codeは`progress`/`claim`/`recover`/`timeout`/`stop`/`start`のenum）を時刻整形して流す読み取り専用コマンドである。REST(core)読み取りは0回で、GitHub・作業ツリーへ書き込まない。`--issue N`で特定Issueだけに絞り込み、`--follow`で追尾（ログのinode回転にも追従）。`status --watch`は全Issueの`tail --follow`のショートカットであり、`tail`は`--issue`絞り込みや非followの履歴表示も担う。worker log本文・Issue本文・コメントは一切読まない・出さない。
 
 ### 認可済みの終了・統合
 
@@ -76,7 +76,7 @@ token、worker log本文、Issue本文・コメント、providerのresult file�
 
 | 入口 | 目的 | 実行頻度・コスト | 合否判定 |
 | --- | --- | --- | --- |
-| `status` | いま何が動き、何を待ち、次に何が来るかの運用snapshot（`--watch [N]`は既定2秒tick、`tail`はevents.logを時刻付きで表示） | 対話Agentの受付手順からも毎回呼べる（REST(core)読み取り最大2回、GraphQL/Projects 0回、書き込み0回。watchはTTL cache既定60秒でrefreshあたり同じ最大2回、`tail`は0回） | 常に終了code 0（異常はwarning/infoとして列挙するのみ） |
+| `status` | いま何が動き、何を待ち、次に何が来るかの運用snapshot（`--watch [N]`はevents.logを`tail -f`相当で連続表示。TTYのみ追尾、pipeでは1回出力、`tail`も同じevents.logを時刻付きで表示） | 対話Agentの受付手順からも毎回呼べる（REST(core)読み取り最大2回、GraphQL/Projects 0回、書き込み0回。`--watch`/`tail`は0回） | 常に終了code 0（異常はwarning/infoとして列挙するのみ） |
 | `doctor` | 導入・復旧のための環境健全性診断（認証・権限・CLI・Devbox・hooks・systemd・Project設定・設定値・残存状態・Foundation manifest/revision pin/中断したupgrade） | 導入時・障害時に実行 | 必須項目の失敗で終了code 1 |
 | `metrics` | 過去の傾向（待ち時間・失敗率・手戻り・稼働率）の再現可能な集計（[運用ドキュメント](loop-metrics.md)） | 利用者が任意の頻度で実行（REST(core)読み取り最大3回、GraphQL/Projects 0回、書き込み0回） | 常に終了code 0（合否判定は`doctor`の責務） |
 | `upgrade` | 導入済みFoundationの安全な更新（[運用ドキュメント](upgrade.md)、[ADR 0009](../decisions/0009-foundation-upgrade.md)） | 運用者が明示実行（Supervisor停止中のみ`--apply`可）。既定はdry-runでGitHub書き込み0回 | 承認未済は終了code 3、適用・検証失敗は1、引数不正は2 |

@@ -65,11 +65,15 @@ readonly DECOMPOSITION_MAX_DESCENDANTS=20
 readonly WORKER_TIMEOUT_MIN_SAFE_SECONDS=1800
 # Local-only progress observability (see docs/decisions/0005): a worker marks
 # its stage boundaries in workers/<issue>.progress and mirrors a safe enum row
-# into events.log; status/watch/tail read those (plus the worker log's mtime as
-# a secondary signal) with zero GitHub calls. A worker whose last progress is
-# older than STATUS_STALL_SECONDS is surfaced as stalled (observation only --
-# automatic termination stays the worker_timeout_seconds domain of ADR 0006).
+# into events.log; status reads the markers while tail and status --watch stream
+# events.log (the worker log's mtime is a secondary stall signal in status),
+# all with zero GitHub calls. A worker whose last progress is older than
+# STATUS_STALL_SECONDS is surfaced as stalled (observation only -- automatic
+# termination stays the worker_timeout_seconds domain of ADR 0006).
 readonly STATUS_STALL_SECONDS=300
+# Legacy `status --watch [N]` interval: still parsed and validated for backward
+# compatibility, but ignored because --watch now follows events.log instead of
+# re-rendering on a timer.
 readonly STATUS_WATCH_DEFAULT_SECONDS=2
 readonly STATUS_GITHUB_TTL_SECONDS=60
 readonly TAIL_MAX_LINES=100
@@ -153,7 +157,8 @@ Usage: $PROGRAM_NAME {setup|sync-issue ISSUE|dispose ISSUE --reason cancelled|su
   start   Start one background supervisor for this repository
   stop    Stop claiming work and drain running workers
   status  Show what is running, queued, waiting, and any anomalies (always exit 0)
-          status --watch [N] re-renders every N seconds (default 2) using a TTL cache
+          status --watch [N] streams events.log like tail -f (TTY only; prints the
+          recent events once and exits on a pipe/redirect; the legacy interval is ignored)
   doctor  Read-only checks with remediation guidance (exit 1 on failures)
   metrics Read-only queue/lifecycle metrics over recent history (always exit 0)
   tail    Stream supervisor/worker stage/progress events with timestamps (REST 0)

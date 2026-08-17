@@ -47,14 +47,15 @@ queued候補の順序が`claim_next`と食い違うと運用者を誤誘導す�
 lease heartbeatは「プロセス生存」しか証明せず、API待ち・無限リトライで**stack（進行停止）**しているworkerは`status`上healthyに見え続ける（[0006](0006-worker-hang-timeout.md)は時間上限ベースの安全網であり、進捗そのものは判定しない）。この穴は、単一ホストのローカルCLIだけを対象に次の3点で埋める。
 
 - **progress marker**: workerが`$STATE_ROOT/workers/<issue>.progress`に`<epoch>\t<stage>\t<seq>`の1行TSVを書く（Git管理外）。`stage`はenumのみ（`claim`/`resume`/`worktree`/`plan`/`exec`/`replan`/`checks`/`review`/`merge`/`cleanup`/`done`/`failed`/`needs-input`/`queued`/`blocked`/`stopped`）で、providerの自由文を永続化しない（secret境界）。`seq`は単調増加で、同一stageの短周期touchでも`tail`が変化を検知できる。workerはstage境界と、自ホストが制御を持つ区間（probe、scope refine、PR後処理、cleanup）でtouchする。**heartbeatループはprogressを更新しない**（生存と進行を分離し、stall workerが自分をhealthyに見せられないようにする）。
-- **`status`のhealth帯と`--watch`**: Running Issues行とJSON `workers[]`に`stage`・`progress_at`・`progress_age_seconds`・`health`（`healthy`/`stalled`/`timeout`/`unknown`）を追加する。3帯はlocalのみで判定し、`timeout`は既存の`worker_timeout_seconds`超過（[0006](0006-worker-hang-timeout.md)）を優先する。stallは観測警告（`worker-stalled` anomaly）に留め、自動停止しない。`status --watch [N]`（既定2秒）は端末をtick更新し、色分けはTTYかつ`NO_COLOR`未設定のときだけANSIを出す。watch中のGitHub snapshot/staleは**メモリ上のTTL cache**（既定60秒）を再利用するため、refreshあたりのREST(core)読み取りは従来と同じ最大2回のままで、TTL内のtickはlocal state（workers/*、worker log mtime、supervisor pid）だけを読む。`AGENTIC_LOOP_WATCH_ITERATIONS`はテスト用にループ回数を制限する逃げ道である。
+- **`status`のhealth帯**: Running Issues行とJSON `workers[]`に`stage`・`progress_at`・`progress_age_seconds`・`health`（`healthy`/`stalled`/`timeout`/`unknown`）を追加する。3帯はlocalのみで判定し、`timeout`は既存の`worker_timeout_seconds`超過（[0006](0006-worker-hang-timeout.md)）を優先する。stallは観測警告（`worker-stalled` anomaly）に留め、自動停止しない。色分けはTTYかつ`NO_COLOR`未設定のときだけANSIを出す。snapshot/staleは**メモリ上のTTL cache**（既定60秒）で再利用するため、実行あたりのREST(core)読み取りは最大2回のままである。
+- **`status --watch`はevents.logのfollowに置換**: 再描画方式では「workerの操作履歴が連続表示される」体験を提供できないため、`status --watch [N]`はevents.logを`tail -f`相当で追尾する（`tail --follow`の全Issue版）。TTYではイベント追加のたびに整形行が流れ、pipe/リダイレクトでは既存イベントを直近`TAIL_MAX_LINES`件だけ1回出力して終了する（followしない）。旧仕様の再描画間隔Nは後方互換のため正の整数として受け付けるが無視する。`AGENTIC_LOOP_WATCH_ITERATIONS`は不要になったため廃止し、テストは`tail --follow`と同じbackground+append+TERMパターン（`script`で擬似TTY化）で検証する。
 - **`tail`**: `$STATE_ROOT/events.log`（append-only、`epoch\tissue|supervisor\tcode\tstage-or-`、codeは`progress`/`claim`/`recover`/`timeout`/`stop`/`start`のenum）を時刻整形して流す読み取り専用コマンド（REST 0）。`--issue N`でフィルタ、`--follow`で追尾する。worker log本文・Issue本文は読まない・出さない。
 
 `status`/`--watch`/`tail`はすべてGitHub・Git作業ツリーへ書き込まない。progress markerとevents.logはGit-common stateへのlocal書き込みであり、既存の`.started`/`.lease`等と同じ扱いとする。`clear_worker_local`は`.progress`も削除する（events.logはappend-onlyの監査跡として残す）。stall判定の副シグナルとしてworker logの**mtime**を採用する（本文は読まない）。provider待ちの長考中はstage境界のprogressが止まるため、mtimeが新しければhealthyとみなす。
 
 ## 影響
 
-- `bin/agentic-loop`: `cmd_status`の全面書き換え、`json_escape`の共有化、`queue_rank_jq`の抽出、worker local stateの拡張（`.started`／`.lease`拡張／`.resume`）と`clear_worker_local`の追随、`status --watch`とTTL cache、`cmd_tail`、workerのprogress計装、Supervisorのevents.log遷移。
+- `bin/agentic-loop`: `cmd_status`の全面書き換え、`json_escape`の共有化、`queue_rank_jq`の抽出、worker local stateの拡張（`.started`／`.lease`拡張／`.resume`）と`clear_worker_local`の追随、`status --watch`のevents.log follow化、`cmd_tail`、workerのprogress計装、Supervisorのevents.log遷移。
 - `tests/test-agentic-loop.sh`: fake ghへのstatus snapshot・stale queryルーティング追加と、idle・複数worker・queued順序・needs-input・lease期限切れ・壊れたlocal state・残存worktreeのシナリオ追加、watch/tail/stall/REST予算/色なし/不明ホストのシナリオ追加。
 - `docs/operations/issue-queue.md`: `status`の出力仕様、JSON schemaの主なキー、`--watch`/`tail`の使い方、`doctor`/GitHub Project Viewとの責務分担表を追記。
 
@@ -63,7 +64,7 @@ lease heartbeatは「プロセス生存」しか証明せず、API待ち・無�
 ## 対象外
 
 - running workerの強制停止・再開（別Issue）。
-- **web/TUI dashboardや本格的な継続監視UI**。`status --watch`は単一ホストの端末更新とメモリTTL cacheに限定し、別マシン集約・時系列DB・リモート表示はしない。
+- **web/TUI dashboardや本格的な継続監視UI**。`status --watch`は単一ホストのevents.log追尾（TTY）または1回出力（pipe）に限定し、別マシン集約・時系列DB・リモート表示はしない。
 - 履歴の永続化やメトリクス出力（`tail`のevents.logはaudit用途のappend-onlyであり、時系列メトリクス集計は[0007](0007-loop-metrics.md)の責務）。
 - 他端末が担当するleaseをGitHubから読み直すremote参照モード（`worker-missing`は「不明」と表示するに留める。他ホストのprogressはGitHub共有しない）。
 - stall検出に基づく自動停止・自動再queue（[0006](0006-worker-hang-timeout.md)の時間上限のみ。stallは観測警告に留める）。
