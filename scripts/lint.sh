@@ -3,9 +3,20 @@ set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
-required=(AGENTS.md README.md Makefile .editorconfig .gitignore .codex/config.toml .claude/settings.json .claude/hooks/confirm-main-worktree-edit.sh install.sh devbox.json devbox.lock docs/policies/cost.md docs/policies/testing.md docs/policies/external-environment.md docs/policies/development-environment.md docs/policies/ai-tool-neutrality.md docs/policies/github-language.md docs/policies/validation-harness.md docs/policies/continuous-delivery.md docs/decisions/0002-github-issue-queue.md docs/decisions/0003-supervisor-resilience-and-api-budget.md docs/decisions/0004-worker-resume-and-handoff.md docs/decisions/0005-status-observability.md docs/decisions/0006-worker-hang-timeout.md docs/decisions/0007-loop-metrics.md docs/decisions/0009-foundation-upgrade.md docs/decisions/0010-authorized-issue-disposition.md docs/operations/issue-queue.md docs/operations/codebase-diagnosis.md docs/operations/loop-metrics.md docs/operations/upgrade.md .agentic-loop.toml .agentic-loop/guard-secrets.sh .agentic-loop/update-main.sh .agentic-loop/diagnose-codebase.sh .githooks/pre-commit .githooks/pre-push .agents/skills/submit-requirement/SKILL.md .agents/skills/diagnose-codebase/SKILL.md .claude/skills/submit-requirement/SKILL.md .claude/skills/diagnose-codebase/SKILL.md bin/agentic-loop bin/agentic-loop-diagnose scripts/check-environment.sh scripts/install-target.sh scripts/lib/foundation-files.sh scripts/upgrade-target.sh scripts/upgrade/migrations/0001-foundation-config-section.sh)
+required=(AGENTS.md README.md Makefile .editorconfig .gitignore .codex/config.toml .claude/settings.json .claude/hooks/confirm-main-worktree-edit.sh install.sh devbox.json devbox.lock docs/policies/cost.md docs/policies/testing.md docs/policies/external-environment.md docs/policies/development-environment.md docs/policies/ai-tool-neutrality.md docs/policies/github-language.md docs/policies/validation-harness.md docs/policies/continuous-delivery.md docs/decisions/0002-github-issue-queue.md docs/decisions/0003-supervisor-resilience-and-api-budget.md docs/decisions/0004-worker-resume-and-handoff.md docs/decisions/0005-status-observability.md docs/decisions/0006-worker-hang-timeout.md docs/decisions/0007-loop-metrics.md docs/decisions/0009-foundation-upgrade.md docs/decisions/0010-authorized-issue-disposition.md docs/decisions/0012-provider-pool-fallback.md docs/decisions/0013-agentic-loop-modules.md docs/operations/issue-queue.md docs/operations/codebase-diagnosis.md docs/operations/loop-metrics.md docs/operations/upgrade.md .agentic-loop.toml .agentic-loop/guard-secrets.sh .agentic-loop/update-main.sh .agentic-loop/diagnose-codebase.sh .githooks/pre-commit .githooks/pre-push .agents/skills/submit-requirement/SKILL.md .agents/skills/diagnose-codebase/SKILL.md .claude/skills/submit-requirement/SKILL.md .claude/skills/diagnose-codebase/SKILL.md bin/agentic-loop bin/agentic-loop-diagnose bin/lib/agentic-loop/common.sh bin/lib/agentic-loop/config.sh bin/lib/agentic-loop/api.sh bin/lib/agentic-loop/agent.sh bin/lib/agentic-loop/setup.sh bin/lib/agentic-loop/service.sh bin/lib/agentic-loop/status.sh bin/lib/agentic-loop/doctor.sh bin/lib/agentic-loop/upgrade.sh bin/lib/agentic-loop/metrics.sh bin/lib/agentic-loop/project.sh bin/lib/agentic-loop/dispose.sh bin/lib/agentic-loop/worker_state.sh bin/lib/agentic-loop/dependency.sh bin/lib/agentic-loop/scope.sh bin/lib/agentic-loop/supervisor.sh bin/lib/agentic-loop/worker.sh scripts/check-environment.sh scripts/install-target.sh scripts/lib/foundation-files.sh scripts/upgrade-target.sh scripts/upgrade/migrations/0001-foundation-config-section.sh)
 for file in "${required[@]}"; do
   [[ -f $file ]] || { printf 'Missing required file: %s\n' "$file" >&2; exit 1; }
+done
+
+# The queue CLI is the thin entry script plus its implementation modules (see
+# ADR 0013). Invariants that used to live in one file must now hold somewhere
+# in this set, so every symbol check below scans the whole set.
+readonly AGENTIC_LOOP_SOURCES=(bin/agentic-loop bin/lib/agentic-loop/*.sh)
+for module in bin/lib/agentic-loop/*.sh; do
+  grep -Fq "source \"\$SCRIPT_ROOT/bin/lib/agentic-loop/$(basename "$module")\"" bin/agentic-loop || {
+    printf 'Module %s is not sourced by the queue CLI entry.\n' "$module" >&2
+    exit 1
+  }
 done
 
 yq -p json -o json '.' .claude/settings.json >/dev/null || { printf 'Invalid Claude settings JSON.\n' >&2; exit 1; }
@@ -87,7 +98,7 @@ grep -Fq 'doctor --format json' docs/operations/issue-queue.md || {
   printf 'Doctor machine-readable interface is not documented.\n' >&2
   exit 1
 }
-grep -Fq 'doctor) cmd_doctor' bin/agentic-loop || {
+grep -Fq 'doctor) cmd_doctor' "${AGENTIC_LOOP_SOURCES[@]}" || {
   printf 'Doctor command is not distributed through the queue CLI.\n' >&2
   exit 1
 }
@@ -95,15 +106,15 @@ grep -Fq 'status --format json' docs/operations/issue-queue.md || {
   printf 'Status machine-readable interface is not documented.\n' >&2
   exit 1
 }
-grep -Fq 'status) cmd_status' bin/agentic-loop || {
+grep -Fq 'status) cmd_status' "${AGENTIC_LOOP_SOURCES[@]}" || {
   printf 'Status command is not distributed through the queue CLI.\n' >&2
   exit 1
 }
-grep -Fq 'status_snapshot_fetch' bin/agentic-loop || {
+grep -Fq 'status_snapshot_fetch' "${AGENTIC_LOOP_SOURCES[@]}" || {
   printf 'Status observability snapshot is missing.\n' >&2
   exit 1
 }
-grep -Fq 'queue_rank_jq' bin/agentic-loop || {
+grep -Fq 'queue_rank_jq' "${AGENTIC_LOOP_SOURCES[@]}" || {
   printf 'Queue candidate ordering does not share claim_next\x27s rank expression.\n' >&2
   exit 1
 }
@@ -132,55 +143,55 @@ while IFS= read -r -d '' file; do
   bash -n "$file"
 done < <(find bin scripts tests .agentic-loop .githooks -type f \( -name '*.sh' -o -perm -u+x \) -print0)
 bash -n bin/agentic-loop
-shellcheck bin/agentic-loop bin/agentic-loop-diagnose .agentic-loop/diagnose-codebase.sh tests/test-agentic-loop.sh
+shellcheck bin/agentic-loop bin/agentic-loop-diagnose .agentic-loop/diagnose-codebase.sh tests/test-agentic-loop.sh "${AGENTIC_LOOP_SOURCES[@]}"
 grep -Eq '^max_workers[[:space:]]*=[[:space:]]*4$' .agentic-loop.toml || { printf 'Unsafe worker default.\n' >&2; exit 1; }
-grep -Fq -- '--sandbox workspace-write' bin/agentic-loop || { printf 'Unsafe Codex sandbox.\n' >&2; exit 1; }
-grep -Fq 'AGENT_PROVIDER' bin/agentic-loop || { printf 'AI provider is not selectable.\n' >&2; exit 1; }
-grep -Fq -- '--dangerously-skip-permissions' bin/agentic-loop || { printf 'Claude worker isolation is not configured.\n' >&2; exit 1; }
-grep -Fq 'agentic-loop:usage' bin/agentic-loop || { printf 'Token usage is not recorded for analysis.\n' >&2; exit 1; }
+grep -Fq -- '--sandbox workspace-write' "${AGENTIC_LOOP_SOURCES[@]}" || { printf 'Unsafe Codex sandbox.\n' >&2; exit 1; }
+grep -Fq 'AGENT_PROVIDER' "${AGENTIC_LOOP_SOURCES[@]}" || { printf 'AI provider is not selectable.\n' >&2; exit 1; }
+grep -Fq -- '--dangerously-skip-permissions' "${AGENTIC_LOOP_SOURCES[@]}" || { printf 'Claude worker isolation is not configured.\n' >&2; exit 1; }
+grep -Fq 'agentic-loop:usage' "${AGENTIC_LOOP_SOURCES[@]}" || { printf 'Token usage is not recorded for analysis.\n' >&2; exit 1; }
 cmp -s .agents/skills/submit-requirement/SKILL.md .claude/skills/submit-requirement/SKILL.md || { printf 'Codex and Claude submit-requirement skills diverged.\n' >&2; exit 1; }
 grep -Fq 'exec終了プロトコルと外部待機' docs/operations/issue-queue.md || { printf 'Exec completion protocol is not documented.\n' >&2; exit 1; }
-grep -Fq -- '--sandbox read-only' bin/agentic-loop || { printf 'Plan stage does not run read-only.\n' >&2; exit 1; }
-grep -Fq 'agent_phase_effort' bin/agentic-loop || { printf 'Plan and exec reasoning effort is not tiered.\n' >&2; exit 1; }
-grep -Fq 'agent_phase_provider' bin/agentic-loop || { printf 'Per-phase provider selection is missing.\n' >&2; exit 1; }
-grep -Fq 'agent_pick_tier' bin/agentic-loop || { printf 'Pool/tier priority selection is missing.\n' >&2; exit 1; }
-grep -Fq 'agent_mark_pool_exhausted' bin/agentic-loop || { printf 'Per-pool exhaustion marking is missing.\n' >&2; exit 1; }
-grep -Fq 'agent_result_is_model_failure' bin/agentic-loop || { printf 'Model-specific failure classification is missing.\n' >&2; exit 1; }
-grep -Fq 'opencode.ai/zen/go/v1/usage' bin/agentic-loop || { printf 'OpenCode Go usage API measurement is missing.\n' >&2; exit 1; }
-grep -Fq '_pick-tier' bin/agentic-loop .agentic-loop/diagnose-codebase.sh || { printf 'Shared tier picker is not wired into diagnosis.\n' >&2; exit 1; }
+grep -Fq -- '--sandbox read-only' "${AGENTIC_LOOP_SOURCES[@]}" || { printf 'Plan stage does not run read-only.\n' >&2; exit 1; }
+grep -Fq 'agent_phase_effort' "${AGENTIC_LOOP_SOURCES[@]}" || { printf 'Plan and exec reasoning effort is not tiered.\n' >&2; exit 1; }
+grep -Fq 'agent_phase_provider' "${AGENTIC_LOOP_SOURCES[@]}" || { printf 'Per-phase provider selection is missing.\n' >&2; exit 1; }
+grep -Fq 'agent_pick_tier' "${AGENTIC_LOOP_SOURCES[@]}" || { printf 'Pool/tier priority selection is missing.\n' >&2; exit 1; }
+grep -Fq 'agent_mark_pool_exhausted' "${AGENTIC_LOOP_SOURCES[@]}" || { printf 'Per-pool exhaustion marking is missing.\n' >&2; exit 1; }
+grep -Fq 'agent_result_is_model_failure' "${AGENTIC_LOOP_SOURCES[@]}" || { printf 'Model-specific failure classification is missing.\n' >&2; exit 1; }
+grep -Fq 'opencode.ai/zen/go/v1/usage' "${AGENTIC_LOOP_SOURCES[@]}" || { printf 'OpenCode Go usage API measurement is missing.\n' >&2; exit 1; }
+grep -Fq '_pick-tier' "${AGENTIC_LOOP_SOURCES[@]}" .agentic-loop/diagnose-codebase.sh || { printf 'Shared tier picker is not wired into diagnosis.\n' >&2; exit 1; }
 grep -Fq 'docs/decisions/0012-provider-pool-fallback.md' scripts/lib/foundation-files.sh || { printf 'Pool-fallback ADR is not distributed.\n' >&2; exit 1; }
-grep -Fq 'budget_allows_claim' bin/agentic-loop || { printf 'Budget guard is missing.\n' >&2; exit 1; }
-grep -Fq 'retry_failed' bin/agentic-loop || { printf 'Transient-failure retry is missing.\n' >&2; exit 1; }
-grep -Fq 'exhaustion_note_pause' bin/agentic-loop || { printf 'Token-exhaustion pause is missing.\n' >&2; exit 1; }
-grep -Fq 'agentic-loop:unresolved' bin/agentic-loop || { printf 'Unresolvable-close disposition is missing.\n' >&2; exit 1; }
-grep -Fq 'recover_expired || true' bin/agentic-loop || { printf 'Supervisor poll is not resilient to transient API errors.\n' >&2; exit 1; }
-grep -Fq 'supervisor_graceful_shutdown' bin/agentic-loop || { printf 'Graceful shutdown handler is missing.\n' >&2; exit 1; }
-grep -Fq 'setsid "$0" _worker' bin/agentic-loop || { printf 'Workers are not started in their own process group.\n' >&2; exit 1; }
-grep -Fq 'worker_alive "$issue" && continue' bin/agentic-loop || { printf 'Restart recovery lacks the local worker fast path.\n' >&2; exit 1; }
-grep -Fq 'issues/comments/$id" --method PATCH' bin/agentic-loop || { printf 'Lease heartbeat does not update a single comment in place.\n' >&2; exit 1; }
-grep -Fq 'core_budget_note_pause' bin/agentic-loop || { printf 'REST(core) budget governor is missing from the claim gate.\n' >&2; exit 1; }
-grep -Fq 'next_poll_interval' bin/agentic-loop || { printf 'Adaptive idle poll backoff is missing.\n' >&2; exit 1; }
-grep -Fq 'agentic-loop:dependency-blocked' bin/agentic-loop || { printf 'Issue dependency gating is missing.\n' >&2; exit 1; }
-grep -Fq 'resume_probe() {' bin/agentic-loop || { printf 'Worker resume phase detection is missing.\n' >&2; exit 1; }
-grep -Fq 'agentic-loop:handoff' bin/agentic-loop || { printf 'Worker resume handoff comment is missing.\n' >&2; exit 1; }
-grep -Fq 'worker_confirm_running_label' bin/agentic-loop || { printf 'Worker resume ownership re-check is missing.\n' >&2; exit 1; }
+grep -Fq 'budget_allows_claim' "${AGENTIC_LOOP_SOURCES[@]}" || { printf 'Budget guard is missing.\n' >&2; exit 1; }
+grep -Fq 'retry_failed' "${AGENTIC_LOOP_SOURCES[@]}" || { printf 'Transient-failure retry is missing.\n' >&2; exit 1; }
+grep -Fq 'exhaustion_note_pause' "${AGENTIC_LOOP_SOURCES[@]}" || { printf 'Token-exhaustion pause is missing.\n' >&2; exit 1; }
+grep -Fq 'agentic-loop:unresolved' "${AGENTIC_LOOP_SOURCES[@]}" || { printf 'Unresolvable-close disposition is missing.\n' >&2; exit 1; }
+grep -Fq 'recover_expired || true' "${AGENTIC_LOOP_SOURCES[@]}" || { printf 'Supervisor poll is not resilient to transient API errors.\n' >&2; exit 1; }
+grep -Fq 'supervisor_graceful_shutdown' "${AGENTIC_LOOP_SOURCES[@]}" || { printf 'Graceful shutdown handler is missing.\n' >&2; exit 1; }
+grep -Fq 'setsid "$0" _worker' "${AGENTIC_LOOP_SOURCES[@]}" || { printf 'Workers are not started in their own process group.\n' >&2; exit 1; }
+grep -Fq 'worker_alive "$issue" && continue' "${AGENTIC_LOOP_SOURCES[@]}" || { printf 'Restart recovery lacks the local worker fast path.\n' >&2; exit 1; }
+grep -Fq 'issues/comments/$id" --method PATCH' "${AGENTIC_LOOP_SOURCES[@]}" || { printf 'Lease heartbeat does not update a single comment in place.\n' >&2; exit 1; }
+grep -Fq 'core_budget_note_pause' "${AGENTIC_LOOP_SOURCES[@]}" || { printf 'REST(core) budget governor is missing from the claim gate.\n' >&2; exit 1; }
+grep -Fq 'next_poll_interval' "${AGENTIC_LOOP_SOURCES[@]}" || { printf 'Adaptive idle poll backoff is missing.\n' >&2; exit 1; }
+grep -Fq 'agentic-loop:dependency-blocked' "${AGENTIC_LOOP_SOURCES[@]}" || { printf 'Issue dependency gating is missing.\n' >&2; exit 1; }
+grep -Fq 'resume_probe() {' "${AGENTIC_LOOP_SOURCES[@]}" || { printf 'Worker resume phase detection is missing.\n' >&2; exit 1; }
+grep -Fq 'agentic-loop:handoff' "${AGENTIC_LOOP_SOURCES[@]}" || { printf 'Worker resume handoff comment is missing.\n' >&2; exit 1; }
+grep -Fq 'worker_confirm_running_label' "${AGENTIC_LOOP_SOURCES[@]}" || { printf 'Worker resume ownership re-check is missing.\n' >&2; exit 1; }
 grep -Fq '中断からの再開' docs/operations/issue-queue.md || { printf 'Worker resume documentation is missing.\n' >&2; exit 1; }
-grep -Fq 'enforce_worker_timeout' bin/agentic-loop || { printf 'Per-worker hang timeout enforcement is missing.\n' >&2; exit 1; }
+grep -Fq 'enforce_worker_timeout' "${AGENTIC_LOOP_SOURCES[@]}" || { printf 'Per-worker hang timeout enforcement is missing.\n' >&2; exit 1; }
 grep -Eq '^worker_timeout_seconds[[:space:]]*=[[:space:]]*14400$' .agentic-loop.toml || { printf 'Unsafe worker_timeout_seconds default.\n' >&2; exit 1; }
-grep -Fq 'agentic-loop:worker-timeout' bin/agentic-loop || { printf 'Worker-timeout audit comment marker is missing.\n' >&2; exit 1; }
+grep -Fq 'agentic-loop:worker-timeout' "${AGENTIC_LOOP_SOURCES[@]}" || { printf 'Worker-timeout audit comment marker is missing.\n' >&2; exit 1; }
 grep -Fq 'ハング' docs/operations/issue-queue.md || { printf 'Worker hang timeout documentation is missing.\n' >&2; exit 1; }
-grep -Fq 'metrics) cmd_metrics' bin/agentic-loop || { printf 'Metrics command is not distributed through the queue CLI.\n' >&2; exit 1; }
+grep -Fq 'metrics) cmd_metrics' "${AGENTIC_LOOP_SOURCES[@]}" || { printf 'Metrics command is not distributed through the queue CLI.\n' >&2; exit 1; }
 grep -Fq '[--days N] [--as-of EPOCH] [--format json]' docs/operations/loop-metrics.md || { printf 'Metrics machine-readable interface is not documented.\n' >&2; exit 1; }
-grep -Fq 'metrics_close_attempt' bin/agentic-loop || { printf 'Metrics attempt-lifecycle aggregation is missing.\n' >&2; exit 1; }
+grep -Fq 'metrics_close_attempt' "${AGENTIC_LOOP_SOURCES[@]}" || { printf 'Metrics attempt-lifecycle aggregation is missing.\n' >&2; exit 1; }
 grep -Fq 'worker単位の内訳・ランキングは出力しない' docs/operations/loop-metrics.md || { printf 'Metrics privacy guarantee is not documented.\n' >&2; exit 1; }
 grep -Fq '追加費用ゼロ' docs/decisions/0007-loop-metrics.md || { printf 'Metrics cost-neutrality is not documented.\n' >&2; exit 1; }
 grep -Fq 'docs/operations/loop-metrics.md' scripts/lib/foundation-files.sh || { printf 'Metrics documentation is not distributed.\n' >&2; exit 1; }
-if grep -Eq 'danger-full-access|OPENAI_API_KEY' bin/agentic-loop bin/agentic-loop-diagnose .agentic-loop/diagnose-codebase.sh install.sh scripts/install-target.sh scripts/upgrade-target.sh scripts/lib/foundation-files.sh scripts/upgrade/migrations/0001-foundation-config-section.sh; then
+if grep -Eq 'danger-full-access|OPENAI_API_KEY' "${AGENTIC_LOOP_SOURCES[@]}" bin/agentic-loop-diagnose .agentic-loop/diagnose-codebase.sh install.sh scripts/install-target.sh scripts/upgrade-target.sh scripts/lib/foundation-files.sh scripts/upgrade/migrations/0001-foundation-config-section.sh; then
   printf 'Forbidden Codex execution or API-key billing configuration.\n' >&2
   exit 1
 fi
 
-grep -Fq 'upgrade) cmd_upgrade' bin/agentic-loop || { printf 'Upgrade command is not distributed through the queue CLI.\n' >&2; exit 1; }
+grep -Fq 'upgrade) cmd_upgrade' "${AGENTIC_LOOP_SOURCES[@]}" || { printf 'Upgrade command is not distributed through the queue CLI.\n' >&2; exit 1; }
 grep -Fq 'docs/operations/upgrade.md' scripts/lib/foundation-files.sh || { printf 'Upgrade documentation is not distributed.\n' >&2; exit 1; }
 grep -Fq 'docs/decisions/0009-foundation-upgrade.md' scripts/lib/foundation-files.sh || { printf 'Upgrade ADR is not distributed.\n' >&2; exit 1; }
 grep -Fq 'upgrade --format json' docs/operations/upgrade.md || { printf 'Upgrade machine-readable interface is not documented.\n' >&2; exit 1; }
