@@ -10,10 +10,11 @@
 # reads only (Issues, repo-wide Issue comments, Pull Requests): no Actions/CI,
 # no Projects, no GraphQL, so this adds no cost beyond REST(core) quota already
 # budgeted for supervisor operation (see docs/policies/cost.md). Only the
-# `<!-- agentic-loop:...-->` marker substring of each comment is ever read; the
-# surrounding Japanese comment body, Issue bodies, worker logs and prompts are
-# never requested or stored, and `worker=` is never parsed out, so no per-
-# worker breakdown is possible from this data (see docs/operations/
+# numeric `agentic-loop:priority` marker value of each Issue body and the
+# `<!-- agentic-loop:...-->` marker substring of each comment are ever read;
+# the surrounding Japanese bodies/comments, worker logs and prompts are never
+# requested separately or stored, and `worker=` is never parsed out, so no
+# per-worker breakdown is possible from this data (see docs/operations/
 # loop-metrics.md "収集境界").
 
 metrics_since_iso() { date -u -d "@$1" '+%Y-%m-%dT%H:%M:%SZ'; }
@@ -28,7 +29,7 @@ metrics_fetch_issues() {
     [.number, (.created_at | fromdateiso8601),
      (if .closed_at == null then 0 else (.closed_at | fromdateiso8601) end), .state,
      (([.labels[].name | select(startswith("category:"))] | join(",")) as $v | if $v == "" then "none" else $v end),
-     (([.labels[].name | select(startswith("priority:"))] | join(",")) as $v | if $v == "" then "none" else $v end),
+     '"$(queue_priority_jq)"',
      (([.labels[].name | select(startswith("agent:"))] | join(",")) as $v | if $v == "" then "none" else $v end)
     ] | @tsv' 2>/dev/null
 }
@@ -287,7 +288,12 @@ metrics_render_text() {
   printf 'category別件数（作成が対象期間内のIssue）:\n'
   for key in "${CATEGORY_LABELS[@]}"; do printf '  %s: %s件\n' "$key" "${CATCOUNT[$key]}"; done
   printf 'priority別件数（作成が対象期間内のIssue）:\n'
-  for key in "${PRIORITY_LABELS[@]}"; do printf '  %s: %s件\n' "$key" "${PRICOUNT[$key]}"; done
+  if (( ${#PRICOUNT[@]} > 0 )); then
+    local key
+    for key in $(printf '%s\n' "${!PRICOUNT[@]}" | sort -n); do printf '  %s: %s件\n' "$key" "${PRICOUNT[$key]}"; done
+  else
+    say '  なし（窓内作成Issueにpriority markerがありません）'
+  fi
   printf 'worker稼働率: %s（max_workers=%s, 対象期間=%s秒, 稼働=%s秒。個人やworker単位の速度ではなく設備全体の占有率です）\n' "$UTIL_RATIO" "$MAX_WORKERS" "$((WINDOW_END - WINDOW_START))" "$UTIL_SUM"
   if (( ${#WARNINGS[@]} > 0 )); then
     printf '警告:\n'
@@ -326,7 +332,8 @@ metrics_render_json() {
   for key in "${CATEGORY_LABELS[@]}"; do printf '%s"%s":%s' "$sep" "$key" "${CATCOUNT[$key]}"; sep=','; done
   printf '},"by_priority":{'
   sep=''
-  for key in "${PRIORITY_LABELS[@]}"; do printf '%s"%s":%s' "$sep" "$key" "${PRICOUNT[$key]}"; sep=','; done
+  local key
+  for key in $(printf '%s\n' "${!PRICOUNT[@]}" | sort -n); do printf '%s"%s":%s' "$sep" "$key" "${PRICOUNT[$key]}"; sep=','; done
   printf '},"warnings":['
   sep=''
   local w
@@ -362,7 +369,6 @@ cmd_metrics() {
   declare -gA CATCOUNT=() PRICOUNT=()
   local label
   for label in "${CATEGORY_LABELS[@]}"; do CATCOUNT[$label]=0; done
-  for label in "${PRIORITY_LABELS[@]}"; do PRICOUNT[$label]=0; done
   declare -ga DUR_QUEUE=() DUR_ATTEMPT=() DUR_NEEDSINPUT=() DUR_CONFLICT=() DUR_DEPENDENCY=() DUR_LEADTIME=() DUR_PLANSEC=() DUR_EXECSEC=() DUR_PRWAIT=()
   declare -ga OPEN_QUEUE=() OPEN_NEEDSINPUT=() OPEN_CONFLICT=() OPEN_DEPENDENCY=()
   declare -ga WARNINGS=()
@@ -437,8 +443,8 @@ cmd_metrics() {
     if (( ISSUE_CREATED[$n] >= WINDOW_START && ISSUE_CREATED[$n] <= WINDOW_END )); then
       c=${ISSUE_CATEGORY[$n]%%,*}; c=${c#category:}
       [[ -n $c && -n ${CATCOUNT[$c]+x} ]] && CATCOUNT[$c]=$(( CATCOUNT[$c] + 1 ))
-      p=${ISSUE_PRIORITY[$n]%%,*}; p=${p#priority:}
-      [[ -n $p && -n ${PRICOUNT[$p]+x} ]] && PRICOUNT[$p]=$(( PRICOUNT[$p] + 1 ))
+      p=${ISSUE_PRIORITY[$n]}
+      [[ $p =~ ^[0-9]+$ ]] && PRICOUNT[$p]=$(( ${PRICOUNT[$p]:-0} + 1 ))
     fi
   done
   (( mismatches > 0 )) && WARNINGS+=("label_marker_mismatch: 窓内でcloseしたIssueのうち${mismatches}件はLabelからdispositionを判定できませんでした（otherとして集計）。")

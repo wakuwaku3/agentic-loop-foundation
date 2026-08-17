@@ -2,7 +2,7 @@
 
 ## セットアップ
 
-`install.sh` は変更前に `git`、`gh`、設定 `agent.provider`（環境変数 `AGENT_PROVIDER` と git管理外 `.agentic-loop.local.toml` による上書きを含む）から解決したAI CLI（`codex`／`claude`／`opencode`、既定は `codex`）、GitHubログイン、origin、リポジトリ参照、Projects API権限を検査する。provider=opencodeならCodex CLIが存在しなくてもinstallは成立する。既存ファイルとの競合もコピー前に検査する。検査後、8個の状態Label、4個の `priority:*` Label、6個の `category:*` Labelと `Agentic Loop - OWNER/REPOSITORY` Projectを冪等に用意し、既定ではSupervisorを起動する。Projectには同じ6選択肢の `Category` fieldを作成する。再installは保存済みのProject identityを再利用し、高コストなProject drift走査とqueued Issueの同期修復を行わない。明示的な `bin/agentic-loop setup` はProjectのrepository link・field・viewを収束させるが、既存Issue/PRの一括backfillは行わない。Issue受付とworkerが扱ったPRは、必要になった時点で個別にProjectへ登録する。
+`install.sh` は変更前に `git`、`gh`、設定 `agent.provider`（環境変数 `AGENT_PROVIDER` と git管理外 `.agentic-loop.local.toml` による上書きを含む）から解決したAI CLI（`codex`／`claude`／`opencode`、既定は `codex`）、GitHubログイン、origin、リポジトリ参照、Projects API権限を検査する。provider=opencodeならCodex CLIが存在しなくてもinstallは成立する。既存ファイルとの競合もコピー前に検査する。検査後、13個の状態Label、6個の `category:*` Labelと `Agentic Loop - OWNER/REPOSITORY` Projectを冪等に用意し、既定ではSupervisorを起動する。`priority:*` Labelは作成せず、既存の open Issue と label 定義があれば本文markerへ移行して削除する（[ADR 0015](../decisions/0015-numeric-priority-marker.md)）。Projectには同じ6選択肢の `Category` fieldを作成する。再installは保存済みのProject identityを再利用し、高コストなProject drift走査とqueued Issueの同期修復を行わない。明示的な `bin/agentic-loop setup` はProjectのrepository link・field・viewを収束させるが、既存Issue/PRの一括backfillは行わない。Issue受付とworkerが扱ったPRは、必要になった時点で個別にProjectへ登録する。
 
 GitHub tokenには対象リポジトリのIssue/PR操作権限と `project`、`read:project` scopeが必要である。不足時は `gh auth refresh -s project,read:project` など、利用中のGitHub認証方式に合う方法で追加する。Projectはuser/org所有のため、対象リポジトリとProjectの閲覧者が一致することを管理者が確認する。privateリポジトリの内容や秘密情報をProjectフィールドへ転記しない。
 
@@ -11,7 +11,7 @@ Project APIでlink、`Agent status` single-select、Issue item追加に加え、
 | View | 自動適用するfilter | 目的と表示順 |
 | --- | --- | --- |
 | `Triage` | `is:issue is:open no:category` | Category未設定のopen Issueを検出する。Agent status・Priorityの欠落とLabel/field不整合は後述の手動検査も行う |
-| `Queue` | `is:issue is:open label:"agent:queued"` | Category、Priority、Created at、Issue番号の順で確認する。各値の順位はSupervisorのclaim順と同じにする |
+| `Queue` | `is:issue is:open label:"agent:queued"` | Priority（数値・降順）、Category、Created at、Issue番号の順で確認する。各値の順位はSupervisorのclaim順と同じにする。Priorityは本文marker（`bin/agentic-loop priority`）で管理し、Project fieldはソートの正本にしない |
 | `Active` | `is:issue is:open label:"agent:running","agent:in-review"` | Agent statusでgroupし、Updated at降順。Issue、関連Pull requestを表示する |
 | `Needs input` | `is:issue is:open label:"agent:needs-input"` | Updated at昇順。Title、Agent status、Updated atを表示し、Issue本文・commentを回答先とする |
 | `Recovery` | `is:issue label:"agent:failed","agent:stale"` | Agent statusでgroupし、Updated at昇順。期限切れleaseはSupervisorがqueuedへ復旧するまでrunningとしてIssue commentで検査する |
@@ -23,7 +23,7 @@ Project APIでlink、`Agent status` single-select、Issue item追加に加え、
 
 Issue状態の正本は `agent:*` Labelであり、Project fieldは表示用の複製である。このため状態別ViewのfilterもLabelを使用し、回答後にLabelが遷移すると `Needs input` から自動的に外れる。private repositoryの本文やcomment、秘密情報をProject custom fieldへ複製しない。
 
-GitHub Projects APIはviewのname、layout、filterを作成・更新できる一方、CLI/APIのversionや所有者種別によってvisible field、sort、groupの更新を利用できない場合がある。現在の自動適用範囲はtable layoutとfilterまでとし、上表の「目的と表示順」をそれ以外のdesired stateとする。Project画面で列、sort、groupを上表どおり設定し、`bin/agentic-loop setup` 後に各Viewのfilterと対象集合を目視検証する。`Triage` はCategory欠落を自動抽出し、Agent status・Priorityの欠落やLabel/field不整合を `All open issues` で比較する。`Queue` は `bin/agentic-loop` のcategory rank、priority rank、Created at、Issue番号の比較、`Needs input` は `agent:needs-input` のopen Issue一覧との比較、`Recovery` の期限切れleaseは最新の `agentic-loop:lease` commentの `expires` と現在時刻の比較でdriftを検出する。
+GitHub Projects APIはviewのname、layout、filterを作成・更新できる一方、CLI/APIのversionや所有者種別によってvisible field、sort、groupの更新を利用できない場合がある。現在の自動適用範囲はtable layoutとfilterまでとし、上表の「目的と表示順」をそれ以外のdesired stateとする。Project画面で列、sort、groupを上表どおり設定し、`bin/agentic-loop setup` 後に各Viewのfilterと対象集合を目視検証する。`Triage` はCategory欠落を自動抽出し、Agent status・Priorityの欠落やLabel/field不整合を `All open issues` で比較する。`Queue` は `bin/agentic-loop` のpriority値（数値・降順）、category rank、Created at、Issue番号の比較、`Needs input` は `agent:needs-input` のopen Issue一覧との比較、`Recovery` の期限切れleaseは最新の `agentic-loop:lease` commentの `expires` と現在時刻の比較でdriftを検出する。
 
 Project同期やview修復はbest-effortであり、失敗をstderrへ記録してIssueキュー自体は停止しない。権限または一時障害の復旧後にsetupを再実行する。filter更新は冪等で、再作成も既存名を再利用するためrollbackは直前のfilterへ同じsetup関数で戻せる。view削除は自動化せず、不要Viewを破棄する場合は対象と依存を確認して明示的に承認する。
 
@@ -37,6 +37,7 @@ bin/agentic-loop tail
 bin/agentic-loop stop
 bin/agentic-loop doctor
 bin/agentic-loop metrics
+bin/agentic-loop priority ISSUE N
 bin/agentic-loop upgrade
 ```
 
@@ -58,7 +59,7 @@ running/in-reviewはまず`agent:stopping`へ遷移し、所有hostのworker pro
 
 - **Supervisor**: 稼働状態、pid、`max_workers`（既存の1行目の文言は不変）。
 - **Running Issues**: Issue番号・title・`(phase: ...)`・`(scope: ...)`に加え、`(started: 開始epoch, elapsed: 経過秒)`・`(timeout_at: 上限到達epoch[、超過なら「超過」]。`worker_timeout_seconds=0`では非表示)`・`(heartbeat: 最終heartbeat epoch)`・`(lease_expires: 期限epoch[、期限切れなら「期限切れ」])`・`(worktree: path[、dirty/diverged、または「なし」])`・`(pr: #番号 state=... checks=...)`を、追加のGitHub呼び出しなしでlocal state（`workers/<issue>.started`・`.lease`・`.resume`、scope cache）から表示する。加えて、workerがlocalへ書くprogress marker（`workers/<issue>.progress`、`epoch\tstage\tseq`。stageはenumのみ）から `(stage: plan|exec|...)`・`(progress: Ns ago)`・`(health: healthy|stalled|timeout)`を表示する。`health`は`timeout`（`worker_timeout_seconds`超過）> `stalled`（最後の進行から既定300秒超過）> `healthy`の順で、local stateのない他host所有Issueは`unknown`（「不明」）。色分けはTTYかつ`NO_COLOR`未設定のときだけANSI、pipe/JSONは無色。progress markerはworkerがstage境界と自ホスト制御区間で書く（heartbeatは更新しない）。worker logのmtimeは本文を読まずに副シグナルとして採用し、provider待ちの長考をstalledと誤判定しない。
-- **キュー / 次のclaim候補**: queued総数とclaim可能数、および`claim_next`と同じ順序（category rank→priority rank→created_at→Issue番号）の上位候補を、claimされない理由code（`scope-conflict`／`retry-cooldown`／`claim-paused`）付きで表示する。依存関係の再検証はしない（`agent:blocked`のIssueはqueuedに現れないため対象外であり、これはコスト方針上のbest-effortな割り切りである）。また、各phaseで次に選ばれる `pool` / `provider` / `model`（`agent_pick_tier` のlocal計算。usage実測はせず、pool markerと設定からの推論に限定）と、プール別のclaim pause理由（`pool=<pool> 枯渇（回復待ち）`、`全プール利用不可`）を表示する。
+- **キュー / 次のclaim候補**: queued総数とclaim可能数、および`claim_next`と同じ順序（priority値（数値・降順）→category rank→created_at→Issue番号）の上位候補を、claimされない理由code（`scope-conflict`／`retry-cooldown`／`claim-paused`）付きで表示する。依存関係の再検証はしない（`agent:blocked`のIssueはqueuedに現れないため対象外であり、これはコスト方針上のbest-effortな割り切りである）。また、各phaseで次に選ばれる `pool` / `provider` / `model`（`agent_pick_tier` のlocal計算。usage実測はせず、pool markerと設定からの推論に限定）と、プール別のclaim pause理由（`pool=<pool> 枯渇（回復待ち）`、`全プール利用不可`）を表示する。
 - **状態サマリ**: `needs-input`／`failed`／`in-review`／`blocked`／`stale`の件数と、`https://github.com/OWNER/REPO/issues/N`形式のURL一覧（`stale`は直近100件までで打ち切りがある場合は明示する）。
 - **警告**: staleなsupervisor pid/lock、期限切れlease、実行時間上限を超過したlocal worker（`worker-timeout`。次回pollで停止し自動的に再試行キューへ戻る）、stall（`worker-stalled`。最後の進行から300秒以上経過しているが上限は未超過。観測のみで自動停止はしない）、local stateのないrunning Issue（`worker-missing`、多端末運用では正常）、GitHub上でrunningでないlocal worker（`worker-orphan`）、対応するrunning Issueのない残存worktree/branch、破損したlocal state file、Project同期の再試行待ち、claim一時停止中、をすべてlocal stateの読み取りだけで検出する。
 
@@ -68,7 +69,7 @@ token、worker log本文、Issue本文・コメント、providerのresult file�
 bin/agentic-loop status --format json
 ```
 
-`--format json`は`schema_version: 1`の単一JSONを1行で出す。主なキーは`supervisor`、`workers`（running Issueごとの詳細。既存の`started_at`/`elapsed_seconds`/`timeout_at`/`timeout_exceeded`/`heartbeat_at`/`lease_expires_at`/`lease_expired`/`worktree`/`worktree_exists`/`dirty`/`diverged`/`branch`/`pr`/`pr_url`/`pr_state`/`checks`/`local_state`/`phase`に加え、後方互換で`stage`・`progress_at`・`progress_age_seconds`・`health`）、`queue`（`queued`・`claimable`・`candidates`）、`waits`（scope/dependency待ち）、`states`（needs-input/failed/in-review/blocked/staleの件数とIssue一覧）、`anomalies`（`level`/`code`/`subject`/`detail`）、`github_available`（GitHub取得に失敗した場合は`false`になり、それ以外のフィールドはlocalの情報のみを反映する）。
+`--format json`は`schema_version: 1`の単一JSONを1行で出す。主なキーは`supervisor`、`workers`（running Issueごとの詳細。既存の`started_at`/`elapsed_seconds`/`timeout_at`/`timeout_exceeded`/`heartbeat_at`/`lease_expires_at`/`lease_expired`/`worktree`/`worktree_exists`/`dirty`/`diverged`/`branch`/`pr`/`pr_url`/`pr_state`/`checks`/`local_state`/`phase`に加え、後方互換で`stage`・`progress_at`・`progress_age_seconds`・`health`）、`queue`（`queued`・`claimable`・`candidates`。候補は本文marker由来の数値`priority`（0-100）と`category_rank`を持つ）、`waits`（scope/dependency待ち）、`states`（needs-input/failed/in-review/blocked/staleの件数とIssue一覧）、`anomalies`（`level`/`code`/`subject`/`detail`）、`github_available`（GitHub取得に失敗した場合は`false`になり、それ以外のフィールドはlocalの情報のみを反映する）。
 
 token、worker log本文、Issue本文・コメント、providerのresult fileは`status`/`--watch`/`tail`のいずれも読まない・表示しない。progress markerとevents.logはenumのみを保存するため、providerの自由文はここに混入しえない。
 
@@ -96,7 +97,17 @@ bin/agentic-loop doctor --format json
 
 `bin/agentic-loop upgrade`（[運用ドキュメント](upgrade.md)、[ADR 0009](../decisions/0009-foundation-upgrade.md)）は、既定では書き込みを一切行わないdry-runで、追加・更新・利用者編集との競合・削除候補・設定migrationを日本語で表示する。`--apply`で実際に適用し、破壊的・不可逆・追加費用・権限変更を伴う項目は`--approve`なしでは適用しない。適用前後で`doctor`と完全検証を実行し、失敗時は適用状態を保持したまま`--rollback`または再実行を案内する。Supervisorが稼働中の`--apply`と、明示的なrevision指定を欠く実行はいずれも拒否する（`main`への暗黙追従はしない）。
 
-利用者は要求をIssueとして登録し、6個の `category:*` のうち1つと `agent:queued` を付ける。取得順はcategory、同一category内のcritical、high、medium、low、優先度なし、作成日時、Issue番号の順とする。category順は `loop-continuity`、`confidentiality-incident`、`integrity-incident`、`availability-incident`、`feature`、`improvement` で固定する。複数のpriority LabelがあるIssueは最も高いものを使う。依存関係は後述の「Issue間の依存関係」に従ってGitHub標準機能またはIssue本文に明記する。変更が及ぶpathやexternal環境が分かる場合は、後述の「変更競合の予防」に従って本文へ `agentic-loop:scope` markerを1行記載する。不明な場合は記載を省略してよく、安全な既定動作（`unknown_scope`）にフォールバックする。回答は `agent:needs-input` のIssueへコメントする。
+利用者は要求をIssueとして登録し、6個の `category:*` のうち1つと `agent:queued` を付ける。取得順は本文markerの数値priority（0-100・降順、[ADR 0015](../decisions/0015-numeric-priority-marker.md)）、category、作成日時、Issue番号の順とする。priorityが未設定（markerなし）のIssueは0扱いで最下位となり、以降はcategory→作成日時→Issue番号の従来順で並ぶ。category順は `loop-continuity`、`confidentiality-incident`、`integrity-incident`、`availability-incident`、`feature`、`improvement` で固定する。複数のpriority markerがあるIssueは最も大きい有効値を使う。priorityの設定・更新は `bin/agentic-loop priority ISSUE N`（0-100）で行う。依存関係は後述の「Issue間の依存関係」に従ってGitHub標準機能またはIssue本文に明記する。変更が及ぶpathやexternal環境が分かる場合は、後述の「変更競合の予防」に従って本文へ `agentic-loop:scope` markerを1行記載する。不明な場合は記載を省略してよく、安全な既定動作（`unknown_scope`）にフォールバックする。回答は `agent:needs-input` のIssueへコメントする。
+
+### priority: 数値priorityの設定・更新
+
+`bin/agentic-loop priority ISSUE N` は、Issue の priority を 0-100 の整数 `N` に設定する。実行者は `dispose` / `resume` と同じく GitHub 認証済みで対象repositoryの write/maintain/admin 権限が必要である。処理は次のとおりで、queue 処理の GraphQL 呼び出しを増やさない。
+
+1. Issue を REST で取得し、本文の既存 `agentic-loop:priority` marker 行を削除して末尾に `<!-- agentic-loop:priority N -->` を1行 upsert する（本文の他の内容は保持）。
+2. 移行期に残存する `priority:*` label があれば Issue から外す。
+3. `<!-- agentic-loop:priority-set schema=1 actor=... issue=... value=N at=... -->` 監査コメントと日本語説明を記録する。
+
+読み取り確認は `bin/agentic-loop status` の `queue.candidates[].priority`、または `bin/agentic-loop metrics --format json` の `by_priority` で行える。手動で marker を編集しても同じ値が読み取られる（複数 marker は最大値、範囲外・不正値は無視）。
 
 ### 対話要求の受付
 
@@ -203,7 +214,7 @@ claim前、queued Issueのscopeはbody（一覧取得時に既に取得済みで
 
 Supervisorは各pollで取得済みのOpen Issue snapshotを正本としてlocal scope/conflict cacheを照合する。`agent:running`でなくなったIssueのscope cacheと、待機側が`agent:queued`でない、または競合相手が`agent:running`でないconflict cacheはlocal stale stateとして除去し、Projectの`Blocked by`投影も空へ収束させる。これにより、別hostがIssueをclaim・完了した場合も、停止中でないSupervisorが再起動を待たず次のpollで追随する。照合用のIssue単位API呼び出しは追加せず、別hostのworker、lease、worktree、branchには触れない。
 
-hard conflictを検出したqueued Issueはclaimせず、category・priority・created_at・Issue番号による既存の取得順を変えずに次の非競合Issueへ進む。競合が解消すれば、待機していたIssueは本来の順位で自然にclaimされる（恒久的な順位降格や飢餓は発生しない）。soft overlapでは待機も `scope-conflict` コメントも出さない。競合判定はworker数上限のhard constraintと既存のqueue処理（budget guard、stale triage、retry）の内側で働くfilterであり、後述の「Issue間の依存関係」によるclaim前block判定はこのfilterの手前に位置づける。
+hard conflictを検出したqueued Issueはclaimせず、priority・category・created_at・Issue番号による既存の取得順を変えずに次の非競合Issueへ進む。競合が解消すれば、待機していたIssueは本来の順位で自然にclaimされる（恒久的な順位降格や飢餓は発生しない）。soft overlapでは待機も `scope-conflict` コメントも出さない。競合判定はworker数上限のhard constraintと既存のqueue処理（budget guard、stale triage、retry）の内側で働くfilterであり、後述の「Issue間の依存関係」によるclaim前block判定はこのfilterの手前に位置づける。
 
 scopeを宣言していないIssueの既定動作は `[queue].unknown_scope`（既定 `isolated`）で制御する。`isolated` は未宣言scope同士でのみ競合し、同時に走る未宣言scope workerを常に1件に制限する一方、宣言済みの独立scope Issueとは並列に走る。`exclusive` は未宣言scopeをrepository全体として扱い、`open` は未宣言scopeの競合判定を行わない（本機能の実質無効化）。`[queue].exclusive_paths`（既定は空）にcomma区切りのpathを設定すると、宣言scopeがそのpathと重なるIssueをrepository全体として扱う（共有基盤file・生成物・migrationなど）。両設定の不正値は起動時検証と `doctor` が失敗として報告する。
 

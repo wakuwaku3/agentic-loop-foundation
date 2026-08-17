@@ -89,6 +89,7 @@ if [[ $* == *--slurp* && $* == *--jq* ]]; then
 fi
 case "${1:-} ${2:-}" in
   'auth status') [[ ${FAKE_GH_AUTH_FAIL:-0} == 0 ]] ;;
+  'api user') printf 'test-operator\n' ;;
   'api https://'*)
     # OpenCode Go usage API (Issue #155). Tests control the response with
     # FAKE_GO_USAGE_FILE (default: a modest, non-exhausted usage).
@@ -144,10 +145,40 @@ case "${1:-} ${2:-}" in
       awk -v slug="$slug" '{print "https://github.example/" slug "/issues/" $1}' "$state" 2>/dev/null || true
     elif [[ $endpoint == issues && $method == GET && $form_state == open && $* == *html_url* ]]; then
       awk -v slug="$slug" '$3 != "closed" {print "https://github.example/" slug "/issues/" $1}' "$state" 2>/dev/null || true
+    elif [[ $endpoint == issues && $method == GET && $form_state == open && $* == *'startswith("priority:")'* ]]; then
+      # bin/agentic-loop setup's legacy priority label migration: emit
+      # number<TAB>body(base64)<TAB>priority-labels for open Issues that still
+      # carry a priority:* label.
+      if [[ -r $state ]]; then
+        awk '
+        $3 != "closed" {
+          split($4,p,","); plist=""
+          for(i in p) if(p[i] != "" && p[i] != "none") plist=(plist=="" ? p[i] : plist "," p[i])
+          if (plist == "") next
+          printf "%s\t%s\t%s\n", $1, ($8 == "" || $8 == "-" ? "" : $8), plist
+        }' "$state" 2>/dev/null || true
+      fi
     elif [[ $endpoint == issues && $method == GET && -z $wanted && $* == *'then "-" else'* ]]; then
-      awk '$3 != "closed" {
+      awk 'function prio(b,   body, val, max, rest, tok, cmd) {
+        max = 0
+        if (b == "" || b == "-" || b == "none") return 0
+        cmd = "printf %s \"" b "\" | base64 -d 2>/dev/null"
+        while ((cmd | getline body) > 0) {
+          rest = body
+          while (match(rest, /agentic-loop:priority[[:space:]]+[0-9]+([[:space:]]|--)/)) {
+            tok = substr(rest, RSTART, RLENGTH)
+            val = 0
+            if (match(tok, /[0-9]+/)) val = substr(tok, RSTART, RLENGTH) + 0
+            if (val >= 0 && val <= 100 && val > max) max = val
+            rest = substr(rest, RSTART + RLENGTH)
+          }
+        }
+        close(cmd)
+        return max
+      }
+      $3 != "closed" {
         category=5; if ($7 ~ /(^|,)loop-continuity(,|$)/) category=0; else if ($7 ~ /(^|,)confidentiality-incident(,|$)/) category=1; else if ($7 ~ /(^|,)integrity-incident(,|$)/) category=2; else if ($7 ~ /(^|,)availability-incident(,|$)/) category=3; else if ($7 ~ /(^|,)feature(,|$)/) category=4
-        priority=4; if ($4 ~ /(^|,)critical(,|$)/) priority=0; else if ($4 ~ /(^|,)high(,|$)/) priority=1; else if ($4 ~ /(^|,)medium(,|$)/) priority=2; else if ($4 ~ /(^|,)low(,|$)/) priority=3
+        priority=prio($8)
         created=($5 == "" ? $1 : $5); updated=($6 == "" ? "-" : $6)
         body=($8 == "" ? "-" : $8); categories=$7; gsub(/,/, ",category:", categories); categories=(categories == "" || categories == "none" ? "-" : "category:" categories)
         print $1 "\t" $2 "\t" updated "\t" created "\t" body "\t" categories "\t" category "\t" priority
@@ -155,10 +186,27 @@ case "${1:-} ${2:-}" in
     elif [[ $endpoint == issues && $method == GET && -z $wanted ]]; then
       # status-snapshot: every open Issue, classified purely by its own state
       # word (see bin/agentic-loop's status_snapshot_fetch), with the same
-      # category/priority ranks as the agent:queued created_at query above.
-      awk '$3 != "closed" {
+      # numeric priority / category ranks as the agent:queued created_at query.
+      awk 'function prio(b,   body, val, max, rest, tok, cmd) {
+        max = 0
+        if (b == "" || b == "-" || b == "none") return 0
+        cmd = "printf %s \"" b "\" | base64 -d 2>/dev/null"
+        while ((cmd | getline body) > 0) {
+          rest = body
+          while (match(rest, /agentic-loop:priority[[:space:]]+[0-9]+([[:space:]]|--)/)) {
+            tok = substr(rest, RSTART, RLENGTH)
+            val = 0
+            if (match(tok, /[0-9]+/)) val = substr(tok, RSTART, RLENGTH) + 0
+            if (val >= 0 && val <= 100 && val > max) max = val
+            rest = substr(rest, RSTART + RLENGTH)
+          }
+        }
+        close(cmd)
+        return max
+      }
+      $3 != "closed" {
         category=5; if ($7 ~ /(^|,)loop-continuity(,|$)/) category=0; else if ($7 ~ /(^|,)confidentiality-incident(,|$)/) category=1; else if ($7 ~ /(^|,)integrity-incident(,|$)/) category=2; else if ($7 ~ /(^|,)availability-incident(,|$)/) category=3; else if ($7 ~ /(^|,)feature(,|$)/) category=4
-        priority=4; if ($4 ~ /(^|,)critical(,|$)/) priority=0; else if ($4 ~ /(^|,)high(,|$)/) priority=1; else if ($4 ~ /(^|,)medium(,|$)/) priority=2; else if ($4 ~ /(^|,)low(,|$)/) priority=3
+        priority=prio($8)
         created=($5 == "" ? $1 : $5)
         state="other"
         if ($2 == "running") state="running"
@@ -167,7 +215,7 @@ case "${1:-} ${2:-}" in
         else if ($2 == "failed") state="failed"
         else if ($2 == "in-review") state="in-review"
         else if ($2 == "blocked") state="blocked"
-        print $1 "\t" "Fake issue " $1 "\t" state "\t" category "\t" priority "\t" created
+        print $1 "\t" "Fake issue " $1 "\t" state "\t" priority "\t" category "\t" created
       }' "$state" 2>/dev/null || true
     elif [[ $endpoint == issues && $method == GET ]]; then
       case $wanted in
@@ -175,13 +223,30 @@ case "${1:-} ${2:-}" in
           if [[ $* == *updated_at* ]]; then
             awk '$2 == "queued" && $3 != "closed" && $6 != "" {print $1 "\t" $6}' "$state"
           elif [[ $* == *created_at* ]]; then
-            awk '$2 == "queued" && $3 != "closed" {
+            awk 'function prio(b,   body, val, max, rest, tok, cmd) {
+              max = 0
+              if (b == "" || b == "-" || b == "none") return 0
+              cmd = "printf %s \"" b "\" | base64 -d 2>/dev/null"
+              while ((cmd | getline body) > 0) {
+                rest = body
+                while (match(rest, /agentic-loop:priority[[:space:]]+[0-9]+([[:space:]]|--)/)) {
+                  tok = substr(rest, RSTART, RLENGTH)
+                  val = 0
+                  if (match(tok, /[0-9]+/)) val = substr(tok, RSTART, RLENGTH) + 0
+                  if (val >= 0 && val <= 100 && val > max) max = val
+                  rest = substr(rest, RSTART + RLENGTH)
+                }
+              }
+              close(cmd)
+              return max
+            }
+            $2 == "queued" && $3 != "closed" {
               category=5; if ($7 ~ /(^|,)loop-continuity(,|$)/) category=0; else if ($7 ~ /(^|,)confidentiality-incident(,|$)/) category=1; else if ($7 ~ /(^|,)integrity-incident(,|$)/) category=2; else if ($7 ~ /(^|,)availability-incident(,|$)/) category=3; else if ($7 ~ /(^|,)feature(,|$)/) category=4
-              priority=4; if ($4 ~ /(^|,)critical(,|$)/) priority=0; else if ($4 ~ /(^|,)high(,|$)/) priority=1; else if ($4 ~ /(^|,)medium(,|$)/) priority=2; else if ($4 ~ /(^|,)low(,|$)/) priority=3
-              created=($5 == "" ? $1 : $5); print category "\t" priority "\t" created "\t" $1 "\t" $8
+              priority=prio($8)
+              created=($5 == "" ? $1 : $5); print priority "\t" category "\t" created "\t" $1 "\t" $8
             }' "$state"
             if [[ -n ${FAKE_STALE_QUEUED_ISSUE:-} ]] && ! awk -v n="$FAKE_STALE_QUEUED_ISSUE" '$1 == n && $2 == "queued" {found=1} END {exit !found}' "$state"; then
-              awk -v n="$FAKE_STALE_QUEUED_ISSUE" '$1 == n {print "0\t" ($5 == "" ? $1 : $5) "\t" $1}' "$state"
+              awk -v n="$FAKE_STALE_QUEUED_ISSUE" '$1 == n {print "0\t5\t" ($5 == "" ? $1 : $5) "\t" $1 "\t" $8}' "$state"
             fi
           else awk '$2 == "queued" && $3 != "closed" {print $1}' "$state"; fi ;;
         agent:running)
@@ -193,8 +258,8 @@ case "${1:-} ${2:-}" in
         agent:blocked) awk '$2 == "blocked" && $3 != "closed" {print $1 "\t" $8}' "$state" ;;
       esac
     elif [[ $endpoint =~ ^issues/([0-9]+)/labels$ && $method == PUT ]]; then
-      issue=${BASH_REMATCH[1]}; payload=$(if [[ -n $input_file && $input_file != - ]]; then cat "$input_file"; else cat; fi); target=$(sed -n 's/.*"agent:\([^"]*\)".*/\1/p' <<< "$payload"); category=$(grep -o 'category:[a-z-]*' <<< "$payload" | head -n 1 | cut -d: -f2 || true)
-      ( flock 9; awk -v n="$issue" -v s="$target" -v c="$category" '{if ($1 == n) {if (s != "") $2=s; if (c != "") $7=c} print}' "$state" > "$state.$$.tmp" && mv "$state.$$.tmp" "$state" ) 9> "$state.lock"
+      issue=${BASH_REMATCH[1]}; payload=$(if [[ -n $input_file && $input_file != - ]]; then cat "$input_file"; else cat; fi); target=$(sed -n 's/.*"agent:\([^"]*\)".*/\1/p' <<< "$payload"); category=$(grep -o 'category:[a-z-]*' <<< "$payload" | head -n 1 | cut -d: -f2 || true); priority_labels=$(grep -o 'priority:[a-z-]*' <<< "$payload" | sed 's/priority://' | sort -u | paste -sd, - || true)
+      ( flock 9; awk -v n="$issue" -v s="$target" -v c="$category" -v p="$priority_labels" '{if ($1 == n) {if (s != "") $2=s; if (c != "") $7=c; if (NF >= 4) {if (p != "") $4=p; else $4="none"}} print}' "$state" > "$state.$$.tmp" && mv "$state.$$.tmp" "$state" ) 9> "$state.lock"
     elif [[ $endpoint =~ ^issues/comments/([0-9]+)$ && $method == PATCH ]]; then
       cid=${BASH_REMATCH[1]}
       body=''; for arg in "$@"; do [[ $arg == body=* ]] && body=${arg#body=}; done
@@ -238,6 +303,14 @@ case "${1:-} ${2:-}" in
       issue=${BASH_REMATCH[1]}
       if [[ $method == PATCH && $form_state == closed ]]; then
         ( flock 9; awk -v n="$issue" '{if ($1 == n) $3="closed"; print}' "$state" > "$state.$$.tmp" && mv "$state.$$.tmp" "$state" ) 9> "$state.lock"
+      elif [[ $method == PATCH && $* == *body=* ]]; then
+        body=''; for arg in "$@"; do [[ $arg == body=* ]] && body=${arg#body=}; done
+        b64=$(printf '%s' "$body" | base64 -w0)
+        ( flock 9; awk -v n="$issue" -v b="$b64" '{if ($1 == n) $8=b; print}' "$state" > "$state.$$.tmp" && mv "$state.$$.tmp" "$state" ) 9> "$state.lock"
+      elif [[ $* == *'[(.body // "" | @base64)'* ]]; then
+        tmp=$(awk -v n="$issue" '$1 == n {printf "%s\t", $8; split($4,p,","); labels="agent:" $2; for(i in p) if(p[i] != "" && p[i] != "none") labels=labels ",priority:" p[i]; split($7,c,","); for(i in c) if(c[i] != "" && c[i] != "none") labels=labels ",category:" c[i]; print labels}' "$state")
+        body_b64=${tmp%%$'\t'*}; labels=${tmp#*$'\t'}
+        printf '%s\t%s\n' "${body_b64:-}" "$labels"
       elif [[ $* == *'.updated_at'* && $* == *'.body // ""'* ]]; then
         awk -v n="$issue" '$1 == n {
           labels="agent:" $2; split($4,p,","); for(i in p) if(p[i] != "" && p[i] != "none") labels=labels ",priority:" p[i]; split($7,c,","); for(i in c) if(c[i] != "" && c[i] != "none") labels=labels ",category:" c[i]
@@ -263,6 +336,8 @@ case "${1:-} ${2:-}" in
         awk -v n="$issue" '$1 == n {split($7,c,","); out=""; for(i in c) if(c[i] != "" && c[i] != "none") out=out (out=="" ? "" : ",") "category:" c[i]; print out}' "$state"
       elif [[ $* == *'startswith("category:") | not'* ]]; then
         category=$(grep -o 'category:[a-z-]*' <<< "$*" | tail -n 1); printf '["agent:queued","%s"]\n' "$category"
+      elif [[ $* == *'startswith("priority:") | not'* ]]; then
+        awk -v n="$issue" '$1 == n {printf "[\"agent:%s\"", $2; split($7,c,","); for(i in c) if(c[i] != "" && c[i] != "none") printf ",\"category:%s\"", c[i]; print "]"}' "$state"
       elif [[ $* == *'[.labels[].name]'* ]]; then
         awk -v n="$issue" '$1 == n {printf "[\"agent:%s\"", $2; split($4,p,","); for(i in p) if(p[i] != "" && p[i] != "none") printf ",\"priority:%s\"",p[i]; split($7,c,","); for(i in c) if(c[i] != "" && c[i] != "none") printf ",\"category:%s\"",c[i]; print "]"}' "$state"
       elif [[ $* == *starts*with* ]]; then
@@ -289,6 +364,8 @@ case "${1:-} ${2:-}" in
       elif [[ $form_state == all && $* == *html_url* ]]; then printf 'https://github.example/%s/pull/1\nhttps://github.example/%s/pull/2\n' "$slug" "$slug"
       elif [[ $form_state == open && $* == *html_url* ]]; then printf 'https://github.example/%s/pull/1\n' "$slug"
       elif [[ $* == *html_url* ]]; then printf 'https://github.example/%s/pull/6\n' "$slug"; fi
+    elif [[ $endpoint == collaborators/* ]]; then
+      printf 'admin\n'
     elif [[ -z $endpoint ]]; then
       if [[ $* == *permissions.push* ]]; then printf 'true\n'; else printf 'main\n'; fi
     fi ;;
@@ -351,6 +428,10 @@ case "${1:-} ${2:-}" in
     done
     awk -F '\t' -v name="$label_name" '$1 != name' "$labels" 2>/dev/null > "$labels.$$.tmp" || true
     printf '%s\t%s\t%s\n' "$label_name" "$color" "$description" >> "$labels.$$.tmp"
+    mv "$labels.$$.tmp" "$labels" ;;
+  'label delete')
+    label_name=${3:-}
+    awk -F '\t' -v name="$label_name" '$1 != name' "$labels" 2>/dev/null > "$labels.$$.tmp" || true
     mv "$labels.$$.tmp" "$labels" ;;
   'project list')
     if [[ -e $project ]]; then printf '7\n'; fi ;;
@@ -450,15 +531,27 @@ case "${1:-} ${2:-}" in
       if [[ $* == *updatedAt* ]]; then
         awk '$2 == "queued" && $3 != "closed" && $6 != "" {print $1 "\t" $6}' "$state"
       elif [[ $* == *createdAt* ]]; then
-        awk '$2 == "queued" && $3 != "closed" {
-          rank=4
-          if ($4 ~ /(^|,)critical(,|$)/) rank=0
-          else if ($4 ~ /(^|,)high(,|$)/) rank=1
-          else if ($4 ~ /(^|,)medium(,|$)/) rank=2
-          else if ($4 ~ /(^|,)low(,|$)/) rank=3
+        awk 'function prio(b,   body, val, max, rest, tok, cmd) {
+          max = 0
+          if (b == "" || b == "-" || b == "none") return 0
+          cmd = "printf %s \"" b "\" | base64 -d 2>/dev/null"
+          while ((cmd | getline body) > 0) {
+            rest = body
+            while (match(rest, /agentic-loop:priority[[:space:]]+[0-9]+([[:space:]]|--)/)) {
+              tok = substr(rest, RSTART, RLENGTH)
+              val = 0
+              if (match(tok, /[0-9]+/)) val = substr(tok, RSTART, RLENGTH) + 0
+              if (val >= 0 && val <= 100 && val > max) max = val
+              rest = substr(rest, RSTART + RLENGTH)
+            }
+          }
+          close(cmd)
+          return max
+        }
+        $2 == "queued" && $3 != "closed" {
           created=($5 == "" ? $1 : $5)
-          print rank "\t" created "\t" $1
-        }' "$state" | sort -k1,1n -k2,2 -k3,3n | awk 'NR == 1 {print $3}'
+          print prio($8) "\t" created "\t" $1
+        }' "$state" | sort -k1,1nr -k2,2 -k3,3n | awk 'NR == 1 {print $3}'
       else
         awk '$2 == "queued" && $3 != "closed" {print $1}' "$state"
       fi
@@ -1173,29 +1266,53 @@ state_root="$(git -C "$target" rev-parse --absolute-git-dir)/agentic-loop"
 
 if [[ $TEST_GROUP == all || $TEST_GROUP == queue ]]; then
 
-# Category is the primary queue key, followed by priority, creation time, and Issue number.
-# unknown_scope=open disables change-scope conflict avoidance here: this fixture
-# declares no scope for any Issue and exercises only the ordering, which the
-# scope filter must never reorder (a dedicated set of scope tests covers
-# conflict avoidance itself, further below).
+# Numeric priority is the primary queue key (desc), then category rank,
+# creation time, and Issue number. A priority-90 improvement must therefore
+# beat every priority-0 feature. unknown_scope=open disables change-scope
+# conflict avoidance here: this fixture declares no scope for any Issue and
+# exercises only the ordering, which the scope filter must never reorder.
 write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=11 LEASE_SECONDS=30 STOP_TIMEOUT=10 STALE_DAYS=30
 printf 'unknown_scope = "open"\n' >> "$target/.agentic-loop.toml"
-printf '101 queued open low 2026-01-01T00:00:00Z none loop-continuity\n102 queued open critical 2026-01-01T00:00:00Z none confidentiality-incident\n103 queued open none 2026-01-01T00:00:00Z none integrity-incident\n104 queued open none 2026-01-01T00:00:00Z none availability-incident\n105 queued open none 2026-01-01T00:00:00Z none feature\n106 queued open none 2026-01-01T00:00:00Z none improvement\n107 queued open critical 2026-01-02T00:00:00Z none improvement\n108 queued open low 2025-01-01T00:00:00Z none improvement\n109 queued open critical 2026-01-02T00:00:00Z none improvement\n110 queued open none 2026-01-03T00:00:00Z none none\n111 queued open critical 2026-01-01T00:00:00Z none feature,availability-incident\n' > "$state"
+prio90=$(printf '<!-- agentic-loop:priority 90 -->' | base64 -w0)
+printf '101 queued open none 2026-01-01T00:00:00Z none loop-continuity %s\n102 queued open none 2026-01-01T00:00:00Z none confidentiality-incident %s\n103 queued open none 2026-01-01T00:00:00Z none integrity-incident\n104 queued open none 2026-01-01T00:00:00Z none availability-incident\n105 queued open none 2026-01-01T00:00:00Z none feature\n106 queued open none 2026-01-01T00:00:00Z none improvement %s\n107 queued open none 2026-01-02T00:00:00Z none improvement %s\n108 queued open none 2025-01-01T00:00:00Z none improvement\n109 queued open none 2026-01-02T00:00:00Z none improvement %s\n110 queued open none 2026-01-03T00:00:00Z none none\n111 queued open none 2026-01-01T00:00:00Z none feature,availability-incident\n' "$prio90" "$prio90" "$prio90" "$prio90" "$prio90" > "$state"
 : > "$FAKE_GH_ROOT/$state_key.comments"
 AGENTIC_LOOP_RUN_ONCE=1 FAKE_CODEX_SLEEP=1 "$target/bin/agentic-loop" _supervise
 claim_order=$(sed -n 's/^\([0-9][0-9]*\) .*agentic-loop:lease.*/\1/p' "$FAKE_GH_ROOT/$state_key.comments" | awk '!seen[$0]++' | paste -sd, -)
-[[ $claim_order == 101,102,103,111,104,105,107,109,108,106,110 ]] || fail "category queue order was incorrect: $claim_order"
+[[ $claim_order == 101,102,106,107,109,103,104,111,105,108,110 ]] || fail "queue order was incorrect (priority first, then category/created/number): $claim_order"
 grep -Eq '^110 completed closed .* improvement$' "$state" || fail 'missing category was not repaired to improvement'
 grep -Eq '^111 completed closed .* availability-incident$' "$state" || fail 'multiple categories did not retain only the highest-ranked category'
 assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'category-reconciled reason=missing' 'missing category repair was not audited'
 assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'category-reconciled reason=multiple selected=availability-incident' 'multiple category repair was not audited'
 
+# Numeric priority semantics: descending order, unset=0, multiple markers take
+# the maximum, and out-of-range/non-numeric markers are ignored. All Issues
+# share one category and created_at so only priority decides the order.
+write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=30 STOP_TIMEOUT=10 STALE_DAYS=30
+b100=$(printf '<!-- agentic-loop:priority 100 -->' | base64 -w0)
+b90=$(printf '<!-- agentic-loop:priority 90 -->' | base64 -w0)
+bmix=$(printf '<!-- agentic-loop:priority 50 -->\n<!-- agentic-loop:priority 75 -->' | base64 -w0)
+b75=$(printf '<!-- agentic-loop:priority 75 -->' | base64 -w0)
+binvalid=$(printf '<!-- agentic-loop:priority 200 -->' | base64 -w0)
+printf '41 queued open none 2026-01-01T00:00:00Z none improvement %s\n42 queued open none 2026-01-01T00:00:00Z none improvement %s\n43 queued open none 2026-01-01T00:00:00Z none improvement %s\n44 queued open none 2026-01-01T00:00:00Z none improvement\n45 queued open none 2026-01-01T00:00:00Z none improvement %s\n46 queued open none 2026-01-01T00:00:00Z none improvement %s\n' "$b90" "$bmix" "$b75" "$binvalid" "$b100" > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+queue_json=$("$target/bin/agentic-loop" status --format json)
+candidate_order=$(printf '%s' "$queue_json" | yq -p json '.queue.candidates[].issue' | paste -sd, -)
+[[ $candidate_order == 46,41,42,43,44,45 ]] || fail "priority semantics order was incorrect: $candidate_order"
+[[ $(printf '%s' "$queue_json" | yq -p json '.queue.candidates[0].priority') -eq 100 ]] || fail 'priority 100 candidate was not ranked first'
+[[ $(printf '%s' "$queue_json" | yq -p json '.queue.candidates[1].priority') -eq 90 ]] || fail 'priority 90 candidate did not sort after 100'
+[[ $(printf '%s' "$queue_json" | yq -p json '.queue.candidates[2].priority') -eq 75 ]] || fail 'multiple markers did not take the maximum (50 vs 75)'
+[[ $(printf '%s' "$queue_json" | yq -p json '.queue.candidates[4].priority') -eq 0 ]] || fail 'an unset priority was not treated as 0'
+[[ $(printf '%s' "$queue_json" | yq -p json '.queue.candidates[5].priority') -eq 0 ]] || fail 'an out-of-range marker was not treated as unset'
+
 # unknown_scope=open: this fixture also declares no scope and exercises the
-# worker limit and priority ordering, not scope conflict avoidance.
+# worker limit and priority ordering, not scope conflict avoidance. The two
+# highest-priority Issues (90, 90) are claimed first; the lower ones stay queued.
 write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=2 LEASE_SECONDS=3 STOP_TIMEOUT=10 STALE_DAYS=30
 printf 'unknown_scope = "open"\n' >> "$target/.agentic-loop.toml"
-printf '1 queued open low 2026-01-01T00:00:00Z\n2 queued open critical,low 2026-01-02T00:00:00Z\n3 queued open critical 2025-12-31T00:00:00Z\n4 queued open none 2025-01-01T00:00:00Z\n' > "$state"
-AGENTIC_LOOP_RUN_ONCE=1 FAKE_CODEX_SLEEP=1 FAKE_STALE_QUEUED_ISSUE=3 "$target/bin/agentic-loop" _supervise
+prio90=$(printf '<!-- agentic-loop:priority 90 -->' | base64 -w0)
+prio25=$(printf '<!-- agentic-loop:priority 25 -->' | base64 -w0)
+printf '1 queued open none 2026-01-01T00:00:00Z none none %s\n2 queued open none 2026-01-02T00:00:00Z none none %s\n3 queued open none 2025-12-31T00:00:00Z none none %s\n4 queued open none 2025-01-01T00:00:00Z none none\n' "$prio25" "$prio90" "$prio90" > "$state"
+AGENTIC_LOOP_RUN_ONCE=1 FAKE_CODEX_SLEEP=1 "$target/bin/agentic-loop" _supervise
 completed_count=$(awk '$2 == "completed" {count++} END {print count+0}' "$state")
 if [[ $completed_count -ne 2 ]]; then
   cat "$state" >&2
@@ -2267,14 +2384,52 @@ rm -f "$state_root/dependency/blocked-500"
 rm -f "$FAKE_GH_ROOT/$state_key.dep-links"
 write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=2 LEASE_SECONDS=3 STOP_TIMEOUT=10 STALE_DAYS=30
 
-# Multiple priority labels use the highest rank; setup creates all priority and stale labels idempotently.
-grep -Fq $'label create priority:critical' "$FAKE_GH_ROOT/calls" || fail 'setup did not create the critical priority label'
-grep -Fq $'label create priority:low' "$FAKE_GH_ROOT/calls" || fail 'setup did not create the low priority label'
+# Setup creates no priority:* label (numeric priority lives in the body marker
+# now) and creates the state and category labels idempotently.
+if grep -Fq $'label create priority:critical' "$FAKE_GH_ROOT/calls" || grep -Fq $'label create priority:high' "$FAKE_GH_ROOT/calls" || grep -Fq $'label create priority:medium' "$FAKE_GH_ROOT/calls" || grep -Fq $'label create priority:low' "$FAKE_GH_ROOT/calls"; then fail 'setup created a legacy priority label'; fi
 grep -Fq $'label create agent:stale' "$FAKE_GH_ROOT/calls" || fail 'setup did not create the stale state label'
 for category in loop-continuity confidentiality-incident integrity-incident availability-incident feature improvement; do
   grep -Fq "label create category:$category" "$FAKE_GH_ROOT/calls" || fail "setup did not create category:$category"
 done
 assert_contains "$FAKE_GH_ROOT/calls" 'project field-create 7 --owner acme --name Category --data-type SINGLE_SELECT' 'setup did not create the Project Category field'
+
+# Setup migrates legacy priority:* labels on open Issues into numeric body
+# markers (the highest label wins; an existing valid marker stays authoritative),
+# removes the Issue labels, and deletes the repository-level priority labels.
+migration_body=$(printf 'title\nbody' | base64 -w0)
+legacy_marker_body=$(printf 'title\n<!-- agentic-loop:priority 30 -->' | base64 -w0)
+printf '301 queued open critical 2026-01-01T00:00:00Z none improvement %s\n302 queued open low 2026-01-02T00:00:00Z none improvement %s\n303 running open critical,low 2026-01-03T00:00:00Z none improvement\n' "$migration_body" "$legacy_marker_body" > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+AGENTIC_LOOP_SKIP_START=1 "$target/bin/agentic-loop" setup >/dev/null
+decoded_301=$(awk -v n=301 '$1 == n {print $8}' "$state" | base64 -d)
+decoded_302=$(awk -v n=302 '$1 == n {print $8}' "$state" | base64 -d)
+grep -Fq 'agentic-loop:priority 90' <<< "$decoded_301" || fail 'setup migration did not convert critical to a priority-90 body marker'
+grep -Fq 'agentic-loop:priority 30' <<< "$decoded_302" || fail 'setup migration overwrote an existing valid body marker'
+[[ $(awk -v n=301 '$1 == n {print $4}' "$state") == none ]] || fail 'setup migration did not remove the legacy label from Issue 301'
+[[ $(awk -v n=302 '$1 == n {print $4}' "$state") == none ]] || fail 'setup migration did not remove the legacy label from Issue 302'
+[[ $(awk -v n=303 '$1 == n {print $4}' "$state") == none ]] || fail 'setup migration did not remove the legacy labels from Issue 303'
+if grep -Fq $'label create priority:' "$FAKE_GH_ROOT/calls"; then fail 'setup created a priority label during migration'; fi
+for legacy in critical high medium low; do
+  grep -Fq "label delete priority:$legacy" "$FAKE_GH_ROOT/calls" || fail "setup migration did not delete the repository priority:$legacy label"
+done
+
+# The priority CLI upserts the body marker (replacing any old one), records an
+# audit comment, drops a lingering legacy label, and the value is re-readable
+# through the same parser the queue uses.
+write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=2 LEASE_SECONDS=30 STOP_TIMEOUT=10 STALE_DAYS=30
+priority_cli_body=$(printf 'title\nold <!-- agentic-loop:priority 25 -->\nmore' | base64 -w0)
+printf '401 queued open critical 2026-01-01T00:00:00Z none improvement %s\n' "$priority_cli_body" > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+"$target/bin/agentic-loop" priority 401 90 >/dev/null
+decoded_401=$(awk -v n=401 '$1 == n {print $8}' "$state" | base64 -d)
+grep -Fq 'agentic-loop:priority 90' <<< "$decoded_401" || fail 'priority CLI did not upsert the body marker'
+grep -Fq 'agentic-loop:priority 25' <<< "$decoded_401" && fail 'priority CLI left the previous body marker behind'
+grep -Fq 'title' <<< "$decoded_401" || fail 'priority CLI did not preserve the rest of the body'
+[[ $(awk -v n=401 '$1 == n {print $4}' "$state") == none ]] || fail 'priority CLI did not drop the lingering legacy priority label'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:priority-set schema=1 actor=test-operator issue=401 value=90' 'priority CLI did not record its audit marker'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'priority を 90（0-100）に設定' 'priority CLI did not explain the change in Japanese'
+priority_json=$("$target/bin/agentic-loop" status --format json)
+[[ $(printf '%s' "$priority_json" | yq -p json '.queue.candidates[0].priority') -eq 90 ]] || fail 'priority CLI value was not re-readable by status'
 
 # Only inactive queued Issues are closed; the audit explains safe recovery.
 # unknown_scope=open: this fixture declares no scope for any Issue and
@@ -2962,15 +3117,18 @@ multi_json=$("$target/bin/agentic-loop" status --format json)
 rm -rf "$state_root/workers"
 
 # Scenario: queued Issues are counted, ordered exactly like claim_next
-# (category rank, then priority rank, then created_at, then number), and the
-# ordering is cross-checked against an actual claim.
+# (numeric priority desc, then category rank, then created_at, then number),
+# and the ordering is cross-checked against an actual claim.
 write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=30 STOP_TIMEOUT=10 STALE_DAYS=30
-printf '40 queued open low 2026-01-03T00:00:00Z none none\n41 queued open critical 2026-01-01T00:00:00Z none none\n' > "$state"
+prio90=$(printf '<!-- agentic-loop:priority 90 -->' | base64 -w0)
+prio25=$(printf '<!-- agentic-loop:priority 25 -->' | base64 -w0)
+printf '40 queued open none 2026-01-03T00:00:00Z none none %s\n41 queued open none 2026-01-01T00:00:00Z none none %s\n' "$prio25" "$prio90" > "$state"
 : > "$FAKE_GH_ROOT/$state_key.comments"
 queue_json=$("$target/bin/agentic-loop" status --format json)
 [[ $(printf '%s' "$queue_json" | yq -p json '.queue.queued') -eq 2 ]] || fail 'queued status did not count both Issues'
 [[ $(printf '%s' "$queue_json" | yq -p json '.queue.claimable') -eq 2 ]] || fail 'queued status did not report both Issues as claimable'
 [[ $(printf '%s' "$queue_json" | yq -p json '.queue.candidates[0].issue') -eq 41 ]] || fail 'queue candidate preview did not rank the higher-priority Issue first'
+[[ $(printf '%s' "$queue_json" | yq -p json '.queue.candidates[0].priority') -eq 90 ]] || fail 'queue candidate preview did not expose the numeric priority value'
 status_output=$("$target/bin/agentic-loop" status)
 grep -Fq '#41 Fake issue 41 (claimable)' <<< "$status_output" || fail 'text status did not show the top claim candidate as claimable'
 rm -f "$state_root/workers/41.pid"
@@ -3382,23 +3540,23 @@ t0i=$((window_start + 180000))  # 509: scope-conflict left open
 t0j=$((window_start + 190000))  # 510: dependency-blocked left open
 t0k=$((window_start + 200000))  # 511: needs-input answered, then completed
 
-t0l=$((window_start + 210000)) # 512: closed+completed but missing a priority: label (jq TSV null-field regression)
+t0l=$((window_start + 210000)) # 512: closed+completed with priority 0 (unset; jq TSV null-field regression)
 t0m=$((window_start + 220000)) # 513: open, but its only lease event and its only PR postdate --as-of (out-of-window event/PR regression)
 
 cat > "$metrics_issues" <<TSV
-501	$t0	$((t0 + 400))	closed	category:feature	priority:high	agent:completed
-502	$t0b	$((t0b + 500))	closed	category:improvement	priority:medium	agent:completed
-503	$t0c	0	open	category:improvement	priority:low	agent:needs-input
-504	$t0d	0	open	category:feature	priority:high	agent:running
-505	$t0e	$((t0e + 50))	closed	category:improvement	priority:medium	agent:completed
-506	$t0f	0	open	category:improvement	priority:low	agent:running
-507	$t0g	$((t0g + 30))	closed	category:feature	priority:high	agent:running
-508	$t0h	$((t0h + 100))	closed	category:feature	priority:high	agent:running
-509	$t0i	0	open	category:improvement	priority:low	agent:queued
-510	$t0j	0	open	category:improvement	priority:low	agent:blocked
-511	$t0k	$((t0k + 7300))	closed	category:feature	priority:medium	agent:completed
-512	$t0l	$((t0l + 40))	closed	category:feature	none	agent:completed
-513	$t0m	0	open	category:improvement	priority:low	agent:queued
+501	$t0	$((t0 + 400))	closed	category:feature	75	agent:completed
+502	$t0b	$((t0b + 500))	closed	category:improvement	50	agent:completed
+503	$t0c	0	open	category:improvement	25	agent:needs-input
+504	$t0d	0	open	category:feature	75	agent:running
+505	$t0e	$((t0e + 50))	closed	category:improvement	50	agent:completed
+506	$t0f	0	open	category:improvement	25	agent:running
+507	$t0g	$((t0g + 30))	closed	category:feature	75	agent:running
+508	$t0h	$((t0h + 100))	closed	category:feature	75	agent:running
+509	$t0i	0	open	category:improvement	25	agent:queued
+510	$t0j	0	open	category:improvement	25	agent:blocked
+511	$t0k	$((t0k + 7300))	closed	category:feature	50	agent:completed
+512	$t0l	$((t0l + 40))	closed	category:feature	0	agent:completed
+513	$t0m	0	open	category:improvement	25	agent:queued
 TSV
 
 cat > "$metrics_events" <<TSV
@@ -3450,9 +3608,9 @@ mj() { printf '%s' "$metrics_json" | yq -p json "$1"; }
 # Dispositions: label is authoritative except when a `declined` marker is
 # present (the worker never relabels on decline), which must still resolve to
 # "declined" rather than being misread from the stale agent:running label.
-[[ $(mj '.dispositions.completed') -eq 5 ]] || fail 'metrics miscounted completed dispositions (501, 502, 505 by label alone despite zero marker history, 511, 512 with a missing priority label)'
+[[ $(mj '.dispositions.completed') -eq 5 ]] || fail 'metrics miscounted completed dispositions (501, 502, 505 by label alone despite zero marker history, 511, 512 with priority 0)'
 [[ $(mj '.dispositions.declined') -eq 1 ]] || fail 'metrics did not detect a declined Issue behind a stale agent:running label'
-[[ $(mj '.dispositions.other') -eq 1 ]] || fail 'metrics did not flag the genuinely unclassifiable closed Issue (507) as other, or a missing priority: label on 512 shifted a later TSV column and corrupted its agent-label disposition'
+[[ $(mj '.dispositions.other') -eq 1 ]] || fail 'metrics did not flag the genuinely unclassifiable closed Issue (507) as other, or an unset priority on 512 shifted a later TSV column and corrupted its agent-label disposition'
 [[ $(mj '.dispositions.open') -eq 6 ]] || fail 'metrics miscounted still-open Issues'
 [[ $(mj '.dispositions.unresolved') -eq 0 && $(mj '.dispositions.stale') -eq 0 ]] || fail 'metrics fabricated an unresolved or stale disposition'
 [[ $(mj '.warnings[]') == *label_marker_mismatch* ]] || fail 'metrics did not warn about the label/marker mismatch'
@@ -3482,7 +3640,7 @@ mj() { printf '%s' "$metrics_json" | yq -p json "$1"; }
 [[ $(mj '.durations.lead_time.n') -eq 3 && $(mj '.durations.lead_time.max') -eq 7300 ]] || fail 'metrics computed the wrong lead_time distribution (505 is excluded: no completed marker despite the label)'
 
 [[ $(mj '.by_category.feature') -eq 6 && $(mj '.by_category.improvement') -eq 7 ]] || fail 'metrics miscounted by_category'
-[[ $(mj '.by_priority.high') -eq 4 && $(mj '.by_priority.medium') -eq 3 && $(mj '.by_priority.low') -eq 5 ]] || fail 'metrics miscounted by_priority'
+[[ $(mj '.by_priority."75"') -eq 4 && $(mj '.by_priority."50"') -eq 3 && $(mj '.by_priority."25"') -eq 5 && $(mj '.by_priority."0"') -eq 1 ]] || fail 'metrics miscounted by_priority (numeric body-marker keys)'
 [[ $(mj '.utilization.busy_seconds') -eq 2525 && $(mj '.utilization.max_workers') -eq 2 ]] || fail 'metrics computed the wrong worker-utilization busy_seconds'
 
 # Privacy: only enum/numeric marker fields, Issue numbers, and label names may
