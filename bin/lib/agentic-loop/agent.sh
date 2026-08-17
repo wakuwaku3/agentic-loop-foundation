@@ -207,10 +207,34 @@ agent_provider_usage_state() {
 
 # --- Pool exhaustion and recovery (Issue #155) ---
 # Exhaustion is recorded per pool (subscription) under STATE_ROOT/pools/<pool>/
-# (Git-ignored, key/token-free). Recovery is usage-measured where possible and
-# otherwise falls back to the fixed EXHAUSTION_PAUSE_SECONDS cooldown.
+# (Git-ignored, key/token-free). The marker holds a resume_epoch. When the
+# provider names a concrete reset (Codex "try again at ...", OpenCode
+# resetsAt), that epoch is stored so a multi-day weekly limit is not cleared
+# after the short EXHAUSTION_PAUSE_SECONDS default. Recovery never clears a
+# marker before resume_epoch; after it, measured recovery or a safe retry
+# (unreadable usage) may clear, while a still-exhausted measurement extends
+# the marker by the default pause.
 
 agent_pool_marker() { printf '%s/pools/%s/exhausted' "$STATE_ROOT" "$(agent_pool_sanitize "$1")"; }
+
+# Best-effort parse of a provider-stated reset instant into epoch seconds.
+# Accepts ISO-8601 (…Z) and Codex-style "try again at Aug 20th, 2026 9:27 PM".
+# Returns non-zero when nothing parseable is found.
+agent_parse_reset_epoch() {
+  local text=${1:-} iso human epoch
+  [[ -n $text ]] || return 1
+  iso=$(grep -oiE '[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]+)?Z?' <<< "$text" | head -n 1 || true)
+  if [[ -n $iso ]]; then
+    epoch=$(date -d "$iso" +%s 2>/dev/null) || true
+    [[ $epoch =~ ^[0-9]+$ ]] && { printf '%s\n' "$epoch"; return 0; }
+  fi
+  human=$(grep -oiE 'try again at[[:space:]]+[^.;\n]+' <<< "$text" | head -n 1 | sed -E 's/^[Tt]ry again at[[:space:]]+//; s/([0-9]+)(st|nd|rd|th)/\1/g' || true)
+  if [[ -n $human ]]; then
+    epoch=$(date -d "$human" +%s 2>/dev/null) || true
+    [[ $epoch =~ ^[0-9]+$ ]] && { printf '%s\n' "$epoch"; return 0; }
+  fi
+  return 1
+}
 
 
 # The distinct pools referenced by any phase (sanitized, for `for` loops).
@@ -248,9 +272,9 @@ agent_pool_marker_active() {
 }
 
 
-# Usage-based early recovery: true when at least one provider of the pool is
+# Usage-based recovery probe: true when at least one provider of the pool is
 # measurably recovered and none is measurably exhausted. Unmeasurable providers
-# defer to the cooldown below.
+# do not count as recovered (fail closed while a marker is held).
 agent_pool_usage_recovered() {
   local pool=$1 provider recovered=0
   for provider in $(agent_pool_providers "$pool"); do
@@ -262,28 +286,75 @@ agent_pool_usage_recovered() {
   (( recovered == 1 ))
 }
 
+# True when any provider of the pool is measurably still exhausted.
+agent_pool_usage_still_exhausted() {
+  local pool=$1 provider
+  for provider in $(agent_pool_providers "$pool"); do
+    case $(agent_provider_usage_state "$provider") in
+      exhausted) return 0 ;;
+    esac
+  done
+  return 1
+}
 
-# Whether the pool is currently exhausted, attempting recovery first (usage
-# measurement, then cooldown expiry). Returns 0 when exhausted.
+
+# Whether the pool is currently exhausted. A marker before its resume_epoch is
+# always binding (provider-stated multi-day resets must not be cut short by a
+# stale session-log "recovered" reading). After resume_epoch: clear on measured
+# recovery or unreadable usage (retry); if usage is still exhausted, extend the
+# marker by EXHAUSTION_PAUSE_SECONDS and stay exhausted. Returns 0 when exhausted.
 agent_pool_exhausted() {
   local pool=$1 marker resume now
   marker=$(agent_pool_marker "$pool")
   [[ -r $marker ]] || return 1
-  if agent_pool_usage_recovered "$pool"; then rm -f "$marker"; return 1; fi
   read -r resume < "$marker" || true
   now=$(date +%s)
-  if [[ $resume =~ ^[0-9]+$ ]] && (( now >= resume )); then rm -f "$marker"; return 1; fi
-  return 0
+  if [[ $resume =~ ^[0-9]+$ ]] && (( now < resume )); then
+    return 0
+  fi
+  if agent_pool_usage_still_exhausted "$pool"; then
+    printf '%s\n' "$(( now + EXHAUSTION_PAUSE_SECONDS ))" > "$marker"
+    return 0
+  fi
+  if agent_pool_usage_recovered "$pool"; then
+    rm -f "$marker"
+    return 1
+  fi
+  # resume_epoch reached and usage unreadable: allow a single retry attempt.
+  rm -f "$marker"
+  return 1
 }
 
 
 # Record that a pool's quota is spent so the picker skips it and the supervisor
-# pauses claiming only when every pool becomes unavailable.
+# pauses claiming only when every pool becomes unavailable. Optional second
+# argument is a result file path or free-form diagnostic text; when it names a
+# concrete reset instant, that epoch is preferred over the short default pause.
+# An existing later resume_epoch is never shortened.
 agent_mark_pool_exhausted() {
-  local pool=$1 marker
+  local pool=$1 source=${2:-} marker resume now parsed='' existing='' text=''
   marker=$(agent_pool_marker "$pool")
   mkdir -p "$(dirname "$marker")"
-  printf '%s\n' "$(( $(date +%s) + EXHAUSTION_PAUSE_SECONDS ))" > "$marker"
+  now=$(date +%s)
+  resume=$((now + EXHAUSTION_PAUSE_SECONDS))
+  if [[ -n $source ]]; then
+    if [[ -f $source && -r $source ]]; then
+      text=$(cat "$source" 2>/dev/null || true)
+    else
+      text=$source
+    fi
+    parsed=$(agent_parse_reset_epoch "$text" 2>/dev/null || true)
+    if [[ $parsed =~ ^[0-9]+$ ]] && (( parsed > resume )); then
+      resume=$parsed
+    fi
+  fi
+  if [[ -r $marker ]]; then
+    read -r existing < "$marker" || true
+    if [[ $existing =~ ^[0-9]+$ ]] && (( existing > resume )); then
+      resume=$existing
+    fi
+  fi
+  printf '%s\n' "$resume" > "$marker"
 }
 
 
@@ -657,7 +728,7 @@ run_stage_candidates() {
       "$CAND_POOL" "$CAND_PROVIDER" "$CAND_MODEL" "$CAND_EFFORT" || STAGE_EXIT_CODE=$?
     if agent_result_is_pool_exhausted "$result_file" "$STAGE_EXIT_CODE"; then
       LAST_EXHAUSTED_POOL=$CAND_POOL
-      agent_mark_pool_exhausted "$CAND_POOL"
+      agent_mark_pool_exhausted "$CAND_POOL" "$result_file"
       pool_saw_exhausted=1
       say "プール枠枯渇のため次の候補へ切り替えます: pool=$CAND_POOL provider=$CAND_PROVIDER model=$CAND_MODEL" >&2
       continue
