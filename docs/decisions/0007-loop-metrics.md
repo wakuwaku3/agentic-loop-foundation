@@ -15,7 +15,7 @@ Agentic Loopは既に、lease・usage・handoff・retry・recovered・worker-tim
 
 `bin/agentic-loop metrics`は次の3クエリだけを読み取る。
 
-- `GET issues?state=all&since=<窓開始>`: Issue番号・作成時刻・close時刻・stateと、`category:*`/`priority:*`/`agent:*`ラベル。
+- `GET issues?state=all&since=<窓開始>`: Issue番号・作成時刻・close時刻・stateと、`category:*`/`agent:*`ラベル、本文markerの数値priority（0-100、未設定0）。
 - `GET issues/comments?since=<窓開始>&sort=created&direction=asc`: repository全体のIssueコメントを走査し、`<!-- agentic-loop:...-->` marker文字列を含む行だけを対象にする。Issue番号は`.issue_url`から取り、上記Issue集合に無い番号（Pull Requestの一般コメント）は内部結合で除外する。
 - `GET pulls?state=all`: Pull Request番号・作成時刻・merge時刻と`head.ref`（`agent/issue-<N>`のみ対象）。
 
@@ -47,7 +47,7 @@ closedなIssueは、そのclose時刻が窓に入っている場合だけ`comple
 
 ### `category`/`priority`別集計は作成時刻で窓に帰属する
 
-closeの有無に関わらず、Issue作成時刻が窓に入っているものだけを`by_category`/`by_priority`の分母に数える。「今期どんな種類の要求が積まれたか」を見るための集計であり、転帰(closeベース)とは異なる窓の切り方を意図的に採用する。両者の非対称性は`docs/operations/loop-metrics.md`に明記する。
+closeの有無に関わらず、Issue作成時刻が窓に入っているものだけを`by_category`/`by_priority`の分母に数える。「今期どんな種類の要求が積まれたか」を見るための集計であり、転帰(closeベース)とは異なる窓の切り方を意図的に採用する。両者の非対称性は`docs/operations/loop-metrics.md`に明記する。`by_priority`のキーは本文markerの数値priority（[0015](0015-numeric-priority-marker.md)）で、出現した値だけを文字列キー（`"0"`, `"50"`, `"90"`等）として出力する。旧`priority:*`labelは読まない。
 
 ### worker稼働率は設備占有率として定義し、個人の速度指標にしない
 

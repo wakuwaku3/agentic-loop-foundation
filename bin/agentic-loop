@@ -2,7 +2,7 @@
 # SC2034: shared globals are declared here and consumed by the sourced modules.
 # SC1091: modules are sourced at runtime; `source=` directives document the path
 # for shellcheck -x / editors and are followed only when -x is enabled.
-# shellcheck disable=SC2016,SC2034,SC2155,SC1091
+# shellcheck disable=SC2016,SC2034,SC2155,SC1091,SC2154
 set -euo pipefail
 
 readonly PROGRAM_NAME="${0##*/}"
@@ -39,7 +39,11 @@ readonly CONFIG_FILE="$REPO_ROOT/.agentic-loop.toml"
 readonly CONFIG_LOCAL="$REPO_ROOT/.agentic-loop.local.toml"
 readonly LABELS=(queued running needs-input in-review stopping completed failed stale blocked cancelled superseded duplicate merged)
 readonly DISPOSITION_LABELS=(cancelled superseded duplicate merged)
-readonly PRIORITY_LABELS=(critical high medium low)
+# Legacy priority:* label to numeric marker mapping, used only by the one-time
+# setup migration (docs/decisions/0015-numeric-priority-marker.md). New queue
+# ordering reads the numeric body marker directly; priority labels are never
+# created and their numeric value is never re-read from labels.
+readonly -A PRIORITY_LEGACY_VALUES=([critical]=90 [high]=75 [medium]=50 [low]=25)
 readonly CATEGORY_LABELS=(loop-continuity confidentiality-incident integrity-incident availability-incident feature improvement)
 readonly DIAGNOSIS_LABEL=diagnosis
 # Grace before a lock without a published pid is treated as stale, so two
@@ -117,6 +121,8 @@ source "$SCRIPT_ROOT/bin/lib/agentic-loop/api.sh"
 source "$SCRIPT_ROOT/bin/lib/agentic-loop/agent.sh"
 # shellcheck source=lib/agentic-loop/setup.sh
 source "$SCRIPT_ROOT/bin/lib/agentic-loop/setup.sh"
+# shellcheck source=lib/agentic-loop/priority.sh
+source "$SCRIPT_ROOT/bin/lib/agentic-loop/priority.sh"
 # shellcheck source=lib/agentic-loop/service.sh
 source "$SCRIPT_ROOT/bin/lib/agentic-loop/service.sh"
 # shellcheck source=lib/agentic-loop/status.sh
@@ -148,12 +154,13 @@ load_config || { [[ ${1:-} == doctor ]] || fail "$CONFIG_ERROR"; }
 
 usage() {
   cat >&2 <<EOF
-Usage: $PROGRAM_NAME {setup|sync-issue ISSUE|dispose ISSUE --reason cancelled|superseded|duplicate|merged [--target ISSUE]|resume ISSUE|start|stop|status [--format json] [--watch [N]]|doctor [--format json]|metrics [--days N] [--as-of EPOCH] [--format json]|tail [--issue N] [--follow]|upgrade [--source PATH|--revision SHA] [--apply] [--approve] [--rollback] [--skip-verify] [--overwrite PATH]... [--format json]}
+Usage: $PROGRAM_NAME {setup|sync-issue ISSUE|dispose ISSUE --reason cancelled|superseded|duplicate|merged [--target ISSUE]|resume ISSUE|priority ISSUE N|start|stop|status [--format json] [--watch [N]]|doctor [--format json]|metrics [--days N] [--as-of EPOCH] [--format json]|tail [--issue N] [--follow]|upgrade [--source PATH|--revision SHA] [--apply] [--approve] [--rollback] [--skip-verify] [--overwrite PATH]... [--format json]}
 
   setup   Create or reuse this repository's labels and Project
   sync-issue  Add one Issue to the Project now, or queue a retry
   dispose     Authorized, auditable cancellation or consolidation of an Issue
   resume      Authorized reopening of a disposed Issue
+  priority    Set an Issue's numeric priority (0-100) via its body marker
   start   Start one background supervisor for this repository
   stop    Stop claiming work and drain running workers
   status  Show what is running, queued, waiting, and any anomalies (always exit 0)
@@ -172,6 +179,7 @@ main() {
     sync-issue) [[ $# -eq 2 ]] || fail 'sync-issue requires one Issue number'; cmd_sync_issue "$2" ;;
     dispose) cmd_dispose "${@:2}" ;;
     resume) [[ $# -eq 2 ]] || fail 'resume requires one Issue number'; cmd_resume "$2" ;;
+    priority) cmd_priority "$2" "$3" ;;
     start) [[ $# -eq 1 ]] || fail 'start takes no arguments'; cmd_start ;;
     stop) [[ $# -eq 1 ]] || fail 'stop takes no arguments'; cmd_stop ;;
     status) cmd_status "${@:2}" ;;

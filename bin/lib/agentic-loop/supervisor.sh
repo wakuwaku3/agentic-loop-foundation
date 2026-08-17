@@ -5,11 +5,13 @@
 
 
 # jq expression fragment (evaluated with an Issue object as `.`) producing the
-# two numeric ranks -- category then priority -- used to order agent:queued
-# Issues. Shared by claim_next and cmd_status's claim-candidate preview so the
-# two orderings cannot drift apart.
+# two numeric ranks -- numeric priority then category -- used to order
+# agent:queued Issues. Shared by claim_next and cmd_status's claim-candidate
+# preview so the two orderings cannot drift apart. The priority value is the
+# body marker's maximum in-range N (0-100, unset=0); see docs/decisions/
+# 0015-numeric-priority-marker.md.
 queue_rank_jq() {
-  printf '%s' '(if any(.labels[]; .name == "category:loop-continuity") then 0 elif any(.labels[]; .name == "category:confidentiality-incident") then 1 elif any(.labels[]; .name == "category:integrity-incident") then 2 elif any(.labels[]; .name == "category:availability-incident") then 3 elif any(.labels[]; .name == "category:feature") then 4 else 5 end), (if any(.labels[]; .name == "priority:critical") then 0 elif any(.labels[]; .name == "priority:high") then 1 elif any(.labels[]; .name == "priority:medium") then 2 elif any(.labels[]; .name == "priority:low") then 3 else 4 end)'
+  printf '%s' '('"$(queue_priority_jq)"'), (if any(.labels[]; .name == "category:loop-continuity") then 0 elif any(.labels[]; .name == "category:confidentiality-incident") then 1 elif any(.labels[]; .name == "category:integrity-incident") then 2 elif any(.labels[]; .name == "category:availability-incident") then 3 elif any(.labels[]; .name == "category:feature") then 4 else 5 end)'
 }
 
 
@@ -46,9 +48,12 @@ claim_next() {
     clear_worker_local "$issue"
   done < <(
     if [[ -n $SUPERVISOR_SNAPSHOT && -r $SUPERVISOR_SNAPSHOT ]]; then
-      snapshot_state_rows queued | awk -F '\t' '{print $7 "\t" $8 "\t" $4 "\t" $1 "\t" $5}' | sort -k1,1n -k2,2n -k3,3 -k4,4n | cut -f4,5
+      # Snapshot rows are number, state, updated, created, body, categories,
+      # category_rank, priority_value. Reorder to claim_next's comparator:
+      # priority (desc), category, created_at, number, then body.
+      snapshot_state_rows queued | awk -F '\t' '{print $8 "\t" $7 "\t" $4 "\t" $1 "\t" $5}' | sort -k1,1nr -k2,2n -k3,3 -k4,4n | cut -f4,5
     else
-      repo_api issues --method GET -f state=open -f labels="$(state_label queued)" -f per_page=100 --paginate --jq '.[] | select(.pull_request == null) | ['"$(queue_rank_jq)"', .created_at, .number, (.body // "" | @base64)] | @tsv' 2>/dev/null | sort -k1,1n -k2,2n -k3,3 -k4,4n | awk -F '\t' '{print $4 "\t" $5}'
+      repo_api issues --method GET -f state=open -f labels="$(state_label queued)" -f per_page=100 --paginate --jq '.[] | select(.pull_request == null) | ['"$(queue_rank_jq)"', .created_at, .number, (.body // "" | @base64)] | @tsv' 2>/dev/null | sort -k1,1nr -k2,2n -k3,3 -k4,4n | awk -F '\t' '{print $4 "\t" $5}'
     fi
   )
   return 1

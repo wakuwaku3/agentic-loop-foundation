@@ -49,9 +49,10 @@ status_dependency_waits() {
 
 # One TSV row per open Issue, classified purely by its own agent:* Label into
 # running/queued/needs-input/failed/in-review/blocked/other, plus the
-# queue_rank_jq ranks and created_at (used only to order queued rows the same
-# way claim_next does). A single REST(core) call backs every section below
-# except the closed agent:stale summary (see status_stale_fetch).
+# queue_rank_jq ranks (numeric priority, then category) and created_at (used
+# only to order queued rows the same way claim_next does). A single REST(core)
+# call backs every section below except the closed agent:stale summary (see
+# status_stale_fetch).
 status_snapshot_fetch() {
   repo_api issues --method GET -f state=open -f per_page=100 --paginate --jq '
     .[] | select(.pull_request == null) |
@@ -335,7 +336,7 @@ status_collect_anomalies() {
 
 status_collect_snapshot() {
   STATUS_GITHUB_OK=1
-  local raw num title state catrank priorank created
+  local raw num title state priority catrank created
   if status_cache_fresh "$STATUS_SNAPSHOT_FETCHED"; then
     raw=$STATUS_SNAPSHOT_RAW
   elif ! raw=$(status_snapshot_fetch); then
@@ -345,11 +346,11 @@ status_collect_snapshot() {
     STATUS_SNAPSHOT_RAW=$raw
     STATUS_SNAPSHOT_FETCHED=$(date +%s)
   fi
-  while IFS=$'\t' read -r num title state catrank priorank created; do
+  while IFS=$'\t' read -r num title state priority catrank created; do
     [[ -n $num ]] || continue
     case $state in
       running) RUN_NUM+=("$num"); RUN_TITLE+=("$title") ;;
-      queued) QUEUE_NUM+=("$num"); QUEUE_TITLE+=("$title"); QUEUE_CATRANK+=("$catrank"); QUEUE_PRIORANK+=("$priorank"); QUEUE_CREATED+=("$created") ;;
+      queued) QUEUE_NUM+=("$num"); QUEUE_TITLE+=("$title"); QUEUE_PRIORITY+=("$priority"); QUEUE_CATRANK+=("$catrank"); QUEUE_CREATED+=("$created") ;;
       needs-input) NEEDSINPUT_NUM+=("$num"); NEEDSINPUT_TITLE+=("$title") ;;
       failed) FAILED_NUM+=("$num"); FAILED_TITLE+=("$title") ;;
       in-review) INREVIEW_NUM+=("$num"); INREVIEW_TITLE+=("$title") ;;
@@ -381,13 +382,13 @@ status_collect_stale() {
 
 
 # The agent:queued snapshot rows, sorted with claim_next's exact comparator
-# (category rank, priority rank, created_at, number) so the candidate preview
-# matches the order Issues will actually be claimed in.
+# (numeric priority desc, category rank, created_at, number) so the candidate
+# preview matches the order Issues will actually be claimed in.
 status_queue_sorted() {
   local i
   for i in "${!QUEUE_NUM[@]}"; do
-    printf '%s\t%s\t%s\t%s\t%s\n' "${QUEUE_CATRANK[$i]}" "${QUEUE_PRIORANK[$i]}" "${QUEUE_CREATED[$i]}" "${QUEUE_NUM[$i]}" "${QUEUE_TITLE[$i]}"
-  done | sort -k1,1n -k2,2n -k3,3 -k4,4n
+    printf '%s\t%s\t%s\t%s\t%s\n' "${QUEUE_PRIORITY[$i]}" "${QUEUE_CATRANK[$i]}" "${QUEUE_CREATED[$i]}" "${QUEUE_NUM[$i]}" "${QUEUE_TITLE[$i]}"
+  done | sort -k1,1nr -k2,2n -k3,3 -k4,4n
 }
 
 
@@ -578,7 +579,7 @@ status_render_json() {
   while IFS=$'\t' read -r rank1 rank2 created num title; do
     [[ -n $num ]] || continue
     status_queue_candidate_reason "$num"
-    printf '%s{"issue":%s,"title":"%s","category_rank":%s,"priority_rank":%s,"created_at":"%s","claimable":%s,"withheld":"%s","withheld_detail":"%s"}' \
+    printf '%s{"issue":%s,"title":"%s","priority":%s,"category_rank":%s,"created_at":"%s","claimable":%s,"withheld":"%s","withheld_detail":"%s"}' \
       "$sep" "$num" "$(json_escape "$title")" "$rank1" "$rank2" "$(json_escape "$created")" \
       "$( [[ $STATUS_CANDIDATE_REASON == claimable ]] && printf true || printf false )" \
       "$(json_escape "$STATUS_CANDIDATE_REASON")" "$(json_escape "$STATUS_CANDIDATE_DETAIL")"
@@ -674,7 +675,7 @@ cmd_status() {
     return 0
   fi
   declare -ga RUN_NUM=() RUN_TITLE=()
-  declare -ga QUEUE_NUM=() QUEUE_TITLE=() QUEUE_CATRANK=() QUEUE_PRIORANK=() QUEUE_CREATED=()
+  declare -ga QUEUE_NUM=() QUEUE_TITLE=() QUEUE_PRIORITY=() QUEUE_CATRANK=() QUEUE_CREATED=()
   declare -ga NEEDSINPUT_NUM=() NEEDSINPUT_TITLE=() FAILED_NUM=() FAILED_TITLE=() INREVIEW_NUM=() INREVIEW_TITLE=() BLOCKED_NUM=() BLOCKED_TITLE=()
   declare -ga STALE_NUM=() STALE_TITLE=()
   declare -ga ANOMALY_LEVEL=() ANOMALY_CODE=() ANOMALY_SUBJECT=() ANOMALY_DETAIL=()

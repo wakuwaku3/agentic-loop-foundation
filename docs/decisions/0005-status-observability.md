@@ -21,10 +21,10 @@
 `status`が新たに表示する項目のほとんどは、既存のworkerが既に観測してlocalへ書いている値の再利用で得られる。追加のGitHub呼び出しを増やさない。
 
 - **running Issueの詳細**（開始時刻・経過時間・最終heartbeat・lease期限・worktree・PR情報）は、`workers/<issue>.started`（`worker()`起動直後に書く）、`workers/<issue>.lease`（`id\texpires\theartbeat`のTSVへ拡張。旧形式（idのみ）も読める後方互換）、`workers/<issue>.resume`（`resume_handoff_write()`が`resume_probe()`の観測結果をそのままTSVで書く。既存の`agentic-loop:handoff`コメントと同じ実体で、定義上secretを含みえない）から読む。GitHub呼び出しは0回。
-- **queuedの件数・次のclaim候補・needs-input/failed/in-review/blocked/staleの件数**は、1回の`status_snapshot_fetch()`（open Issue全件を`agent:*`ラベルで分類し、`queue_rank_jq`（`claim_next`と共有するcategory/priority rank式）も同時に計算する）と、1回の`status_stale_fetch()`（closedな`agent:stale`を最大100件、`--paginate`なし）で得る。1回の実行での REST(core)読み取りは最大2回。GraphQL・Projects APIは呼ばない。
+- **queuedの件数・次のclaim候補・needs-input/failed/in-review/blocked/staleの件数**は、1回の`status_snapshot_fetch()`（open Issue全件を`agent:*`ラベルで分類し、`queue_rank_jq`（`claim_next`と共有するpriority値・category rank式）も同時に計算する）と、1回の`status_stale_fetch()`（closedな`agent:stale`を最大100件、`--paginate`なし）で得る。1回の実行での REST(core)読み取りは最大2回。GraphQL・Projects APIは呼ばない。
 - **異常検知**（staleなsupervisor pid/lock、期限切れlease、residualなworktree/branch、破損local state、Project同期の再試行待ち、claim一時停止）は、Supervisor自身が既に読み書きしているmarker file（`supervisor.pid`/`.lock`、`budget-paused`、`core-budget-paused`、`agent-exhausted`、`stop.requested`、`project-pending`）とGit local操作（`git worktree list`、`git for-each-ref`）だけで判定する。`gh api rate_limit` は呼ばない。
 
-queued候補の順序が`claim_next`と食い違うと運用者を誤誘導するため、category/priority rankのjq式を`queue_rank_jq()`として1箇所に抽出し、`claim_next`と`status`の双方から呼ぶ（sort/awkパイプラインは各呼び出し側に残すが、rank式そのものはdriftしない）。
+queued候補の順序が`claim_next`と食い違うと運用者を誤誘導するため、priority値・category rankのjq式を`queue_rank_jq()`として1箇所に抽出し、`claim_next`と`status`の双方から呼ぶ（sort/awkパイプラインは各呼び出し側に残すが、rank式そのものはdriftしない）。priority値は本文marker（[0015](0015-numeric-priority-marker.md)）から導出する。
 
 ### 依存関係・queued候補はbest-effortの再現であり、claim判定そのものではない
 

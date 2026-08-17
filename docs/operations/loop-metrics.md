@@ -18,7 +18,7 @@ REST(core)読み取りは常に3本に固定する。
 
 | 収集 | endpoint | 用途 |
 | --- | --- | --- |
-| A | `GET issues?state=all&since=<窓開始>` | Issue番号、作成時刻、close時刻、state、`category:*`/`priority:*`/`agent:*` label |
+| A | `GET issues?state=all&since=<窓開始>` | Issue番号、作成時刻、close時刻、state、`category:*`/`agent:*` label、本文markerの数値priority（0-100、未設定0） |
 | B | `GET issues/comments?since=<窓開始>&sort=created&direction=asc` | `<!-- agentic-loop:...-->` marker文字列とその作成時刻（`.issue_url`からIssue番号を得て、収集Aの集合に無い番号＝PRの一般コメントは除外する） |
 | C | `GET pulls?state=all` | `agent/issue-<N>`ブランチのPR番号、作成時刻、merge時刻 |
 
@@ -26,9 +26,9 @@ Actions（CI run）、GraphQL、Projects APIは読まない。理由は[ADR 0007
 
 ### privacy境界
 
-- 収集Bはコメント本文のうち`<!-- agentic-loop:...-->`の中身だけを取り出す。Issue本文、コメントの日本語本文、worker log、providerへの生のpromptは要求も保存もしない。
+- 収集AはIssue本文のうち数値`agentic-loop:priority` marker値（0-100）だけを取り出し、収集Bはコメント本文のうち`<!-- agentic-loop:...-->`の中身だけを取り出す。Issue本文の他の部分、コメントの日本語本文、worker log、providerへの生のpromptは要求も保存もしない。
 - markerの`worker=`fieldは常に破棄する。出力にworker識別子は一切現れず、worker単位の内訳・ランキングを出す経路も実装しない。
-- Issue titleは収集A・B・Cのいずれでも取得しない。出力に現れるのはIssue番号・PR番号・集計値・label名・enum値だけである。
+- Issue titleは収集A・B・Cのいずれでも取得しない。出力に現れるのはIssue番号・PR番号・集計値・label名・enum値・数値priorityだけである。
 
 ## 指標schema
 
@@ -53,7 +53,7 @@ Actions（CI run）、GraphQL、Projects APIは読まない。理由は[ADR 0007
 
 ### category / priority別集計
 
-`by_category` / `by_priority` は、**Issue作成時刻**が窓に入っているものだけを分母にする（転帰の集計とは異なる窓の切り方であることに注意する）。「今期どんな種類の要求が積まれたか」を見るための集計である。
+`by_category` / `by_priority` は、**Issue作成時刻**が窓に入っているものだけを分母にする（転帰の集計とは異なる窓の切り方であることに注意する）。「今期どんな種類の要求が積まれたか」を見るための集計である。`by_priority` のキーは本文markerの数値priority（[ADR 0015](../decisions/0015-numeric-priority-marker.md)）で、出現した値だけを文字列キー（`"0"`、`"50"`、`"90"`等）として昇順に出力する。旧 `priority:*` labelは読まない（移行後は存在しない）。
 
 ### 件数系（counters）
 
@@ -83,7 +83,7 @@ Actions（CI run）、GraphQL、Projects APIは読まない。理由は[ADR 0007
   "failures": {},
   "utilization": {"max_workers": 4, "window_seconds": 2592000, "busy_seconds": 0, "ratio": 0},
   "by_category": {"loop-continuity": 0, "confidentiality-incident": 0, "integrity-incident": 0, "availability-incident": 0, "feature": 0, "improvement": 0},
-  "by_priority": {"critical": 0, "high": 0, "medium": 0, "low": 0},
+  "by_priority": {"25": 2, "50": 1, "75": 3},
   "warnings": []
 }
 ```
@@ -132,10 +132,7 @@ category別件数（作成が対象期間内のIssue）:
   feature: 8件
   improvement: 15件
 priority別件数（作成が対象期間内のIssue）:
-  critical: 0件
-  high: 0件
-  medium: 0件
-  low: 0件
+  なし（窓内作成Issueにpriority markerがありません）
 worker稼働率: 0.0070（max_workers=4, 対象期間=7776000秒, 稼働=217718秒。個人やworker単位の速度ではなく設備全体の占有率です）
 警告:
   label_marker_mismatch: 窓内でcloseしたIssueのうち3件はLabelからdispositionを判定できませんでした（otherとして集計）。
@@ -143,7 +140,7 @@ worker稼働率: 0.0070（max_workers=4, 対象期間=7776000秒, 稼働=217718�
 
 同じ`--as-of`で再実行し、出力が完全に一致することを確認済み（再現可能性の確認。text形式は`generated_at`を含まないためbyte一致）。
 
-`priority`別件数が全て0件なのは指標の欠陥ではない: このリポジトリで`priority:*`labelの付与が始まったのは取得日2026-08-13の07時台からであり、`--as-of`（同日00:00 UTC）の時点では1件も存在しないため。今後`priority:*`の運用が進めば非ゼロになる。
+`priority`別件数が「なし」なのは指標の欠陥ではない: このbaselineは本変更の統合前（2026-08-13）に旧実装で取得した実測記録であり、当時の窓内Issueに本文markerの`agentic-loop:priority`は1件も存在しないため。統合後は`bin/agentic-loop priority`や手動marker編集で運用すれば、`by_priority`は出現した数値キー（`"0"`〜`"100"`）だけで非ゼロになる。旧`priority:*`label時代のキー（critical/high/medium/low）は読まない。
 
 ## 既知の限界・v1で計測しないもの
 

@@ -26,15 +26,6 @@ setup_labels() {
     esac
     setup_label "$(state_label "$name")" "$color" "$description" "$current"
   done
-  for name in "${PRIORITY_LABELS[@]}"; do
-    case $name in
-      critical) color=B60205; description='Critical priority' ;;
-      high) color=D93F0B; description='High priority' ;;
-      medium) color=FBCA04; description='Medium priority' ;;
-      low) color=0E8A16; description='Low priority' ;;
-    esac
-    setup_label "priority:$name" "$color" "$description" "$current"
-  done
   for name in "${CATEGORY_LABELS[@]}"; do
     case $name in
       loop-continuity) color=5319E7; description='Agentic Loop continuity and maintenance' ;;
@@ -57,6 +48,42 @@ setup_label() {
   ) || true
   [[ $existing_color == "$color" && $existing_description == "$description" ]] && return 0
   gh label create "$name" --color "$color" --description "$description" --force >/dev/null
+}
+
+
+# One-time migration of the legacy priority:critical|high|medium|low labels
+# (see docs/decisions/0015-numeric-priority-marker.md). For every open Issue
+# still carrying one of them: convert the highest label to its numeric value
+# (90/75/50/25) and append it as a body marker only when the body has no valid
+# marker yet (an existing marker stays authoritative), then drop the labels.
+# Finally delete the repository-level priority:* label definitions. Setup no
+# longer creates these labels, so this is the only path that removes them.
+# Idempotent and bounded: open Issues only (closed Issues keep a now-harmless
+# label; the repository-level delete stops new assignments).
+migrate_priority_labels() {
+  local rows issue body_b64 body legacy value existing new_body labels_json name
+  rows=$(repo_api issues --method GET -f state=open -f per_page=100 --paginate --jq '
+    .[] | select(.pull_request == null) | select(any(.labels[]; .name | startswith("priority:"))) |
+    [.number, ((.body // "") | @base64), ([.labels[].name | select(startswith("priority:"))] | join(","))] | @tsv' 2>/dev/null) || return 0
+  [[ -n $rows ]] || return 0
+  while IFS=$'\t' read -r issue body_b64 legacy; do
+    [[ $issue =~ ^[1-9][0-9]*$ ]] || continue
+    body=$(base64 -d <<< "$body_b64" 2>/dev/null || true)
+    value=0
+    for name in critical high medium low; do
+      if [[ ,$legacy, == *",$name,"* ]] && (( ${PRIORITY_LEGACY_VALUES[$name]} > value )); then value=${PRIORITY_LEGACY_VALUES[$name]}; fi
+    done
+    existing=$(body_priority_value "$body")
+    if (( existing == 0 && value > 0 )); then
+      new_body=$(printf '%s\n<!-- agentic-loop:priority %s -->' "$body" "$value")
+      repo_api "issues/$issue" --method PATCH -f body="$new_body" >/dev/null 2>&1 || continue
+    fi
+    labels_json=$(repo_api "issues/$issue" --jq '[.labels[].name | select(startswith("priority:") | not)]' 2>/dev/null) || continue
+    printf '%s\n' "$labels_json" | repo_api "issues/$issue/labels" --method PUT --input - >/dev/null 2>&1 || continue
+  done <<< "$rows"
+  for name in critical high medium low; do
+    gh label delete "priority:$name" --yes >/dev/null 2>&1 || true
+  done
 }
 
 
@@ -194,6 +221,7 @@ setup_project_views() {
 cmd_setup() {
   preflight
   setup_labels
+  migrate_priority_labels
   if [[ ${AGENTIC_LOOP_INSTALL:-0} == 1 && -r $STATE_ROOT/project.env ]]; then
     : # Reinstall: keep the persisted Project identity; explicit setup repairs drift.
   elif graphql_budget_allows "$((GRAPHQL_RESERVE + 50))"; then

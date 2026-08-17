@@ -266,7 +266,7 @@ rebuild_project_hints() {
 # One open-Issue snapshot backs all label-state maintenance in a supervisor
 # poll. Without it, an idle poll performs separate list requests for running,
 # queued, needs-input, failed and blocked Issues. Rows are:
-# number<TAB>agent-state<TAB>updated_at<TAB>created_at<TAB>body(base64)<TAB>categories.
+# number<TAB>agent-state<TAB>updated_at<TAB>created_at<TAB>body(base64)<TAB>categories<TAB>category_rank<TAB>priority_value.
 SUPERVISOR_SNAPSHOT=''
 
 refresh_supervisor_snapshot() {
@@ -284,7 +284,7 @@ refresh_supervisor_snapshot() {
      (if (.body // "") == "" then "-" else ((.body // "") | @base64) end),
      (([.labels[].name | select(startswith("category:"))] | join(",")) as $categories | if $categories == "" then "-" else $categories end),
      (if any(.labels[]; .name == "category:loop-continuity") then 0 elif any(.labels[]; .name == "category:confidentiality-incident") then 1 elif any(.labels[]; .name == "category:integrity-incident") then 2 elif any(.labels[]; .name == "category:availability-incident") then 3 elif any(.labels[]; .name == "category:feature") then 4 else 5 end),
-     (if any(.labels[]; .name == "priority:critical") then 0 elif any(.labels[]; .name == "priority:high") then 1 elif any(.labels[]; .name == "priority:medium") then 2 elif any(.labels[]; .name == "priority:low") then 3 else 4 end)
+     '"$(queue_priority_jq)"'
     ] | @tsv' > "$target"; then
     SUPERVISOR_SNAPSHOT=$target
     return 0
