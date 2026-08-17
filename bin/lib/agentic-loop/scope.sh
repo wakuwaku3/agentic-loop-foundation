@@ -25,10 +25,11 @@ scope_cache_clear() { rm -f "$(scope_cache_file "$1")"; }
 
 # Normalize a comma-separated raw declaration (bare path tokens plus env names
 # already prefixed with "env:") into one canonical token per line: "*" (whole
-# repository), "env:NAME", or "path:VALUE". Invalid characters, empty tokens,
-# and a bare "." or "/" degrade to fewer or no tokens rather than failing the
-# worker, since an incomplete declaration must still be safe (see
-# resolve_issue_scope for the unknown-scope fallback).
+# repository), "structural" (a rename/move/reorg sentinel), "env:NAME", or
+# "path:VALUE". Invalid characters, empty tokens, and a bare "." or "/" degrade
+# to fewer or no tokens rather than failing the worker, since an incomplete
+# declaration must still be safe (see resolve_issue_scope for the unknown-scope
+# fallback).
 scope_tokens_normalize() {
   local raw=$1 token trimmed
   local -a parts result=()
@@ -39,6 +40,8 @@ scope_tokens_normalize() {
     [[ $trimmed =~ ^[A-Za-z0-9._/*:-]+$ ]] || continue
     if [[ $trimmed == '*' ]]; then
       result+=('*')
+    elif [[ $trimmed == structural ]]; then
+      result+=('structural')
     elif [[ $trimmed == env:* ]]; then
       [[ ${#trimmed} -gt 4 ]] && result+=("$trimmed")
     else
@@ -55,18 +58,24 @@ scope_tokens_normalize() {
 
 # Extract the last agentic-loop:scope marker from an Issue body or comment and
 # return its tokens as one bare (pre-normalization) comma-joined string:
-# path tokens verbatim, env= names prefixed with "env:".
+# path tokens verbatim, env= names prefixed with "env:", and the sentinel
+# "structural" when the marker declares structural=1 (a rename/move/reorg that
+# must serialize against overlapping paths).
 scope_marker_from_body() {
-  local body=$1 marker paths env_val combined e
+  local body=$1 marker paths env_val structural combined e
   local -a envs
   marker=$(grep -oE 'agentic-loop:scope[^>]*' <<< "$body" | tail -n 1) || true
   [[ -n $marker ]] || return 0
   paths=$(grep -oE '(^|[[:space:]])paths=[^[:space:]]*' <<< "$marker" | tail -n 1); paths=${paths#*paths=}
   env_val=$(grep -oE '(^|[[:space:]])env=[^[:space:]]*' <<< "$marker" | tail -n 1); env_val=${env_val#*env=}
+  structural=$(grep -oE '(^|[[:space:]])structural=[^[:space:]]*' <<< "$marker" | tail -n 1); structural=${structural#*structural=}
   combined=$paths
   if [[ -n $env_val ]]; then
     IFS=',' read -ra envs <<< "$env_val"
     for e in "${envs[@]}"; do [[ -n $e ]] && combined+="${combined:+,}env:$e"; done
+  fi
+  if [[ $structural == 1 || $structural == true ]]; then
+    combined+="${combined:+,}structural"
   fi
   printf '%s\n' "$combined"
 }
@@ -116,15 +125,40 @@ resolve_issue_scope() {
 }
 
 
+# Print the first path token shared between two normalized token sets (path:
+# only), or nothing if no path prefix overlaps. The shorter of the two
+# overlapping paths is reported since it names the shared (blocking) scope.
+scope_path_overlap_token() {
+  local -a a b
+  local ta tb pa pb
+  readarray -t a <<< "$1"
+  readarray -t b <<< "$2"
+  for ta in "${a[@]}"; do
+    [[ $ta == path:* ]] || continue
+    for tb in "${b[@]}"; do
+      [[ $tb == path:* ]] || continue
+      pa=${ta#path:}; pb=${tb#path:}
+      if [[ $pa == "$pb" || $pb == "$pa"/* || $pa == "$pb"/* ]]; then
+        if [[ ${#pa} -le ${#pb} ]]; then printf '%s\n' "$pa"; else printf '%s\n' "$pb"; fi
+        return 0
+      fi
+    done
+  done
+  return 1
+}
+
+
 # Print the first token shared between two normalized token sets (one per
 # line), or nothing if they do not overlap. "*" overlaps everything; two
 # "unknown" sentinels overlap each other; env: tokens overlap only on an exact
 # name match; path tokens overlap when one is a "/"-boundary prefix of the
 # other (or equal). The shorter of the two overlapping paths is reported since
-# it names the shared (blocking) scope.
+# it names the shared (blocking) scope. This remains the path-overlap helper
+# used by claim/record after scope_hard_conflict_token has decided that the
+# overlap must serialize.
 scope_overlap_token() {
   local -a a b
-  local ta tb pa pb
+  local ta tb
   readarray -t a <<< "$1"
   readarray -t b <<< "$2"
   for ta in "${a[@]}"; do
@@ -134,19 +168,39 @@ scope_overlap_token() {
       if [[ $ta == '*' || $tb == '*' ]]; then printf '*\n'; return 0; fi
       if [[ $ta == unknown && $tb == unknown ]]; then printf 'unknown\n'; return 0; fi
       if [[ $ta == env:* && $ta == "$tb" ]]; then printf '%s\n' "$ta"; return 0; fi
-      if [[ $ta == path:* && $tb == path:* ]]; then
-        pa=${ta#path:}; pb=${tb#path:}
-        if [[ $pa == "$pb" || $pb == "$pa"/* || $pa == "$pb"/* ]]; then
-          if [[ ${#pa} -le ${#pb} ]]; then printf '%s\n' "$pa"; else printf '%s\n' "$pb"; fi
-          return 0
-        fi
-      fi
     done
   done
+  scope_path_overlap_token "$1" "$2"
+}
+
+
+# Whether a normalized token set carries the structural sentinel.
+scope_has_structural() { grep -qx 'structural' <<< "$1" >/dev/null; }
+
+
+# The token that forces serialization between two normalized scope token sets,
+# or nothing when any overlap is soft (path-only) and may run in parallel and
+# converge via the existing rebase/re-validation path. Serialization happens
+# for: "*" (whole repository, including exclusive_paths escalation), two
+# "unknown" sentinels (undeclared scope under unknown_scope=isolated), an exact
+# env:NAME match (external environments cannot be rebased), and a structural
+# change whose affected paths overlap. A plain path overlap without a
+# structural flag is reported as no conflict.
+scope_hard_conflict_token() {
+  local overlap
+  overlap=$(scope_overlap_token "$1" "$2") || overlap=''
+  case $overlap in
+    '*'|unknown|env:*) printf '%s\n' "$overlap"; return 0 ;;
+  esac
+  if scope_has_structural "$1" || scope_has_structural "$2"; then
+    [[ -n $overlap ]] || return 1
+    printf 'structural:%s\n' "$overlap"
+    return 0
+  fi
   return 1
 }
 
-scope_conflicts() { scope_overlap_token "$1" "$2" >/dev/null; }
+scope_conflicts() { scope_hard_conflict_token "$1" "$2" >/dev/null; }
 
 
 # The number of a currently cached (running) Issue whose scope conflicts with
@@ -173,9 +227,11 @@ conflict_wait_file() { printf '%s/conflict/issue-%s' "$STATE_ROOT" "$1"; }
 # Record that an Issue is waiting for another Issue's change-scope to stop
 # overlapping, and comment only on the transition into (or a change of) the
 # wait, so a 30-second poll does not repost the same notice every cycle.
+# Only a hard conflict (structural / "*" / unknown / env:) is recorded; a plain
+# path overlap is soft and runs in parallel instead.
 record_conflict_wait() {
   local issue=$1 other=$2 tokens=$3 file reason note
-  reason=$(scope_overlap_token "$tokens" "$(scope_cache_read "$other")") || reason=unknown
+  reason=$(scope_hard_conflict_token "$tokens" "$(scope_cache_read "$other")") || reason=unknown
   file=$(conflict_wait_file "$issue")
   note=$(printf '%s\t%s' "$other" "$reason")
   [[ -r $file && $(cat "$file") == "$note" ]] && return 0

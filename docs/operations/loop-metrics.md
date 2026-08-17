@@ -57,6 +57,8 @@ Actions（CI run）、GraphQL、Projects APIは読まない。理由は[ADR 0007
 
 ### 件数系（counters）
 
+`conflict_wait` と `scope_conflict` は、直列化が必要な**hard conflictのみ**を数える。理由tokenは `structural:path`（rename/move・directory再編でpath重複）／`*`（全体・`exclusive_paths`昇格）／`unknown`（`unknown_scope=isolated` 同士）／`env:NAME`（外部環境の完全一致）のいずれかで、`scope-conflict` markerの `token=` に記録される。通常の同一path編集（soft overlap）は並列実行され、`scope-conflict` markerもカウントも発生しない（merge時はrebase・再検証で収束する。緩和前はpath重複の全件がカウントされていたため、件数は構造的衝突のみに縮小する）。
+
 `attempts`（=lease件数）、`retry`、`recovered`、`worker_timeout`、`exhausted`、`scope_conflict`、`dependency_block`、`needs_input_round`、`resume`（`handoff`の`phase!=fresh`）、`requeue`（retry+recovered+answer-detected+exhausted+shutdownの合計）、`replan`、`open_attempts`（終端未観測の試行数。現在進行中の試行も含む中立的な件数）、`unmerged_pr`。
 
 ### 失敗理由（failures）
@@ -94,7 +96,7 @@ Actions（CI run）、GraphQL、Projects APIは読まない。理由は[ADR 0007
 | `attempt_duration`のうち`exec`失敗率上昇（`failures`） | `agent.retry.plan_max`やproviderの見直し |
 | `needs_input_wait`が長期化 | 要求受付時の完了条件・情報の充実 |
 | `recovered`／`worker_timeout`が増加 | `[queue].lease_seconds`／`worker_timeout_seconds`の見直し |
-| `scope_conflict`が増加 | scope宣言の粒度、`[queue].exclusive_paths`の見直し |
+| `scope_conflict`が増加 | 構造的衝突（rename/move・directory再編）の頻度、`[queue].exclusive_paths`、`unknown_scope`の見直し。soft overlap（通常の同一path編集）はこのカウントに含まれない |
 | `pr_review_wait`が長期化 | required checksの所要時間・レビュー体制の見直し |
 | `utilization.ratio`が高止まり | `max_workers`の増加、または要求の流入量そのものの見直し |
 
