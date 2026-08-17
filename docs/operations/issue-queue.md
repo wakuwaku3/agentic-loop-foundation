@@ -40,6 +40,8 @@ bin/agentic-loop metrics
 bin/agentic-loop upgrade
 ```
 
+CLIの公開入口は変更後も `bin/agentic-loop` のままである（[ADR 0013](../decisions/0013-agentic-loop-modules.md)）。実装は機能単位のモジュール `bin/lib/agentic-loop/*.sh` に分かれており、入口は定数と `source` 配線と `main` だけを持つ。実装変更時は、触るモジュールのpathを `agentic-loop:scope` marker（後述）の `paths=` に書いてモジュール単位のscope宣言を行うことで、`bin/agentic-loop` 単体への集中による直列化を避ける。
+
 ### status: いま何が動き、何を待ち、次に何が来るか
 
 `bin/agentic-loop status`（[ADR 0005](../decisions/0005-status-observability.md)）は、Supervisorの生死だけでなく、running Issueの詳細、queuedの件数と次のclaim候補、needs-input/failed/in-review/blocked/staleの件数とURL、運用上の異常を1つの入口にまとめた運用snapshotである。常に読み取り専用（GitHubへの書き込み・Git作業ツリーの変更を一切行わない）で、GitHub REST(core)呼び出しは1回の実行あたり最大2回（open Issue全件のsnapshotと、closedな`agent:stale`の一覧）に抑え、GraphQL・Projects APIは呼ばない。引数不正時のみ終了code 2で、それ以外は異常があっても常に終了code 0（合否判定は`doctor`の責務）。
