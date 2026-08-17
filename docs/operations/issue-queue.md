@@ -180,25 +180,36 @@ Supervisorはclaimの直前に、`agent:queued` のまま `STALE_DAYS` 日以上
 
 ## 変更競合の予防
 
-密接に関連するIssueを複数workerが同時に処理してmerge conflictや手戻りを起こす可能性を、claim前に検出して安全に直列化する。Issue本文（または最新の `agentic-loop:scope` コメント）に次のmarkerを1行記載すると、影響が及ぶpathとexternal環境を宣言できる。
+密接に関連するIssueを複数workerが同時に処理してmerge conflictや手戻りを起こす可能性を、claim前に検出して**構造的衝突（rename/move・directory再編）だけを直列化**する。通常の同一file編集は並列実行し、merge時に既存のrebase・再検証経路で収束させる。Issue本文（または最新の `agentic-loop:scope` コメント）に次のmarkerを1行記載すると、影響が及ぶpathとexternal環境を宣言できる。
 
 ```
-<!-- agentic-loop:scope paths=bin/agentic-loop,docs/operations/ env=github-project -->
+<!-- agentic-loop:scope paths=bin/agentic-loop,docs/operations/ env=github-project structural=1 -->
 ```
 
-`paths=` は対象file・directoryのカンマ区切りで、末尾に `/` を付けるとそのdirectory配下すべてを含む。`env=` は外部環境やmigrationなど、pathで表現できない対象をカンマ区切りの名前で宣言する。repository全体に及ぶ場合は `paths=*` とする。不正な文字を含むtokenや空のtokenは破棄され、有効なtokenが残らなければ後述の「scope不明」として扱われる。
+`paths=` は対象file・directoryのカンマ区切りで、末尾に `/` を付けるとそのdirectory配下すべてを含む。`env=` は外部環境やmigrationなど、pathで表現できない対象をカンマ区切りの名前で宣言する。repository全体に及ぶ場合は `paths=*` とする。計画がfileのrename/moveやdirectory再編を含む場合のみ `structural=1`（または `true`）を付ける。不正な文字を含むtokenや空のtokenは破棄され、有効なtokenが残らなければ後述の「scope不明」として扱われる。
 
-claim前、queued Issueのscopeはbody（一覧取得時に既に取得済みで追加API呼び出しは発生しない）から解決する。running Issueの実効scopeはGit common state（`.git/agentic-loop/scope/issue-<番号>`）にcacheし、Supervisor起動時にrunning Issue分だけ再構築する。実行中workerはplan段完了直後にscope markerを検出してcacheへ反映し、exec段完了直後には実測の変更範囲（`git diff --name-only`）でcacheを補正する。cacheは既存宣言との和集合として更新され、決して縮小しない。scopeが変化したときだけ、audit用のIssueコメントを1回記録する。
+claim前、queued Issueのscopeはbody（一覧取得時に既に取得済みで追加API呼び出しは発生しない）から解決する。running Issueの実効scopeはGit common state（`.git/agentic-loop/scope/issue-<番号>`）にcacheし、Supervisor起動時にrunning Issue分だけ再構築する。実行中workerはplan段完了直後にscope markerを検出してcacheへ反映し、exec段完了直後には実測の変更範囲（`git diff --name-only`）でcacheを補正する。補正時はrenameを検出できる `git diff --name-status -M` も見て、rename/move・同一directoryの多数の削除＋追加をstructuralとして検知し、そのpathと `structural` sentinelをcacheへ加える。cacheは既存宣言との和集合として更新され、決して縮小しない。scopeが変化したときだけ、audit用のIssueコメントを1回記録する。
+
+競合判定は「直列化すべきhard conflict」と「並列許容のsoft overlap」を区別する。直列化するのは次のいずれかが真のときだけである。
+
+| 種別 | 条件 | 理由token |
+| --- | --- | --- |
+| 全体 | いずれかが `paths=*`、または `exclusive_paths` に昇格 | `*` |
+| 未宣言 | 双方がscope未宣言（`unknown_scope=isolated`） | `unknown` |
+| 外部環境 | `env:` が完全一致（rebase不能な外部資源） | `env:NAME` |
+| 構造的 | いずれかが `structural`（宣言または実測）で、かつpathが `/` 境界で重なる | `structural:path` |
+
+これ以外の重なり、つまり双方が通常のpath編集で同一file・directoryへ触れる場合は**soft overlap**として並列実行する。実際のmerge conflictはworker既存の経路（default branch更新後のrebase・再検証、`agent:failed`→retry）で吸収される。この緩和のため、過去に同一path宣言を全直列化していた時代の `scope-conflict` 待ちは、構造的衝突と、`*`／`unknown`／`env:` の衝突だけに限定される。
 
 Supervisorは各pollで取得済みのOpen Issue snapshotを正本としてlocal scope/conflict cacheを照合する。`agent:running`でなくなったIssueのscope cacheと、待機側が`agent:queued`でない、または競合相手が`agent:running`でないconflict cacheはlocal stale stateとして除去し、Projectの`Blocked by`投影も空へ収束させる。これにより、別hostがIssueをclaim・完了した場合も、停止中でないSupervisorが再起動を待たず次のpollで追随する。照合用のIssue単位API呼び出しは追加せず、別hostのworker、lease、worktree、branchには触れない。
 
-実行中Issueとscopeが重なるqueued Issueはclaimせず、category・priority・created_at・Issue番号による既存の取得順を変えずに次の非競合Issueへ進む。競合が解消すれば、待機していたIssueは本来の順位で自然にclaimされる（恒久的な順位降格や飢餓は発生しない）。競合判定はworker数上限のhard constraintと既存のqueue処理（budget guard、stale triage、retry）の内側で働くfilterであり、後述の「Issue間の依存関係」によるclaim前block判定はこのfilterの手前に位置づける。
+hard conflictを検出したqueued Issueはclaimせず、category・priority・created_at・Issue番号による既存の取得順を変えずに次の非競合Issueへ進む。競合が解消すれば、待機していたIssueは本来の順位で自然にclaimされる（恒久的な順位降格や飢餓は発生しない）。soft overlapでは待機も `scope-conflict` コメントも出さない。競合判定はworker数上限のhard constraintと既存のqueue処理（budget guard、stale triage、retry）の内側で働くfilterであり、後述の「Issue間の依存関係」によるclaim前block判定はこのfilterの手前に位置づける。
 
 scopeを宣言していないIssueの既定動作は `[queue].unknown_scope`（既定 `isolated`）で制御する。`isolated` は未宣言scope同士でのみ競合し、同時に走る未宣言scope workerを常に1件に制限する一方、宣言済みの独立scope Issueとは並列に走る。`exclusive` は未宣言scopeをrepository全体として扱い、`open` は未宣言scopeの競合判定を行わない（本機能の実質無効化）。`[queue].exclusive_paths`（既定は空）にcomma区切りのpathを設定すると、宣言scopeがそのpathと重なるIssueをrepository全体として扱う（共有基盤file・生成物・migrationなど）。両設定の不正値は起動時検証と `doctor` が失敗として報告する。
 
-`bin/agentic-loop status` は running Issueの実効scopeと、競合待ちIssue・相手Issue番号・重複tokenを表示する。GitHub Projectには `Blocked by` というTEXT fieldを冪等に用意し、相手Issue番号と重複tokenだけを書き込む（Issue本文や秘密情報は転記しない）。GraphQL残量が不足する場合はProjects同期のみ既存のretry queueへ退避し、Issue Labelを正本とするqueue処理は継続する。
+`bin/agentic-loop status` は running Issueの実効scopeと、hard conflictで待機しているIssue・相手Issue番号・理由token（`structural:...`／`*`／`unknown`／`env:...`）を表示する。GitHub Projectには `Blocked by` というTEXT fieldを冪等に用意し、相手Issue番号と理由tokenだけを書き込む（Issue本文や秘密情報は転記しない）。GraphQL残量が不足する場合はProjects同期のみ既存のretry queueへ退避し、Issue Labelを正本とするqueue処理は継続する。
 
-本機能は実行中Issueの強制停止・再開（別Issueで対応）、AIによるscope推定（コストポリシー順守のため行わない）を対象外とする。宣言済みscopeと未宣言scope（`isolated`）のIssueが実際には同じfileへ触れる可能性は残るが、既存のrebase・再検証経路（default branch更新後の競合はworkerが最新branchに対して修正・再検証する）で吸収する。
+本機能は実行中Issueの強制停止・再開（別Issueで対応）、AIによるscope・structural推定（コストポリシー順守のため行わない。structuralは明示宣言とGit実測のみ）を対象外とする。通常編集が実際には同一fileへ触れる可能性は残るが、既存のrebase・再検証経路（default branch更新後の競合はworkerが最新branchに対して修正・再検証する）で吸収する。
 
 ## Issue間の依存関係
 
