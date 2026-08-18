@@ -285,7 +285,7 @@ trace_evaluate() {
     return 1
   fi
   TRACE_CHECKRUNS=$(repo_api "commits/$head_sha/check-runs" --jq '.check_runs' 2>/dev/null || printf '[]')
-  TRACE_FILES=$(repo_api "pulls/$pr/files" -f per_page=100 --jq '.[].filename' 2>/dev/null || true)
+  TRACE_FILES=$(repo_api "pulls/$pr/files" --method GET -f per_page=100 --jq '.[].filename' 2>/dev/null || true)
   if ! trace_reconcile_checks "$TRACE_MANIFEST" "$(trace_checkrun_verdict "$TRACE_CHECKRUNS")" || ! trace_reconcile_paths "$TRACE_MANIFEST" "$TRACE_FILES"; then
     return 1
   fi
