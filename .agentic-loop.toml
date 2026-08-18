@@ -114,6 +114,17 @@ unknown_scope = "isolated"
 # repository (shared infrastructure, lockfiles, generated artifacts). Empty by
 # default so enabling this feature does not serialize existing Issues.
 exclusive_paths = ""
+# Requirement traceability gate (see docs/decisions/0017-requirement-traceability.md,
+# docs/operations/traceability.md): a merged PR may carry a fenced
+# `agentic-loop:traceability` JSON record mapping each acceptance criterion to
+# the changes/checks that satisfied it. "require" blocks completion (without
+# closing the Issue or deleting its worktree/branch) when the record is
+# missing or does not reconcile with GitHub's observed checks/changed files;
+# "warn" evaluates the same record but only posts an advisory comment; "off"
+# disables evaluation entirely. This repository ships "warn" so its own queue
+# starts recording evidence immediately without blocking completion; switch to
+# "require" once the PR-body convention is consistently followed.
+traceability = "warn"
 
 [foundation]
 # Foundationの配布元repository。`agentic-loop upgrade` はここを基準に新しいrevisionを取得する。

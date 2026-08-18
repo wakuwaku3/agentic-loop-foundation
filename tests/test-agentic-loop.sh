@@ -15,7 +15,10 @@ case "$TEST_GROUP" in all|queue|lifecycle|auxiliary|upgrade) ;; *) printf 'Unkno
 fail() { printf 'FAIL: %s\n' "$1" >&2; exit 1; }
 assert_contains() { grep -Fq -- "$2" "$1" || fail "$3"; }
 
-# write_queue_config FILE KEY=VAL ... -> render a [queue] TOML config
+# write_queue_config FILE KEY=VAL ... -> render a [queue] TOML config. A
+# purely numeric VAL is emitted bare (existing numeric queue.* keys); any
+# other VAL (e.g. TRACEABILITY=require) is TOML-quoted as a string, since
+# bare unquoted words are not valid TOML and yq would reject the whole file.
 write_queue_config() {
   local file=$1 kv key val
   shift
@@ -23,7 +26,11 @@ write_queue_config() {
   for kv in "$@"; do
     key=${kv%%=*}
     val=${kv#*=}
-    printf '%s = %s\n' "${key,,}" "$val" >> "$file"
+    if [[ $val =~ ^[0-9]+$ ]]; then
+      printf '%s = %s\n' "${key,,}" "$val" >> "$file"
+    else
+      printf '%s = "%s"\n' "${key,,}" "$val" >> "$file"
+    fi
   done
 }
 
@@ -34,6 +41,65 @@ scope_field() { printf '<!-- agentic-loop:scope %s -->' "$1" | base64 -w0; }
 # dependency_field REFS -> base64 of a "Blocked by:" body line for state column
 # 8, e.g. dependency_field '#12, #34'
 dependency_field() { printf 'Blocked by: %s' "$1" | base64 -w0; }
+
+# criteria_body FIELDS... -> base64 of an Issue body with a 受け入れ条件
+# heading and one bullet per argument, for trace.sh's trace_derive_criteria
+# (state column 8, see docs/decisions/0017-requirement-traceability.md).
+criteria_body() {
+  local body=$'## 受け入れ条件\n'
+  local c
+  for c in "$@"; do body+="- $c"$'\n'; done
+  printf '%s' "$body" | base64 -w0
+}
+
+# criterion_id TEXT -> the ac-XXXXXXXX id trace.sh's trace_criterion_id
+# derives for a "- TEXT" bullet produced by criteria_body. trace_normalize_
+# criterion's final `tr -s '[:space:]' ' ' <<< "$text"` here-string appends an
+# implicit trailing newline that tr then folds into a single trailing space
+# (command substitution only strips trailing newlines, not that space), so
+# every normalized criterion trace.sh hashes carries one trailing space; this
+# must reproduce that exactly or the derived and hand-built ids will never match.
+criterion_id() { printf 'ac-%s' "$(printf '%s ' "$1" | sha256sum | cut -c1-8)"; }
+
+# trace_change_json PATH [ANCHOR] -> a {"path":...} JSON object for one
+# element of a trace_criterion_json "changes" argument.
+trace_change_json() {
+  if [[ -n ${2:-} ]]; then printf '{"path":"%s","anchor":"%s"}' "$1" "$2"
+  else printf '{"path":"%s"}' "$1"; fi
+}
+
+# trace_check_json NAME RESULT -> a {"name":...,"result":...} JSON object
+# for one element of a trace_criterion_json "checks" argument.
+trace_check_json() { printf '{"name":"%s","result":"%s"}' "$1" "$2"; }
+
+# trace_criterion_json ID SOURCE STATUS [VERIFICATION] [REASON] [SUPERSEDED_BY] [CHANGES_JSON] [CHECKS_JSON]
+# -> one "criteria[]" element of an agentic-loop:traceability record.
+# CHANGES_JSON/CHECKS_JSON are already comma-joined trace_change_json/
+# trace_check_json outputs, e.g. "$(trace_change_json a.sh),$(trace_change_json b.sh)".
+trace_criterion_json() {
+  local id=$1 source=$2 status=$3 verification=${4:-} reason=${5:-} superseded_by=${6:-} changes=${7:-} checks=${8:-}
+  local out="{\"id\":\"$id\",\"source\":\"$source\",\"status\":\"$status\""
+  [[ -z $verification ]] || out+=",\"verification\":\"$verification\""
+  [[ -z $reason ]] || out+=",\"reason\":\"$reason\""
+  [[ -z $superseded_by ]] || out+=",\"superseded_by\":\"$superseded_by\""
+  out+=",\"changes\":[$changes],\"checks\":[$checks]}"
+  printf '%s' "$out"
+}
+
+# trace_record_json ISSUE CRITERION_JSON... -> the full agentic-loop:
+# traceability record object (schema=1) wrapping the given criteria.
+trace_record_json() {
+  local issue=$1 joined='' c
+  shift
+  for c in "$@"; do joined+="${joined:+,}$c"; done
+  printf '{"schema":1,"issue":%s,"criteria":[%s]}' "$issue" "$joined"
+}
+
+# trace_pr_body RECORD_JSON -> a PR body wrapping RECORD_JSON in the fenced
+# ```agentic-loop:traceability code block trace.sh's trace_manifest_from_pr_body
+# parses.
+# shellcheck disable=SC2016 # Backticks are literal Markdown fencing in the fabricated PR body.
+trace_pr_body() { printf '## Summary\n\n```agentic-loop:traceability\n%s\n```\n' "$1"; }
 
 mkdir -p "$FAKE_BIN" "$FAKE_GH_ROOT"
 
@@ -127,6 +193,11 @@ case "${1:-} ${2:-}" in
       # fromdateiso8601 call that only this query makes.
       [[ ${FAKE_METRICS_ISSUES_FAIL:-0} == 0 ]] || { printf 'HTTP 503: Service Unavailable\n' >&2; exit 1; }
       cat "$metrics_issues" 2>/dev/null || true
+    elif [[ $endpoint == issues/comments && $* == *'agentic-loop:traceability'* ]]; then
+      # bin/agentic-loop trace --audit (Issue #53): distinct from metrics
+      # collection B's repo-wide comments read matched just below (this
+      # branch must come first, since both share the issues/comments endpoint).
+      [[ -n ${FAKE_TRACE_AUDIT_EVENTS:-} ]] && cat "$FAKE_TRACE_AUDIT_EVENTS" 2>/dev/null || true
     elif [[ $endpoint == issues/comments ]]; then
       # bin/agentic-loop metrics collection B (repo-wide comments): distinct
       # from the per-Issue issues/N/comments endpoint matched further below.
@@ -290,6 +361,11 @@ case "${1:-} ${2:-}" in
           printf '%s %s\n' "$issue" "$body" >> "$comments"
           if [[ $* == *"--jq .id"* ]]; then wc -l < "$comments" | tr -d '[:space:]'; printf '\n'; fi
         ) 9> "$comments.lock"
+      elif [[ $method == GET && $* == *'agentic-loop:traceability'* ]]; then
+        # trace_verdict_upsert's fallback search for an existing verdict
+        # comment when the local $STATE_ROOT/workers/ISSUE.trace cache file
+        # is missing or stale (Issue #53).
+        awk -v n="$issue" '$1 == n && index($0, "agentic-loop:traceability schema=1") {id=NR} END{if (id) print id}' "$comments" 2>/dev/null || true
       elif [[ $* == *agentic-loop:claim* ]]; then
         awk -v n="$issue" '$1 == n && index($0, "agentic-loop:claim") {body=$0; sub(/^[^ ]+ /, "", body); printf "%s\t%s", NR, body | "base64 -w0"; close("base64 -w0"); printf "\n"}' "$comments" 2>/dev/null || true
       elif [[ $* == *needs-input* ]]; then
@@ -357,25 +433,52 @@ case "${1:-} ${2:-}" in
         target=$(sed -n 's/.*\["agent:\([^"]*\)"\].*/\1/p' <<< "$*"); printf '["agent:%s"]\n' "$target"
       else awk -v n="$issue" '$1 == n {print "agent:" $2}' "$state"; fi
     elif [[ $endpoint =~ ^commits/.+/check-runs$ ]]; then
-      [[ -n ${FAKE_RESUME_CHECKS:-} ]] && printf '%s\n' "$FAKE_RESUME_CHECKS"
+      jqarg=''
+      for ((i = 1; i <= $#; i++)); do [[ ${!i} == --jq ]] && { j=$((i + 1)); jqarg=${!j}; }; done
+      if [[ $jqarg == '.check_runs' ]]; then
+        # trace.sh's trace_evaluate (Issue #53): distinct from resume_probe's
+        # multi-line check-status jq matched in the else branch below.
+        if [[ -n ${FAKE_CHECK_RUNS_FILE:-} ]]; then cat "$FAKE_CHECK_RUNS_FILE"; else printf '[]\n'; fi
+      else
+        [[ -n ${FAKE_RESUME_CHECKS:-} ]] && printf '%s\n' "$FAKE_RESUME_CHECKS"
+      fi
+    elif [[ $endpoint =~ ^pulls/[0-9]+/files$ ]]; then
+      # trace.sh's trace_evaluate PR changed-files read (Issue #53).
+      [[ -n ${FAKE_PR_FILES:-} ]] && printf '%s\n' "$FAKE_PR_FILES"
     elif [[ $endpoint =~ ^pulls/[0-9]+$ ]]; then
-      printf '%s\x1f%s\x1f%s\x1f%s\x1f%s\n' \
-        "${FAKE_RESUME_BASE_REF:-main}" "${FAKE_RESUME_BASE_SHA:-}" "${FAKE_RESUME_HEAD_SHA:-}" \
-        "${FAKE_RESUME_MERGEABLE:-null}" "${FAKE_RESUME_MERGEABLE_STATE:-unknown}"
+      jqarg=''
+      for ((i = 1; i <= $#; i++)); do [[ ${!i} == --jq ]] && { j=$((i + 1)); jqarg=${!j}; }; done
+      if [[ $jqarg == '.body // ""' ]]; then
+        # trace.sh's trace_evaluate PR-body read (Issue #53): distinct from
+        # resume_probe's open-PR detail jq matched in the else branch below.
+        [[ -n ${FAKE_PR_BODY_FILE:-} && -r $FAKE_PR_BODY_FILE ]] && cat "$FAKE_PR_BODY_FILE"
+      else
+        printf '%s\x1f%s\x1f%s\x1f%s\x1f%s\n' \
+          "${FAKE_RESUME_BASE_REF:-main}" "${FAKE_RESUME_BASE_SHA:-}" "${FAKE_RESUME_HEAD_SHA:-}" \
+          "${FAKE_RESUME_MERGEABLE:-null}" "${FAKE_RESUME_MERGEABLE_STATE:-unknown}"
+      fi
     elif [[ $endpoint == pulls && $* == *'resume-probe-prs'* ]]; then
-      printf '%s\x1f%s\x1f%s\x1f%s\x1f%s\n' \
+      printf '%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\n' \
         "${FAKE_RESUME_MERGED_PR:-}" "${FAKE_RESUME_MERGED_SHA:-}" "${FAKE_RESUME_MERGED_URL:-}" \
-        "${FAKE_RESUME_OPEN_PR:-}" "${FAKE_RESUME_OPEN_URL:-}"
+        "${FAKE_RESUME_OPEN_PR:-}" "${FAKE_RESUME_OPEN_URL:-}" "${FAKE_RESUME_MERGE_COMMIT:-}" "${FAKE_RESUME_BASE:-}"
     elif [[ $endpoint == pulls ]]; then
       if [[ $form_state == closed ]]; then
         if [[ ${FAKE_PR_MERGED:-1} == 1 ]]; then
           head=''; for arg in "$@"; do [[ $arg == head=* ]] && head=${arg#head=}; done; head=${head#*:}
           oid=${FAKE_PR_HEAD_OID:-$(git rev-parse "refs/heads/$head" 2>/dev/null || true)}
-          printf 'https://github.example/%s/pull/merged\t%s\n' "$slug" "$oid"
+          printf 'https://github.example/%s/pull/merged\t%s\t%s\t%s\t%s\n' "$slug" "$oid" \
+            "${FAKE_PR_MERGED_NUMBER:-99}" "${FAKE_PR_MERGED_BASE:-main}" "${FAKE_PR_MERGE_COMMIT:-$oid}"
         fi
       elif [[ $* == *head=* && $* == *html_url* ]]; then printf 'https://github.example/%s/pull/6\n' "$slug"
       elif [[ $form_state == all && $* == *html_url* ]]; then printf 'https://github.example/%s/pull/1\nhttps://github.example/%s/pull/2\n' "$slug" "$slug"
       elif [[ $form_state == open && $* == *html_url* ]]; then printf 'https://github.example/%s/pull/1\n' "$slug"
+      elif [[ $* == *'$m // $o'* ]]; then
+        # bin/agentic-loop trace's trace_find_pr (Issue #53): distinct from
+        # resume_probe's resume-probe-prs jq matched above and every
+        # html_url-returning branch here.
+        if [[ -n ${FAKE_TRACE_PR:-} ]]; then
+          printf '%s\t%s\t%s\t%s\n' "$FAKE_TRACE_PR" "${FAKE_TRACE_HEAD:-}" "${FAKE_TRACE_MERGE_COMMIT:-${FAKE_TRACE_HEAD:-}}" "${FAKE_TRACE_BASE:-main}"
+        fi
       elif [[ $* == *html_url* ]]; then printf 'https://github.example/%s/pull/6\n' "$slug"; fi
     elif [[ $endpoint == collaborators/* ]]; then
       printf 'admin\n'
@@ -3101,6 +3204,274 @@ grep -Fq '[警告] 設定値: WORKER_TIMEOUT_SECONDS' <<< "$doctor_small_timeout
 if grep -Fq '[失敗] 設定値: WORKER_TIMEOUT_SECONDS' <<< "$doctor_small_timeout"; then fail 'an unsafely small worker_timeout_seconds was misclassified as a failure'; fi
 mv "$target/.agentic-loop.toml.valid" "$target/.agentic-loop.toml"
 
+# --- Requirement traceability gate (Issue #53, ADR 0017) ---
+# These scenarios exercise trace_gate through the ordinary (non-resume)
+# completion path: a fresh "running" Issue with no worktree yet, so worker()
+# creates the worktree/branch, runs the (default-completing) fake provider,
+# and then discovers its own merged PR via the `pulls?state=closed` fixture
+# (FAKE_PR_MERGED defaults to 1), exactly as production does after a real
+# provider opens and merges a PR. This is far simpler than staging a resume,
+# and reuses the exact same trace_gate call site.
+
+# 1) Multiple acceptance criteria: satisfied + not-applicable all covered.
+write_queue_config "$target/.agentic-loop.toml" TRACEABILITY=require
+trace_id1=$(criterion_id 'API endpoint responds within 200ms')
+trace_id2=$(criterion_id 'Structured logs are emitted for each request')
+trace_id3=$(criterion_id 'Existing clients remain backward compatible')
+trace_c1=$(trace_criterion_json "$trace_id1" issue-body satisfied automated '' '' "$(trace_change_json bin/trace-a.sh)" "$(trace_check_json check success)")
+trace_c2=$(trace_criterion_json "$trace_id2" issue-body satisfied automated '' '' "$(trace_change_json bin/trace-b.sh)" "$(trace_check_json check success)")
+trace_c3=$(trace_criterion_json "$trace_id3" issue-body not-applicable '' 'No client-facing change in this Issue' '' '' '')
+trace_record=$(trace_record_json 7001 "$trace_c1" "$trace_c2" "$trace_c3")
+printf '%s' "$(trace_pr_body "$trace_record")" > "$TEST_ROOT/trace-pr-body"
+printf '7001 running open none 2026-01-01T00:00:00Z none none %s\n' \
+  "$(criteria_body 'API endpoint responds within 200ms' 'Structured logs are emitted for each request' 'Existing clients remain backward compatible')" > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+FAKE_PR_BODY_FILE="$TEST_ROOT/trace-pr-body" FAKE_PR_FILES=$'bin/trace-a.sh\nbin/trace-b.sh' \
+  "$target/bin/agentic-loop" _worker 7001 trace-multi-criteria-worker
+grep -Eq '^7001 completed closed' "$state" || fail 'a fully-covered multi-criterion traceability record did not complete the Issue'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'criteria=3 satisfied=2 partial=0 not-applicable=1' 'the traceability verdict did not tally satisfied/not-applicable criteria correctly'
+
+# 2) Multiple changed paths across multiple criteria, all present in the PR's
+# own file list: pass, with every changed path attributed to a criterion.
+write_queue_config "$target/.agentic-loop.toml" TRACEABILITY=require
+trace_id1=$(criterion_id 'Feature A endpoint is implemented')
+trace_id2=$(criterion_id 'Feature B endpoint is implemented')
+trace_c1=$(trace_criterion_json "$trace_id1" issue-body satisfied automated '' '' "$(trace_change_json bin/trace-a.sh),$(trace_change_json bin/trace-b.sh)" "$(trace_check_json check success)")
+trace_c2=$(trace_criterion_json "$trace_id2" issue-body satisfied automated '' '' "$(trace_change_json bin/trace-c.sh)" "$(trace_check_json check success)")
+trace_record=$(trace_record_json 7002 "$trace_c1" "$trace_c2")
+printf '%s' "$(trace_pr_body "$trace_record")" > "$TEST_ROOT/trace-pr-body"
+printf '7002 running open none 2026-01-01T00:00:00Z none none %s\n' \
+  "$(criteria_body 'Feature A endpoint is implemented' 'Feature B endpoint is implemented')" > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+FAKE_PR_BODY_FILE="$TEST_ROOT/trace-pr-body" FAKE_PR_FILES=$'bin/trace-a.sh\nbin/trace-b.sh\nbin/trace-c.sh' \
+  "$target/bin/agentic-loop" _worker 7002 trace-multi-path-worker
+grep -Eq '^7002 completed closed' "$state" || fail 'a multi-path traceability record covering every changed file did not complete the Issue'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'unreferenced_paths=0' 'a fully-attributed multi-path traceability record reported unreferenced paths'
+
+# 3) A changed path the PR's own file list does not contain is never trusted
+# from the record: evidence-mismatch, and in require mode the Issue is left
+# open/failed with its worktree and branch intact for investigation.
+write_queue_config "$target/.agentic-loop.toml" TRACEABILITY=require
+trace_id1=$(criterion_id 'Feature C endpoint is implemented')
+trace_c1=$(trace_criterion_json "$trace_id1" issue-body satisfied automated '' '' "$(trace_change_json bin/trace-a.sh),$(trace_change_json bin/trace-missing.sh)" "$(trace_check_json check success)")
+trace_record=$(trace_record_json 7003 "$trace_c1")
+printf '%s' "$(trace_pr_body "$trace_record")" > "$TEST_ROOT/trace-pr-body"
+printf '7003 running open none 2026-01-01T00:00:00Z none none %s\n' "$(criteria_body 'Feature C endpoint is implemented')" > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+FAKE_PR_BODY_FILE="$TEST_ROOT/trace-pr-body" FAKE_PR_FILES='bin/trace-a.sh' \
+  "$target/bin/agentic-loop" _worker 7003 trace-missing-path-worker
+grep -Eq '^7003 failed open' "$state" || fail 'a traceability record claiming an unobserved changed path was not blocked in require mode'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'reason=traceability-invalid detail=evidence-mismatch' 'a record claiming an unobserved changed path was not classified as evidence-mismatch'
+[[ -e $target-worktrees/issue-7003 ]] || fail 'require mode removed the worktree despite blocking completion on evidence-mismatch'
+git -C "$target" show-ref --verify --quiet refs/heads/agent/issue-7003 || fail 'require mode removed the branch despite blocking completion on evidence-mismatch'
+
+# 4) A record's check claim that matches the observed check-run conclusion
+# passes.
+write_queue_config "$target/.agentic-loop.toml" TRACEABILITY=require
+trace_id1=$(criterion_id 'CI passes for this change')
+trace_c1=$(trace_criterion_json "$trace_id1" issue-body satisfied automated '' '' "$(trace_change_json bin/trace-ci.sh)" "$(trace_check_json ci success)")
+trace_record=$(trace_record_json 7004 "$trace_c1")
+printf '%s' "$(trace_pr_body "$trace_record")" > "$TEST_ROOT/trace-pr-body"
+printf '[{"name":"ci","conclusion":"success"}]' > "$TEST_ROOT/trace-check-runs.json"
+printf '7004 running open none 2026-01-01T00:00:00Z none none %s\n' "$(criteria_body 'CI passes for this change')" > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+FAKE_PR_BODY_FILE="$TEST_ROOT/trace-pr-body" FAKE_PR_FILES='bin/trace-ci.sh' FAKE_CHECK_RUNS_FILE="$TEST_ROOT/trace-check-runs.json" \
+  "$target/bin/agentic-loop" _worker 7004 trace-ci-match-worker
+grep -Eq '^7004 completed closed' "$state" || fail 'a check claim matching the observed check-run conclusion was not accepted'
+
+# 5) The record's own claim about a check's result is never trusted: an
+# observed failing check-run beats a record that claims success (this is the
+# core self-attestation regression this gate exists to prevent).
+write_queue_config "$target/.agentic-loop.toml" TRACEABILITY=require
+trace_id1=$(criterion_id 'CI passes for this bugfix')
+trace_c1=$(trace_criterion_json "$trace_id1" issue-body satisfied automated '' '' "$(trace_change_json bin/trace-ci-fix.sh)" "$(trace_check_json ci success)")
+trace_record=$(trace_record_json 7005 "$trace_c1")
+printf '%s' "$(trace_pr_body "$trace_record")" > "$TEST_ROOT/trace-pr-body"
+printf '[{"name":"ci","conclusion":"failure"}]' > "$TEST_ROOT/trace-check-runs.json"
+printf '7005 running open none 2026-01-01T00:00:00Z none none %s\n' "$(criteria_body 'CI passes for this bugfix')" > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+FAKE_PR_BODY_FILE="$TEST_ROOT/trace-pr-body" FAKE_PR_FILES='bin/trace-ci-fix.sh' FAKE_CHECK_RUNS_FILE="$TEST_ROOT/trace-check-runs.json" \
+  "$target/bin/agentic-loop" _worker 7005 trace-ci-mismatch-worker
+grep -Eq '^7005 failed open' "$state" || fail 'a record self-attesting a success the observed check-run contradicts was not blocked'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'reason=traceability-invalid detail=evidence-mismatch' 'a self-attested check result contradicting the observed check-run was not classified as evidence-mismatch'
+[[ -e $target-worktrees/issue-7005 ]] || fail 'require mode removed the worktree despite blocking completion on a self-attested check mismatch'
+
+# 6) The Issue's acceptance criteria changed (new wording -> new id) and the
+# record does not cover the new id at all: criteria-missing.
+write_queue_config "$target/.agentic-loop.toml" TRACEABILITY=require
+trace_old_id=$(criterion_id 'Support v1 authentication flow')
+trace_c_old=$(trace_criterion_json "$trace_old_id" issue-body satisfied automated '' '' "$(trace_change_json bin/trace-auth.sh)" "$(trace_check_json check success)")
+trace_record=$(trace_record_json 7006 "$trace_c_old")
+printf '%s' "$(trace_pr_body "$trace_record")" > "$TEST_ROOT/trace-pr-body"
+printf '7006 running open none 2026-01-01T00:00:00Z none none %s\n' "$(criteria_body 'Support v2 authentication flow')" > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+FAKE_PR_BODY_FILE="$TEST_ROOT/trace-pr-body" FAKE_PR_FILES='bin/trace-auth.sh' \
+  "$target/bin/agentic-loop" _worker 7006 trace-criteria-changed-worker
+grep -Eq '^7006 failed open' "$state" || fail 'a record that omits a changed criterion id was not blocked'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'reason=traceability-invalid detail=criteria-missing' 'an omitted changed criterion id was not classified as criteria-missing'
+
+# 7) The same wording change, this time with the record properly declaring
+# the old id `superseded` (with `superseded_by` pointing at the new id) while
+# also covering the new id: passes.
+write_queue_config "$target/.agentic-loop.toml" TRACEABILITY=require
+trace_old_id=$(criterion_id 'Support v1 authentication flow')
+trace_new_id=$(criterion_id 'Support v2 authentication flow')
+trace_c_new=$(trace_criterion_json "$trace_new_id" issue-body satisfied automated '' '' "$(trace_change_json bin/trace-auth.sh)" "$(trace_check_json check success)")
+trace_c_old=$(trace_criterion_json "$trace_old_id" issue-body superseded '' 'Superseded by the v2 authentication flow criterion' "$trace_new_id" '' '')
+trace_record=$(trace_record_json 7007 "$trace_c_new" "$trace_c_old")
+printf '%s' "$(trace_pr_body "$trace_record")" > "$TEST_ROOT/trace-pr-body"
+printf '7007 running open none 2026-01-01T00:00:00Z none none %s\n' "$(criteria_body 'Support v2 authentication flow')" > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+FAKE_PR_BODY_FILE="$TEST_ROOT/trace-pr-body" FAKE_PR_FILES='bin/trace-auth.sh' \
+  "$target/bin/agentic-loop" _worker 7007 trace-superseded-worker
+grep -Eq '^7007 completed closed' "$state" || fail 'a record that supersedes the old criterion id while covering the new one was blocked'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'superseded=1' 'a superseded criterion was not reflected in the traceability verdict tally'
+
+# 8) Manual/external verification with no automatable checks or changes is a
+# legitimate way to satisfy a criterion.
+write_queue_config "$target/.agentic-loop.toml" TRACEABILITY=require
+trace_id1=$(criterion_id 'Manual QA sign-off obtained')
+trace_id2=$(criterion_id 'External security review completed')
+trace_c1=$(trace_criterion_json "$trace_id1" issue-body satisfied manual '' '' '' '')
+trace_c2=$(trace_criterion_json "$trace_id2" issue-body satisfied external '' '' '' '')
+trace_record=$(trace_record_json 7008 "$trace_c1" "$trace_c2")
+printf '%s' "$(trace_pr_body "$trace_record")" > "$TEST_ROOT/trace-pr-body"
+printf '7008 running open none 2026-01-01T00:00:00Z none none %s\n' \
+  "$(criteria_body 'Manual QA sign-off obtained' 'External security review completed')" > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+FAKE_PR_BODY_FILE="$TEST_ROOT/trace-pr-body" "$target/bin/agentic-loop" _worker 7008 trace-manual-external-worker
+grep -Eq '^7008 completed closed' "$state" || fail 'manually/externally verified criteria with no checks or changes were not accepted'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'manual=1 external=1' 'the traceability verdict did not tally manual/external verification counts'
+
+# 9) Squash merge regression (the bug this gate must never reintroduce): the
+# merge commit recorded on the verdict must be the PR's merge_commit_sha
+# (which differs from the PR head under squash merge), while check-runs are
+# still looked up against the PR's own head sha, never the merge commit.
+write_queue_config "$target/.agentic-loop.toml" TRACEABILITY=require
+trace_id1=$(criterion_id 'Squash-merged change behaves correctly')
+trace_c1=$(trace_criterion_json "$trace_id1" issue-body satisfied automated '' '' "$(trace_change_json bin/trace-squash.sh)" "$(trace_check_json check success)")
+trace_record=$(trace_record_json 7009 "$trace_c1")
+printf '%s' "$(trace_pr_body "$trace_record")" > "$TEST_ROOT/trace-pr-body"
+printf '7009 running open none 2026-01-01T00:00:00Z none none %s\n' "$(criteria_body 'Squash-merged change behaves correctly')" > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+: > "$FAKE_GH_ROOT/calls"
+squash_merge_commit='sq11111111111111111111111111111111111111'
+FAKE_PR_BODY_FILE="$TEST_ROOT/trace-pr-body" FAKE_PR_FILES='bin/trace-squash.sh' FAKE_PR_MERGE_COMMIT=$squash_merge_commit \
+  "$target/bin/agentic-loop" _worker 7009 trace-squash-worker
+grep -Eq '^7009 completed closed' "$state" || fail 'a squash-merge traceability record was not accepted'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" "merge_commit=$squash_merge_commit" 'the traceability verdict did not record the squash merge_commit_sha'
+! grep -Fq "commits/$squash_merge_commit/check-runs" "$FAKE_GH_ROOT/calls" || fail 'squash-merge traceability queried check-runs against the merge commit instead of the PR head sha'
+assert_contains "$FAKE_GH_ROOT/calls" '/check-runs' 'squash-merge traceability never queried check-runs at all'
+[[ ! -e $target-worktrees/issue-7009 ]] || fail 'a passing squash-merge traceability record did not clean up the worktree'
+
+# 10) off (the shipped default): completion never even reads the PR's file
+# list, let alone requires a record.
+write_queue_config "$target/.agentic-loop.toml" TRACEABILITY=off
+printf '7010 running open\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+: > "$FAKE_GH_ROOT/calls"
+"$target/bin/agentic-loop" _worker 7010 trace-off-worker
+grep -Eq '^7010 completed closed' "$state" || fail 'traceability off mode blocked completion despite having no record'
+! grep -Fq '/files' "$FAKE_GH_ROOT/calls" || fail 'traceability off mode unexpectedly read the PR file list'
+
+# 11) warn: a missing record never blocks completion, but an advisory verdict
+# comment naming the failure reason is posted.
+write_queue_config "$target/.agentic-loop.toml" TRACEABILITY=warn
+printf '7011 running open\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+"$target/bin/agentic-loop" _worker 7011 trace-warn-worker
+grep -Eq '^7011 completed closed' "$state" || fail 'traceability warn mode blocked completion despite having no record'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'verdict=warn reason=missing-record' 'traceability warn mode did not post an advisory verdict for a missing record'
+
+# 12) require: a missing record blocks completion; the Issue is left
+# open/failed with its worktree and branch intact.
+write_queue_config "$target/.agentic-loop.toml" TRACEABILITY=require
+printf '7012 running open\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+"$target/bin/agentic-loop" _worker 7012 trace-require-missing-worker
+grep -Eq '^7012 failed open$' "$state" || fail 'traceability require mode completed an Issue despite having no record'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'reason=traceability-invalid detail=missing-record' 'traceability require mode did not record the missing-record reason'
+[[ -e $target-worktrees/issue-7012 ]] || fail 'traceability require mode removed the worktree despite blocking completion'
+git -C "$target" show-ref --verify --quiet refs/heads/agent/issue-7012 || fail 'traceability require mode removed the branch despite blocking completion'
+
+# 13) A record containing credential-like content is rejected before it is
+# ever trusted, and the raw secret text never reaches a posted comment.
+write_queue_config "$target/.agentic-loop.toml" TRACEABILITY=require
+trace_secret="ghp_$(printf '%s%s' 'abcdefghijklmnopqrst' 'uvwxyz0123456789')"
+trace_id1=$(criterion_id 'Rotate the leaked token')
+trace_c1=$(trace_criterion_json "$trace_id1" issue-body unmet '' "blocked pending rotation of $trace_secret" '' '' '')
+trace_record=$(trace_record_json 7013 "$trace_c1")
+printf '%s' "$(trace_pr_body "$trace_record")" > "$TEST_ROOT/trace-pr-body"
+printf '7013 running open none 2026-01-01T00:00:00Z none none %s\n' "$(criteria_body 'Rotate the leaked token')" > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+FAKE_PR_BODY_FILE="$TEST_ROOT/trace-pr-body" "$target/bin/agentic-loop" _worker 7013 trace-secret-worker
+grep -Eq '^7013 failed open' "$state" || fail 'a credential-like traceability record was not blocked'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'reason=traceability-invalid detail=secret-like' 'a credential-like traceability record was not classified as secret-like'
+! grep -Fq "$trace_secret" "$FAKE_GH_ROOT/$state_key.comments" || fail 'a credential-like traceability record leaked its secret text into a posted comment'
+
+# 14) A record exceeding the size cap is rejected outright, before any
+# structural or secret validation of its content.
+write_queue_config "$target/.agentic-loop.toml" TRACEABILITY=require
+trace_big_filler=$(printf '%9000s' '' | tr ' ' x)
+printf '%s' "$(trace_pr_body "$trace_big_filler")" > "$TEST_ROOT/trace-pr-body"
+printf '7014 running open none 2026-01-01T00:00:00Z none none %s\n' "$(criteria_body 'Any criterion at all')" > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+FAKE_PR_BODY_FILE="$TEST_ROOT/trace-pr-body" "$target/bin/agentic-loop" _worker 7014 trace-oversized-worker
+grep -Eq '^7014 failed open' "$state" || fail 'an oversized traceability record was not blocked'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'reason=traceability-invalid detail=record-too-large' 'an oversized traceability record was not classified as record-too-large'
+
+# 15) Upsert idempotence: passing the gate for the same Issue twice (e.g. a
+# second convergent worker run) must update the single existing verdict
+# comment in place, never create a second one.
+write_queue_config "$target/.agentic-loop.toml" TRACEABILITY=require
+trace_id1=$(criterion_id 'Idempotent verdict criterion')
+trace_c1=$(trace_criterion_json "$trace_id1" issue-body satisfied automated '' '' "$(trace_change_json bin/trace-idem.sh)" "$(trace_check_json check success)")
+trace_record=$(trace_record_json 7015 "$trace_c1")
+printf '%s' "$(trace_pr_body "$trace_record")" > "$TEST_ROOT/trace-pr-body"
+printf '7015 running open none 2026-01-01T00:00:00Z none none %s\n' "$(criteria_body 'Idempotent verdict criterion')" > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+FAKE_PR_BODY_FILE="$TEST_ROOT/trace-pr-body" FAKE_PR_FILES='bin/trace-idem.sh' \
+  "$target/bin/agentic-loop" _worker 7015 trace-idempotent-worker-1
+grep -Eq '^7015 completed closed' "$state" || fail 'idempotent-upsert setup: the first gate pass did not complete the Issue'
+[[ $(grep -c 'agentic-loop:traceability schema=1' "$FAKE_GH_ROOT/$state_key.comments") -eq 1 ]] || fail 'idempotent-upsert setup: the first gate pass did not post exactly one verdict comment'
+printf '7015 running open none 2026-01-01T00:00:00Z none none %s\n' "$(criteria_body 'Idempotent verdict criterion')" > "$state"
+FAKE_PR_BODY_FILE="$TEST_ROOT/trace-pr-body" FAKE_PR_FILES='bin/trace-idem.sh' \
+  "$target/bin/agentic-loop" _worker 7015 trace-idempotent-worker-2
+grep -Eq '^7015 completed closed' "$state" || fail 'idempotent-upsert: the second gate pass did not complete the Issue'
+[[ $(grep -c 'agentic-loop:traceability schema=1' "$FAKE_GH_ROOT/$state_key.comments") -eq 1 ]] || fail 'a second traceability gate pass for the same Issue posted a second verdict comment instead of updating the existing one in place'
+
+# 16) `bin/agentic-loop trace ISSUE --format json` (read-only CLI): a failing
+# record (here, a missing one) is reported with verdict/reason/criteria and a
+# non-zero exit code.
+printf '7016 completed closed none 2026-01-01T00:00:00Z none none none\n' > "$state"
+trace_cli_out="$TEST_ROOT/trace-cli-output.json"
+if FAKE_TRACE_PR=816 FAKE_TRACE_HEAD=deadbeefdeadbeefdeadbeefdeadbeefdeadbeef FAKE_TRACE_BASE=main \
+  "$target/bin/agentic-loop" trace 7016 --format json > "$trace_cli_out"; then
+  fail 'bin/agentic-loop trace did not exit non-zero for a failing traceability record'
+fi
+assert_contains "$trace_cli_out" '"verdict":"fail"' 'bin/agentic-loop trace json output did not report a fail verdict'
+assert_contains "$trace_cli_out" '"reason":"missing-record"' 'bin/agentic-loop trace json output did not report the failure reason'
+assert_contains "$trace_cli_out" '"criteria":[]' 'bin/agentic-loop trace json output did not include a criteria array'
+yq -p json '.' "$trace_cli_out" >/dev/null 2>&1 || fail 'bin/agentic-loop trace --format json did not produce valid JSON'
+
+# 17) `bin/agentic-loop trace --audit --format json`: a valid JSON summary,
+# exit 0, surfacing a flagged Issue from the repository-wide verdict-comment
+# sweep.
+trace_audit_events_file="$TEST_ROOT/trace-audit-events.tsv"
+printf '7017\t schema=1 issue=7017 pr=1 merge_commit=abc base=main checks=success criteria=1 satisfied=0 partial=0 not-applicable=0 unmet=1 superseded=0 manual=0 external=0 unreferenced_paths=0 verdict=pass \n' > "$trace_audit_events_file"
+trace_audit_out="$TEST_ROOT/trace-audit-output.json"
+FAKE_TRACE_AUDIT_EVENTS="$trace_audit_events_file" "$target/bin/agentic-loop" trace --audit --format json > "$trace_audit_out" \
+  || fail 'bin/agentic-loop trace --audit did not exit 0 for a successful sweep'
+yq -p json '.' "$trace_audit_out" >/dev/null 2>&1 || fail 'bin/agentic-loop trace --audit --format json did not produce valid JSON'
+assert_contains "$trace_audit_out" '"issue":7017' 'bin/agentic-loop trace --audit did not flag an Issue with an unmet criterion'
+
+# doctor rejects an invalid traceability value.
+cp "$target/.agentic-loop.toml" "$target/.agentic-loop.toml.valid"
+printf '[queue]\ntraceability = "loose"\n' > "$target/.agentic-loop.toml"
+if "$target/bin/agentic-loop" doctor > "$TEST_ROOT/trace-doctor-output.txt"; then fail 'doctor accepted an invalid traceability value'; fi
+grep -Fq '[失敗] 設定値: TRACEABILITY' "$TEST_ROOT/trace-doctor-output.txt" || fail 'doctor did not classify the invalid traceability value'
+mv "$target/.agentic-loop.toml.valid" "$target/.agentic-loop.toml"
+
 # --- status observability (Issue #42) ---
 # The Supervisor is deliberately left stopped for the manual-state scenarios
 # below: a live start would call rebuild_scope_cache/recover_expired and
@@ -3943,7 +4314,7 @@ grep -Fq '[foundation]' "$migration_target/.agentic-loop.toml" || fail 'migratio
 resolved_revision=$(git -C "$PROJECT_ROOT" rev-parse HEAD)
 assert_contains "$migration_target/.agentic-loop.toml" "revision = \"$resolved_revision\"" 'migration apply did not pin the applied revision'
 [[ $(yq -p json -o yaml '.source.revision' "$migration_target/.agentic-loop/manifest.json") == "$resolved_revision" ]] || fail 'upgrade manifest did not record the applied revision'
-[[ $(yq -p json -o yaml '.migration_level' "$migration_target/.agentic-loop/manifest.json") -eq 1 ]] || fail 'manifest migration_level was not bumped after applying the migration'
+[[ $(yq -p json -o yaml '.migration_level' "$migration_target/.agentic-loop/manifest.json") -eq 2 ]] || fail 'manifest migration_level was not bumped after applying the migration'
 migration_rerun=$("$migration_target/bin/agentic-loop" upgrade --source "$PROJECT_ROOT")
 [[ $migration_rerun == *'変更はありません'* ]] || fail 'rerunning upgrade after a completed migration was not a no-op'
 

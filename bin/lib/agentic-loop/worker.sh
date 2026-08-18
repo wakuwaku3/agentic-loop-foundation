@@ -41,6 +41,7 @@ exec_prompt() {
   [[ -n $resume_context ]] && printf '%s\n' "$resume_context"
   issue_prompt "$issue" "$repository"
   cat <<'EOF'
+PR本文に、各受け入れ条件と実装変更・検証結果を対応付ける `agentic-loop:traceability` code blockを含めてください（`.github/PULL_REQUEST_TEMPLATE.md` の雛形と `docs/operations/traceability.md` を参照）。schema=1、issue番号、criteria配列（各要素はid=`ac-`+条件文正規化のsha256先頭8桁、source、status、verification、必要に応じてchanges/checks/reason/superseded_by）を持つJSONです。行番号やcommit SHAではなくidとpathで対象を示し、秘密やlog全文は含めないでください。この記録はGitHubの観測結果（checks結論、変更path）と照合されるため、実際に行った変更・実行した検証とだけ一致させてください。
 CI・required checks・AI reviewなどの外部完了待ちは、このturn内で前景実行してください。`gh pr checks --watch` 等にはtimeoutを付け、未確定なら状態を再確認して同じturn内で繰り返します。background process、別agent、別sessionへ待機を委譲してはいけません。checksがpending、review feedbackが未対応、またはmergeとdefault branch上の検証が未完了のまま最終応答を書いてはいけません。「待機中です」などの待機報告で終了してはいけません。
 正当な終端に到達した最終応答は、最後の非空行を `AGENTIC_LOOP_RESULT=completed`、`AGENTIC_LOOP_RESULT=failed`、`AGENTIC_LOOP_RESULT=needs-input`、`AGENTIC_LOOP_RESULT=declined` のいずれか一行だけにしてください。markerの後に説明、コードフェンス、または別の非空行を置いてはいけません。
 EOF
@@ -303,7 +304,7 @@ resume_probe() {
   local branch_ref="refs/heads/$branch" worktree_root registered_branch other main_sha
   RESUME_PHASE="fresh" RESUME_DIRTY=0 RESUME_DIVERGED=0 RESUME_HEAD='' RESUME_REMOTE=''
   RESUME_PR='' RESUME_PR_STATE='' RESUME_PR_URL='' RESUME_CHECKS=''
-  RESUME_BASE_BRANCH='' RESUME_BEHIND=0 RESUME_MERGEABLE='unknown'
+  RESUME_BASE_BRANCH='' RESUME_BEHIND=0 RESUME_MERGEABLE='unknown' RESUME_MERGE_COMMIT=''
 
   if [[ -e $worktree ]]; then
     if worktree_root=$(cd "$worktree" && pwd -P 2>/dev/null); then
@@ -347,20 +348,21 @@ resume_probe() {
   # bash `read` treats consecutive/leading tabs as a single whitespace-class
   # delimiter and silently collapses an empty leading field, which happens
   # whenever there is no merged PR yet.
-  local pr_tsv pr_jq merged_pr='' merged_sha='' merged_url='' open_pr='' open_url='' sep=$'\x1f'
+  local pr_tsv pr_jq merged_pr='' merged_sha='' merged_url='' open_pr='' open_url='' merged_merge_commit='' merged_base='' sep=$'\x1f'
   pr_jq='
     # resume-probe-prs
     (map(select(.merged_at != null)) | sort_by(.merged_at) | last) as $m |
     (map(select(.state == "open")) | sort_by(.created_at) | last) as $o |
-    [$m.number // "", $m.head.sha // "", $m.html_url // "", $o.number // "", $o.html_url // ""] | join("SEP")
+    [$m.number // "", $m.head.sha // "", $m.html_url // "", $o.number // "", $o.html_url // "", $m.merge_commit_sha // "", $m.base.ref // ""] | join("SEP")
   '
   pr_jq=${pr_jq/SEP/$sep}
   pr_tsv=$(repo_api pulls --method GET -f state=all -f head="${repository%%/*}:$branch" -f per_page=100 --jq "$pr_jq" 2>/dev/null) || true
-  [[ -n $pr_tsv ]] && IFS=$'\x1f' read -r merged_pr merged_sha merged_url open_pr open_url <<< "$pr_tsv"
+  [[ -n $pr_tsv ]] && IFS=$'\x1f' read -r merged_pr merged_sha merged_url open_pr open_url merged_merge_commit merged_base <<< "$pr_tsv"
 
   if [[ $merged_pr =~ ^[0-9]+$ ]]; then
     if [[ $merged_sha == "$RESUME_HEAD" && $RESUME_DIVERGED -eq 0 ]]; then
       RESUME_PHASE="pr-merged"; RESUME_PR=$merged_pr; RESUME_PR_URL=$merged_url; RESUME_PR_STATE="merged"
+      RESUME_MERGE_COMMIT=${merged_merge_commit:-$merged_sha}; RESUME_BASE_BRANCH=${merged_base:-$default_branch}
     else
       RESUME_PHASE="needs-decision"; RESUME_PR=$merged_pr; RESUME_PR_URL=$merged_url; RESUME_PR_STATE="merged-mismatch"
     fi
@@ -577,23 +579,30 @@ worker() {
       ;;
     pr-merged)
       local cleaned=1
-      if [[ -e $worktree ]]; then
-        cleanup_completed_worker "$worktree" "$branch" "$RESUME_HEAD" || cleaned=0
-      else
-        cleanup_completed_branch_only "$branch" "$RESUME_HEAD" || cleaned=0
-      fi
-      if [[ $cleaned -eq 1 ]]; then
-        clear_attempts "$issue"
-        progress_touch "$issue" 'done'
-        set_issue_state "$issue" completed
-        project_sync_state "$issue" completed
-        comment_issue "$issue" "<!-- agentic-loop:completed pr=$RESUME_PR resumed=1 -->\n再開時の検査で、対応PR $RESUME_PR_URL が既にmerge済みであることを確認しました（providerは起動していません）。専用worktreeとlocal branch \`$branch\` を削除しました。remote branchは復旧とGitHubのPR設定との責務分離のため、Supervisorからは削除しません。"
-        repo_api "issues/$issue" --method PATCH -f state=closed >/dev/null
+      if trace_gate "$issue" "$RESUME_PR" "$RESUME_HEAD" "${RESUME_MERGE_COMMIT:-$RESUME_HEAD}" "${RESUME_BASE_BRANCH:-$default_branch}"; then
+        if [[ -e $worktree ]]; then
+          cleanup_completed_worker "$worktree" "$branch" "$RESUME_HEAD" || cleaned=0
+        else
+          cleanup_completed_branch_only "$branch" "$RESUME_HEAD" || cleaned=0
+        fi
+        if [[ $cleaned -eq 1 ]]; then
+          clear_attempts "$issue"
+          progress_touch "$issue" 'done'
+          set_issue_state "$issue" completed
+          project_sync_state "$issue" completed
+          comment_issue "$issue" "<!-- agentic-loop:completed pr=$RESUME_PR resumed=1 -->\n再開時の検査で、対応PR $RESUME_PR_URL が既にmerge済みであることを確認しました（providerは起動していません）。専用worktreeとlocal branch \`$branch\` を削除しました。remote branchは復旧とGitHubのPR設定との責務分離のため、Supervisorからは削除しません。"
+          repo_api "issues/$issue" --method PATCH -f state=closed >/dev/null
+        else
+          progress_touch "$issue" failed
+          set_issue_state "$issue" failed
+          project_sync_state "$issue" failed
+          comment_issue "$issue" "<!-- agentic-loop:failed worker=$worker reason=merge-or-cleanup resumed=1 -->\n再開時の検査でPR $RESUME_PR_URL のmergeを確認しましたが、安全なcleanupを完了できませんでした。Issueはcloseせず、既存のworktree/branchを保持します。原因確認後に再試行するには \`agent:queued\` を再度付与してください。"
+        fi
       else
         progress_touch "$issue" failed
         set_issue_state "$issue" failed
         project_sync_state "$issue" failed
-        comment_issue "$issue" "<!-- agentic-loop:failed worker=$worker reason=merge-or-cleanup resumed=1 -->\n再開時の検査でPR $RESUME_PR_URL のmergeを確認しましたが、安全なcleanupを完了できませんでした。Issueはcloseせず、既存のworktree/branchを保持します。原因確認後に再試行するには \`agent:queued\` を再度付与してください。"
+        comment_issue "$issue" "<!-- agentic-loop:failed worker=$worker reason=traceability-invalid detail=$TRACE_INVALID_REASON resumed=1 -->\n再開時の検査でPR $RESUME_PR_URL のmergeを確認しましたが、トレーサビリティ記録の検証に失敗したため完了処理を保留しました（detail=$TRACE_INVALID_REASON）。Issueはcloseせず、既存のworktree/branchを保持します。PR本文の \`agentic-loop:traceability\` code blockを確認し、修正後に \`agent:queued\` を再度付与してください。"
       fi
       clear_worker_local "$issue"
       return 0
@@ -742,15 +751,32 @@ worker() {
   project_add_pull_requests "$branch"
   if [[ $exit_code -eq 0 ]] && agent_result_is "$result" completed; then
     progress_touch "$issue" merge
-    IFS=$'\t' read -r merged_pr merged_oid < <(repo_api pulls --method GET -f state=closed -f head="${repository%%/*}:$branch" -f per_page=100 --jq 'map(select(.merged_at != null and .head.ref == "'"$branch"'")) | first | [.html_url, .head.sha] | @tsv' 2>/dev/null || true) || true
+    local merged_number='' merged_base='' merged_commit=''
+    IFS=$'\t' read -r merged_pr merged_oid merged_number merged_base merged_commit < <(repo_api pulls --method GET -f state=closed -f head="${repository%%/*}:$branch" -f per_page=100 --jq 'map(select(.merged_at != null and .head.ref == "'"$branch"'")) | first | [.html_url, .head.sha, (.number|tostring), .base.ref, (.merge_commit_sha // .head.sha)] | @tsv' 2>/dev/null || true) || true
     progress_touch "$issue" cleanup
-    if [[ -n $merged_pr && $merged_oid =~ ^[0-9a-fA-F]{40}$ ]] && cleanup_completed_worker "$worktree" "$branch" "$merged_oid"; then
-      clear_attempts "$issue"
-      progress_touch "$issue" 'done'
-      set_issue_state "$issue" completed
-      project_sync_state "$issue" completed
-      comment_issue "$issue" "<!-- agentic-loop:completed pr=$merged_pr -->\nWorker \`$worker\` の完了報告と対応PRのmergeをGitHubで確認し、専用worktreeとlocal branch \`$branch\` を削除しました: $merged_pr\nremote branchは復旧とGitHubのPR設定との責務分離のため、Supervisorからは削除しません。"
-      repo_api "issues/$issue" --method PATCH -f state=closed >/dev/null
+    if [[ -n $merged_pr && $merged_oid =~ ^[0-9a-fA-F]{40}$ ]]; then
+      if trace_gate "$issue" "$merged_number" "$merged_oid" "$merged_commit" "$merged_base"; then
+        if cleanup_completed_worker "$worktree" "$branch" "$merged_oid"; then
+          clear_attempts "$issue"
+          progress_touch "$issue" 'done'
+          set_issue_state "$issue" completed
+          project_sync_state "$issue" completed
+          comment_issue "$issue" "<!-- agentic-loop:completed pr=$merged_pr -->\nWorker \`$worker\` の完了報告と対応PRのmergeをGitHubで確認し、専用worktreeとlocal branch \`$branch\` を削除しました: $merged_pr\nremote branchは復旧とGitHubのPR設定との責務分離のため、Supervisorからは削除しません。"
+          repo_api "issues/$issue" --method PATCH -f state=closed >/dev/null
+        else
+          exit_code=1
+          progress_touch "$issue" failed
+          set_issue_state "$issue" failed
+          project_sync_state "$issue" failed
+          comment_issue "$issue" "<!-- agentic-loop:failed worker=$worker reason=merge-or-cleanup -->\nWorkerは完了を報告しましたが、branch \`$branch\` のmerge済みPRと一致するcommitを確認できないか、安全なcleanupを完了できませんでした。Issueはcloseせず、残っているworktreeまたはbranch dataを保持します。原因確認後に再試行するには \`agent:queued\` を再度付与してください。"
+        fi
+      else
+        exit_code=1
+        progress_touch "$issue" failed
+        set_issue_state "$issue" failed
+        project_sync_state "$issue" failed
+        comment_issue "$issue" "<!-- agentic-loop:failed worker=$worker reason=traceability-invalid detail=$TRACE_INVALID_REASON -->\nWorkerは完了を報告しmergeを確認しましたが、トレーサビリティ記録の検証に失敗したため完了処理を保留しました（detail=$TRACE_INVALID_REASON）。Issueはcloseせず、既存のworktree/branchを保持します。PR本文の \`agentic-loop:traceability\` code blockを確認し、修正後に \`agent:queued\` を再度付与してください。"
+      fi
     else
       exit_code=1
       progress_touch "$issue" failed

@@ -8,7 +8,7 @@ description: Audit a repository for requirements-to-implementation drift, undocu
 Audit the repository without modifying tracked or untracked files.
 
 1. Read `AGENTS.md`, requirements, policies, decisions, operations documentation, source, tests, CI configuration, and the directory tree. Treat repository-specific invariants as mandatory.
-2. Compare documented requirements with observable implementation and tests in both directions.
+2. Compare documented requirements with observable implementation and tests in both directions. Use `bin/agentic-loop trace --audit --format json` as one evidence source: it flags Issues whose merged PR record left a requirement `unmet`/`partial` (implementation or verification missing) or left changed paths `unreferenced_paths` (implementation without a stated requirement), from existing verdict comments at no extra cost beyond a repository-wide comment read.
 3. Assess whether directories have clear ownership, naming, and boundaries.
 4. Identify repeated development work that a new or updated skill could make safer or faster.
 5. Find files that are generated, superseded, unreachable, duplicated, or otherwise apparently unused. Never delete them during diagnosis.

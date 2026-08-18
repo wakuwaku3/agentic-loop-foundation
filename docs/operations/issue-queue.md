@@ -312,3 +312,9 @@ Providerを起動する直前に `worker_confirm_running_label()` がGitHub上�
 - `exhausted`（`agent:queued` へ戻る）: プール枯渇（quota / 429 / usage limit / `insufficient_quota` / credit balance、および後方互換のため空result + 非0 exit）。該当プールのmarkerを書き、全プールが利用不可の間だけSupervisorのclaimを一時停止する。部分枯渇では次claimで他プールが使われる（[ADR 0012](../decisions/0012-provider-pool-fallback.md)）。
 - モデル固有失敗（`overloaded`、model解決失敗）: プール枯渇にしない。同一stage内で同プールの次モデルへ切り替える。
 - `declined`（`agent:needs-input`。closeしない）: workerが実施不要または実施不能と判断した場合。worker自身はcloseせず、認可済み運用者の判断（`dispose`等）を待つ。
+
+## 要求・変更・検証のトレーサビリティ
+
+workerの完了確定（通常のmerge後、および再開時の`pr-merged`確認の両方）は、`[queue].traceability`が`off`以外のとき、PR本文の`agentic-loop:traceability` fenced JSON blockを評価する`trace_gate`を通る。record不在・検証失敗時、`require`はIssueをcloseせず`agent:failed`にしてworktree/branchを保持し、`warn`は完了を継続しつつ助言commentを1件残す。詳細なrecordの書き方・失敗理由コード・`bin/agentic-loop trace`の使い方は[docs/operations/traceability.md](traceability.md)、設計判断（recordの正本の選び方、識別子の方式、自己申告を信用しない理由、既定modeの根拠）は[ADR 0017](../decisions/0017-requirement-traceability.md)を参照。
+
+mode切替は`.agentic-loop.toml`の`queue.traceability`を`off`/`warn`/`require`のいずれかへ書き換えるだけで、GitHub側の設定変更は不要である。新規導入は`warn`から始まり、記録が定着した運用では`require`へ切り替えることを推奨する。
