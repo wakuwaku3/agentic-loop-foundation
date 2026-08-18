@@ -37,7 +37,7 @@ fi
 readonly WORKTREE_ROOT="$(dirname "$REPO_ROOT")/$(basename "$REPO_ROOT")-worktrees"
 readonly CONFIG_FILE="$REPO_ROOT/.agentic-loop.toml"
 readonly CONFIG_LOCAL="$REPO_ROOT/.agentic-loop.local.toml"
-readonly LABELS=(queued running needs-input in-review stopping completed failed stale blocked cancelled superseded duplicate merged)
+readonly LABELS=(queued running needs-input in-review stopping completed failed parked stale blocked cancelled superseded duplicate merged)
 readonly DISPOSITION_LABELS=(cancelled superseded duplicate merged)
 # Legacy priority:* label to numeric marker mapping, used only by the one-time
 # setup migration (docs/decisions/0015-numeric-priority-marker.md). New queue
@@ -162,7 +162,7 @@ Usage: $PROGRAM_NAME {setup|sync-issue ISSUE|dispose ISSUE --reason cancelled|su
   setup   Create or reuse this repository's labels and Project
   sync-issue  Add one Issue to the Project now, or queue a retry
   dispose     Authorized, auditable cancellation or consolidation of an Issue
-  resume      Authorized reopening of a disposed Issue
+  resume      Authorized re-queue of a disposed (closed) or parked (open) Issue
   priority    Set an Issue's numeric priority (0-100) via its body marker
   start   Start one background supervisor for this repository
   stop    Stop claiming work and drain running workers

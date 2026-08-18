@@ -5,7 +5,7 @@
 # approval: no
 # summary: .agentic-loop.toml の [queue] セクションへ、要求・変更・検証のトレー
 #   サビリティgateの既定mode `traceability = "warn"` を追加します(見出しが
-#   `docs/decisions/0016-requirement-traceability.md`、詳細が
+#   `docs/decisions/0017-requirement-traceability.md`、詳細が
 #   `docs/operations/traceability.md`)。
 # recovery: 追加された `traceability = "warn"` 行を削除するか、値を `off` へ
 #   書き換えてください。
@@ -33,7 +33,7 @@ case $mode in
       awk '
         /^\[queue\]/ && !done {
           print
-          print "# Requirement traceability gate (see docs/decisions/0016-requirement-traceability.md,"
+          print "# Requirement traceability gate (see docs/decisions/0017-requirement-traceability.md,"
           print "# docs/operations/traceability.md). require blocks completion on a missing/invalid"
           print "# record without closing the Issue; warn only posts an advisory comment; off disables"
           print "# evaluation entirely."
@@ -47,7 +47,7 @@ case $mode in
       cp "$config" "$tmp"
       {
         printf '\n[queue]\n'
-        printf '# Requirement traceability gate (see docs/decisions/0016-requirement-traceability.md,\n'
+        printf '# Requirement traceability gate (see docs/decisions/0017-requirement-traceability.md,\n'
         printf '# docs/operations/traceability.md). require blocks completion on a missing/invalid\n'
         printf '# record without closing the Issue; warn only posts an advisory comment; off disables\n'
         printf '# evaluation entirely.\n'

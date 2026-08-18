@@ -109,7 +109,7 @@ bin/agentic-loop upgrade
 
 `metrics` は既存のIssue/PR/comment履歴だけから、queue待ち時間・処理時間・失敗率・手戻り・worker稼働率などの傾向を再現可能に集計する読み取り専用コマンドです（[ADR 0007](docs/decisions/0007-loop-metrics.md)）。GitHub REST(core)読み取りは1回の実行あたり最大3回に固定し、Actions/CI・GraphQL・Projects APIは呼びません。追加の外部DB・有料monitoring・API課金は一切発生しません。Issue title・コメント本文・worker識別子は取得・出力せず、worker単位の内訳やランキングも出しません。`--as-of EPOCH`で窓の終端を固定すれば、同じ入力から常に同一の出力が得られます。詳細は [運用ドキュメント](docs/operations/loop-metrics.md) を参照してください。
 
-`trace` は、PR本文の`agentic-loop:traceability` recordとGitHubの観測結果（check-runs、変更ファイル一覧）を照合し、Issueの受け入れ条件が実際に何で満たされたかを確認する読み取り専用コマンドです（[ADR 0016](docs/decisions/0016-requirement-traceability.md)）。`trace ISSUE`は対応PRの評価結果を、`trace --audit`はrecordが不整合なIssueをリポジトリ全体から列挙します。`[queue].traceability`（既定`warn`）が`off`以外のとき、workerの完了確定でも同じ評価を行い、`require`ではrecord不在・不整合時にIssueをcloseせず保持します。詳細は [運用ドキュメント](docs/operations/traceability.md) を参照してください。
+`trace` は、PR本文の`agentic-loop:traceability` recordとGitHubの観測結果（check-runs、変更ファイル一覧）を照合し、Issueの受け入れ条件が実際に何で満たされたかを確認する読み取り専用コマンドです（[ADR 0017](docs/decisions/0017-requirement-traceability.md)）。`trace ISSUE`は対応PRの評価結果を、`trace --audit`はrecordが不整合なIssueをリポジトリ全体から列挙します。`[queue].traceability`（既定`warn`）が`off`以外のとき、workerの完了確定でも同じ評価を行い、`require`ではrecord不在・不整合時にIssueをcloseせず保持します。詳細は [運用ドキュメント](docs/operations/traceability.md) を参照してください。
 
 `upgrade` は導入済みのFoundationを、利用者の変更を失わず安全に更新するコマンドです（[ADR 0009](docs/decisions/0009-foundation-upgrade.md)）。既定は書き込みを一切行わないdry-runで、追加・更新・競合・削除候補・設定migrationを日本語で表示します。`--apply`で実際に適用し、破壊的・不可逆・追加費用・権限変更を伴う項目は`--approve`なしでは適用しません。適用後は`doctor`と完全検証を実行し、失敗時は`--rollback`または再実行の案内を表示します。詳細は [運用ドキュメント](docs/operations/upgrade.md) を参照してください。
 

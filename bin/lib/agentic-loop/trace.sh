@@ -4,7 +4,7 @@
 
 
 
-# --- Requirement traceability (see docs/decisions/0016, docs/operations/traceability.md) ---
+# --- Requirement traceability (see docs/decisions/0017, docs/operations/traceability.md) ---
 # A merged PR may carry one fenced `agentic-loop:traceability` JSON code block
 # in its body, mapping each acceptance criterion to the changes and checks
 # that satisfied it. This is untrusted provider output: it is only ever a
@@ -367,7 +367,7 @@ trace_verdict_upsert() {
 # off: no evaluation, no comment, no REST calls beyond what the caller already
 # made. warn: evaluates and always returns 0 (never blocks completion), but
 # posts an advisory comment when the record does not pass. require (the
-# strictest mode, not the shipped default -- see docs/decisions/0016 for why):
+# strictest mode, not the shipped default -- see docs/decisions/0017 for why):
 # evaluates and returns 1 on failure so the caller can fail the Issue without
 # closing it or deleting its worktree/branch.
 trace_gate() {

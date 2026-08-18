@@ -114,7 +114,7 @@ unknown_scope = "isolated"
 # repository (shared infrastructure, lockfiles, generated artifacts). Empty by
 # default so enabling this feature does not serialize existing Issues.
 exclusive_paths = ""
-# Requirement traceability gate (see docs/decisions/0016-requirement-traceability.md,
+# Requirement traceability gate (see docs/decisions/0017-requirement-traceability.md,
 # docs/operations/traceability.md): a merged PR may carry a fenced
 # `agentic-loop:traceability` JSON record mapping each acceptance criterion to
 # the changes/checks that satisfied it. "require" blocks completion (without

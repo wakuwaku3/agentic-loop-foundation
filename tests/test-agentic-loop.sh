@@ -44,7 +44,7 @@ dependency_field() { printf 'Blocked by: %s' "$1" | base64 -w0; }
 
 # criteria_body FIELDS... -> base64 of an Issue body with a 受け入れ条件
 # heading and one bullet per argument, for trace.sh's trace_derive_criteria
-# (state column 8, see docs/decisions/0016-requirement-traceability.md).
+# (state column 8, see docs/decisions/0017-requirement-traceability.md).
 criteria_body() {
   local body=$'## 受け入れ条件\n'
   local c
@@ -134,6 +134,7 @@ project_page2="$FAKE_GH_ROOT/$key.project-page2"
 project_fields="$FAKE_GH_ROOT/$key.project-fields"
 project_link="$FAKE_GH_ROOT/$key.project-link"
 comments="$FAKE_GH_ROOT/$key.comments"
+closes="$FAKE_GH_ROOT/$key.closes"
 views="$FAKE_GH_ROOT/$key.views"
 labels="$FAKE_GH_ROOT/$key.labels"
 diagnosis_issues="$FAKE_GH_ROOT/$key.diagnosis-issues"
@@ -174,12 +175,13 @@ case "${1:-} ${2:-}" in
     fi
     endpoint=${2#repos/}; endpoint=${endpoint#*/}
     if [[ $endpoint == */* ]]; then endpoint=${endpoint#*/}; else endpoint=''; fi
-    method=GET wanted='' form_state='' input_file=''
+    method=GET wanted='' form_state='' form_state_reason='' input_file=''
     for ((i=1; i<=$#; i++)); do
       case ${!i} in
         --method) j=$((i+1)); method=${!j} ;;
         labels=*) wanted=${!i#labels=} ;;
         state=*) form_state=${!i#state=} ;;
+        state_reason=*) form_state_reason=${!i#state_reason=} ;;
         --input) j=$((i+1)); input_file=${!j} ;;
       esac
     done
@@ -284,6 +286,7 @@ case "${1:-} ${2:-}" in
         else if ($2 == "queued") state="queued"
         else if ($2 == "needs-input") state="needs-input"
         else if ($2 == "failed") state="failed"
+        else if ($2 == "parked") state="parked"
         else if ($2 == "in-review") state="in-review"
         else if ($2 == "blocked") state="blocked"
         print $1 "\t" "Fake issue " $1 "\t" state "\t" priority "\t" category "\t" created
@@ -326,6 +329,7 @@ case "${1:-} ${2:-}" in
           else awk '$2 == "running" && $3 != "closed" {print $1}' "$state"; fi ;;
         agent:needs-input) awk '$2 == "needs-input" && $3 != "closed" {print $1}' "$state" ;;
         agent:failed) awk '$2 == "failed" && $3 != "closed" {print $1}' "$state" ;;
+        agent:parked) awk '$2 == "parked" && $3 != "closed" {print $1}' "$state" ;;
         agent:blocked) awk '$2 == "blocked" && $3 != "closed" {print $1 "\t" $8}' "$state" ;;
       esac
     elif [[ $endpoint =~ ^issues/([0-9]+)/labels$ && $method == PUT ]]; then
@@ -379,6 +383,10 @@ case "${1:-} ${2:-}" in
       issue=${BASH_REMATCH[1]}
       if [[ $method == PATCH && $form_state == closed ]]; then
         ( flock 9; awk -v n="$issue" '{if ($1 == n) $3="closed"; print}' "$state" > "$state.$$.tmp" && mv "$state.$$.tmp" "$state" ) 9> "$state.lock"
+        # Audit log of every Issue close this fake gh ever performs, so tests
+        # can assert an Issue was NEVER closed (positive assertions on closes
+        # can be spoofed by a state-file peek; a negative assertion here can't).
+        printf '%s\t%s\n' "$issue" "${form_state_reason:-none}" >> "$closes"
       elif [[ $method == PATCH && $* == *body=* ]]; then
         body=''; for arg in "$@"; do [[ $arg == body=* ]] && body=${arg#body=}; done
         b64=$(printf '%s' "$body" | base64 -w0)
@@ -394,6 +402,11 @@ case "${1:-} ${2:-}" in
           printf "%s\037%s\037%s\037%s\n", $3, ($6 == "" || $6 == "none" ? "2026-01-01T00:00:00Z" : $6), labels, body
         }' "$state"
       elif [[ $* == *'[.state, ([.labels[].name]'* ]]; then
+        awk -v n="$issue" '$1 == n {printf "%s\tagent:%s\n", $3, $2}' "$state"
+      elif [[ $* == *'select(startswith("agent:"))'* ]]; then
+        # bin/lib/agentic-loop/dispose.sh's issue_agent_state: [.state, agent:*
+        # labels joined]. The fixture state file only ever carries one agent:*
+        # state word per Issue, so it is equivalent to the single-label form above.
         awk -v n="$issue" '$1 == n {printf "%s\tagent:%s\n", $3, $2}' "$state"
       elif [[ $* == *'.state_reason // ""'* ]]; then
         if ! awk -v n="$issue" '$1 == n {found=1} END{exit !found}' "$state" 2>/dev/null; then
@@ -1366,6 +1379,7 @@ git -C "$target" commit --quiet -m configure
 git -C "$target" push --quiet
 state="$FAKE_GH_ROOT/$state_key.state"
 state_root="$(git -C "$target" rev-parse --absolute-git-dir)/agentic-loop"
+closes="$FAKE_GH_ROOT/$state_key.closes"
 
 if [[ $TEST_GROUP == all || $TEST_GROUP == queue ]]; then
 
@@ -1581,23 +1595,71 @@ printf '70 failed open none 2026-01-01T00:00:00Z\n' > "$state"
 AGENTIC_LOOP_RUN_ONCE=1 FAKE_CODEX_SLEEP=1 "$target/bin/agentic-loop" _supervise
 grep -Eq '^70 completed closed' "$state" || fail 'untracked failed backlog was not auto-retried to completion'
 
-# After MAX_ATTEMPTS the failed Issue is closed as unresolvable, not left parked.
+# After MAX_ATTEMPTS the failed Issue is parked (open, non-claim), never closed
+# (see docs/decisions/0016): a worker using up its retry budget does not mean
+# the requirement is unresolvable.
 write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=3 STOP_TIMEOUT=10 STALE_DAYS=30 MAX_ATTEMPTS=1 RETRY_COOLDOWN_SECONDS=0
 printf '80 failed open none 2026-01-01T00:00:00Z\n' > "$state"
 mkdir -p "$state_root/attempts"; printf '1\t0\n' > "$state_root/attempts/issue-80"
 : > "$FAKE_GH_ROOT/$state_key.comments"
+rm -f "$closes"
 AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _supervise
-grep -Eq '^80 failed closed' "$state" || fail 'retry-exhausted Issue was not closed as unresolvable'
-assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:unresolved' 'unresolvable closure was not recorded'
+grep -Eq '^80 parked open' "$state" || fail 'retry-exhausted Issue was not parked (open, non-claim)'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:parked' 'park was not recorded'
+[[ ! -r "$closes" ]] || ! grep -Fq $'^80\t' "$closes" || fail 'retry-exhausted Issue must never be closed'
+[[ -r "$state_root/attempts/issue-80" ]] && fail 'park did not clear the attempts record'
+true
+
+# park does not block a concurrently queued Issue from being claimed: the
+# parked Issue keeps its scope reservation cleared so it cannot conflict-wait
+# another Issue either.
+printf '180 queued open none 2026-01-01T00:00:00Z\n' >> "$state"
+AGENTIC_LOOP_RUN_ONCE=1 FAKE_CODEX_SLEEP=1 "$target/bin/agentic-loop" _supervise
+grep -Eq '^80 parked open' "$state" || fail 'parked Issue changed state on an unrelated poll'
+grep -Eq '^180 completed closed' "$state" || fail 'a parked Issue blocked an unrelated queued Issue from being claimed'
+[[ ! -e "$state_root/conflict/issue-180" ]] || fail 'parked Issue left a stale conflict-wait entry for an unrelated Issue'
+
+# park is stable across further polls: no repeated comments, no close, no
+# reclaim (a restarted supervisor must not re-touch a parked Issue).
+comments_before=$(wc -l < "$FAKE_GH_ROOT/$state_key.comments")
+AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _supervise
+AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _supervise
+grep -Eq '^80 parked open' "$state" || fail 'parked Issue was not stable across further supervisor polls'
+comments_after=$(wc -l < "$FAKE_GH_ROOT/$state_key.comments")
+[[ $comments_before == "$comments_after" ]] || fail 'parked Issue accumulated repeat comments across polls'
+[[ ! -r "$closes" ]] || ! grep -Fq $'^80\t' "$closes" || fail 'a parked Issue was closed on a later poll'
+
+# An authorized resume re-queues a parked Issue directly (no reopen: it was
+# never closed), and the next poll claims it to completion.
+AGENTIC_LOOP_RUN_ONCE=1 FAKE_CODEX_SLEEP=1 "$target/bin/agentic-loop" resume 80
+grep -Eq '^80 queued open' "$state" || fail 'resume did not re-queue a parked Issue'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:resume' 'resume of a parked Issue was not recorded'
+AGENTIC_LOOP_RUN_ONCE=1 FAKE_CODEX_SLEEP=1 "$target/bin/agentic-loop" _supervise
+grep -Eq '^80 completed closed' "$state" || fail 'a resumed park Issue was not claimed and completed on the next poll'
 rm -f "$state_root/attempts/issue-80"
 
-# A worker that declines an Issue (unnecessary/impossible) closes it.
+# A worker that declines an Issue (unnecessary/impossible) moves it to
+# needs-input; the worker itself never closes it (see docs/decisions/0016 and
+# ADR 0010: only an authorized operator's dispose may close it).
 write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=3 STOP_TIMEOUT=10 STALE_DAYS=30
 printf '71 queued open none 2026-01-01T00:00:00Z\n' > "$state"
 : > "$FAKE_GH_ROOT/$state_key.comments"
+rm -f "$closes"
 AGENTIC_LOOP_RUN_ONCE=1 FAKE_CODEX_RESULT='AGENTIC_LOOP_RESULT=declined' "$target/bin/agentic-loop" _supervise
 grep -Eq '^71 needs-input open' "$state" || fail 'declined Issue was not moved to needs-input for authorized disposition'
 assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:declined' 'decline was not recorded'
+[[ ! -r "$closes" ]] || fail 'a declined Issue must never be closed by the worker'
+
+# Authorized dispose is the only path that closes an Issue outside completion
+# and stale triage; it must record state_reason=not_planned (see
+# docs/decisions/0016's allowlist).
+printf '72 needs-input open none 2026-01-01T00:00:00Z\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+rm -f "$closes"
+"$target/bin/agentic-loop" dispose 72 --reason cancelled
+grep -Eq '^72 cancelled closed' "$state" || fail 'authorized dispose did not close the Issue as cancelled'
+assert_contains "$closes" $'72\tnot_planned' 'dispose close did not record state_reason=not_planned'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:dispose' 'dispose did not record its audit marker'
 
 # A token/rate-limit exhaustion re-queues the Issue (never failed) and pauses
 # the supervisor; claiming resumes once the pool's exhaustion clears.
@@ -2491,6 +2553,7 @@ write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=2 LEA
 # now) and creates the state and category labels idempotently.
 if grep -Fq $'label create priority:critical' "$FAKE_GH_ROOT/calls" || grep -Fq $'label create priority:high' "$FAKE_GH_ROOT/calls" || grep -Fq $'label create priority:medium' "$FAKE_GH_ROOT/calls" || grep -Fq $'label create priority:low' "$FAKE_GH_ROOT/calls"; then fail 'setup created a legacy priority label'; fi
 grep -Fq $'label create agent:stale' "$FAKE_GH_ROOT/calls" || fail 'setup did not create the stale state label'
+grep -Fq $'label create agent:parked' "$FAKE_GH_ROOT/calls" || fail 'setup did not create the parked state label'
 for category in loop-continuity confidentiality-incident integrity-incident availability-incident feature improvement; do
   grep -Fq "label create category:$category" "$FAKE_GH_ROOT/calls" || fail "setup did not create category:$category"
 done
@@ -2543,8 +2606,10 @@ recent_date=$(date -u -d '1 day ago' +%Y-%m-%dT%H:%M:%SZ)
 # agent:failed is deliberately excluded here: it is actively managed by retry_failed, not stale closure.
 printf '20 queued open none 2025-01-01T00:00:00Z %s\n21 queued open none 2025-01-02T00:00:00Z %s\n22 running open none 2025-01-01T00:00:00Z %s\n23 needs-input open none 2025-01-01T00:00:00Z %s\n25 in-review open none 2025-01-01T00:00:00Z %s\n26 none open none 2025-01-01T00:00:00Z %s\n' "$old_date" "$recent_date" "$old_date" "$old_date" "$old_date" "$old_date" > "$state"
 printf '22 <!-- agentic-loop:lease worker=active heartbeat=%s expires=%s -->\n' "$(date +%s)" "$(($(date +%s) + 3600))" > "$FAKE_GH_ROOT/$state_key.comments"
+rm -f "$closes"
 AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _supervise
 grep -Eq '^20 stale closed' "$state" || fail 'inactive queued Issue was not marked stale and closed'
+assert_contains "$closes" $'20\tnot_planned' 'stale close did not record state_reason=not_planned'
 grep -Eq '^21 completed closed' "$state" || fail 'recent queued Issue was not left available for claim'
 for issue_state in '22 running open' '23 needs-input open' '25 in-review open' '26 none open'; do
   grep -Eq "^$issue_state" "$state" || fail "excluded Issue changed state: $issue_state"
@@ -2907,18 +2972,21 @@ grep -Eq '^9 queued open$' "$state" || fail 'expired running Issue was not recov
 
 # A worker that keeps dying before finishing (lease expiry / crash, never an
 # explicit AGENTIC_LOOP_RESULT=failed) must not requeue forever: once its recorded
-# claim attempts reach MAX_ATTEMPTS, recover_expired escalates it to agent:failed
-# so retry_failed closes it as unresolvable instead of looping in the queue.
+# claim attempts reach MAX_ATTEMPTS, recover_expired escalates it to agent:failed,
+# and retry_failed parks it (open, non-claim) instead of closing it as
+# unresolvable (see docs/decisions/0016) or looping in the queue.
 write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=3 STOP_TIMEOUT=10 STALE_DAYS=30 MAX_ATTEMPTS=2 RETRY_COOLDOWN_SECONDS=0
 printf '91 running open\n' > "$state"
 printf '91 <!-- agentic-loop:lease worker=dead heartbeat=1 expires=1 -->\n' > "$FAKE_GH_ROOT/$state_key.comments"
 mkdir -p "$state_root/attempts"; printf '2\t0\n' > "$state_root/attempts/issue-91"
 rm -f "$state_root/stop.requested"
+rm -f "$closes"
 AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _supervise
-grep -Eq '^91 failed closed$' "$state" || fail 'a worker that kept dying before finishing was not escalated and closed after MAX_ATTEMPTS'
+grep -Eq '^91 parked open$' "$state" || fail 'a worker that kept dying before finishing was not parked after MAX_ATTEMPTS'
 assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:recover-exhausted' 'lease-death escalation was not recorded on the Issue'
-assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:unresolved' 'escalated Issue was not closed as unresolvable'
-[[ ! -e $state_root/attempts/issue-91 ]] || fail 'attempts counter was not cleared after unresolvable closure'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:parked' 'escalated Issue was not parked'
+[[ ! -e $state_root/attempts/issue-91 ]] || fail 'attempts counter was not cleared after park'
+[[ ! -r "$closes" ]] || ! grep -Fq $'^91\t' "$closes" || fail 'a lease-death-escalated Issue must never be closed'
 
 # Under the attempt limit, a crashed worker's Issue still returns to the queue
 # (no premature escalation) so ordinary transient deaths keep retrying.
@@ -3136,7 +3204,7 @@ grep -Fq '[警告] 設定値: WORKER_TIMEOUT_SECONDS' <<< "$doctor_small_timeout
 if grep -Fq '[失敗] 設定値: WORKER_TIMEOUT_SECONDS' <<< "$doctor_small_timeout"; then fail 'an unsafely small worker_timeout_seconds was misclassified as a failure'; fi
 mv "$target/.agentic-loop.toml.valid" "$target/.agentic-loop.toml"
 
-# --- Requirement traceability gate (Issue #53, ADR 0016) ---
+# --- Requirement traceability gate (Issue #53, ADR 0017) ---
 # These scenarios exercise trace_gate through the ordinary (non-resume)
 # completion path: a fresh "running" Issue with no worktree yet, so worker()
 # creates the worktree/branch, runs the (default-completing) fake provider,
@@ -3511,13 +3579,17 @@ grep -Eq '^40 queued open' "$state" || fail 'claim_next claimed more than MAX_WO
 # counts and constructed Issue URLs (no extra GitHub call is needed for the
 # URL: see project_add_content's identical https://github.com/OWNER/REPO
 # convention).
-printf '50 needs-input open\n51 failed open\n52 blocked open\n53 stale closed\n' > "$state"
+printf '50 needs-input open\n51 failed open\n52 blocked open\n53 stale closed\n54 parked open\n' > "$state"
 : > "$FAKE_GH_ROOT/$state_key.comments"
 status_output=$("$target/bin/agentic-loop" status)
 grep -Fq 'needs-input: 1件 (https://github.com/acme/installed-project/issues/50)' <<< "$status_output" || fail 'status did not summarize the needs-input Issue with its URL'
 grep -Fq 'failed: 1件 (https://github.com/acme/installed-project/issues/51)' <<< "$status_output" || fail 'status did not summarize the failed Issue with its URL'
 grep -Fq 'blocked: 1件 (https://github.com/acme/installed-project/issues/52)' <<< "$status_output" || fail 'status did not summarize the blocked Issue with its URL'
 grep -Fq 'stale: 1件 (https://github.com/acme/installed-project/issues/53)' <<< "$status_output" || fail 'status did not summarize the closed agent:stale Issue with its URL'
+grep -Fq 'parked: 1件 (https://github.com/acme/installed-project/issues/54)' <<< "$status_output" || fail 'status did not summarize the parked Issue with its URL'
+status_json=$("$target/bin/agentic-loop" status --format json)
+[[ $(printf '%s' "$status_json" | yq -p json '.states.parked.count') -eq 1 ]] || fail 'status --format json did not report the parked count'
+[[ $(printf '%s' "$status_json" | yq -p json '.states.parked.issues[0].number') -eq 54 ]] || fail 'status --format json did not list the parked Issue number'
 
 # Scenario: an expired lease is surfaced as a warning, both in the running
 # Issue's own line and as a structured anomaly, without mutating any state
@@ -3913,6 +3985,7 @@ t0k=$((window_start + 200000))  # 511: needs-input answered, then completed
 
 t0l=$((window_start + 210000)) # 512: closed+completed with priority 0 (unset; jq TSV null-field regression)
 t0m=$((window_start + 220000)) # 513: open, but its only lease event and its only PR postdate --as-of (out-of-window event/PR regression)
+t0n=$((window_start + 230000)) # 514: retry-budget exhausted and parked (open, non-claim; see docs/decisions/0016), never closed
 
 cat > "$metrics_issues" <<TSV
 501	$t0	$((t0 + 400))	closed	category:feature	75	agent:completed
@@ -3928,6 +4001,7 @@ cat > "$metrics_issues" <<TSV
 511	$t0k	$((t0k + 7300))	closed	category:feature	50	agent:completed
 512	$t0l	$((t0l + 40))	closed	category:feature	0	agent:completed
 513	$t0m	0	open	category:improvement	25	agent:queued
+514	$t0n	0	open	category:improvement	25	agent:parked
 TSV
 
 cat > "$metrics_events" <<TSV
@@ -3959,6 +4033,9 @@ cat > "$metrics_events" <<TSV
 511	$((t0k + 7250))	lease worker=w
 511	$((t0k + 7300))	completed pr=https://github.example/acme/x/pull/11
 513	$((as_of + 100))	lease worker=w
+514	$((t0n + 10))	lease worker=w
+514	$((t0n + 200))	failed worker=w reason=merge-or-cleanup
+514	$((t0n + 250))	parked attempts=3 reason=retry-exhausted
 TSV
 
 cat > "$metrics_pulls" <<TSV
@@ -3983,23 +4060,26 @@ mj() { printf '%s' "$metrics_json" | yq -p json "$1"; }
 [[ $(mj '.dispositions.declined') -eq 1 ]] || fail 'metrics did not detect a declined Issue behind a stale agent:running label'
 [[ $(mj '.dispositions.other') -eq 1 ]] || fail 'metrics did not flag the genuinely unclassifiable closed Issue (507) as other, or an unset priority on 512 shifted a later TSV column and corrupted its agent-label disposition'
 [[ $(mj '.dispositions.open') -eq 6 ]] || fail 'metrics miscounted still-open Issues'
+[[ $(mj '.dispositions.parked') -eq 1 ]] || fail 'metrics did not classify the open agent:parked Issue (514) as parked, separately from open'
 [[ $(mj '.dispositions.unresolved') -eq 0 && $(mj '.dispositions.stale') -eq 0 ]] || fail 'metrics fabricated an unresolved or stale disposition'
 [[ $(mj '.warnings[]') == *label_marker_mismatch* ]] || fail 'metrics did not warn about the label/marker mismatch'
 
-[[ $(mj '.counters.attempts') -eq 10 ]] || fail 'metrics miscounted attempts (one per lease marker; the lease for Issue 513 postdates --as-of and must not count)'
+[[ $(mj '.counters.attempts') -eq 11 ]] || fail 'metrics miscounted attempts (one per lease marker, including 514; the lease for Issue 513 postdates --as-of and must not count)'
 [[ $(mj '.counters.retry') -eq 2 && $(mj '.counters.recovered') -eq 1 && $(mj '.counters.worker_timeout') -eq 1 ]] || fail 'metrics miscounted the retry/recovered/worker-timeout requeue path (Issue 504)'
 [[ $(mj '.counters.scope_conflict') -eq 1 && $(mj '.counters.dependency_block') -eq 1 ]] || fail 'metrics miscounted the still-open scope-conflict/dependency-blocked waits (509, 510)'
 [[ $(mj '.counters.needs_input_round') -eq 2 ]] || fail 'metrics miscounted needs-input rounds (503 open, 511 answered)'
 [[ $(mj '.counters.requeue') -eq 4 ]] || fail 'metrics miscounted total requeues (2 retry + 1 recovered + 1 answer-detected)'
-[[ $(mj '.counters.open_attempts') -eq 2 ]] || fail 'metrics miscounted attempts with no terminal marker yet (504 attempt 3, 506; an out-of-window lease must not open an attempt for 513)'
+[[ $(mj '.counters.open_attempts') -eq 2 ]] || fail 'metrics miscounted attempts with no terminal marker yet (504 attempt 3, 506; an out-of-window lease must not open an attempt for 513; 514'"'"'s attempt is closed by its failed marker before parking)'
 [[ $(mj '.counters.unmerged_pr') -eq 1 ]] || fail 'metrics miscounted unmerged pull requests (PR 10; PR 12 postdates --as-of and must not count)'
 [[ $(mj '.counters.exhausted') -eq 0 && $(mj '.counters.replan') -eq 0 && $(mj '.counters.resume') -eq 0 ]] || fail 'metrics fabricated an exhausted, replan, or resume count'
+[[ $(mj '.counters.parked') -eq 1 ]] || fail 'metrics did not count the park of retry-exhausted Issue 514'
 
 [[ $(mj '.failures.unspecified') -eq 1 ]] || fail 'metrics did not classify the reasonless failed marker (502) as unspecified'
 [[ $(mj '."failures"."worker-timeout"') -eq 1 ]] || fail 'metrics did not tally the worker-timeout failure reason (504)'
+[[ $(mj '."failures"."merge-or-cleanup"') -eq 1 ]] || fail 'metrics did not tally the merge-or-cleanup failure reason (514, before it was parked)'
 
-[[ $(mj '.durations.queue_wait.n') -eq 10 && $(mj '.durations.queue_wait.max') -eq 100 ]] || fail 'metrics computed the wrong queue_wait distribution'
-[[ $(mj '.durations.attempt_duration.n') -eq 8 && $(mj '.durations.attempt_duration.max') -eq 890 ]] || fail 'metrics computed the wrong attempt_duration distribution'
+[[ $(mj '.durations.queue_wait.n') -eq 11 && $(mj '.durations.queue_wait.max') -eq 100 ]] || fail 'metrics computed the wrong queue_wait distribution'
+[[ $(mj '.durations.attempt_duration.n') -eq 9 && $(mj '.durations.attempt_duration.max') -eq 890 ]] || fail 'metrics computed the wrong attempt_duration distribution'
 [[ $(mj '.durations.open_queue_wait.n') -eq 0 ]] || fail 'metrics fabricated an open_queue_wait sample'
 [[ $(mj '.durations.open_needs_input_wait.n') -eq 1 ]] || fail 'metrics did not report the still-open needs-input wait (503)'
 [[ $(mj '.durations.open_conflict_wait.n') -eq 1 ]] || fail 'metrics did not report the still-open scope-conflict wait (509)'
@@ -4010,9 +4090,9 @@ mj() { printf '%s' "$metrics_json" | yq -p json "$1"; }
 [[ $(mj '.durations.pr_review_wait.n') -eq 2 && $(mj '.durations.pr_review_wait.max') -eq 7280 ]] || fail 'metrics computed the wrong pr_review_wait distribution (PR 9: 400-120=280, PR 11: 7300-20=7280; PR 10 is unmerged and excluded)'
 [[ $(mj '.durations.lead_time.n') -eq 3 && $(mj '.durations.lead_time.max') -eq 7300 ]] || fail 'metrics computed the wrong lead_time distribution (505 is excluded: no completed marker despite the label)'
 
-[[ $(mj '.by_category.feature') -eq 6 && $(mj '.by_category.improvement') -eq 7 ]] || fail 'metrics miscounted by_category'
-[[ $(mj '.by_priority."75"') -eq 4 && $(mj '.by_priority."50"') -eq 3 && $(mj '.by_priority."25"') -eq 5 && $(mj '.by_priority."0"') -eq 1 ]] || fail 'metrics miscounted by_priority (numeric body-marker keys)'
-[[ $(mj '.utilization.busy_seconds') -eq 2525 && $(mj '.utilization.max_workers') -eq 2 ]] || fail 'metrics computed the wrong worker-utilization busy_seconds'
+[[ $(mj '.by_category.feature') -eq 6 && $(mj '.by_category.improvement') -eq 8 ]] || fail 'metrics miscounted by_category'
+[[ $(mj '.by_priority."75"') -eq 4 && $(mj '.by_priority."50"') -eq 3 && $(mj '.by_priority."25"') -eq 6 && $(mj '.by_priority."0"') -eq 1 ]] || fail 'metrics miscounted by_priority (numeric body-marker keys)'
+[[ $(mj '.utilization.busy_seconds') -eq 2715 && $(mj '.utilization.max_workers') -eq 2 ]] || fail 'metrics computed the wrong worker-utilization busy_seconds'
 
 # Privacy: only enum/numeric marker fields, Issue numbers, and label names may
 # ever reach the output -- never a title, a comment body, or a worker id.

@@ -1,6 +1,6 @@
 <!--
 このPRが対応するIssueの受け入れ条件と、実際の変更・検証を対応付けてください。
-詳細は docs/operations/traceability.md と docs/decisions/0016-requirement-traceability.md を参照してください。
+詳細は docs/operations/traceability.md と docs/decisions/0017-requirement-traceability.md を参照してください。
 -->
 
 ## 概要

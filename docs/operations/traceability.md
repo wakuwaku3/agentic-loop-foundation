@@ -1,4 +1,4 @@
-# 要求・変更・検証のトレーサビリティ（[ADR 0016](../decisions/0016-requirement-traceability.md)）
+# 要求・変更・検証のトレーサビリティ（[ADR 0017](../decisions/0017-requirement-traceability.md)）
 
 `bin/agentic-loop trace` と、workerの完了確定に組み込まれた`trace_gate`は、Issueの受け入れ条件が実際にどの変更・どの検証で満たされたかを、PR本文の自己申告とGitHubの再観測から記録・確認する。
 
@@ -58,7 +58,7 @@ Issue本文の受け入れ条件の文言を変更すると、そのcriterionの
 
 ## `trace_gate`の3 mode
 
-`.agentic-loop.toml`の`queue.traceability`で選択する。既定は配布物では`warn`（Foundation自身のcode側fallbackは`off`。導入直後に無警告で挙動が変わらないための安全策。詳細は[ADR 0016](../decisions/0016-requirement-traceability.md)）。
+`.agentic-loop.toml`の`queue.traceability`で選択する。既定は配布物では`warn`（Foundation自身のcode側fallbackは`off`。導入直後に無警告で挙動が変わらないための安全策。詳細は[ADR 0017](../decisions/0017-requirement-traceability.md)）。
 
 | mode | record不在・検証失敗時の動作 |
 | --- | --- |

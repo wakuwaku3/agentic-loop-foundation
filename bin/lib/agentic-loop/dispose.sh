@@ -113,10 +113,17 @@ cmd_resume() {
   [[ $issue =~ ^[1-9][0-9]*$ ]] || fail 'resume requires a positive Issue number'
   actor=$(authorized_operator) || fail 'resume requires authenticated repository write, maintain, or admin permission'
   IFS=$'\t' read -r state labels < <(issue_agent_state "$issue") || fail "cannot read Issue #$issue"
-  [[ $state == closed ]] || fail 'resume is only for a closed disposed Issue'
-  case ,$labels, in *,agent:cancelled,*|*,agent:superseded,*|*,agent:duplicate,*|*,agent:merged,*) ;; *) fail 'resume requires a disposition label' ;; esac
-  repo_api "issues/$issue" --method PATCH -f state=open >/dev/null || fail 'could not reopen Issue'
-  set_issue_state "$issue" queued; project_sync_state "$issue" queued
-  comment_issue "$issue" "<!-- agentic-loop:resume schema=1 actor=$actor issue=$issue at=$(date +%s) -->\n認可済みの再開操作により、終了履歴を保持したままIssueを \`agent:queued\` として再開しました。"
-  say "Issue #$issue を再開しました。"
+  if [[ $state == closed ]]; then
+    case ,$labels, in *,agent:cancelled,*|*,agent:superseded,*|*,agent:duplicate,*|*,agent:merged,*) ;; *) fail 'resume requires a disposition label' ;; esac
+    repo_api "issues/$issue" --method PATCH -f state=open >/dev/null || fail 'could not reopen Issue'
+    set_issue_state "$issue" queued; project_sync_state "$issue" queued
+    comment_issue "$issue" "<!-- agentic-loop:resume schema=1 actor=$actor issue=$issue at=$(date +%s) -->\n認可済みの再開操作により、終了履歴を保持したままIssueを \`agent:queued\` として再開しました。"
+    say "Issue #$issue を再開しました。"
+  elif [[ $state == open ]] && [[ ,$labels, == *,agent:parked,* ]]; then
+    set_issue_state "$issue" queued; project_sync_state "$issue" queued
+    comment_issue "$issue" "<!-- agentic-loop:resume schema=1 actor=$actor issue=$issue at=$(date +%s) -->\n認可済みの再開操作により、\`agent:parked\` のIssueを \`agent:queued\` として再投入しました。"
+    say "Issue #$issue を再投入しました。"
+  else
+    fail 'resume is only for a closed disposed Issue or an open agent:parked Issue'
+  fi
 }

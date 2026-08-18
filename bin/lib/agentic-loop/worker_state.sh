@@ -288,7 +288,7 @@ recover_expired() {
     count=$(attempt_count "$issue")
     if (( count >= MAX_ATTEMPTS )); then
       set_issue_state "$issue" failed
-      comment_issue "$issue" "<!-- agentic-loop:recover-exhausted attempts=$count -->\n担当workerが完了前に繰り返し停止したため（試行 $count/$MAX_ATTEMPTS）、キューへ戻さず \`agent:failed\` へ移します。以降は解決不能として自動でcloseされます。再開が必要なら内容を確認のうえ \`agent:queued\` を付け直してください。"
+      comment_issue "$issue" "<!-- agentic-loop:recover-exhausted attempts=$count -->\n担当workerが完了前に繰り返し停止したため（試行 $count/$MAX_ATTEMPTS）、キューへ戻さず \`agent:failed\` へ移します。以降はcloseせず \`agent:parked\`（人間トリアージ待ち）へ移します。再開が必要なら内容を確認のうえ \`bin/agentic-loop resume $issue\` を実行してください。"
     else
       set_issue_state "$issue" queued
       comment_issue "$issue" '<!-- agentic-loop:recovered -->\n担当workerの終了、またはリース期限切れを検出したため、Issueを安全にキューへ戻しました。'
@@ -363,7 +363,7 @@ triage_stale_queued() {
     set_issue_state "$issue" stale
     project_sync_state "$issue" stale
     comment_issue "$issue" "<!-- agentic-loop:stale days=$STALE_DAYS updated=$updated_at -->\nこのIssueは \`agent:queued\` のまま$STALE_DAYS日間更新されなかったため、claim前のトリアージで \`agent:stale\` へ移し、クローズしました。再開するにはIssueをreopenし、内容を確認・更新してから \`agent:queued\` Labelを付けてください。"
-    repo_api "issues/$issue" --method PATCH -f state=closed >/dev/null
+    repo_api "issues/$issue" --method PATCH -f state=closed -f state_reason=not_planned >/dev/null
   done < <(snapshot_state_rows queued | awk -F '\t' '{print $1 "\t" $3}' || repo_api issues --method GET -f state=open -f labels="$(state_label queued)" -f per_page=100 --paginate --jq '.[] | select(.pull_request == null) | [.number, .updated_at] | @tsv' 2>/dev/null || true)
 }
 
@@ -396,28 +396,44 @@ attempt_cooldown_elapsed() {
   now=$(date +%s); (( now - ts >= RETRY_COOLDOWN_SECONDS ))
 }
 
+# Move a retry-budget-exhausted Issue to a non-claim, open "human triage"
+# state instead of closing it (see docs/decisions/0016): a worker using up its
+# retry budget means the model/attempt count was insufficient, not that the
+# requirement is invalid. If the Label PUT fails, this returns failure and the
+# Issue is left in agent:failed for the next poll to retry -- it is never
+# closed as a side effect of a failed park attempt (fail-safe).
+park_issue() {
+  local issue=$1 count=$2 reason=$3
+  set_issue_state "$issue" parked || return 1
+  project_sync_state "$issue" parked || true
+  comment_issue "$issue" "<!-- agentic-loop:parked attempts=$count reason=$reason -->\n$count 回試行しても完了できなかったため、closeせず \`agent:parked\`（人間トリアージ待ち）へ移しました。要求は無効になったわけではありません。内容を確認し、要求の精緻化・より小さな単位への分解のうえ \`bin/agentic-loop resume $issue\` で再投入するか、不要であれば \`bin/agentic-loop dispose $issue --reason cancelled\` 等で終了してください。" || true
+  clear_attempts "$issue"
+  scope_cache_clear "$issue"
+  clear_conflict_wait "$issue"
+  clear_worker_local "$issue"
+  event_append "$issue" recover -
+}
+
 # Re-queue failures this loop already attempted, so a transient failure (e.g. an
 # exhausted token budget or a killed session) is retried instead of parked.
 # Only Issues tracked by claim are managed; those that reach MAX_ATTEMPTS stay
 # agent:failed for human review, and untracked/external failures are left alone.
 # Automatically manage every failed Issue: retry it (bounded by MAX_ATTEMPTS with
 # a cooldown) so a transient failure recovers without human action, and once the
-# attempts are exhausted, close it as genuinely unresolvable instead of parking
-# it in agent:failed forever. Pre-existing/untracked failures (attempt count 0)
-# are retried too.
+# attempts are exhausted, park it instead of closing -- retry-budget exhaustion
+# is never treated as proof the requirement is unresolvable (see docs/decisions/
+# 0016). Pre-existing/untracked failures (attempt count 0) are retried too.
 retry_failed() {
   local issue count
   while IFS= read -r issue; do
     [[ $issue =~ ^[0-9]+$ ]] || continue
     count=$(attempt_count "$issue")
     if (( count >= MAX_ATTEMPTS )); then
-      comment_issue "$issue" "<!-- agentic-loop:unresolved attempts=$count -->\n$count 回試行しても解決できなかったため、解決不能とみなしてIssueをcloseします。再開が必要なら \`agent:queued\` を付け直してください。" || true
-      repo_api "issues/$issue" --method PATCH -f state=closed >/dev/null 2>&1 || true
-      clear_attempts "$issue"
+      park_issue "$issue" "$count" retry-exhausted
       continue
     fi
     attempt_cooldown_elapsed "$issue" || continue
     set_issue_state "$issue" queued || continue
-    comment_issue "$issue" "<!-- agentic-loop:retry attempt=$count -->\n一時的な失敗の可能性があるため自動的に再試行キューへ戻します（試行 $count/$MAX_ATTEMPTS）。上限に達したら解決不能とみなしてcloseします。" || true
+    comment_issue "$issue" "<!-- agentic-loop:retry attempt=$count -->\n一時的な失敗の可能性があるため自動的に再試行キューへ戻します（試行 $count/$MAX_ATTEMPTS）。上限に達したらcloseせず \`agent:parked\`（人間トリアージ待ち）へ移します。" || true
   done < <(snapshot_state_rows failed | cut -f1 || repo_api issues --method GET -f state=open -f labels="$(state_label failed)" -f per_page=100 --paginate --jq '.[] | select(.pull_request == null) | .number' 2>/dev/null)
 }
