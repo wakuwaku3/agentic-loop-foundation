@@ -4801,6 +4801,334 @@ metrics_text=$("$target/bin/agentic-loop" metrics --days "$days" --as-of "$as_of
 [[ $metrics_text == *'転帰:'* ]] || fail 'metrics text format did not render a summary'
 [[ $metrics_text != *'Fake issue'* && $metrics_text != *'worker=w'* ]] || fail 'metrics text format leaked private data'
 
+# --- flaky test detection and quarantine (Issue #60, ADR 0022, docs/operations/flaky-tests.md) ---
+flaky_sh="$PROJECT_ROOT/scripts/flaky.sh"
+flaky_ok_log="$TEST_ROOT/flaky-ok.log"
+flaky_fail_log="$TEST_ROOT/flaky-fail.log"
+flaky_crash_log="$TEST_ROOT/flaky-crash.log"
+printf 'ok\n' > "$flaky_ok_log"
+printf 'garbage\nFAIL: something broke\n' > "$flaky_fail_log"
+printf 'boom (no FAIL: line)\n' > "$flaky_crash_log"
+flaky_fp=$(printf '%s' 'FAIL: something broke' | sha256sum | cut -c1-12)
+
+# 常時成功: attempt1で成功しretryが起きない(attempts長=1)。
+classify_json=$("$flaky_sh" classify --unit e2e:queue --attempt "co-run:0:$flaky_ok_log")
+[[ $(yq -p json -r '.verdict' <<< "$classify_json") == passed ]] || fail 'flaky classify did not report passed for a clean attempt1'
+[[ $(yq -p json -r '.attempts | length' <<< "$classify_json") -eq 1 ]] || fail 'flaky classify retried an always-passing attempt1'
+
+# 常時失敗: attempt2も失敗し verdict=failing。既知flakyの隔離entryがあっても
+# 決定的失敗は常に非ゼロ(隔離不可)。
+registry_known="$TEST_ROOT/flaky-registry-known.toml"
+cat > "$registry_known" <<EOF
+schema_version = 1
+[[entry]]
+unit = "e2e:queue"
+fingerprint = "$flaky_fp"
+message = "known flaky"
+issue = 60
+owner = "wakuwaku3"
+first_seen = "$(date -u +%Y-%m-%d)"
+until = "$(date -u -d '+7 days' +%Y-%m-%d)"
+EOF
+"$flaky_sh" classify --unit e2e:queue --registry "$registry_known" --attempt "co-run:1:$flaky_fail_log" --attempt "isolated:1:$flaky_fail_log" >/dev/null 2>&1 \
+  && fail 'flaky classify quarantined a decisive (non-flaky) failure despite a matching registry entry'
+classify_json=$("$flaky_sh" classify --unit e2e:queue --registry "$registry_known" --attempt "co-run:1:$flaky_fail_log" --attempt "isolated:1:$flaky_fail_log" 2>/dev/null || true)
+[[ $(yq -p json -r '.verdict' <<< "$classify_json") == failing ]] || fail 'flaky classify did not report failing for two decisive failures'
+[[ $(yq -p json -r '.quarantined' <<< "$classify_json") == false ]] || fail 'flaky classify quarantined a decisive failure'
+[[ $(yq -p json -r '.attempts[0].fail_line' <<< "$classify_json") == 'FAIL: something broke' ]] || fail 'flaky classify did not preserve the first failure log line'
+
+# 断続失敗: attempt2成功・attempt3失敗はflaky/intermittent。隔離が無ければ非ゼロ。
+"$flaky_sh" classify --unit e2e:queue --attempt "co-run:1:$flaky_fail_log" --attempt "isolated:0:$flaky_ok_log" --attempt "isolated:1:$flaky_fail_log" >/dev/null 2>&1 \
+  && fail 'flaky classify exited 0 for an unquarantined intermittent flaky unit'
+classify_json=$("$flaky_sh" classify --unit e2e:queue --attempt "co-run:1:$flaky_fail_log" --attempt "isolated:0:$flaky_ok_log" --attempt "isolated:1:$flaky_fail_log" 2>/dev/null || true)
+[[ $(yq -p json -r '.verdict' <<< "$classify_json") == flaky ]] || fail 'flaky classify did not report flaky for an attempt2-pass/attempt3-fail pattern'
+[[ $(yq -p json -r '.hints[0]' <<< "$classify_json") == intermittent ]] || fail 'flaky classify did not hint intermittent'
+
+# 順序依存: attempt2・attempt3とも成功はflaky/isolation-sensitive。
+classify_json=$("$flaky_sh" classify --unit e2e:queue --attempt "co-run:1:$flaky_fail_log" --attempt "isolated:0:$flaky_ok_log" --attempt "isolated:0:$flaky_ok_log" 2>/dev/null || true)
+[[ $(yq -p json -r '.verdict' <<< "$classify_json") == flaky ]] || fail 'flaky classify did not report flaky for a co-run-fail/isolated-success pattern'
+[[ $(yq -p json -r '.hints[0]' <<< "$classify_json") == isolation-sensitive ]] || fail 'flaky classify did not hint isolation-sensitive'
+
+# 既知flaky: registryのunit+fingerprintに一致すればexit 0で、隔離対象・
+# Issue番号・責任者を明示する。
+classify_out=$("$flaky_sh" classify --unit e2e:queue --registry "$registry_known" --attempt "co-run:1:$flaky_fail_log" --attempt "isolated:0:$flaky_ok_log" --attempt "isolated:0:$flaky_ok_log") \
+  || fail 'flaky classify did not exit 0 for a matching quarantine entry'
+assert_contains <(printf '%s' "$classify_out") 'issue=#60' 'flaky classify did not disclose the quarantining Issue number'
+assert_contains <(printf '%s' "$classify_out") 'owner=wakuwaku3' 'flaky classify did not disclose the quarantine owner'
+[[ $(yq -p json -r '.quarantined' <<< "$(head -n1 <<< "$classify_out")") == true ]] || fail 'flaky classify did not mark quarantined:true'
+
+# fingerprintが1文字違えば隔離は効かない。
+registry_wrong="$TEST_ROOT/flaky-registry-wrong.toml"
+sed "s/$flaky_fp/${flaky_fp:0:11}0/" "$registry_known" > "$registry_wrong"
+"$flaky_sh" classify --unit e2e:queue --registry "$registry_wrong" --attempt "co-run:1:$flaky_fail_log" --attempt "isolated:0:$flaky_ok_log" --attempt "isolated:0:$flaky_ok_log" >/dev/null 2>&1 \
+  && fail 'flaky classify quarantined a mismatched fingerprint'
+
+# 修復後: entryが残っていてもattempt1が成功すれば厳格動作(verdict=passed)へ
+# 戻り、除去候補として報告する。
+classify_out=$("$flaky_sh" classify --unit e2e:queue --registry "$registry_known" --attempt "co-run:0:$flaky_ok_log")
+classify_json=$(head -n1 <<< "$classify_out")
+[[ $(yq -p json -r '.verdict' <<< "$classify_json") == passed ]] || fail 'flaky classify did not report passed after repair'
+[[ $(yq -p json -r '.removal_candidate' <<< "$classify_json") == true ]] || fail 'flaky classify did not flag a removal candidate for a repaired unit'
+
+# FAIL:行を抽出できない異常終了はfingerprint=unknownとして常に隔離不可。
+classify_json=$("$flaky_sh" classify --unit e2e:queue --attempt "co-run:1:$flaky_crash_log" --attempt "isolated:1:$flaky_crash_log" 2>/dev/null || true)
+[[ $(yq -p json -r '.verdict' <<< "$classify_json") == failing-unknown ]] || fail 'flaky classify did not classify a FAIL:-less crash as failing-unknown'
+[[ $(yq -p json -r '.fingerprint' <<< "$classify_json") == unknown ]] || fail 'flaky classify did not report fingerprint=unknown for a FAIL:-less crash'
+
+# 抜け道なし: 除外・skip用のoptionは存在しない。
+grep -Eiq 'flaky|skip-group|known-failure' "$PROJECT_ROOT/scripts/affected-check.sh" && fail 'affected-check.sh source mentions a flaky-based exclusion token'
+grep -Fq -- '--exclude)' "$flaky_sh" "$PROJECT_ROOT/tests/run-e2e.sh" && fail 'flaky.sh/run-e2e.sh implement an --exclude case branch'
+grep -Fq -- '--skip)' "$flaky_sh" "$PROJECT_ROOT/tests/run-e2e.sh" && fail 'flaky.sh/run-e2e.sh implement a --skip case branch'
+"$flaky_sh" classify --exclude e2e:queue >/dev/null 2>&1 && fail 'flaky.sh classify accepted an --exclude argument'
+
+# --- scripts/flaky.sh audit --------------------------------------------------
+"$flaky_sh" audit --registry "$PROJECT_ROOT/tests/flaky-registry.toml" || fail 'flaky audit failed against the real tests/flaky-registry.toml'
+
+flaky_registry_root="$TEST_ROOT/flaky-registries"
+mkdir -p "$flaky_registry_root"
+
+cat > "$flaky_registry_root/expired.toml" <<EOF
+schema_version = 1
+[[entry]]
+unit = "e2e:queue"
+fingerprint = "$flaky_fp"
+message = "expired"
+issue = 1
+owner = "o"
+first_seen = "2020-01-01"
+until = "2020-01-05"
+EOF
+audit_out=$("$flaky_sh" audit --registry "$flaky_registry_root/expired.toml" 2>&1) && fail 'flaky audit accepted an expired entry'
+assert_contains <(printf '%s' "$audit_out") '期限切れです' 'flaky audit did not report the expired entry'
+
+cat > "$flaky_registry_root/toolong.toml" <<EOF
+schema_version = 1
+[[entry]]
+unit = "e2e:queue"
+fingerprint = "$flaky_fp"
+message = "too long"
+issue = 1
+owner = "o"
+first_seen = "$(date -u +%Y-%m-%d)"
+until = "$(date -u -d '+30 days' +%Y-%m-%d)"
+EOF
+audit_out=$("$flaky_sh" audit --registry "$flaky_registry_root/toolong.toml" 2>&1) && fail 'flaky audit accepted an entry spanning more than 14 days'
+assert_contains <(printf '%s' "$audit_out") '14日を超えています' 'flaky audit did not report the too-long span'
+
+cat > "$flaky_registry_root/incomplete.toml" <<EOF
+schema_version = 1
+[[entry]]
+unit = "e2e:queue"
+fingerprint = "$flaky_fp"
+message = "missing owner"
+issue = 1
+owner = ""
+first_seen = "$(date -u +%Y-%m-%d)"
+until = "$(date -u -d '+5 days' +%Y-%m-%d)"
+EOF
+audit_out=$("$flaky_sh" audit --registry "$flaky_registry_root/incomplete.toml" 2>&1) && fail 'flaky audit accepted an entry missing owner'
+assert_contains <(printf '%s' "$audit_out") '必須fieldが不足' 'flaky audit did not report the incomplete entry'
+
+# Built by concatenation (never a contiguous literal in this source file):
+# this file itself is an INIT_FILE that later upgrade fixtures below copy and
+# `git commit`, which would otherwise trip the repository's own pre-commit
+# secret guard on this very file.
+flaky_secret_msg=$(printf '%s%s leaked' 'AKIA' 'ABCDEFGHIJKLMNOPQRS')
+cat > "$flaky_registry_root/secret.toml" <<EOF
+schema_version = 1
+[[entry]]
+unit = "e2e:queue"
+fingerprint = "$flaky_fp"
+message = "$flaky_secret_msg"
+issue = 1
+owner = "o"
+first_seen = "$(date -u +%Y-%m-%d)"
+until = "$(date -u -d '+5 days' +%Y-%m-%d)"
+EOF
+audit_out=$("$flaky_sh" audit --registry "$flaky_registry_root/secret.toml" 2>&1) && fail 'flaky audit accepted a secret-like message'
+assert_contains <(printf '%s' "$audit_out") '秘密様の文字列' 'flaky audit did not report the secret-like message'
+
+{
+  printf 'schema_version = 1\n'
+  for flaky_u in a b c d; do
+    flaky_fp_u=$(printf '%s' "FAIL: $flaky_u" | sha256sum | cut -c1-12)
+    printf '[[entry]]\nunit = "%s"\nfingerprint = "%s"\nmessage = "m-%s"\nissue = 1\nowner = "o"\nfirst_seen = "%s"\nuntil = "%s"\n' \
+      "$flaky_u" "$flaky_fp_u" "$flaky_u" "$(date -u +%Y-%m-%d)" "$(date -u -d '+5 days' +%Y-%m-%d)"
+  done
+} > "$flaky_registry_root/toomany.toml"
+audit_out=$("$flaky_sh" audit --registry "$flaky_registry_root/toomany.toml" 2>&1) && fail 'flaky audit accepted more than 3 active entries'
+assert_contains <(printf '%s' "$audit_out") '3件を超えています' 'flaky audit did not report too many active entries'
+[[ -f $PROJECT_ROOT/tests/flaky-registry.toml ]] || fail 'the real tests/flaky-registry.toml went missing during the flaky fixtures'
+
+# --- tests/run-e2e.sh retry orchestration (fake runner, no fake gh needed) --
+flaky_fake_runner="$TEST_ROOT/flaky-fake-runner.sh"
+cat > "$flaky_fake_runner" <<'FAKE_RUNNER'
+#!/usr/bin/env bash
+set -uo pipefail
+group=${AGENTIC_LOOP_TEST_GROUP:-all}
+state_dir=${FAKE_RUNNER_STATE:?}
+mkdir -p "$state_dir"
+counter_file="$state_dir/$group.count"
+n=0
+[[ -f $counter_file ]] && n=$(cat "$counter_file")
+n=$((n + 1))
+printf '%s' "$n" > "$counter_file"
+behavior=$(cat "$state_dir/$group.behavior" 2>/dev/null || echo pass)
+IFS=',' read -ra steps <<< "$behavior"
+idx=$((n - 1))
+(( idx >= ${#steps[@]} )) && idx=$((${#steps[@]} - 1))
+step=${steps[$idx]}
+if [[ $step == fail ]]; then
+  printf 'FAIL: simulated failure for %s\n' "$group" >&2
+  exit 1
+fi
+printf 'ok\n'
+FAKE_RUNNER
+chmod +x "$flaky_fake_runner"
+
+run_e2e_sh="$PROJECT_ROOT/tests/run-e2e.sh"
+flaky_empty_registry="$TEST_ROOT/flaky-registry-empty.toml"
+printf 'schema_version = 1\n' > "$flaky_empty_registry"
+
+# 常時成功: attempt1で成功しretryが起きない(record.attempts長=1)。
+run_state1="$TEST_ROOT/run-e2e-state-1"
+mkdir -p "$run_state1"
+echo pass > "$run_state1/queue.behavior"
+run_record1="$TEST_ROOT/run-e2e-record-1.json"
+FAKE_RUNNER_STATE="$run_state1" "$run_e2e_sh" --groups queue --runner "$flaky_fake_runner" --registry "$flaky_empty_registry" --record "$run_record1" >/dev/null 2>&1 \
+  || fail 'run-e2e.sh failed for an always-passing group'
+[[ $(yq -p json -r '.verdicts[0].verdict' "$run_record1") == passed ]] || fail 'run-e2e.sh record did not mark an always-passing group as passed'
+[[ $(yq -p json -r '.verdicts[0].attempts | length' "$run_record1") -eq 1 ]] || fail 'run-e2e.sh retried an always-passing group'
+
+# 常時失敗: 隔離entryがあっても決定的失敗は非ゼロで終了する。
+run_state2="$TEST_ROOT/run-e2e-state-2"
+mkdir -p "$run_state2"
+echo fail > "$run_state2/queue.behavior"
+run_fp_always=$(printf '%s' 'FAIL: simulated failure for queue' | sha256sum | cut -c1-12)
+run_registry_always="$TEST_ROOT/run-e2e-registry-always.toml"
+cat > "$run_registry_always" <<EOF
+schema_version = 1
+[[entry]]
+unit = "e2e:queue"
+fingerprint = "$run_fp_always"
+message = "should never quarantine a decisive failure"
+issue = 60
+owner = "wakuwaku3"
+first_seen = "$(date -u +%Y-%m-%d)"
+until = "$(date -u -d '+5 days' +%Y-%m-%d)"
+EOF
+run_record2="$TEST_ROOT/run-e2e-record-2.json"
+FAKE_RUNNER_STATE="$run_state2" "$run_e2e_sh" --groups queue --runner "$flaky_fake_runner" --registry "$run_registry_always" --record "$run_record2" >/dev/null 2>&1 \
+  && fail 'run-e2e.sh exited 0 for a decisively-failing group despite a matching quarantine entry'
+[[ $(yq -p json -r '.verdicts[0].verdict' "$run_record2") == failing ]] || fail 'run-e2e.sh record did not mark a decisive failure as failing'
+
+# 既知flaky(順序依存パターン): 隔離entryに一致すればexit 0。
+run_state3="$TEST_ROOT/run-e2e-state-3"
+mkdir -p "$run_state3"
+echo 'fail,pass,pass' > "$run_state3/queue.behavior"
+run_record3="$TEST_ROOT/run-e2e-record-3.json"
+FAKE_RUNNER_STATE="$run_state3" "$run_e2e_sh" --groups queue --runner "$flaky_fake_runner" --registry "$run_registry_always" --record "$run_record3" >/dev/null 2>&1 \
+  || fail 'run-e2e.sh did not exit 0 for a quarantined flaky group'
+[[ $(yq -p json -r '.verdicts[0].verdict' "$run_record3") == flaky ]] || fail 'run-e2e.sh record did not mark the quarantined group as flaky'
+[[ $(yq -p json -r '.verdicts[0].quarantined' "$run_record3") == true ]] || fail 'run-e2e.sh record did not mark the group as quarantined'
+[[ $(yq -p json -r '.commit' "$run_record3") =~ ^([0-9a-f]{40}|unknown)$ ]] || fail 'run-e2e.sh record did not capture a commit identifier'
+[[ $(yq -p json -r '.env_marker' "$run_record3") != '' ]] || fail 'run-e2e.sh record did not capture an environment marker'
+
+# 除外・skip用のinterfaceは存在しない: 未知optionは終了code 2、--attemptsは1-3のみ。
+run_rc=0
+"$run_e2e_sh" --exclude e2e:queue >/dev/null 2>&1 || run_rc=$?
+[[ $run_rc -eq 2 ]] || fail 'run-e2e.sh did not reject --exclude with exit code 2'
+run_rc=0
+"$run_e2e_sh" --attempts 5 >/dev/null 2>&1 || run_rc=$?
+[[ $run_rc -eq 2 ]] || fail 'run-e2e.sh did not reject an out-of-range --attempts with exit code 2'
+
+# --- bin/agentic-loop flaky (read-only) and doctor integration -------------
+# $target was installed in "install" (not "init") mode, so tests/flaky-
+# registry.toml -- an INIT_FILE -- was never seeded there; a missing registry
+# is a warning, not a failure (see flaky_registry_validate's not-installed
+# case), so registry_valid must still be true.
+flaky_cli_json=$("$target/bin/agentic-loop" flaky --format json) || fail 'bin/agentic-loop flaky failed against a missing registry'
+[[ $(yq -p json -r '.registry_valid' <<< "$flaky_cli_json") == true ]] || fail 'bin/agentic-loop flaky reported an invalid missing registry'
+
+flaky_target_registry="$target/tests/flaky-registry.toml"
+flaky_target_existed=0
+[[ -f $flaky_target_registry ]] && flaky_target_existed=1
+flaky_target_backup="$TEST_ROOT/target-flaky-registry-backup.toml"
+(( flaky_target_existed )) && cp "$flaky_target_registry" "$flaky_target_backup"
+mkdir -p "$(dirname "$flaky_target_registry")"
+cat > "$flaky_target_registry" <<EOF
+schema_version = 1
+[[entry]]
+unit = "e2e:queue"
+fingerprint = "0123456789ab"
+message = "expired for doctor/flaky CLI fixture"
+issue = 1
+owner = "o"
+first_seen = "2020-01-01"
+until = "2020-01-05"
+EOF
+"$target/bin/agentic-loop" flaky >/dev/null 2>&1 && fail 'bin/agentic-loop flaky did not exit 1 for an expired registry entry'
+flaky_doctor_json=$("$target/bin/agentic-loop" doctor --format json || true)
+[[ $(yq -p json -r '[.checks[] | select(.name == "flaky test registry") | select(.level == "failure")] | length' <<< "$flaky_doctor_json") -ge 1 ]] \
+  || fail 'doctor did not report the expired flaky entry as a failure'
+if (( flaky_target_existed )); then cp "$flaky_target_backup" "$flaky_target_registry"; else rm -f "$flaky_target_registry"; fi
+
+# --- bin/agentic-loop flaky report (repair-Issue creation, direct function
+# stubbing -- avoids re-deriving the shared fake gh dispatcher's protocol for
+# a write path that never runs from a make check invocation) ---------------
+flaky_report_state="$TEST_ROOT/flaky-report-state"
+mkdir -p "$flaky_report_state"
+flaky_report_record="$TEST_ROOT/flaky-report-record.json"
+cat > "$flaky_report_record" <<'EOF'
+{"schema":1,"verdicts":[
+  {"unit":"e2e:queue","fingerprint":"aaaaaaaaaaaa","verdict":"passed"},
+  {"unit":"e2e:lifecycle","fingerprint":"bbbbbbbbbbbb","verdict":"failing"},
+  {"unit":"e2e:auxiliary","fingerprint":"cccccccccccc","verdict":"flaky"},
+  {"unit":"e2e:upgrade","fingerprint":"dddddddddddd","verdict":"flaky-unknown"}
+]}
+EOF
+flaky_report_out=$(
+  say() { printf '%s\n' "$*"; }
+  fail() { printf 'FAIL: %s\n' "$1" >&2; exit 1; }
+  project_add_issue() { return 0; }
+  project_sync_state() { return 0; }
+  comment_issue() { printf 'comment_issue %s\n' "$1" >> "$flaky_report_state/calls"; }
+  repo_api() {
+    local joined=" $* "
+    printf '%s\n' "$*" >> "$flaky_report_state/calls"
+    case $1 in
+      issues)
+        if [[ $joined == *' state=open '* ]]; then
+          case $joined in *cccccccccccc*) printf '901\n' ;; esac
+        elif [[ $joined == *' state=closed '* ]]; then
+          case $joined in *dddddddddddd*) printf '902\n' ;; esac
+        elif [[ $joined == *'--method POST'* ]]; then
+          printf 'created content:\n%s\n' "$*" >> "$flaky_report_state/created"
+          printf '903\n'
+        fi
+        ;;
+      */labels) : ;;
+    esac
+  }
+  REPO_ROOT=''
+  source "$PROJECT_ROOT/bin/lib/agentic-loop/flaky.sh"
+  cmd_flaky_report --record "$flaky_report_record"
+)
+assert_contains <(printf '%s' "$flaky_report_out") '2件の修復Issue' 'flaky report did not process exactly the 2 flaky/flaky-unknown units'
+assert_contains <(printf '%s' "$flaky_report_out") '既存のflaky修復Issue #901' 'flaky report did not reuse an existing open Issue for a recurring fingerprint'
+assert_contains <(printf '%s' "$flaky_report_out") 'flaky修復Issue #903' 'flaky report did not create a new Issue when only a closed Issue previously matched'
+call_log="$flaky_report_state/calls"
+grep -Fq 'state=open' "$call_log" || fail 'flaky report did not search open Issues before creating a new one'
+grep -Fq 'cccccccccccc' "$call_log" || fail 'flaky report did not search using the flaky verdict fingerprint'
+grep -Fq 'bbbbbbbbbbbb' "$call_log" && fail 'flaky report searched GitHub for a decisive (failing) unit, which must never be reported'
+grep -Fq 'aaaaaaaaaaaa' "$call_log" && fail 'flaky report searched GitHub for a passed unit, which must never be reported'
+[[ -f $flaky_report_state/created ]] || fail 'flaky report did not create a new Issue for the closed-only match'
+grep -Fq 'agentic-loop:flaky unit=e2e:upgrade fingerprint=dddddddddddd' "$flaky_report_state/created" || fail 'flaky report new-Issue body is missing the dedup marker'
+# Labels are sent via stdin (not captured by this repo_api stub); presence of
+# exactly one /labels endpoint call, for the newly created Issue only, is
+# what this fixture can observe.
+grep -c '/labels' "$call_log" | grep -Fxq 1 || fail 'flaky report did not attach labels to exactly the newly created Issue'
+
 fi
 
 if [[ $TEST_GROUP == all || $TEST_GROUP == upgrade ]]; then

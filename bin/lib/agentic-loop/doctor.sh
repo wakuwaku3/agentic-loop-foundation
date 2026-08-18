@@ -278,6 +278,25 @@ doctor_collect() {
   if [[ -n $(git -C "$REPO_ROOT" status --porcelain -- .agentic-loop/capabilities.toml 2>/dev/null) ]]; then
     doctor_add warning '能力manifest: 未commit' 'install/upgradeが生成・更新した .agentic-loop/capabilities.toml が未commitです。' '内容を確認し、意図した宣言であればcommitしてください。'
   fi
+
+  local flaky_rc=0 flaky_index flaky_code
+  flaky_registry_validate "$(flaky_registry_file "$REPO_ROOT")" "$REPO_ROOT/.agentic-loop/guard-secrets.sh" || flaky_rc=1
+  for flaky_index in "${!FLAKY_LEVELS[@]}"; do
+    flaky_code=${FLAKY_CODES[$flaky_index]}
+    case $flaky_code in
+      not-installed) doctor_add warning 'flaky test registry' "${FLAKY_MESSAGES[$flaky_index]}" 'tests/flaky-registry.toml を追加するか bin/agentic-loop upgrade を実行してください。' ;;
+      expiring-soon) doctor_add warning 'flaky test registry: 期限間近' "${FLAKY_MESSAGES[$flaky_index]}" 'docs/operations/flaky-tests.md の手順で延長するか、修復を完了させてentryを削除してください。' ;;
+      *) doctor_add failure 'flaky test registry' "${FLAKY_MESSAGES[$flaky_index]}" 'docs/operations/flaky-tests.md を確認し、tests/flaky-registry.toml を修正してください。' ;;
+    esac
+  done
+  # doctor_collect is invoked unguarded (see cmd_doctor), so its final
+  # statement must always exit 0 regardless of flaky_rc; a bare
+  # `(( flaky_rc == 0 )) && ...` would make doctor_collect itself return 1
+  # whenever a flaky-registry failure exists, silently aborting cmd_doctor
+  # under set -e before it ever prints a report.
+  if (( flaky_rc == 0 )); then
+    doctor_add success 'flaky test registry' '隔離entryは検証済み、または宣言がありません。' '対応は不要です。'
+  fi
 }
 
 

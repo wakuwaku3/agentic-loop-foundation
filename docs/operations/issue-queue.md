@@ -14,7 +14,7 @@ Project APIでlink、`Agent status` single-select、Issue item追加に加え、
 | `Queue` | `is:issue is:open label:"agent:queued"` | Priority（数値・降順）、Category、Created at、Issue番号の順で確認する。各値の順位はSupervisorのclaim順と同じにする。Priorityは本文marker（`bin/agentic-loop priority`）で管理し、Project fieldはソートの正本にしない |
 | `Active` | `is:issue is:open label:"agent:running","agent:in-review"` | Agent statusでgroupし、Updated at降順。Issue、関連Pull requestを表示する |
 | `Needs input` | `is:issue is:open label:"agent:needs-input"` | Updated at昇順。Title、Agent status、Updated atを表示し、Issue本文・commentを回答先とする |
-| `Recovery` | `is:issue label:"agent:failed","agent:stale","agent:parked"` | Agent statusでgroupし、Updated at昇順。期限切れleaseはSupervisorがqueuedへ復旧するまでrunningとしてIssue commentで検査する。`agent:parked` はリトライ予算を使い切ったopenの人間トリアージ待ちで、自動closeされない（[ADR 0016](../decisions/0016-failure-park-not-close.md)） |
+| `Recovery` | `is:issue label:"agent:failed","agent:stale","agent:parked","flaky"` | Agent statusでgroupし、Updated at昇順。期限切れleaseはSupervisorがqueuedへ復旧するまでrunningとしてIssue commentで検査する。`agent:parked` はリトライ予算を使い切ったopenの人間トリアージ待ちで、自動closeされない（[ADR 0016](../decisions/0016-failure-park-not-close.md)）。`flaky` labelはflaky test修復Issue（`bin/agentic-loop flaky report`が作成、[ADR 0022](../decisions/0022-flaky-test-detection-and-quarantine.md)） |
 | `Stopping` | `is:issue is:open label:"agent:stopping"` | 認可済み終了操作によるdrain中。worker成果物を削除しない |
 | `Paused` | `is:issue is:open label:"agent:paused"` | 認可済み運用者が`pause`で実行を一時停止したIssue（[ADR 0019](../decisions/0019-issue-level-execution-control.md)）。`Blocked by`に操作者・時刻・再開方法を表示する |
 | `Disposed` | `is:issue label:"agent:cancelled","agent:superseded","agent:duplicate","agent:merged" updated:@today-30d` | 理由と統合先を監査commentから追跡する |
@@ -38,6 +38,8 @@ bin/agentic-loop tail
 bin/agentic-loop stop
 bin/agentic-loop doctor
 bin/agentic-loop metrics
+bin/agentic-loop flaky
+bin/agentic-loop flaky report
 bin/agentic-loop priority ISSUE N
 bin/agentic-loop pause ISSUE [--reason TEXT]
 bin/agentic-loop resume ISSUE
@@ -360,3 +362,9 @@ mode切替は`.agentic-loop.toml`の`queue.traceability`を`off`/`warn`/`require
 planとexecの間には、着手前に変更影響とリスクを判定するpreflight gateがある。plan段は`security`/`confidentiality`/`integrity`/`availability`/`data_migration`/`external_environment`/`cost`/`compatibility`/`release_deploy`/`rollback`の10軸を`agentic-loop:preflight` fenced JSON blockとして自己申告し、`preflight_gate`はこれを単独では信用せず、`.agentic-loop/capabilities.toml`とIssueの変更scopeから導いた`signal`と照合する。破壊的・不可逆・重大costまたはsecurity上のリスク（`approval-required`）、判定不能（`undetermined`）、recordとsignalの矛盾（`signal-mismatch`）は、`[queue].preflight`（既定`warn`）が`off`でない限り既存の`agent:needs-input`へgateし、認可済み運用者が`bin/agentic-loop preflight ISSUE --approve --token TOKEN`で承認するまで処理を進めない。execが実装からPRのmergeまでを1 turnで完遂する構造上、実装中に承認範囲を超えるscope拡大を検出した場合は完了確定（cleanup・close）の直前で再評価し、Issueをcloseせずworktree・branch・PRを保持したまま停止する。record・signal・verdict・mode・承認手順・`category`/検証ハーネス/継続的デリバリー各ポリシーとの関係の詳細は[docs/operations/preflight.md](preflight.md)、設計判断は[ADR 0020](../decisions/0020-change-risk-preflight.md)を参照。
 
 読み取り専用の確認は `bin/agentic-loop preflight ISSUE [--format json]` で行える（signalが`approval`なら終了code 1）。
+
+## flakyテストの検知・限定的隔離
+
+`tests/run-e2e.sh`は、attempt1（`queue`/`lifecycle`/`auxiliary`/`upgrade`4群並列のco-run文脈）が失敗した群だけを、最大2回、単独（isolated文脈）で追加試行し、`scripts/flaky.sh classify`が失敗fingerprint（`FAIL:`行のhash）と試行文脈からverdict（`passed`/`failing`/`flaky`/`flaky-unknown`）を決定する（[ADR 0022](../decisions/0022-flaky-test-detection-and-quarantine.md)）。retryは検知・診断目的に限定し、`tests/flaky-registry.toml`の明示的な隔離entry（期限最長14日、責任者・修復Issue必須）に一致しない限り、`verdict=flaky`は常に非ゼロで終了する。決定的失敗（`failing`）は隔離できない。`devbox run --pure check`とCIのmerge gateはこの機能によって一切弱まらない。詳細は[docs/operations/flaky-tests.md](flaky-tests.md)を参照。
+
+読み取り専用の確認は `bin/agentic-loop flaky [--format json]` で行える（registryが期限切れ・不正なら終了code 1）。`bin/agentic-loop flaky report [--record PATH]` は直近の実行recordから修復Issueを作成・再利用する（`make check`からは自動的に呼ばれない）。
