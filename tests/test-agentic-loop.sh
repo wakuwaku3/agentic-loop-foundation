@@ -893,13 +893,35 @@ printf '%s\n' "$*" >> "$FAKE_GH_ROOT/claude-calls"
 [[ $* == *--print* ]] || { printf 'claude worker must run non-interactively\n' >&2; exit 2; }
 [[ $* == *--dangerously-skip-permissions* ]] || { printf 'claude worker must not block on permissions\n' >&2; exit 2; }
 sleep "${FAKE_CLAUDE_SLEEP:-0}"
+# Per-invocation result override so a test can give the plan stage and the exec
+# stage different outputs (e.g. a plan that discusses rate limits, then an exec
+# that completes). Each --output-format json call increments a counter and
+# prefers FAKE_CLAUDE_RESULT_<n>, falling back to the scalar FAKE_CLAUDE_RESULT.
+claude_result=${FAKE_CLAUDE_RESULT:-AGENTIC_LOOP_RESULT=completed}
+if [[ $* == *'--output-format json'* ]]; then
+  claude_count_file="$FAKE_GH_ROOT/claude-json-count"
+  claude_count=$(($(cat "$claude_count_file" 2>/dev/null || printf 0) + 1))
+  printf '%s\n' "$claude_count" > "$claude_count_file"
+  seq_var="FAKE_CLAUDE_RESULT_$claude_count"
+  if [[ -v $seq_var ]]; then claude_result=${!seq_var}; fi
+fi
 # The Claude worker captures the final message from stdout into the result file.
 # With --output-format json the sentinel stays inside .result and usage fields
 # accompany it for the token analysis record.
+#
+# Real Claude usage-limit path: the CLI still exits zero under --print
+# --output-format json but sets is_error true and reports the limit through
+# api_error_status plus the message in .result. FAKE_CLAUDE_IS_ERROR=1 models
+# that envelope so tests exercise the structured-error classification instead of
+# substring-matching the plan text.
 if [[ $* == *'--output-format json'* ]]; then
-  printf '{"type":"result","result":"%s","usage":{"input_tokens":123,"output_tokens":45,"cache_read_input_tokens":10},"total_cost_usd":0.0123}\n' "${FAKE_CLAUDE_RESULT:-AGENTIC_LOOP_RESULT=completed}"
+  if [[ ${FAKE_CLAUDE_IS_ERROR:-0} == 1 ]]; then
+    printf '{"type":"result","is_error":true,"api_error_status":"%s","result":"%s","usage":{"input_tokens":123,"output_tokens":45,"cache_read_input_tokens":10},"total_cost_usd":0.0123}\n' "${FAKE_CLAUDE_API_ERROR_STATUS:-429}" "$claude_result"
+  else
+    printf '{"type":"result","is_error":false,"api_error_status":null,"result":"%s","usage":{"input_tokens":123,"output_tokens":45,"cache_read_input_tokens":10},"total_cost_usd":0.0123}\n' "$claude_result"
+  fi
 else
-  printf '%s\n' "${FAKE_CLAUDE_RESULT:-AGENTIC_LOOP_RESULT=completed}"
+  printf '%s\n' "$claude_result"
 fi
 FAKE_CLAUDE
 cat > "$FAKE_BIN/opencode" <<'FAKE_OPENCODE'
@@ -1755,12 +1777,16 @@ assert_contains "$closes" $'72\tnot_planned' 'dispose close did not record state
 assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:dispose' 'dispose did not record its audit marker'
 
 # A token/rate-limit exhaustion re-queues the Issue (never failed) and pauses
-# the supervisor; claiming resumes once the pool's exhaustion clears.
+# the supervisor; claiming resumes once the pool's exhaustion clears. The real
+# Codex usage-limit path exits non-zero and reports only on stderr, so drive it
+# that way (a plain exit-0 result that merely *mentions* a rate limit is a
+# successful stage and must not be read as exhaustion -- see the plan-output
+# regression tests below).
 write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=3 STOP_TIMEOUT=10 STALE_DAYS=30
 rm -f "$state_root/agent-exhausted" "$state_root/pools/codex/exhausted" "$state_root/all-pools-paused" "$FAKE_GH_ROOT/codex-exec-count"
 printf '60 queued open none 2026-01-01T00:00:00Z\n' > "$state"
 : > "$FAKE_GH_ROOT/$state_key.comments"
-AGENTIC_LOOP_RUN_ONCE=1 FAKE_CODEX_RESULT='rate limit reached' "$target/bin/agentic-loop" _supervise
+AGENTIC_LOOP_RUN_ONCE=1 FAKE_CODEX_EXIT=1 FAKE_CODEX_STDERR='rate limit reached' "$target/bin/agentic-loop" _supervise
 grep -Eq '^60 queued open' "$state" || { echo '---DEBUG STATE---'; cat "$state"; echo '---DEBUG STATE_ROOT---'; find "$state_root" -maxdepth 3 -type f 2>/dev/null; echo '---DEBUG LOG---'; cat "$state_root/logs/issue-60.log" 2>/dev/null | tail -40; echo '---DEBUG COMMENTS---'; cat "$FAKE_GH_ROOT/$state_key.comments" 2>/dev/null; fail 'exhaustion should re-queue the Issue, not fail it'; }
 if grep -Eq '^60 failed' "$state"; then fail 'exhaustion must not mark the Issue failed'; fi
 [[ -r $state_root/pools/codex/exhausted ]] || fail 'pool exhaustion pause marker was not written'
@@ -1775,6 +1801,50 @@ grep -Eq '^60 queued open' "$state" || fail 'exhaustion pause did not hold the I
 rm -f "$state_root/pools/codex/exhausted"
 AGENTIC_LOOP_RUN_ONCE=1 FAKE_CODEX_SLEEP=1 "$target/bin/agentic-loop" _supervise
 grep -Eq '^60 completed closed' "$state" || fail 'claiming did not resume after exhaustion cleared'
+
+# Regression (Issue #158/#130): a SUCCESSFUL Claude plan whose output legitimately
+# discusses rate limits / quota / 429 -- e.g. a scalability or finite-resource
+# Issue -- must NOT be misread as pool exhaustion. Claude reports a real limit
+# through the --output-format json envelope (is_error/api_error_status), not by
+# echoing those words in the plan text; before the structured-error gate the
+# plan prose matched the quota signatures, marked the whole claude pool spent,
+# and blocked the entire queue for 30 minutes. The plan stage (first claude
+# call) returns prose that mentions every signature; the exec stage completes.
+write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=3 STOP_TIMEOUT=10 STALE_DAYS=30
+rm -rf "$state_root/pools"
+rm -f "$state_root/all-pools-paused" "$state_root/agent-exhausted" "$FAKE_GH_ROOT/claude-json-count"
+printf '62 queued open none 2026-01-01T00:00:00Z\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+plan_rate_limit_prose='この計画は有限資源を前提に処理量を設計する。rate limit、quota exceeded、HTTP 429、usage limit、too many requests、credit balance の安全弁を defense in depth として論じる。'
+AGENT_PROVIDER=claude AGENTIC_LOOP_RUN_ONCE=1 FAKE_CLAUDE_SLEEP=1 \
+  FAKE_CLAUDE_RESULT='AGENTIC_LOOP_RESULT=completed' \
+  FAKE_CLAUDE_RESULT_1="$plan_rate_limit_prose" \
+  "$target/bin/agentic-loop" _supervise
+grep -Eq '^62 completed closed' "$state" || { echo '---DEBUG STATE---'; cat "$state"; echo '---DEBUG LOG---'; tail -40 "$state_root/logs/issue-62.log" 2>/dev/null; fail 'a plan that merely discusses rate limits was misclassified as pool exhaustion'; }
+[[ ! -r $state_root/pools/claude/exhausted ]] || fail 'a successful plan mentioning rate limits must not mark the claude pool exhausted'
+[[ ! -e $state_root/all-pools-paused ]] || fail 'a successful plan mentioning rate limits must not pause the supervisor'
+if grep -Fq 'agentic-loop:exhausted' "$FAKE_GH_ROOT/$state_key.comments"; then fail 'plan-text rate-limit mention was recorded as exhaustion'; fi
+
+# Complement (Issue #158): a genuine Claude usage-limit response -- is_error true
+# with api_error_status set, the way the CLI really reports it under
+# --output-format json -- IS pool exhaustion. The Issue is re-queued (never
+# failed), the claude pool is marked spent, and claiming pauses so retries are
+# not burned.
+rm -rf "$state_root/pools"
+rm -f "$state_root/all-pools-paused" "$state_root/agent-exhausted" "$FAKE_GH_ROOT/claude-json-count"
+printf '63 queued open none 2026-01-01T00:00:00Z\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+AGENT_PROVIDER=claude AGENTIC_LOOP_RUN_ONCE=1 FAKE_CLAUDE_SLEEP=1 \
+  FAKE_CLAUDE_IS_ERROR=1 FAKE_CLAUDE_API_ERROR_STATUS=429 \
+  FAKE_CLAUDE_RESULT='Claude AI usage limit reached' \
+  "$target/bin/agentic-loop" _supervise
+grep -Eq '^63 queued open' "$state" || { echo '---DEBUG STATE---'; cat "$state"; echo '---DEBUG LOG---'; tail -40 "$state_root/logs/issue-63.log" 2>/dev/null; fail 'a real claude usage limit should re-queue the Issue, not fail it'; }
+if grep -Eq '^63 failed' "$state"; then fail 'a claude usage limit must not mark the Issue failed'; fi
+[[ -r $state_root/pools/claude/exhausted ]] || fail 'a real claude usage limit did not mark the claude pool exhausted'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:exhausted' 'claude usage limit was not recorded as exhaustion'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'pool=claude' 'claude exhaustion comment did not record the exhausted pool'
+rm -rf "$state_root/pools"
+rm -f "$state_root/all-pools-paused" "$FAKE_GH_ROOT/claude-json-count"
 
 # API budget governor: while remaining REST(core) quota is below the reserve,
 # claiming pauses (keeping budget for heartbeats/recovery); it resumes on recovery.
