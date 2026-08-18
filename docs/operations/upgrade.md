@@ -29,6 +29,15 @@ bin/agentic-loop upgrade --format json
 | `bin/agentic-loop upgrade` | 導入済みのrepository | 配布元の新しいrevisionとの差分を確認し、Foundation管理部分だけを安全に更新する。 |
 | `bin/agentic-loop setup` | 導入済みのrepository | GitHub Label/Projectの作成・整合。upgradeの一部ではなく、必要なら独立して再実行できる。 |
 
+## mainの定期同期timer
+
+installはリポジトリごとのuser-level systemd timer（`agentic-loop-main-sync-<repository path>.timer`）を有効化し、15分間隔（最大2分のランダム遅延あり）でローカルの`main` worktreeを`origin/main`へ追従させる。更新はcleanかつlocal `main`が`origin/main`のancestorである場合のfast-forwardだけに限定され、ローカル変更、先行、分岐があれば何も変更せず失敗する（`.agentic-loop/manifest.json`単独の未commit差分は例外として許容する。後述の「manifestは機械生成の未commit変更として残る」を参照）。登録状態は次で確認できる。
+
+```sh
+systemctl --user list-timers 'agentic-loop-main-sync-*'
+journalctl --user -u 'agentic-loop-main-sync-*'
+```
+
 ## 導入版数の記録: `.agentic-loop/manifest.json`
 
 install/upgradeの度に、target repositoryへ`.agentic-loop/manifest.json`を書き込む(git管理下に置き、通常のcommit対象とする)。

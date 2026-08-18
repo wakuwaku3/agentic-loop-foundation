@@ -4235,7 +4235,25 @@ AGENTIC_LOOP_SOURCE="$PROJECT_ROOT" AGENTIC_LOOP_TARGET="$empty" AGENTIC_LOOP_SK
 [[ -f $empty/devbox.json && -f $empty/devbox.lock ]] || fail 'empty repository did not get the pinned development environment'
 [[ -x $empty/scripts/check-environment.sh ]] || fail 'empty repository did not get the environment guard'
 assert_contains "$empty/README.md" 'opencode' 'installed README.md does not document opencode as a supported provider'
-assert_contains "$empty/README.md" 'category:improvement' 'installed README.md does not document the diagnosis category label'
+assert_contains "$empty/docs/operations/codebase-diagnosis.md" 'category:improvement' 'installed codebase-diagnosis.md does not document the diagnosis category label'
+
+# README.md is scoped to basic users (Issue #64, ADR 0023): it must not leak
+# development/internal content, and must carry the reader's essential links.
+for readme_forbidden in 'devbox run --pure' 'make check' 'tests/' 'bin/lib/' 'docs/decisions/' '```toml' 'reasoning_effort' 'worker_timeout_seconds' 'systemctl --user' 'runtime.path' '.git/agentic-loop'; do
+  if grep -Fq "$readme_forbidden" "$empty/README.md"; then fail "installed README.md leaked development/internal content: $readme_forbidden"; fi
+done
+for readme_required in '## できること' '## 導入' '## 要求を出す' '## 日常の操作' '## 困ったときは' '## 文書の案内' 'docs/development.md'; do
+  assert_contains "$empty/README.md" "$readme_required" "installed README.md is missing a basic-user element: $readme_required"
+done
+
+# Documentation policy (Issue #64, ADR 0023): distributed as shared, referenced
+# from AGENTS.md, and docs/development.md is seeded once as init (target-owned).
+assert_contains "$empty/docs/policies/documentation.md" '基本利用者' 'installed documentation policy lacks reader/responsibility boundaries'
+assert_contains "$empty/AGENTS.md" '[文書ポリシー](docs/policies/documentation.md)' 'installed AGENTS.md does not reference the documentation policy invariant'
+[[ -f $empty/docs/development.md ]] || fail 'init did not seed docs/development.md'
+assert_contains "$empty/docs/development.md" '要求の伝え方' 'installed docs/development.md is missing the human requirement-submission responsibility'
+[[ $(yq -p json -r '.files[] | select(.path == "docs/policies/documentation.md") | .class' "$empty/.agentic-loop/manifest.json") == shared ]] || fail 'manifest did not classify docs/policies/documentation.md as shared'
+[[ $(yq -p json -r '.files[] | select(.path == "docs/development.md") | .class' "$empty/.agentic-loop/manifest.json") == init ]] || fail 'manifest did not classify docs/development.md as init (target-owned)'
 
 # init (empty repository) receives this Foundation's own capability manifest
 # verbatim: it also received this Foundation's own devbox.json/Makefile/CI, so
@@ -5215,6 +5233,8 @@ rm -rf "$new_source/.git"
 printf '\n# upgraded\n' >> "$new_source/AGENTS.md"
 printf 'new doc\n' > "$new_source/docs/operations/new-feature.md"
 sed -i 's#docs/operations/upgrade.md#docs/operations/upgrade.md docs/operations/new-feature.md#' "$new_source/scripts/lib/foundation-files.sh"
+printf '\n# upgraded documentation policy\n' >> "$new_source/docs/policies/documentation.md"
+printf '\n# upgraded development doc\n' >> "$new_source/docs/development.md"
 
 # Pristine: no upstream changes -> no-op dry-run, zero writes.
 before_status=$(git -C "$upgrade_target" status --porcelain)
@@ -5230,6 +5250,9 @@ update_out=$("$upgrade_target/bin/agentic-loop" upgrade --source "$new_source")
 "$upgrade_target/bin/agentic-loop" upgrade --source "$new_source" --apply --skip-verify >/dev/null || fail 'apply of a safe update failed'
 assert_contains "$upgrade_target/AGENTS.md" '# upgraded' 'apply did not update AGENTS.md'
 [[ -f $upgrade_target/docs/operations/new-feature.md ]] || fail 'apply did not add the new shared file'
+# docs/policies/documentation.md (Issue #64, ADR 0023) is Foundation-managed
+# (SHARED_FILES) and upstream updates apply through the ordinary shared-file path.
+assert_contains "$upgrade_target/docs/policies/documentation.md" '# upgraded documentation policy' 'apply did not update docs/policies/documentation.md as a shared file'
 [[ $(yq -p json -o yaml '.source.revision' "$upgrade_target/.agentic-loop/manifest.json") == unknown ]] || fail 'manifest should record "unknown" for an unpinned --source without its own Git history'
 git -C "$upgrade_target" add -A && git -C "$upgrade_target" commit --quiet -m 'apply update'
 rerun_out=$("$upgrade_target/bin/agentic-loop" upgrade --source "$new_source")
@@ -5275,6 +5298,9 @@ init_out=$("$init_target/bin/agentic-loop" upgrade --source "$new_source")
 [[ $init_out == *'[init-notice] README.md'* ]] || fail 'dry-run did not report an init-owned file with upstream drift'
 "$init_target/bin/agentic-loop" upgrade --source "$new_source" --apply --skip-verify >/dev/null || fail 'apply with an init-owned drift failed'
 if grep -Fq 'upstream readme change' "$init_target/README.md"; then fail 'apply modified a user-owned init file'; fi
+# docs/development.md (Issue #64, ADR 0023) is seeded once (INIT_FILES) and is
+# never overwritten by upgrade even when upstream changes it.
+if grep -Fq 'upgraded development doc' "$init_target/docs/development.md"; then fail 'apply overwrote the init-owned docs/development.md'; fi
 
 # Old install predating manifest.json: a pending config migration is detected,
 # applied idempotently, pins the applied revision, and bumps migration_level.

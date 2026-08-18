@@ -135,6 +135,11 @@ units = []
 reason = "AGENTS.mdの文言不変条件はlintのgrep検査だけが覆う"
 
 [[rule]]
+path = "docs/development.md"
+units = []
+reason = "人間向け開発文書の文言不変条件はlintのgrep検査だけが覆う（環境/lintは常時実行のため単位追加は不要）"
+
+[[rule]]
 path = ".editorconfig"
 units = []
 reason = "editor設定は自動テストに影響しない"
