@@ -19,6 +19,8 @@
 
 明示的な隔離は例外である。tests/flaky-registry.tomlへの宣言・期限（最長14日）・責任者・修復Issue紐付けの4条件をすべて満たす場合に限り、一致した検証単位のflaky判定だけを終了code 0にする。これはgateを弱めない：決定的に失敗する検証は隔離できず、対象のtest coverageは恒久的に失われない。registryは実行結果のcacheではなく人手レビュー済みの宣言であり、「以前の実行結果に依存しない」という上記の要求と矛盾しない（各検証はcacheされたverdictを読まず、常に実際に実行してから隔離宣言と照合する）。
 
+secret検査は依存なしのbaseline層と実績あるscanner層（gitleaks）の二層で構成し、どちらかが検出すればblockする。baseline層はscanner層が解決できない環境でも省略しない。コード化済み環境（`DEV_ENVIRONMENT=agentic-loop-foundation-v2`）内、または`AGENTIC_LOOP_SECRET_SCAN=required`が設定された経路（共通入口・CI・workerの完全検証を含む）では、scannerが解決できないことを理由に検査を素通りさせてはならない（fail-closed）。誤検知の除外は理由付きの許可listだけで行い、監査可能・最小範囲・件数上限を機械的に強制し、検査自体の無効化や無条件の除外を許さない。検出時は秘密の値そのものをlog・Issue・PRへ転載してはならない。
+
 ## CI採否とprivate repository例外
 
 repositoryの可視性、GitHub Actionsの料金条件、利用枠を推測してはならない。GitHubが返す可視性と、適用時点の料金・請求設定を確認し、費用ポリシーが許容しない追加費用の可能性がない場合にだけCIを実行する。

@@ -180,6 +180,30 @@ doctor_collect() {
   if [[ $hooks == .githooks && -x $REPO_ROOT/.githooks/pre-commit && -x $REPO_ROOT/.githooks/pre-push ]]; then doctor_add success 'Git hooks' 'secret guardとpush前検証が有効です。' '対応は不要です。'
   else doctor_add failure 'Git hooks' '秘密混入または未検証pushを防止できません。' 'git config core.hooksPath .githooks を実行し、install.shを再実行してください。'; fi
 
+  # secret scanner (gitleaks) resolution (Issue #61, ADR 0024): mirrors
+  # guard-secrets.sh's resolve_gitleaks order (env override, PATH, this
+  # repository's own transient Devbox virtenv, then the install-owned
+  # persistent runtime virtenv) without sourcing that standalone script.
+  local gitleaks_bin='' gitleaks_version=''
+  if [[ -n ${AGENTIC_LOOP_GITLEAKS:-} && -x ${AGENTIC_LOOP_GITLEAKS:-} ]]; then gitleaks_bin=$AGENTIC_LOOP_GITLEAKS
+  elif command -v gitleaks >/dev/null 2>&1; then gitleaks_bin=$(command -v gitleaks)
+  elif [[ -x $REPO_ROOT/.devbox/nix/profile/default/bin/gitleaks ]]; then gitleaks_bin="$REPO_ROOT/.devbox/nix/profile/default/bin/gitleaks"
+  elif [[ -x $RUNTIME_ROOT/.devbox/nix/profile/default/bin/gitleaks ]]; then gitleaks_bin="$RUNTIME_ROOT/.devbox/nix/profile/default/bin/gitleaks"
+  fi
+  if [[ -n $gitleaks_bin ]]; then
+    gitleaks_version=$("$gitleaks_bin" version 2>/dev/null || true)
+    doctor_add success 'secret scanner (gitleaks)' "解決済みです（${gitleaks_version:-バージョン不明}）。" '対応は不要です。'
+  else
+    doctor_add warning 'secret scanner (gitleaks)' 'gitleaksが解決できないため、secret検査はbaseline層のみで動作します（コード化済み環境内またはAGENTIC_LOOP_SECRET_SCAN=requiredではfail-closedになります）。' 'devbox install（またはinstall.shの再実行）でgitleaksを導入するか、AGENTIC_LOOP_GITLEAKSにpathを設定してください。'
+  fi
+  if [[ -x $REPO_ROOT/.agentic-loop/guard-secrets.sh ]]; then
+    if "$REPO_ROOT/.agentic-loop/guard-secrets.sh" --audit >/dev/null 2>&1; then
+      doctor_add success 'gitleaks設定監査' '.agentic-loop/gitleaks.toml の許可listは監査済みです。' '対応は不要です。'
+    else
+      doctor_add failure 'gitleaks設定監査' '.agentic-loop/gitleaks.toml が統治要件（理由付き・非広域・件数上限・.gitleaksignore不在）を満たしていません。' 'devbox run --pure -- .agentic-loop/guard-secrets.sh --audit を実行し、報告される内容を確認してください。'
+    fi
+  fi
+
   if pid_alive; then doctor_add success 'Supervisor' 'Issueキューを処理中です。' '対応は不要です。'
   else doctor_add failure 'Supervisor' 'queued Issueが処理されません。' 'bin/agentic-loop start を実行してください。'; fi
 

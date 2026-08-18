@@ -23,7 +23,7 @@ undetermined = []
 full_check = "devbox run --pure check"
 fast_check = ".githooks/pre-commit"
 secret_guard = ".agentic-loop/guard-secrets.sh"
-secret_guard_modes = ["--staged", "--push", "--all", "--text"]
+secret_guard_modes = ["--staged", "--push", "--all", "--text", "--history", "--audit"]
 # Measured on a change of this repository's own scale (see docs/operations/
 # capability-manifest.md for how to re-measure after a substantial change);
 # used as the basis for queue.worker_timeout_seconds, not enforced directly.
