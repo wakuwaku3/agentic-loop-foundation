@@ -11,7 +11,7 @@ set_issue_state() {
 }
 
 
-comment_issue() { repo_api "issues/$1/comments" --method POST -f body="$2" >/dev/null; }
+comment_issue() { comment_post "$1" "$2" >/dev/null; }
 
 
 queue_project_sync() {

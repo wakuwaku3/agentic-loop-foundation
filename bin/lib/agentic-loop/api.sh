@@ -34,6 +34,14 @@ repo_api() {
 }
 
 
+# The only two places an Issue/PR comment body reaches GitHub (Issue #110):
+# every other module posts/updates a comment through these, never through
+# repo_api directly, so unfold_body's `\n` expansion happens exactly once, at
+# the write boundary. Extra args (e.g. --jq) are passed through untouched.
+comment_post() { repo_api "issues/$1/comments" --method POST -f body="$(unfold_body "$2")" "${@:3}"; }
+comment_patch() { repo_api "issues/comments/$1" --method PATCH -f body="$(unfold_body "$2")" "${@:3}"; }
+
+
 graphql_budget_file() { printf '%s/graphql-rate-limit' "$STATE_ROOT"; }
 
 

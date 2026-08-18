@@ -172,6 +172,15 @@ if env -u DEV_ENVIRONMENT "$PROJECT_ROOT/scripts/check-environment.sh" >/dev/nul
   fail 'environment guard accepted an unpinned host environment'
 fi
 
+# unfold_body (Issue #110): expands a literal `\n` into a real newline, and
+# only that exact two-character sequence (a lone backslash, or a real
+# newline that was already real, must pass through unchanged).
+unfold_body_out=$(source "$PROJECT_ROOT/bin/lib/agentic-loop/common.sh"; unfold_body '<!-- m -->\nbody')
+[[ $(wc -l <<< "$unfold_body_out") -eq 2 ]] || fail 'unfold_body did not expand a literal \n into a real newline'
+[[ $unfold_body_out == $'<!-- m -->\nbody' ]] || fail 'unfold_body produced an unexpected result'
+unfold_body_plain=$(source "$PROJECT_ROOT/bin/lib/agentic-loop/common.sh"; unfold_body 'no newline here')
+[[ $unfold_body_plain == 'no newline here' ]] || fail 'unfold_body altered a body with no \n shorthand'
+
 cat > "$FAKE_BIN/gh" <<'FAKE_GH'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -185,6 +194,24 @@ project_page2="$FAKE_GH_ROOT/$key.project-page2"
 project_fields="$FAKE_GH_ROOT/$key.project-fields"
 project_link="$FAKE_GH_ROOT/$key.project-link"
 comments="$FAKE_GH_ROOT/$key.comments"
+# Append-only audit trail of every comment body this fixture ever recorded,
+# survives the frequent `: > "$comments"` truncations between fixtures (Issue
+# #110). Encoded the same way as $comments (see encode_comment_body below), so
+# a real newline is a literal 2-char `\n` and a literal `\n` bug is a 3-char
+# `\\n`.
+comment_bodies_log="$FAKE_GH_ROOT/comment-bodies.log"
+# Encode a comment body the same way the fake gh's one-comment-per-line
+# $comments/$comment_bodies_log records require: escape a literal backslash
+# first (so a real one is never confused with the encoding below), then fold
+# a real newline into a literal `\n`. This is the fixture's own encoding, kept
+# deliberately independent of common.sh's json_escape/unfold_body so it
+# exercises the production code path rather than assuming it.
+encode_comment_body() {
+  local v=$1
+  v=${v//\\/\\\\}
+  v=${v//$'\n'/\\n}
+  printf '%s' "$v"
+}
 closes="$FAKE_GH_ROOT/$key.closes"
 views="$FAKE_GH_ROOT/$key.views"
 labels="$FAKE_GH_ROOT/$key.labels"
@@ -389,6 +416,8 @@ case "${1:-} ${2:-}" in
     elif [[ $endpoint =~ ^issues/comments/([0-9]+)$ && $method == PATCH ]]; then
       cid=${BASH_REMATCH[1]}
       body=''; for arg in "$@"; do [[ $arg == body=* ]] && body=${arg#body=}; done
+      body=$(encode_comment_body "$body")
+      printf '%s\n' "$body" >> "$comment_bodies_log"
       ( flock 9
         mapfile -t comment_lines < "$comments" 2>/dev/null || comment_lines=()
         if (( cid >= 1 && cid <= ${#comment_lines[@]} )); then
@@ -408,6 +437,8 @@ case "${1:-} ${2:-}" in
       issue=${BASH_REMATCH[1]}
       if [[ $method == POST ]]; then
         body=''; for arg in "$@"; do [[ $arg == body=* ]] && body=${arg#body=}; done
+        body=$(encode_comment_body "$body")
+        printf '%s\n' "$body" >> "$comment_bodies_log"
         ( flock 9
           printf '%s %s\n' "$issue" "$body" >> "$comments"
           if [[ $* == *"--jq .id"* ]]; then wc -l < "$comments" | tr -d '[:space:]'; printf '\n'; fi
@@ -750,7 +781,9 @@ case "${1:-} ${2:-}" in
     fi ;;
   'issue comment')
     issue=$3; shift 3
-    printf '%s %s\n' "$issue" "$*" >> "$comments" ;;
+    body=$(encode_comment_body "$*")
+    printf '%s\n' "$body" >> "$comment_bodies_log"
+    printf '%s %s\n' "$issue" "$body" >> "$comments" ;;
   'issue close')
     issue=$3
     (
@@ -1456,6 +1489,10 @@ grep -Eq '^110 completed closed .* improvement$' "$state" || fail 'missing categ
 grep -Eq '^111 completed closed .* availability-incident$' "$state" || fail 'multiple categories did not retain only the highest-ranked category'
 assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'category-reconciled reason=missing' 'missing category repair was not audited'
 assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'category-reconciled reason=multiple selected=availability-incident' 'multiple category repair was not audited'
+# comment_issue's plain double-quoted-string call sites (Issue #110): the
+# marker must be followed by a real newline, encoded here as the 2-char `\n`.
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'reason=missing -->\nカテゴリが未設定' 'comment_issue (single-quoted call site) did not render a real newline after its marker'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'selected=availability-incident -->\n複数のカテゴリ' 'comment_issue (double-quoted call site) did not render a real newline after its marker'
 
 # Numeric priority semantics: descending order, unset=0, multiple markers take
 # the maximum, and out-of-range/non-numeric markers are ignored. All Issues
@@ -3107,6 +3144,11 @@ AGENTIC_LOOP_RUN_ONCE=1 FAKE_CODEX_SLEEP=3 "$target/bin/agentic-loop" _supervise
 lease_lines=$(grep -c 'agentic-loop:lease' "$FAKE_GH_ROOT/$state_key.comments" || true)
 [[ ${lease_lines:-0} -eq 1 ]] || fail "lease heartbeat should keep a single comment, found ${lease_lines:-0}"
 assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'のハートビートです' 'lease comment was not written'
+# lease_body's printf path (Issue #110): its two markers and the trailing
+# human-readable text must be separated by real newlines, encoded here as the
+# 2-char `\n`.
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" '-->\n<!-- agentic-loop:lease' 'lease_body did not render a real newline between its claim/lease markers'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" '-->\nAgentic Loop worker' 'lease_body did not render a real newline before its human-readable text'
 
 # Two hosts may observe the same queued snapshot. A still-valid claim created
 # by the other host wins by comment id, so this Supervisor must neither change
@@ -3181,6 +3223,11 @@ for _ in $(seq 1 20); do
 done
 [[ $hang_worker_gone == 1 ]] || { kill "$hang_sup_pid" 2>/dev/null; wait "$hang_sup_pid" 2>/dev/null; fail 'a timed-out worker process group left an orphan process behind'; }
 assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:worker-timeout' 'the worker-timeout disposition was not audited on the Issue'
+# lease_release's PATCH body (Issue #110): the claim/lease markers and the
+# human-readable text must be separated by a real newline, encoded here as
+# the 2-char `\n` (a regression would encode as the 3-char `\\n`, see
+# encode_comment_body).
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'expires=0 -->\n<!-- agentic-loop:lease' 'lease_release did not render a real newline between its claim/lease markers'
 hang_queue_progressed=0
 for _ in $(seq 1 40); do
   grep -Eq '^51 completed closed' "$state" && { hang_queue_progressed=1; break; }
@@ -3491,6 +3538,11 @@ FAKE_PR_BODY_FILE="$TEST_ROOT/trace-pr-body" FAKE_PR_FILES='bin/trace-idem.sh' \
   "$target/bin/agentic-loop" _worker 7015 trace-idempotent-worker-1
 grep -Eq '^7015 completed closed' "$state" || fail 'idempotent-upsert setup: the first gate pass did not complete the Issue'
 [[ $(grep -c 'agentic-loop:traceability schema=1' "$FAKE_GH_ROOT/$state_key.comments") -eq 1 ]] || fail 'idempotent-upsert setup: the first gate pass did not post exactly one verdict comment'
+# trace_render_verdict (Issue #110): the marker must be followed by a real
+# newline, encoded here as the 2-char `\n`, and the table itself must render
+# with real newlines between rows (not folded into literal `\n`).
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'verdict=pass -->\n### トレーサビリティ検証結果' 'trace_render_verdict did not render a real newline after its marker'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" '|---|---|---|---|---|\n|' 'trace_render_verdict did not render its table rows with real newlines'
 printf '7015 running open none 2026-01-01T00:00:00Z none none %s\n' "$(criteria_body 'Idempotent verdict criterion')" > "$state"
 FAKE_PR_BODY_FILE="$TEST_ROOT/trace-pr-body" FAKE_PR_FILES='bin/trace-idem.sh' \
   "$target/bin/agentic-loop" _worker 7015 trace-idempotent-worker-2
@@ -3547,6 +3599,9 @@ FAKE_CODEX_RESULT="$(preflight_plan_body "$pf_record")" "$target/bin/agentic-loo
 grep -Eq '^7100 completed closed' "$state" || fail 'a normal low-risk preflight record blocked completion'
 assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:preflight schema=1 issue=7100 verdict=autonomous' 'an autonomous preflight verdict was not recorded as an audit comment'
 assert_contains "$FAKE_GH_ROOT/codex-calls" '--sandbox workspace-write' 'an autonomous preflight verdict did not let exec run'
+# preflight_render_audit_body (Issue #110): the marker must be followed by a
+# real newline, encoded here as the 2-char `\n`.
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'verdict=autonomous -->\n### 変更影響とリスクのpreflight判定' 'preflight_render_audit_body did not render a real newline after its marker'
 
 # 2) Approval-required gates: one axis at "high" with its matching trigger,
 # for each of the Issue's named scenarios (migration, permission change,
@@ -4141,6 +4196,9 @@ grep -Eq '^192 paused open' "$state" || fail 'pause did not drain a running work
 assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:pause schema=1' 'pause of a running Issue did not record its audit marker'
 assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'from=running' 'pause did not record running as the pre-pause state'
 assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:handoff' 'pause did not leave a resume checkpoint'
+# resume_handoff_body's printf path (Issue #110): the marker must be followed
+# by a real newline, encoded here as the 2-char `\n`.
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" '-->\n### 再開のための引き継ぎ' 'resume_handoff_body did not render a real newline after its marker'
 [[ -e "$target-worktrees/issue-192" ]] || fail 'pause deleted the in-progress worktree'
 git -C "$target-worktrees/issue-192" symbolic-ref -q HEAD | grep -Fq 'agent/issue-192' || fail 'pause disturbed the in-progress branch'
 "$target/bin/agentic-loop" resume 192
@@ -5106,6 +5164,8 @@ cat > "$flaky_report_record" <<'EOF'
 ]}
 EOF
 flaky_report_out=$(
+  # shellcheck source=bin/lib/agentic-loop/common.sh
+  source "$PROJECT_ROOT/bin/lib/agentic-loop/common.sh"
   say() { printf '%s\n' "$*"; }
   fail() { printf 'FAIL: %s\n' "$1" >&2; exit 1; }
   project_add_issue() { return 0; }
@@ -5142,6 +5202,9 @@ grep -Fq 'bbbbbbbbbbbb' "$call_log" && fail 'flaky report searched GitHub for a 
 grep -Fq 'aaaaaaaaaaaa' "$call_log" && fail 'flaky report searched GitHub for a passed unit, which must never be reported'
 [[ -f $flaky_report_state/created ]] || fail 'flaky report did not create a new Issue for the closed-only match'
 grep -Fq 'agentic-loop:flaky unit=e2e:upgrade fingerprint=dddddddddddd' "$flaky_report_state/created" || fail 'flaky report new-Issue body is missing the dedup marker'
+# Issue #110: flaky_report_one's new-Issue body must reach GitHub with real
+# newlines, never a literal `\n`.
+! grep -F '\n' "$flaky_report_state/created" || fail 'flaky report new-Issue body contained a literal \n instead of a real newline'
 # Labels are sent via stdin (not captured by this repo_api stub); presence of
 # exactly one /labels endpoint call, for the newly created Issue only, is
 # what this fixture can observe.
@@ -5400,6 +5463,16 @@ git -C "$verify_target" diff --quiet -- .agentic-loop/manifest.json || fail 'rol
 interrupted_check_after=$( ("$verify_target/bin/agentic-loop" doctor --format json || true) | yq -p json '.checks[] | select(.name == "中断したupgrade") | .level')
 [[ $interrupted_check_after == success ]] || fail 'doctor should report the upgrade record cleared after rollback'
 
+fi
+
+# --- Global comment-body newline regression guard (Issue #110) -------------
+# Across every Issue/PR comment body any test group in this run posted (see
+# comment_bodies_log/encode_comment_body above): a real newline re-encodes as
+# the 2-char `\n`; a literal `\n` bug re-encodes as the 3-char `\\n`. This
+# covers every comment-posting path exercised by this file, not just the ones
+# with a dedicated positive assertion above.
+if [[ -s $FAKE_GH_ROOT/comment-bodies.log ]] && grep -Fq '\\n' "$FAKE_GH_ROOT/comment-bodies.log"; then
+  fail 'a posted comment body contained a literal \n instead of a real newline (Issue #110 regression)'
 fi
 
 printf 'Tests passed (%s).\n' "$TEST_GROUP"
