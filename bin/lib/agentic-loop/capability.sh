@@ -120,14 +120,16 @@ capability_validate() {
   fi
 
   local key value
-  for key in validation.full_check validation.fast_check validation.secret_guard; do
+  for key in validation.full_check validation.fast_check validation.secret_guard validation.affected_check validation.impact_map; do
     value=$(capability_query ".$key // \"\"")
     [[ -n $value ]] || continue
-    if [[ $key == validation.full_check ]]; then
-      capability_command_safe "$repo_root" "$value" || capability_add failure "unsafe-command:$key" "$key の値が安全なcommand形式ではありません: $value"
-    else
-      capability_path_safe "$repo_root" "$value" || capability_add failure "unsafe-path:$key" "$key の値が安全なpathではありません: $value"
-    fi
+    case $key in
+      validation.full_check | validation.affected_check)
+        capability_command_safe "$repo_root" "$value" || capability_add failure "unsafe-command:$key" "$key の値が安全なcommand形式ではありません: $value" ;;
+      *)
+        capability_path_safe "$repo_root" "$value" || capability_add failure "unsafe-path:$key" "$key の値が安全なpathではありません: $value"
+        [[ $key != validation.impact_map || -e $repo_root/$value ]] || capability_add warning "missing-path:$key" "$key が実在しません: $value" ;;
+    esac
   done
 
   local path
@@ -171,13 +173,21 @@ capability_validate() {
     fi
   fi
 
+  local full_check_seconds
+  full_check_seconds=$(capability_query '.validation.full_check_seconds // 0')
+  [[ $full_check_seconds =~ ^[0-9]+$ ]] || full_check_seconds=0
+
   if [[ $worker_timeout_seconds =~ ^[0-9]+$ ]] && (( worker_timeout_seconds > 0 )); then
-    local full_check_seconds
-    full_check_seconds=$(capability_query '.validation.full_check_seconds // 0')
-    [[ $full_check_seconds =~ ^[0-9]+$ ]] || full_check_seconds=0
     if (( full_check_seconds > 0 && full_check_seconds >= worker_timeout_seconds )); then
       capability_add warning 'drift:worker_timeout' "validation.full_check_seconds（${full_check_seconds}秒）が queue.worker_timeout_seconds（${worker_timeout_seconds}秒）以上です。完全検証がworker timeoutより長くなる矛盾があります。"
     fi
+  fi
+
+  local affected_check_seconds
+  affected_check_seconds=$(capability_query '.validation.affected_check_seconds // 0')
+  [[ $affected_check_seconds =~ ^[0-9]+$ ]] || affected_check_seconds=0
+  if (( affected_check_seconds > 0 && full_check_seconds > 0 && affected_check_seconds >= full_check_seconds )); then
+    capability_add warning 'drift:affected_check_seconds' "validation.affected_check_seconds（${affected_check_seconds}秒）が validation.full_check_seconds（${full_check_seconds}秒）以上です。短時間検証が完全検証より遅くなる矛盾があります。"
   fi
 
   (( CAPABILITY_FAILURES == 0 ))
@@ -210,6 +220,7 @@ capability_render_text() {
     printf '全検証: %s\n' "$(capability_query '.validation.full_check // "(未宣言)"')"
     printf '短時間検証: %s\n' "$(capability_query '.validation.fast_check // "(未宣言)"')"
     printf 'secret guard: %s\n' "$(capability_query '.validation.secret_guard // "(未宣言)"')"
+    printf '影響範囲検証（gateではない）: %s\n' "$(capability_query '.validation.affected_check // "(未宣言)"')"
   fi
   for index in "${!CAPABILITY_LEVELS[@]}"; do
     case ${CAPABILITY_LEVELS[$index]} in warning) unit='警告' ;; failure) unit='失敗' ;; *) unit=${CAPABILITY_LEVELS[$index]} ;; esac
@@ -260,7 +271,7 @@ cmd_capabilities() {
 # exists, so both scripts/install-target.sh and scripts/upgrade/migrations/
 # 0003-capability-manifest.sh can call this unconditionally and idempotently.
 capability_generate() {
-  local repo_root=$1 file full_check='' fast_check='' secret_guard=''
+  local repo_root=$1 file full_check='' fast_check='' secret_guard='' affected_check='' impact_map=''
   local -a undetermined=() env_defs=() skills=()
   file=$(capability_file "$repo_root")
   [[ -e $file ]] && return 0
@@ -274,6 +285,12 @@ capability_generate() {
   fi
   if [[ -x $repo_root/.githooks/pre-commit ]]; then fast_check='.githooks/pre-commit'; else undetermined+=(validation.fast_check); fi
   if [[ -x $repo_root/.agentic-loop/guard-secrets.sh ]]; then secret_guard='.agentic-loop/guard-secrets.sh'; else undetermined+=(validation.secret_guard); fi
+  if [[ -r $repo_root/Makefile ]] && grep -Eq '^affected:' "$repo_root/Makefile" && [[ -f $repo_root/tests/impact-map.toml ]]; then
+    affected_check='devbox run --pure affected'
+    impact_map='tests/impact-map.toml'
+  else
+    undetermined+=(validation.affected_check validation.impact_map)
+  fi
 
   [[ -f $repo_root/devbox.json ]] && env_defs+=(devbox.json)
   [[ -f $repo_root/devbox.lock ]] && env_defs+=(devbox.lock)
@@ -281,7 +298,7 @@ capability_generate() {
   # Which platforms a pinned toolchain actually runs on is never guessed from
   # file presence; it always requires a positive, out-of-band statement.
   undetermined+=(environment.platforms)
-  undetermined+=(release.deploy release.distribution ownership protected external_environment validation.full_check_seconds)
+  undetermined+=(release.deploy release.distribution ownership protected external_environment validation.full_check_seconds validation.affected_check_seconds)
 
   local skill_manifest
   for skill_manifest in "$repo_root"/.claude/skills/*/SKILL.md; do
@@ -306,6 +323,8 @@ capability_generate() {
     [[ -n $full_check ]] && printf 'full_check = "%s"\n' "$full_check"
     [[ -n $fast_check ]] && printf 'fast_check = "%s"\n' "$fast_check"
     [[ -n $secret_guard ]] && printf 'secret_guard = "%s"\n' "$secret_guard"
+    [[ -n $affected_check ]] && printf 'affected_check = "%s"\n' "$affected_check"
+    [[ -n $impact_map ]] && printf 'impact_map = "%s"\n' "$impact_map"
     printf '\n[environment]\n'
     if (( ${#env_defs[@]} > 0 )); then
       printf 'definition = ['

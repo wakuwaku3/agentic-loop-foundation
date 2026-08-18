@@ -1,0 +1,228 @@
+# 変更影響 -> 検証単位のmap（Issue #59, ADR 0021）。
+#
+# `scripts/affected-check.sh`が読む唯一の判定規則。一致は**pathセグメント境界
+# を尊重した最長prefix一致**（`bin/agentic-loop-diagnose`は`bin/agentic-loop`
+# には一致しない）。`rule`は一致した変更にunitsを追加する。`widen`に一致した
+# 変更、およびどの`rule`/`widen`にも一致しない変更（`unmatched`）は、安全側と
+# して常に全unitsへ拡大する。
+#
+# `devbox run --pure affected-audit`が、schema・到達可能性・pathの実在に加え
+# て「追跡済みfileはすべて明示的にruleかwidenへ一致する」ことを検証する
+# （`unmatched`は新規・未分類fileのためだけの経路であり、既知fileがそこへ落ち
+# たままcommitされることはない）。
+schema_version = 1
+units = ["e2e:queue", "e2e:lifecycle", "e2e:auxiliary", "e2e:upgrade"]
+always = ["environment", "lint"]
+
+[[rule]]
+path = "bin/lib/agentic-loop/scope.sh"
+units = ["e2e:queue"]
+reason = "変更scope競合の判定はqueue群のfixtureが覆う"
+
+[[rule]]
+path = "bin/lib/agentic-loop/dependency.sh"
+units = ["e2e:queue"]
+reason = "Issue依存関係の判定はqueue群のfixtureが覆う"
+
+[[rule]]
+path = "bin/lib/agentic-loop/priority.sh"
+units = ["e2e:queue"]
+reason = "優先度judgingはqueue群のfixtureが覆う"
+
+[[rule]]
+path = "bin/lib/agentic-loop/supervisor.sh"
+units = ["e2e:queue", "e2e:lifecycle"]
+reason = "supervisorのpoll/claim/restart挙動はqueueとlifecycle群にまたがる"
+
+[[rule]]
+path = "bin/lib/agentic-loop/worker.sh"
+units = ["e2e:lifecycle"]
+reason = "worker実行のresume/timeout/handoffはlifecycle群が覆う"
+
+[[rule]]
+path = "bin/lib/agentic-loop/worker_state.sh"
+units = ["e2e:lifecycle"]
+reason = "worker状態遷移とstale回収はlifecycle群が覆う"
+
+[[rule]]
+path = "bin/lib/agentic-loop/control.sh"
+units = ["e2e:lifecycle"]
+reason = "pause/resume/abortはlifecycle群が覆う"
+
+[[rule]]
+path = "bin/lib/agentic-loop/preflight.sh"
+units = ["e2e:auxiliary"]
+reason = "preflight判定はauxiliary群のfixtureが覆う"
+
+[[rule]]
+path = "bin/lib/agentic-loop/trace.sh"
+units = ["e2e:auxiliary"]
+reason = "traceability評価はauxiliary群のfixtureが覆う"
+
+[[rule]]
+path = "bin/lib/agentic-loop/capability.sh"
+units = ["e2e:lifecycle", "e2e:auxiliary", "e2e:upgrade"]
+reason = "capability manifestの検証はlifecycle/auxiliary/upgrade群にまたがる"
+
+[[rule]]
+path = "bin/lib/agentic-loop/metrics.sh"
+units = ["e2e:auxiliary"]
+reason = "metrics集計はauxiliary群のfixtureが覆う"
+
+[[rule]]
+path = "bin/lib/agentic-loop/status.sh"
+units = ["e2e:auxiliary"]
+reason = "status observabilityはauxiliary群のfixtureが覆う"
+
+[[rule]]
+path = "bin/lib/agentic-loop/doctor.sh"
+units = ["e2e:lifecycle", "e2e:auxiliary", "e2e:upgrade"]
+reason = "doctorの助言はlifecycle/auxiliary/upgrade群のfixtureにまたがる"
+
+[[rule]]
+path = "bin/lib/agentic-loop/upgrade.sh"
+units = ["e2e:upgrade"]
+reason = "upgrade/migration適用はupgrade群が覆う"
+
+[[rule]]
+path = "scripts/upgrade/migrations"
+units = ["e2e:upgrade"]
+reason = "個別migrationの適用はupgrade群が覆う"
+
+[[rule]]
+path = "scripts/upgrade-target.sh"
+units = ["e2e:upgrade"]
+reason = "upgrade入口の挙動はupgrade群が覆う"
+
+[[rule]]
+path = "scripts/install-target.sh"
+units = ["e2e:lifecycle", "e2e:upgrade"]
+reason = "install入口はlifecycle群のinstall検証とupgrade群の初期状態にまたがる"
+
+[[rule]]
+path = ".agentic-loop/diagnose-codebase.sh"
+units = ["e2e:auxiliary"]
+reason = "自己診断の実行はauxiliary群のfixtureが覆う"
+
+[[rule]]
+path = "docs/policies"
+units = []
+reason = "policy本文の不変条件はlintのgrep検査だけが覆う（environment/lintは常時実行のため単位追加は不要）"
+
+[[rule]]
+path = "docs/decisions"
+units = []
+reason = "ADR本文はlintの配布検査だけが覆う"
+
+[[rule]]
+path = "docs/operations"
+units = []
+reason = "運用文書はlintの配布検査だけが覆う"
+
+[[rule]]
+path = "README.md"
+units = []
+reason = "README本文は環境/lint以外の自動検証対象を持たない"
+
+[[rule]]
+path = "AGENTS.md"
+units = []
+reason = "AGENTS.mdの文言不変条件はlintのgrep検査だけが覆う"
+
+[[rule]]
+path = ".editorconfig"
+units = []
+reason = "editor設定は自動テストに影響しない"
+
+[[rule]]
+path = ".gitignore"
+units = []
+reason = "git管理対象の除外設定は自動テストに影響しない"
+
+[[widen]]
+path = "bin"
+reason = "shared-dependency"
+
+[[widen]]
+path = "install.sh"
+reason = "shared-dependency"
+
+[[widen]]
+path = "scripts/check-environment.sh"
+reason = "shared-dependency"
+
+[[widen]]
+path = "scripts/lint.sh"
+reason = "shared-dependency"
+
+[[widen]]
+path = "scripts/format.sh"
+reason = "shared-dependency"
+
+[[widen]]
+path = "scripts/lib/foundation-files.sh"
+reason = "shared-dependency"
+
+[[widen]]
+path = "scripts/affected-check.sh"
+reason = "selector-self-change"
+
+[[widen]]
+path = "tests/run-e2e.sh"
+reason = "test-harness"
+
+[[widen]]
+path = "tests/test-agentic-loop.sh"
+reason = "test-harness"
+
+[[widen]]
+path = "tests/impact-map.toml"
+reason = "test-harness"
+
+[[widen]]
+path = ".agentic-loop.toml"
+reason = "runtime-config"
+
+[[widen]]
+path = ".agentic-loop/capabilities.toml"
+reason = "runtime-config"
+
+[[widen]]
+path = ".agentic-loop/guard-secrets.sh"
+reason = "shared-dependency"
+
+[[widen]]
+path = ".agentic-loop"
+reason = "shared-dependency"
+
+[[widen]]
+path = ".agents"
+reason = "shared-dependency"
+
+[[widen]]
+path = ".claude"
+reason = "shared-dependency"
+
+[[widen]]
+path = ".codex"
+reason = "shared-dependency"
+
+[[widen]]
+path = ".githooks"
+reason = "shared-dependency"
+
+[[widen]]
+path = ".github"
+reason = "shared-dependency"
+
+[[widen]]
+path = "devbox.json"
+reason = "build-config"
+
+[[widen]]
+path = "devbox.lock"
+reason = "build-config"
+
+[[widen]]
+path = "Makefile"
+reason = "build-config"
