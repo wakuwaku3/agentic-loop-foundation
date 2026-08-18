@@ -101,6 +101,57 @@ trace_record_json() {
 # shellcheck disable=SC2016 # Backticks are literal Markdown fencing in the fabricated PR body.
 trace_pr_body() { printf '## Summary\n\n```agentic-loop:traceability\n%s\n```\n' "$1"; }
 
+# preflight_risk_json AXIS LEVEL [REASON] [MISSING] -> one "risks[]" element of
+# an agentic-loop:preflight record (see docs/decisions/0020-change-risk-preflight.md).
+preflight_risk_json() {
+  local axis=$1 level=$2 reason=${3:-} missing=${4:-}
+  local out="{\"axis\":\"$axis\",\"level\":\"$level\""
+  [[ -z $reason ]] || out+=",\"reason\":\"$reason\""
+  [[ -z $missing ]] || out+=",\"missing\":\"$missing\""
+  out+='}'
+  printf '%s' "$out"
+}
+
+# preflight_risks_json [OVERRIDE_AXIS OVERRIDE_JSON] -> the full 10-axis
+# "risks[]" array, every axis "low" except the given override (already built
+# by preflight_risk_json).
+preflight_risks_json() {
+  local override_axis=${1:-} override_json=${2:-} axis joined='' sep=''
+  for axis in security confidentiality integrity availability data_migration external_environment cost compatibility release_deploy rollback; do
+    if [[ $axis == "$override_axis" ]]; then joined+="$sep$override_json"; else joined+="$sep$(preflight_risk_json "$axis" low)"; fi
+    sep=','
+  done
+  printf '[%s]' "$joined"
+}
+
+# preflight_record_json ISSUE RISKS_JSON [CHANGE_JSON] [APPROVAL_JSON] -> the
+# full agentic-loop:preflight record object (schema=1).
+preflight_record_json() {
+  local issue=$1 risks=$2 change=${3:-'{"scope":"","tests":[],"external_operations":[],"rollback":""}'} approval=${4:-'{"required":false,"triggers":[]}'}
+  printf '{"schema":1,"issue":%s,"risks":%s,"change":%s,"approval":%s}' "$issue" "$risks" "$change" "$approval"
+}
+
+# preflight_plan_body RECORD_JSON -> a plan-stage output (FAKE_CODEX_RESULT)
+# embedding RECORD_JSON in the fenced code block preflight_manifest_from_plan
+# parses, with an unrelated scope marker (README.md only; never a protected
+# path) so tests control the capability-manifest signal independently. The
+# fake codex/claude/opencode harness reuses this same value as the exec
+# stage's response whenever no per-call FAKE_CODEX_EXEC_RESULT_<n> override is
+# set, so the terminal marker is appended as the last line (mirrors the
+# existing scope-refine fixture's FAKE_CODEX_RESULT=$'<!-- ... -->\nAGENTIC_LOOP_RESULT=completed'
+# convention): harmless for fixtures where the preflight gate never lets exec
+# run, and required for the ones where it does.
+# shellcheck disable=SC2016 # Backticks are literal Markdown fencing in the fabricated plan body.
+preflight_plan_body() { printf '## 計画\n\n```agentic-loop:preflight\n%s\n```\n\n<!-- agentic-loop:scope paths=README.md -->\nAGENTIC_LOOP_RESULT=completed\n' "$1"; }
+
+# preflight_token_for ISSUE RECORD_JSON -> the 12-hex approval envelope token
+# a real worker would compute for this record (see preflight.sh's preflight_token).
+preflight_token_for() { ( source "$PROJECT_ROOT/bin/lib/agentic-loop/common.sh"; source "$PROJECT_ROOT/bin/lib/agentic-loop/preflight.sh"; preflight_token "$1" "$2" ); }
+
+# preflight_signal_token_for ISSUE SIGNAL_REASON -> the 12-hex token for a
+# record-absent signal-derived envelope (see preflight.sh's preflight_signal_token).
+preflight_signal_token_for() { ( source "$PROJECT_ROOT/bin/lib/agentic-loop/common.sh"; source "$PROJECT_ROOT/bin/lib/agentic-loop/preflight.sh"; preflight_signal_token "$1" "$2" ); }
+
 mkdir -p "$FAKE_BIN" "$FAKE_GH_ROOT"
 
 # Disable git auto-maintenance globally for the whole harness: commit, push,
@@ -366,6 +417,11 @@ case "${1:-} ${2:-}" in
         # comment when the local $STATE_ROOT/workers/ISSUE.trace cache file
         # is missing or stale (Issue #53).
         awk -v n="$issue" '$1 == n && index($0, "agentic-loop:traceability schema=1") {id=NR} END{if (id) print id}' "$comments" 2>/dev/null || true
+      elif [[ $method == GET && $* == *'agentic-loop:preflight-approved'* ]]; then
+        # preflight.sh's preflight_approved (Issue #58): count comments that
+        # carry both the approval marker and this exact envelope token.
+        token_pattern=$(grep -oE 'token=[0-9a-f]{12}' <<< "$*" | tail -n 1)
+        awk -v n="$issue" -v t="$token_pattern" '$1 == n && index($0, "agentic-loop:preflight-approved") && index($0, t) {c++} END{print c+0}' "$comments" 2>/dev/null
       elif [[ $* == *agentic-loop:claim* ]]; then
         awk -v n="$issue" '$1 == n && index($0, "agentic-loop:claim") {body=$0; sub(/^[^ ]+ /, "", body); printf "%s\t%s", NR, body | "base64 -w0"; close("base64 -w0"); printf "\n"}' "$comments" 2>/dev/null || true
       elif [[ $* == *needs-input* ]]; then
@@ -3473,6 +3529,240 @@ if "$target/bin/agentic-loop" doctor > "$TEST_ROOT/trace-doctor-output.txt"; the
 grep -Fq '[失敗] 設定値: TRACEABILITY' "$TEST_ROOT/trace-doctor-output.txt" || fail 'doctor did not classify the invalid traceability value'
 mv "$target/.agentic-loop.toml.valid" "$target/.agentic-loop.toml"
 
+# --- Change-risk preflight (Issue #58, ADR 0020) ---
+# These scenarios exercise preflight_gate/preflight_reevaluate_diff through
+# the same "fresh running Issue" completion path the traceability scenarios
+# above use, plus the resume pr-merged path for the escalation backstop.
+capability_orig="$TEST_ROOT/preflight-capabilities-orig.toml"
+cp "$target/.agentic-loop/capabilities.toml" "$capability_orig"
+
+# 1) A normal, low-risk change: verdict=autonomous, an audit comment is
+# posted, and exec actually runs (the gate does not block low risk).
+write_queue_config "$target/.agentic-loop.toml" PREFLIGHT=warn TRACEABILITY=off
+pf_record=$(preflight_record_json 7100 "$(preflight_risks_json)")
+printf '7100 running open\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+: > "$FAKE_GH_ROOT/codex-calls"
+FAKE_CODEX_RESULT="$(preflight_plan_body "$pf_record")" "$target/bin/agentic-loop" _worker 7100 preflight-autonomous-worker
+grep -Eq '^7100 completed closed' "$state" || fail 'a normal low-risk preflight record blocked completion'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:preflight schema=1 issue=7100 verdict=autonomous' 'an autonomous preflight verdict was not recorded as an audit comment'
+assert_contains "$FAKE_GH_ROOT/codex-calls" '--sandbox workspace-write' 'an autonomous preflight verdict did not let exec run'
+
+# 2) Approval-required gates: one axis at "high" with its matching trigger,
+# for each of the Issue's named scenarios (migration, permission change,
+# external deploy, cost, rollback-blocked). None of these ever start exec.
+assert_preflight_approval_gate() {
+  local issue=$1 axis=$2 trigger=$3 label=$4 risks record
+  risks=$(preflight_risks_json "$axis" "$(preflight_risk_json "$axis" high "テスト用の高リスク理由")")
+  record=$(preflight_record_json "$issue" "$risks" '{"scope":"","tests":[],"external_operations":[],"rollback":"revertで復旧"}' "{\"required\":true,\"triggers\":[\"$trigger\"]}")
+  write_queue_config "$target/.agentic-loop.toml" PREFLIGHT=warn TRACEABILITY=off
+  printf '%s running open\n' "$issue" > "$state"
+  : > "$FAKE_GH_ROOT/$state_key.comments"
+  : > "$FAKE_GH_ROOT/codex-calls"
+  FAKE_CODEX_RESULT="$(preflight_plan_body "$record")" "$target/bin/agentic-loop" _worker "$issue" "preflight-$label-worker"
+  grep -Eq "^$issue needs-input open" "$state" || fail "a $label preflight record ($axis=high, trigger=$trigger) was not gated to needs-input"
+  assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'reason=preflight-approval' "the $label gate did not record reason=preflight-approval"
+  assert_contains "$FAKE_GH_ROOT/$state_key.comments" "$axis: high" "the $label gate comment did not surface the risky axis"
+  ! grep -Fq -- '--sandbox workspace-write' "$FAKE_GH_ROOT/codex-calls" || fail "a $label preflight gate unexpectedly started exec"
+}
+assert_preflight_approval_gate 7101 data_migration data-migration migration
+assert_preflight_approval_gate 7102 security permission permission-change
+assert_preflight_approval_gate 7103 release_deploy external-deploy external-deploy
+assert_preflight_approval_gate 7104 cost cost cost
+assert_preflight_approval_gate 7105 rollback rollback-blocked rollback-blocked
+
+# 3) undetermined: an axis marked "unknown" is never silently treated as low
+# risk; the gate comment carries the declared reason and missing information.
+write_queue_config "$target/.agentic-loop.toml" PREFLIGHT=warn TRACEABILITY=off
+pf_risks=$(preflight_risks_json external_environment "$(preflight_risk_json external_environment unknown '対象環境が未確定' 'どの外部環境に触れるか未確認')")
+pf_record=$(preflight_record_json 7106 "$pf_risks")
+printf '7106 running open\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+: > "$FAKE_GH_ROOT/codex-calls"
+FAKE_CODEX_RESULT="$(preflight_plan_body "$pf_record")" "$target/bin/agentic-loop" _worker 7106 preflight-undetermined-worker
+grep -Eq '^7106 needs-input open' "$state" || fail 'an undetermined preflight axis was not gated to needs-input'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'reason=preflight-undetermined' 'the undetermined gate did not record its reason'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" '不足情報: どの外部環境に触れるか未確認' 'the undetermined gate did not surface the declared missing information'
+! grep -Fq -- '--sandbox workspace-write' "$FAKE_GH_ROOT/codex-calls" || fail 'an undetermined preflight verdict unexpectedly started exec'
+
+# 4) invalid (one axis missing -> schema-invalid): warn mode never blocks
+# completion, but posts an advisory comment naming the failure; require mode
+# blocks completion (open/needs-input) instead.
+pf_incomplete_risks='[{"axis":"security","level":"low"},{"axis":"confidentiality","level":"low"},{"axis":"integrity","level":"low"},{"axis":"availability","level":"low"},{"axis":"data_migration","level":"low"},{"axis":"external_environment","level":"low"},{"axis":"cost","level":"low"},{"axis":"compatibility","level":"low"},{"axis":"release_deploy","level":"low"}]'
+pf_record=$(preflight_record_json 7107 "$pf_incomplete_risks")
+write_queue_config "$target/.agentic-loop.toml" PREFLIGHT=warn TRACEABILITY=off
+printf '7107 running open\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+FAKE_CODEX_RESULT="$(preflight_plan_body "$pf_record")" "$target/bin/agentic-loop" _worker 7107 preflight-invalid-warn-worker
+grep -Eq '^7107 completed closed' "$state" || fail 'warn mode blocked completion for an invalid (incomplete-axes) preflight record'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'verdict=invalid detail=schema-invalid' 'warn mode did not post an advisory verdict for an invalid preflight record'
+
+pf_record2=$(preflight_record_json 7108 "$pf_incomplete_risks")
+write_queue_config "$target/.agentic-loop.toml" PREFLIGHT=require TRACEABILITY=off
+printf '7108 running open\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+: > "$FAKE_GH_ROOT/codex-calls"
+FAKE_CODEX_RESULT="$(preflight_plan_body "$pf_record2")" "$target/bin/agentic-loop" _worker 7108 preflight-invalid-require-worker
+grep -Eq '^7108 needs-input open' "$state" || fail 'require mode did not block completion for an invalid (incomplete-axes) preflight record'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'reason=preflight-invalid' 'require mode did not record reason=preflight-invalid'
+! grep -Fq -- '--sandbox workspace-write' "$FAKE_GH_ROOT/codex-calls" || fail 'require mode let exec run despite an invalid preflight record'
+
+# 5) claim-mismatch: a record that leaves one axis "high" but self-attests
+# approval.required=false is an internally-contradictory claim, never
+# downgraded to "low" by trusting the approval block over the risk axis.
+pf_risks=$(preflight_risks_json security "$(preflight_risk_json security high 'high軸だがrequired=falseの矛盾')")
+pf_record=$(preflight_record_json 7109 "$pf_risks" '{"scope":"","tests":[],"external_operations":[],"rollback":""}' '{"required":false,"triggers":[]}')
+write_queue_config "$target/.agentic-loop.toml" PREFLIGHT=require TRACEABILITY=off
+printf '7109 running open\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+FAKE_CODEX_RESULT="$(preflight_plan_body "$pf_record")" "$target/bin/agentic-loop" _worker 7109 preflight-claim-mismatch-worker
+grep -Eq '^7109 needs-input open' "$state" || fail 'a claim-mismatch preflight record was not blocked'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'reason=preflight-invalid' 'a claim-mismatch preflight record was not classified via reason=preflight-invalid'
+
+# 6) A credential-like value anywhere in the record is rejected before it is
+# ever trusted, and the raw secret text never reaches a posted comment.
+pf_secret="ghp_$(printf '%s%s' 'abcdefghijklmnopqrst' 'uvwxyz0123456789')"
+pf_risks=$(preflight_risks_json rollback "$(preflight_risk_json rollback medium "rollback手順に $pf_secret を使う")")
+pf_record=$(preflight_record_json 7110 "$pf_risks")
+write_queue_config "$target/.agentic-loop.toml" PREFLIGHT=require TRACEABILITY=off
+printf '7110 running open\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+FAKE_CODEX_RESULT="$(preflight_plan_body "$pf_record")" "$target/bin/agentic-loop" _worker 7110 preflight-secret-worker
+grep -Eq '^7110 needs-input open' "$state" || fail 'a credential-like preflight record was not blocked'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'reason=preflight-invalid' 'a credential-like preflight record was not classified via reason=preflight-invalid'
+! grep -Fq "$pf_secret" "$FAKE_GH_ROOT/$state_key.comments" || fail 'a credential-like preflight record leaked its secret text into a posted comment'
+
+# 7) A missing record with no risky signal: warn posts an advisory comment
+# and continues; require blocks completion instead.
+write_queue_config "$target/.agentic-loop.toml" PREFLIGHT=warn TRACEABILITY=off
+printf '7111 running open\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+"$target/bin/agentic-loop" _worker 7111 preflight-missing-warn-worker
+grep -Eq '^7111 completed closed' "$state" || fail 'warn mode blocked completion despite no risky signal for a missing preflight record'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'verdict=missing detail=missing-record' 'warn mode did not post an advisory verdict for a missing preflight record'
+
+write_queue_config "$target/.agentic-loop.toml" PREFLIGHT=require TRACEABILITY=off
+printf '7112 running open\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+: > "$FAKE_GH_ROOT/codex-calls"
+"$target/bin/agentic-loop" _worker 7112 preflight-missing-require-worker
+grep -Eq '^7112 needs-input open' "$state" || fail 'require mode completed an Issue despite a missing preflight record'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'reason=preflight-missing' 'require mode did not record reason=preflight-missing'
+! grep -Fq -- '--sandbox workspace-write' "$FAKE_GH_ROOT/codex-calls" || fail 'require mode let exec run despite a missing preflight record'
+
+# 8) off: no evaluation and no comment at all, even for a record that would
+# otherwise gate -- and completion still proceeds.
+pf_risks=$(preflight_risks_json security "$(preflight_risk_json security high 'offなら評価されない')")
+pf_record=$(preflight_record_json 7113 "$pf_risks" '{"scope":"","tests":[],"external_operations":[],"rollback":""}' '{"required":true,"triggers":["security"]}')
+write_queue_config "$target/.agentic-loop.toml" PREFLIGHT=off TRACEABILITY=off
+printf '7113 running open\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+FAKE_CODEX_RESULT="$(preflight_plan_body "$pf_record")" "$target/bin/agentic-loop" _worker 7113 preflight-off-worker
+grep -Eq '^7113 completed closed' "$state" || fail 'preflight off mode blocked completion despite an otherwise-gating record'
+! grep -Fq 'agentic-loop:preflight' "$FAKE_GH_ROOT/$state_key.comments" || fail 'preflight off mode evaluated and commented despite being disabled'
+
+# 9) Approval CLI round-trip: a gated Issue is approved by token, requeued,
+# and a re-run of the same plan (same declared risk, same token) completes.
+pf_risks=$(preflight_risks_json security "$(preflight_risk_json security high '承認往復test')")
+pf_record=$(preflight_record_json 7114 "$pf_risks" '{"scope":"","tests":[],"external_operations":[],"rollback":""}' '{"required":true,"triggers":["security"]}')
+pf_token=$(preflight_token_for 7114 "$pf_record")
+write_queue_config "$target/.agentic-loop.toml" PREFLIGHT=warn TRACEABILITY=off
+printf '7114 running open\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+: > "$FAKE_GH_ROOT/codex-calls"
+FAKE_CODEX_RESULT="$(preflight_plan_body "$pf_record")" "$target/bin/agentic-loop" _worker 7114 preflight-cli-gate-worker
+grep -Eq '^7114 needs-input open' "$state" || fail 'CLI round-trip setup: the initial gate did not fire'
+"$target/bin/agentic-loop" preflight 7114 --approve --token "$pf_token" --note 'テスト承認' >/dev/null || fail 'preflight --approve failed'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" "agentic-loop:preflight-approved schema=1 actor=test-operator token=$pf_token" 'preflight --approve did not post the approval marker'
+grep -Eq '^7114 queued open' "$state" || fail 'preflight --approve did not requeue a gated Issue'
+# The real Supervisor's claim_next would set agent:running before invoking
+# _worker again; this harness calls _worker directly, so simulate that claim.
+printf '7114 running open\n' > "$state"
+FAKE_CODEX_RESULT="$(preflight_plan_body "$pf_record")" "$target/bin/agentic-loop" _worker 7114 preflight-cli-approved-worker
+grep -Eq '^7114 completed closed' "$state" || fail 'an approved preflight envelope was not allowed to complete on the next run'
+assert_contains "$FAKE_GH_ROOT/codex-calls" '--sandbox workspace-write' 'an approved preflight envelope did not let exec run'
+
+# 10) bin/agentic-loop preflight ISSUE --format json (read-only, no approval):
+# reports the current scope/signal and never writes to GitHub.
+printf '7115 running open\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+before_calls=$(wc -l < "$FAKE_GH_ROOT/calls")
+pf_cli_out=$("$target/bin/agentic-loop" preflight 7115 --format json) || fail 'preflight read-only CLI exited non-zero for a no-signal Issue'
+grep -Fq '"signal":"none"' <<< "$pf_cli_out" || fail 'preflight read-only CLI did not report signal=none'
+yq -p json '.' <<< "$pf_cli_out" >/dev/null 2>&1 || fail 'preflight --format json did not produce valid JSON'
+[[ $(wc -l < "$FAKE_GH_ROOT/calls") -eq $before_calls ]] || fail 'preflight read-only CLI made a GitHub API call'
+
+# --- signal-mismatch and the escalation backstop (both need a capability
+# manifest declaring a protected, approval-requiring path) ---
+cat > "$target/.agentic-loop/capabilities.toml" <<'CAPTOML'
+schema_version = 1
+undetermined = []
+[[protected]]
+path = "devbox.lock"
+reason = "preflight test fixture"
+change_requires = "approval"
+CAPTOML
+
+# 11) A missing record is never a free pass: when the declared scope touches a
+# protected, approval-requiring path, even warn mode gates (signal-mismatch).
+write_queue_config "$target/.agentic-loop.toml" PREFLIGHT=warn TRACEABILITY=off
+printf '7116 running open\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+: > "$FAKE_GH_ROOT/codex-calls"
+FAKE_CODEX_RESULT='## 計画
+
+<!-- agentic-loop:scope paths=devbox.lock -->' "$target/bin/agentic-loop" _worker 7116 preflight-signal-mismatch-worker
+grep -Eq '^7116 needs-input open' "$state" || fail 'a missing record touching a protected path was not gated in warn mode (signal-mismatch)'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'reason=preflight-signal-mismatch' 'a signal-mismatch gate did not record its reason'
+! grep -Fq -- '--sandbox workspace-write' "$FAKE_GH_ROOT/codex-calls" || fail 'a signal-mismatch verdict unexpectedly started exec'
+
+# 12) Escalation backstop: scope grows during exec to touch a protected path
+# without prior approval, discovered via the pr-merged resume path (mirrors
+# the resumed-merged-PR fixture above, but with a real devbox.lock-touching
+# commit). Completion is refused; the worktree/branch/PR are preserved and the
+# Issue is never closed.
+write_queue_config "$target/.agentic-loop.toml" PREFLIGHT=warn TRACEABILITY=off
+printf '7117 running open\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+git -C "$target" worktree add --quiet -b agent/issue-7117 "$target-worktrees/issue-7117" origin/main
+printf 'preflight-escalation-test\n' >> "$target-worktrees/issue-7117/devbox.lock"
+git -C "$target-worktrees/issue-7117" add devbox.lock
+git -C "$target-worktrees/issue-7117" commit --quiet -m 'touch protected path'
+escalation_sha=$(git -C "$target-worktrees/issue-7117" rev-parse HEAD)
+FAKE_RESUME_MERGED_PR=7117 FAKE_RESUME_MERGED_SHA=$escalation_sha FAKE_RESUME_MERGED_URL="https://github.example/acme/installed-project/pull/7117" \
+  "$target/bin/agentic-loop" _worker 7117 preflight-escalation-worker
+grep -Eq '^7117 needs-input open' "$state" || fail 'a protected-path escalation was not gated to needs-input'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'reason=preflight-escalation' 'the escalation gate did not record its reason'
+[[ -e $target-worktrees/issue-7117 ]] || fail 'an escalation gate removed the worktree despite blocking completion'
+git -C "$target" show-ref --verify --quiet refs/heads/agent/issue-7117 || fail 'an escalation gate removed the branch despite blocking completion'
+
+# 13) The same escalation, this time already approved: completion proceeds
+# and cleanup runs as normal.
+escalation_token=$(preflight_signal_token_for 7118 'protected:devbox.lock')
+write_queue_config "$target/.agentic-loop.toml" PREFLIGHT=warn TRACEABILITY=off
+printf '7118 running open\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+git -C "$target" worktree add --quiet -b agent/issue-7118 "$target-worktrees/issue-7118" origin/main
+printf 'preflight-escalation-test\n' >> "$target-worktrees/issue-7118/devbox.lock"
+git -C "$target-worktrees/issue-7118" add devbox.lock
+git -C "$target-worktrees/issue-7118" commit --quiet -m 'touch protected path'
+escalation_sha2=$(git -C "$target-worktrees/issue-7118" rev-parse HEAD)
+"$target/bin/agentic-loop" preflight 7118 --approve --token "$escalation_token" >/dev/null || fail 'approving an escalation signal token failed'
+FAKE_RESUME_MERGED_PR=7118 FAKE_RESUME_MERGED_SHA=$escalation_sha2 FAKE_RESUME_MERGED_URL="https://github.example/acme/installed-project/pull/7118" \
+  "$target/bin/agentic-loop" _worker 7118 preflight-escalation-approved-worker
+grep -Eq '^7118 completed closed' "$state" || fail 'an approved escalation signal did not allow completion'
+[[ ! -e $target-worktrees/issue-7118 ]] || fail 'an approved escalation did not clean up its worktree'
+! git -C "$target" show-ref --verify --quiet refs/heads/agent/issue-7118 || fail 'an approved escalation did not remove its branch'
+
+cp "$capability_orig" "$target/.agentic-loop/capabilities.toml"
+
+# doctor rejects an invalid preflight value.
+cp "$target/.agentic-loop.toml" "$target/.agentic-loop.toml.valid"
+printf '[queue]\npreflight = "loose"\n' > "$target/.agentic-loop.toml"
+if "$target/bin/agentic-loop" doctor > "$TEST_ROOT/preflight-doctor-output.txt"; then fail 'doctor accepted an invalid preflight value'; fi
+grep -Fq '[失敗] 設定値: PREFLIGHT' "$TEST_ROOT/preflight-doctor-output.txt" || fail 'doctor did not classify the invalid preflight value'
+mv "$target/.agentic-loop.toml.valid" "$target/.agentic-loop.toml"
+
 # --- status observability (Issue #42) ---
 # The Supervisor is deliberately left stopped for the manual-state scenarios
 # below: a live start would call rebuild_scope_cache/recover_expired and
@@ -4501,7 +4791,7 @@ grep -Fq '[foundation]' "$migration_target/.agentic-loop.toml" || fail 'migratio
 resolved_revision=$(git -C "$PROJECT_ROOT" rev-parse HEAD)
 assert_contains "$migration_target/.agentic-loop.toml" "revision = \"$resolved_revision\"" 'migration apply did not pin the applied revision'
 [[ $(yq -p json -o yaml '.source.revision' "$migration_target/.agentic-loop/manifest.json") == "$resolved_revision" ]] || fail 'upgrade manifest did not record the applied revision'
-[[ $(yq -p json -o yaml '.migration_level' "$migration_target/.agentic-loop/manifest.json") -eq 4 ]] || fail 'manifest migration_level was not bumped after applying the migration'
+[[ $(yq -p json -o yaml '.migration_level' "$migration_target/.agentic-loop/manifest.json") -eq 5 ]] || fail 'manifest migration_level was not bumped after applying the migration'
 migration_rerun=$("$migration_target/bin/agentic-loop" upgrade --source "$PROJECT_ROOT")
 [[ $migration_rerun == *'変更はありません'* ]] || fail 'rerunning upgrade after a completed migration was not a no-op'
 

@@ -73,6 +73,10 @@ doctor_collect() {
     if [[ $TRACEABILITY == require || $TRACEABILITY == warn || $TRACEABILITY == off ]]; then
       doctor_add success 'トレーサビリティgate' "現在のmodeは $TRACEABILITY です（require=完了をblock、warn=助言のみ、off=無効）。" '対応は不要です。'
     fi
+    doctor_enum_config PREFLIGHT "$PREFLIGHT" require warn off
+    if [[ $PREFLIGHT == require || $PREFLIGHT == warn || $PREFLIGHT == off ]]; then
+      doctor_add success '変更影響とリスクのpreflight gate' "現在のmodeは $PREFLIGHT です（require=非自律verdictをblock、warn=リスクの高いverdictのみblock、off=無効）。" '対応は不要です。'
+    fi
     (( DOCTOR_FAILURES == 0 )) && doctor_add success '設定ファイル' '設定値を安全に解釈できます。' '対応は不要です。'
   fi
 

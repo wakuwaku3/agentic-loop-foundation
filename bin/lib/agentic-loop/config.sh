@@ -45,6 +45,7 @@ load_config() {
       queue.unknown_scope) UNKNOWN_SCOPE=$value; continue ;;
       queue.exclusive_paths) EXCLUSIVE_PATHS=$value; continue ;;
       queue.traceability) TRACEABILITY=$value; continue ;;
+      queue.preflight) PREFLIGHT=$value; continue ;;
       *) continue ;;
     esac
     if [[ ! $value =~ ^[0-9]+$ ]]; then
@@ -89,4 +90,5 @@ validate_config() {
   [[ $WORKER_TIMEOUT_SECONDS =~ ^[0-9]+$ ]] || fail 'WORKER_TIMEOUT_SECONDS must be a non-negative integer'
   case $UNKNOWN_SCOPE in isolated | exclusive | open) ;; *) fail 'UNKNOWN_SCOPE must be isolated, exclusive, or open' ;; esac
   case $TRACEABILITY in require | warn | off) ;; *) fail 'TRACEABILITY must be require, warn, or off' ;; esac
+  case $PREFLIGHT in require | warn | off) ;; *) fail 'PREFLIGHT must be require, warn, or off' ;; esac
 }

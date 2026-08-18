@@ -30,6 +30,6 @@
 - [テストポリシー](docs/policies/testing.md)に従い、すべての自動テストを共通入口から実行する。
 - [検証ハーネスポリシー](docs/policies/validation-harness.md)に従い、変更ライフサイクルの各gateで共通入口による検証を完了する。
 - [継続的デリバリーポリシー](docs/policies/continuous-delivery.md)に従い、最初の本番deployまたはbinary releaseと同じ変更で、mainへのmergeを起点とする再現可能なCD pipelineを実装する。
-- 破壊的・不可逆または重大なコストを伴う判断は、実行前に明示的な承認を得る。
+- 破壊的・不可逆または重大なコストを伴う判断は、実行前に明示的な承認を得る（機械的な強制点は[preflightゲート](docs/operations/preflight.md)を参照）。
 - [費用ポリシー](docs/policies/cost.md)をすべての機能・設計・運用に適用し、許容されない金銭的コストを発生させない。
 - [GitHub日本語運用ポリシー](docs/policies/github-language.md)に従い、Issue、PR、コメント、レビューは日本語で記述する。

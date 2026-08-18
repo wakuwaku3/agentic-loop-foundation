@@ -7,7 +7,8 @@ required=(AGENTS.md README.md Makefile .editorconfig .gitignore .codex/config.to
   docs/decisions/0017-requirement-traceability.md docs/operations/traceability.md .github/PULL_REQUEST_TEMPLATE.md
   docs/decisions/0018-repository-capability-manifest.md docs/operations/capability-manifest.md bin/lib/agentic-loop/capability.sh
   .agentic-loop/capabilities.toml scripts/upgrade/migrations/0003-capability-manifest.sh
-  docs/decisions/0019-issue-level-execution-control.md bin/lib/agentic-loop/control.sh scripts/upgrade/migrations/0004-pause-control-config.sh)
+  docs/decisions/0019-issue-level-execution-control.md bin/lib/agentic-loop/control.sh scripts/upgrade/migrations/0004-pause-control-config.sh
+  docs/decisions/0020-change-risk-preflight.md docs/operations/preflight.md bin/lib/agentic-loop/preflight.sh scripts/upgrade/migrations/0005-preflight-config.sh)
 for file in "${required[@]}"; do
   [[ -f $file ]] || { printf 'Missing required file: %s\n' "$file" >&2; exit 1; }
 done
@@ -329,6 +330,37 @@ for guarded_fn in cmd_pause cmd_abort control_resume_paused; do
     exit 1
   fi
 done
+
+# --- change-risk preflight gate (Issue #58, ADR 0020) ---
+grep -Fq 'preflight) cmd_preflight' "${AGENTIC_LOOP_SOURCES[@]}" || { printf 'Preflight command is not distributed through the queue CLI.\n' >&2; exit 1; }
+grep -Fq 'preflight_gate' "${AGENTIC_LOOP_SOURCES[@]}" || { printf 'Change-risk preflight gate is missing.\n' >&2; exit 1; }
+grep -Fq 'preflight_reevaluate_diff' "${AGENTIC_LOOP_SOURCES[@]}" || { printf 'Change-risk preflight escalation re-evaluation is missing.\n' >&2; exit 1; }
+grep -Fq 'agentic-loop:preflight' "${AGENTIC_LOOP_SOURCES[@]}" || { printf 'Preflight audit marker is missing.\n' >&2; exit 1; }
+grep -Fq 'agentic-loop:preflight-approved' "${AGENTIC_LOOP_SOURCES[@]}" || { printf 'Preflight approval marker is missing.\n' >&2; exit 1; }
+grep -Fq 'reason=preflight-approval' "${AGENTIC_LOOP_SOURCES[@]}" || { printf 'Preflight approval-required gate marker is missing.\n' >&2; exit 1; }
+grep -Fq 'reason=preflight-escalation' "${AGENTIC_LOOP_SOURCES[@]}" || { printf 'Preflight escalation gate marker is missing.\n' >&2; exit 1; }
+grep -Eq '^preflight[[:space:]]*=[[:space:]]*"warn"$' .agentic-loop.toml || { printf 'Unsafe preflight default.\n' >&2; exit 1; }
+grep -Fq 'preflight ISSUE' docs/operations/issue-queue.md || { printf 'preflight command is not documented.\n' >&2; exit 1; }
+grep -Fq '追加費用ゼロ' docs/decisions/0020-change-risk-preflight.md || { printf 'Preflight cost-neutrality is not documented.\n' >&2; exit 1; }
+grep -Fq 'docs/decisions/0020-change-risk-preflight.md' scripts/lib/foundation-files.sh || { printf 'Preflight ADR is not distributed.\n' >&2; exit 1; }
+grep -Fq 'docs/operations/preflight.md' scripts/lib/foundation-files.sh || { printf 'Preflight documentation is not distributed.\n' >&2; exit 1; }
+for requirement in 'category' 'needs-input' '検証ハーネスポリシー' '継続的デリバリーポリシー'; do
+  grep -Fq "$requirement" docs/operations/preflight.md || {
+    printf 'Preflight documentation lacks requirement: %s\n' "$requirement" >&2
+    exit 1
+  }
+done
+# Preflight is execution control, never disposal (see docs/decisions/0016):
+# it must not close Issues itself.
+preflight_fn_body=$(awk '
+  $0 ~ "^preflight_gate\\(\\) \\{" || $0 ~ "^preflight_reevaluate_diff\\(\\) \\{" || $0 ~ "^cmd_preflight\\(\\) \\{" { capture=1; next }
+  capture && /^}/ { capture=0 }
+  capture { print }
+' bin/lib/agentic-loop/preflight.sh)
+if grep -Fq 'state=closed' <<< "$preflight_fn_body"; then
+  printf 'Preflight gate/CLI must not close Issues (see docs/decisions/0016).\n' >&2
+  exit 1
+fi
 
 for doc in README.md docs/operations/issue-queue.md docs/operations/codebase-diagnosis.md; do
   grep -Fq 'opencode' "$doc" || {
