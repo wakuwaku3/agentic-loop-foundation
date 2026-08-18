@@ -4,7 +4,9 @@ set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 required=(AGENTS.md README.md Makefile .editorconfig .gitignore .codex/config.toml .claude/settings.json .claude/hooks/confirm-main-worktree-edit.sh install.sh devbox.json devbox.lock docs/policies/cost.md docs/policies/testing.md docs/policies/external-environment.md docs/policies/development-environment.md docs/policies/ai-tool-neutrality.md docs/policies/github-language.md docs/policies/validation-harness.md docs/policies/continuous-delivery.md docs/decisions/0002-github-issue-queue.md docs/decisions/0003-supervisor-resilience-and-api-budget.md docs/decisions/0004-worker-resume-and-handoff.md docs/decisions/0005-status-observability.md docs/decisions/0006-worker-hang-timeout.md docs/decisions/0007-loop-metrics.md docs/decisions/0009-foundation-upgrade.md docs/decisions/0010-authorized-issue-disposition.md docs/decisions/0012-provider-pool-fallback.md docs/decisions/0013-agentic-loop-modules.md docs/decisions/0014-scope-structural-conflict.md docs/decisions/0015-numeric-priority-marker.md docs/decisions/0016-failure-park-not-close.md docs/operations/issue-queue.md docs/operations/codebase-diagnosis.md docs/operations/loop-metrics.md docs/operations/upgrade.md .agentic-loop.toml .agentic-loop/guard-secrets.sh .agentic-loop/update-main.sh .agentic-loop/diagnose-codebase.sh .githooks/pre-commit .githooks/pre-push .agents/skills/submit-requirement/SKILL.md .agents/skills/diagnose-codebase/SKILL.md .claude/skills/submit-requirement/SKILL.md .claude/skills/diagnose-codebase/SKILL.md bin/agentic-loop bin/agentic-loop-diagnose bin/lib/agentic-loop/common.sh bin/lib/agentic-loop/config.sh bin/lib/agentic-loop/api.sh bin/lib/agentic-loop/agent.sh bin/lib/agentic-loop/setup.sh bin/lib/agentic-loop/service.sh bin/lib/agentic-loop/status.sh bin/lib/agentic-loop/doctor.sh bin/lib/agentic-loop/upgrade.sh bin/lib/agentic-loop/metrics.sh bin/lib/agentic-loop/project.sh bin/lib/agentic-loop/dispose.sh bin/lib/agentic-loop/worker_state.sh bin/lib/agentic-loop/dependency.sh bin/lib/agentic-loop/scope.sh bin/lib/agentic-loop/priority.sh bin/lib/agentic-loop/supervisor.sh bin/lib/agentic-loop/worker.sh bin/lib/agentic-loop/trace.sh scripts/check-environment.sh scripts/install-target.sh scripts/lib/foundation-files.sh scripts/upgrade-target.sh scripts/upgrade/migrations/0001-foundation-config-section.sh scripts/upgrade/migrations/0002-traceability-config.sh
-  docs/decisions/0017-requirement-traceability.md docs/operations/traceability.md .github/PULL_REQUEST_TEMPLATE.md)
+  docs/decisions/0017-requirement-traceability.md docs/operations/traceability.md .github/PULL_REQUEST_TEMPLATE.md
+  docs/decisions/0018-repository-capability-manifest.md docs/operations/capability-manifest.md bin/lib/agentic-loop/capability.sh
+  .agentic-loop/capabilities.toml scripts/upgrade/migrations/0003-capability-manifest.sh)
 for file in "${required[@]}"; do
   [[ -f $file ]] || { printf 'Missing required file: %s\n' "$file" >&2; exit 1; }
 done
@@ -252,7 +254,7 @@ grep -Fq 'metrics_close_attempt' "${AGENTIC_LOOP_SOURCES[@]}" || { printf 'Metri
 grep -Fq 'worker単位の内訳・ランキングは出力しない' docs/operations/loop-metrics.md || { printf 'Metrics privacy guarantee is not documented.\n' >&2; exit 1; }
 grep -Fq '追加費用ゼロ' docs/decisions/0007-loop-metrics.md || { printf 'Metrics cost-neutrality is not documented.\n' >&2; exit 1; }
 grep -Fq 'docs/operations/loop-metrics.md' scripts/lib/foundation-files.sh || { printf 'Metrics documentation is not distributed.\n' >&2; exit 1; }
-if grep -Eq 'danger-full-access|OPENAI_API_KEY' "${AGENTIC_LOOP_SOURCES[@]}" bin/agentic-loop-diagnose .agentic-loop/diagnose-codebase.sh install.sh scripts/install-target.sh scripts/upgrade-target.sh scripts/lib/foundation-files.sh scripts/upgrade/migrations/0001-foundation-config-section.sh scripts/upgrade/migrations/0002-traceability-config.sh; then
+if grep -Eq 'danger-full-access|OPENAI_API_KEY' "${AGENTIC_LOOP_SOURCES[@]}" bin/agentic-loop-diagnose .agentic-loop/diagnose-codebase.sh install.sh scripts/install-target.sh scripts/upgrade-target.sh scripts/lib/foundation-files.sh scripts/upgrade/migrations/0001-foundation-config-section.sh scripts/upgrade/migrations/0002-traceability-config.sh scripts/upgrade/migrations/0003-capability-manifest.sh; then
   printf 'Forbidden Codex execution or API-key billing configuration.\n' >&2
   exit 1
 fi
@@ -275,6 +277,27 @@ grep -Fq 'docs/decisions/0017-requirement-traceability.md' scripts/lib/foundatio
 grep -Fq 'agentic-loop:traceability' .github/PULL_REQUEST_TEMPLATE.md || { printf 'PR template lacks the traceability record template.\n' >&2; exit 1; }
 cmp -s .agents/skills/diagnose-codebase/SKILL.md .claude/skills/diagnose-codebase/SKILL.md || { printf 'Codex and Claude diagnose-codebase skills diverged.\n' >&2; exit 1; }
 grep -Fq 'trace --audit' .agents/skills/diagnose-codebase/SKILL.md || { printf 'diagnose-codebase skill does not reference the traceability audit as an evidence source.\n' >&2; exit 1; }
+
+# --- repository capability manifest (Issue #56, ADR 0018) ---
+grep -Fq 'capabilities) cmd_capabilities' "${AGENTIC_LOOP_SOURCES[@]}" || { printf 'Capabilities command is not distributed through the queue CLI.\n' >&2; exit 1; }
+grep -Fq 'capabilities --format json' docs/operations/issue-queue.md || { printf 'Capabilities machine-readable interface is not documented.\n' >&2; exit 1; }
+grep -Fq 'docs/operations/capability-manifest.md' scripts/lib/foundation-files.sh || { printf 'Capability manifest documentation is not distributed.\n' >&2; exit 1; }
+grep -Fq 'docs/decisions/0018-repository-capability-manifest.md' scripts/lib/foundation-files.sh || { printf 'Capability manifest ADR is not distributed.\n' >&2; exit 1; }
+grep -Fq 'capability_generate' scripts/install-target.sh scripts/upgrade/migrations/0003-capability-manifest.sh || { printf 'Capability manifest is not seeded on install/upgrade.\n' >&2; exit 1; }
+grep -Fq '.agentic-loop/capabilities.toml' .agentic-loop/update-main.sh || { printf 'Main-sync does not tolerate a freshly generated, uncommitted capability manifest.\n' >&2; exit 1; }
+# shellcheck source=bin/lib/agentic-loop/capability.sh
+source bin/lib/agentic-loop/capability.sh
+if ! capability_validate "$PWD" "$(yq -p toml -r '.foundation.verify_command // ""' .agentic-loop.toml 2>/dev/null)"; then
+  printf 'This repository'"'"'s own capability manifest failed validation:\n' >&2
+  for cap_i in "${!CAPABILITY_LEVELS[@]}"; do
+    [[ ${CAPABILITY_LEVELS[$cap_i]} == failure ]] && printf '  [%s] %s\n' "${CAPABILITY_CODES[$cap_i]}" "${CAPABILITY_MESSAGES[$cap_i]}" >&2
+  done
+  exit 1
+fi
+[[ $(yq -p toml -o yaml '.undetermined | length' .agentic-loop/capabilities.toml) -eq 0 ]] || {
+  printf 'This Foundation repository knows all of its own capabilities; capabilities.toml must not leave anything undetermined for itself.\n' >&2
+  exit 1
+}
 
 for doc in README.md docs/operations/issue-queue.md docs/operations/codebase-diagnosis.md; do
   grep -Fq 'opencode' "$doc" || {

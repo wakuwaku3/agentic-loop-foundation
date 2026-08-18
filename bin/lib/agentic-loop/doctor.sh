@@ -253,6 +253,27 @@ doctor_collect() {
   else
     doctor_add success '中断したupgrade' '未完了のupgrade適用はありません。' '対応は不要です。'
   fi
+
+  local cap_rc=0 cap_index cap_code
+  capability_validate "$REPO_ROOT" "$(config_value 'foundation.verify_command')" "$WORKER_TIMEOUT_SECONDS" || cap_rc=1
+  for cap_index in "${!CAPABILITY_LEVELS[@]}"; do
+    cap_code=${CAPABILITY_CODES[$cap_index]}
+    case $cap_code in
+      not-installed) doctor_add warning '能力manifest' "${CAPABILITY_MESSAGES[$cap_index]}" 'bin/agentic-loop upgrade を実行するか install.sh を再実行してください（既存repositoryでは検出可能な項目だけが安全に初期化されます）。' ;;
+      unreadable | schema-version) doctor_add failure '能力manifest' "${CAPABILITY_MESSAGES[$cap_index]}" '.agentic-loop/capabilities.toml のTOML構文・schema_version・yqの利用可否を確認してください。' ;;
+      unsafe-command:* | unsafe-path:*) doctor_add failure '能力manifest: 安全性検証' "${CAPABILITY_MESSAGES[$cap_index]}" '.agentic-loop/capabilities.toml の該当する宣言を、repository相対の安全なpathまたはcommand形式に修正してください。' ;;
+      missing-path:*) doctor_add warning '能力manifest: 参照切れ' "${CAPABILITY_MESSAGES[$cap_index]}" '.agentic-loop/capabilities.toml の該当pathを、実在するpathに更新するか宣言を削除してください。' ;;
+      undetermined) doctor_add warning '能力manifest: 未確定項目' "${CAPABILITY_MESSAGES[$cap_index]}" '検出できる情報が増え次第、該当キーを .agentic-loop/capabilities.toml へ明示してください（推測での確定は避けてください）。' ;;
+      drift:*) doctor_add warning '能力manifest: drift' "${CAPABILITY_MESSAGES[$cap_index]}" '.agentic-loop.toml の [foundation].verify_command と .agentic-loop/capabilities.toml の validation.full_check を一致させてください。' ;;
+      *) doctor_add warning '能力manifest' "${CAPABILITY_MESSAGES[$cap_index]}" '.agentic-loop/capabilities.toml を確認してください。' ;;
+    esac
+  done
+  if (( cap_rc == 0 )) && [[ -n $CAPABILITY_JSON ]]; then
+    doctor_add success '能力manifest' '検証済みのrepository capability manifestを利用できます。' '対応は不要です。'
+  fi
+  if [[ -n $(git -C "$REPO_ROOT" status --porcelain -- .agentic-loop/capabilities.toml 2>/dev/null) ]]; then
+    doctor_add warning '能力manifest: 未commit' 'install/upgradeが生成・更新した .agentic-loop/capabilities.toml が未commitです。' '内容を確認し、意図した宣言であればcommitしてください。'
+  fi
 }
 
 

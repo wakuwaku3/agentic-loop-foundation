@@ -93,6 +93,14 @@ token、worker log本文、Issue本文・コメント、providerのresult file�
 bin/agentic-loop doctor --format json
 ```
 
+### capabilities: repository能力manifestの読み取り
+
+`bin/agentic-loop capabilities`（[運用ドキュメント](capability-manifest.md)、[ADR 0018](../decisions/0018-repository-capability-manifest.md)）は、`.agentic-loop/capabilities.toml`（存在すれば）を検証済みの形で読み取り専用に表示する読み取り専用コマンドである。完全検証・短時間検証・secret guard・対応platform・重要directory/ownership・変更禁止領域・外部環境・release/deploy有無・利用可能skill・想定実行時間を、worker・`doctor`・CI・自己診断が共有する単一のparser/validator（`bin/lib/agentic-loop/capability.sh`）経由で提示する。manifestが存在しない場合は任意設定として警告のみで終了code 0、存在するが安全性検証（pathのworkspace外参照や`..`、commandのシェルmetacharacter）や`schema_version`（未対応値は暗黙fallbackせず失敗）に違反する場合は終了code 1になる。
+
+```sh
+bin/agentic-loop capabilities --format json
+```
+
 ### upgrade: 導入済みFoundationの安全な更新
 
 `bin/agentic-loop upgrade`（[運用ドキュメント](upgrade.md)、[ADR 0009](../decisions/0009-foundation-upgrade.md)）は、既定では書き込みを一切行わないdry-runで、追加・更新・利用者編集との競合・削除候補・設定migrationを日本語で表示する。`--apply`で実際に適用し、破壊的・不可逆・追加費用・権限変更を伴う項目は`--approve`なしでは適用しない。適用前後で`doctor`と完全検証を実行し、失敗時は適用状態を保持したまま`--rollback`または再実行を案内する。Supervisorが稼働中の`--apply`と、明示的なrevision指定を欠く実行はいずれも拒否する（`main`への暗黙追従はしない）。
