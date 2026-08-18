@@ -5,6 +5,8 @@ readonly SOURCE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 readonly TARGET="${1:-.}"
 # shellcheck source=lib/foundation-files.sh
 source "$SOURCE_ROOT/scripts/lib/foundation-files.sh"
+# shellcheck source=lib/agentic-loop/capability.sh
+source "$SOURCE_ROOT/bin/lib/agentic-loop/capability.sh"
 
 fail() { printf 'install-target: %s\n' "$1" >&2; exit 1; }
 
@@ -140,7 +142,17 @@ main() {
   "$target/.agentic-loop/update-main.sh" install "$target"
   "$target/.agentic-loop/diagnose-codebase.sh" install "$target"
   for file in "${SHARED_FILES[@]}"; do entries+="$file"$'\t'"shared"$'\n'; done
-  if [[ $mode == init ]]; then for file in "${INIT_FILES[@]}"; do entries+="$file"$'\t'"init"$'\n'; done; fi
+  if [[ $mode == init ]]; then
+    for file in "${INIT_FILES[@]}"; do entries+="$file"$'\t'"init"$'\n'; done
+  else
+    # An existing repository never receives this Foundation's own capability
+    # declarations wholesale (they would misdescribe its actual toolchain);
+    # instead seed one from a small detection table, never guessing anything
+    # it cannot positively detect (see docs/operations/capability-manifest.md).
+    # A no-op if the target already has one (e.g. a prior install run).
+    capability_generate "$target"
+    [[ -e $target/.agentic-loop/capabilities.toml ]] && entries+=".agentic-loop/capabilities.toml"$'\t'"init"$'\n'
+  fi
   history=$(printf '{"at":%s,"from_revision":"none","to_revision":"%s","from_level":0,"to_level":%s,"steps":[],"result":"installed"}' "$(date +%s)" "$(foundation_json_escape "$revision")" "$migration_level")
   foundation_manifest_write "$target" "$mode" "$repository" "$revision" "$revision_ref" "$migration_level" "$entries" "$history"
 

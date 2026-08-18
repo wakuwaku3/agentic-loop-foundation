@@ -3827,6 +3827,16 @@ AGENTIC_LOOP_SOURCE="$PROJECT_ROOT" AGENTIC_LOOP_TARGET="$empty" AGENTIC_LOOP_SK
 assert_contains "$empty/README.md" 'opencode' 'installed README.md does not document opencode as a supported provider'
 assert_contains "$empty/README.md" 'category:improvement' 'installed README.md does not document the diagnosis category label'
 
+# init (empty repository) receives this Foundation's own capability manifest
+# verbatim: it also received this Foundation's own devbox.json/Makefile/CI, so
+# the declarations are facts for it too (see docs/decisions/0018). It must
+# fully declare itself (no undetermined items) and never be touched by upgrade.
+cmp -s "$PROJECT_ROOT/.agentic-loop/capabilities.toml" "$empty/.agentic-loop/capabilities.toml" || fail 'init did not distribute this capability manifest verbatim'
+[[ $(yq -p json -r '.files[] | select(.path == ".agentic-loop/capabilities.toml") | .class' "$empty/.agentic-loop/manifest.json") == init ]] || fail 'manifest did not classify the init-seeded capability manifest as init (target-owned)'
+empty_cap_json=$("$empty/bin/agentic-loop" capabilities --format json)
+[[ $(yq -p json -r '.valid' <<< "$empty_cap_json") == true ]] || fail 'the distributed capability manifest failed its own validation'
+[[ $(yq -p json -r '.data.undetermined | length' <<< "$empty_cap_json") -eq 0 ]] || fail 'the distributed capability manifest left items undetermined for a repository that received this whole Foundation'
+
 # The documented one-command install bootstraps yq through the downloaded
 # Devbox definition instead of requiring an unpinned host installation.
 bootstrap_bin="$TEST_ROOT/bootstrap-bin"
@@ -3960,6 +3970,58 @@ cp "$PROJECT_ROOT/.agentic-loop/guard-secrets.sh" "$secret_target/guard-secrets.
 printf 'token=ghp_%s%s\n' '123456789012345678' '901234567890123456' > "$secret_target/leak.txt"
 git -C "$secret_target" add leak.txt
 if (cd "$secret_target" && ./guard-secrets.sh --staged) >/dev/null 2>&1; then fail 'secret guard accepted a credential-like value'; fi
+
+# --- repository capability manifest (Issue #56, ADR 0018) ---
+
+# $target (an "existing repository" install: new_repository seeds a tracked
+# file, so install-target.sh takes the non-init branch) got a detection-only
+# seed. .githooks/pre-commit and .agentic-loop/guard-secrets.sh are always
+# distributed as shared files, so fast_check/secret_guard are detected; this
+# fixture has no devbox.json/Makefile, so full_check is left undetermined
+# instead of guessed (never fabricated).
+cap_json=$("$target/bin/agentic-loop" capabilities --format json)
+[[ $(yq -p json -r '.installed' <<< "$cap_json") == true ]] || fail 'capabilities did not report an installed manifest for an existing-repository install'
+[[ $(yq -p json -r '.valid' <<< "$cap_json") == true ]] || fail 'capabilities reported an invalid manifest for a detection-only seed'
+[[ $(yq -p json -r '.data.validation.fast_check' <<< "$cap_json") == '.githooks/pre-commit' ]] || fail 'capabilities did not detect the fast check entry point'
+[[ $(yq -p json -r '.data.validation.secret_guard' <<< "$cap_json") == '.agentic-loop/guard-secrets.sh' ]] || fail 'capabilities did not detect the secret guard entry point'
+grep -Fxq 'validation.full_check' <(yq -p json -r '.data.undetermined[]' <<< "$cap_json") || fail 'capabilities fabricated a full_check value for a repository without Devbox or Make'
+[[ $(yq -p json -o yaml '.files[] | select(.path == ".agentic-loop/capabilities.toml") | .class' "$target/.agentic-loop/manifest.json") == init ]] || fail 'manifest did not classify the generated capability manifest as init (target-owned)'
+doctor_cap_out=$("$target/bin/agentic-loop" doctor || true)
+grep -Fq '[成功] 能力manifest' <<< "$doctor_cap_out" || fail 'doctor did not report the detection-only capability manifest as healthy'
+
+# Unsafe declarations (workspace escape, shell metacharacters) are rejected by
+# the exact same shared validator doctor/capabilities/lint all call, and no
+# command from an unsafe manifest is ever executed -- capability.sh only ever
+# tokenizes and pattern-matches command strings, never eval's or shells out to
+# them (see ADR 0018). Exercised by sourcing the module directly since this
+# fixture is not itself an installed Foundation checkout.
+unsafe_target="$TEST_ROOT/capability-unsafe"
+mkdir -p "$unsafe_target/.agentic-loop"
+pwned_marker="$TEST_ROOT/capability-unsafe-pwned-marker"
+rm -f "$pwned_marker"
+cat > "$unsafe_target/.agentic-loop/capabilities.toml" <<EOF
+schema_version = 1
+undetermined = []
+[validation]
+full_check = "make check; touch $pwned_marker"
+[[protected]]
+path = "../outside"
+reason = "x"
+change_requires = "approval"
+EOF
+cap_rc=0
+( source "$PROJECT_ROOT/bin/lib/agentic-loop/common.sh"; source "$PROJECT_ROOT/bin/lib/agentic-loop/capability.sh"; capability_validate "$unsafe_target" ) || cap_rc=$?
+[[ $cap_rc -ne 0 ]] || fail 'capability_validate accepted an unsafe path/command manifest'
+[[ ! -e $pwned_marker ]] || fail 'an unsafe capabilities.toml command was actually executed'
+
+# An unknown (or missing) schema_version fails closed: no implicit fallback
+# to defaults.
+schema_target="$TEST_ROOT/capability-schema"
+mkdir -p "$schema_target/.agentic-loop"
+printf 'schema_version = 99\n' > "$schema_target/.agentic-loop/capabilities.toml"
+cap_rc=0
+( source "$PROJECT_ROOT/bin/lib/agentic-loop/common.sh"; source "$PROJECT_ROOT/bin/lib/agentic-loop/capability.sh"; capability_validate "$schema_target" ) || cap_rc=$?
+[[ $cap_rc -ne 0 ]] || fail 'capability_validate accepted an unknown schema_version instead of failing closed'
 
 # --- bin/agentic-loop metrics (see docs/decisions/0007, docs/operations/loop-metrics.md) ---
 write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=2 LEASE_SECONDS=30 STOP_TIMEOUT=10 STALE_DAYS=30
@@ -4224,7 +4286,12 @@ AGENTIC_LOOP_SOURCE="$PROJECT_ROOT" AGENTIC_LOOP_TARGET="$upgrade_target" AGENTI
 [[ $(yq -p json -o yaml '.source.repository' "$upgrade_target/.agentic-loop/manifest.json") == 'wakuwaku3/agentic-loop-foundation' ]] || fail 'manifest recorded the wrong source repository'
 [[ $(yq -p json -o yaml '.source.revision' "$upgrade_target/.agentic-loop/manifest.json") =~ ^[0-9a-f]{40}$ ]] || fail 'manifest did not record a resolved 40-hex revision'
 [[ $(yq -p json -o yaml '.files | map(select(.class == "shared")) | length' "$upgrade_target/.agentic-loop/manifest.json") -gt 0 ]] || fail 'manifest recorded no shared files'
-[[ $(yq -p json -o yaml '.files | map(select(.class == "init")) | length' "$upgrade_target/.agentic-loop/manifest.json") -eq 0 ]] || fail 'an install-mode manifest must not record init-class files'
+# The one deliberate exception (Issue #56, ADR 0018): an install-mode target
+# still gets its own detection-only capability manifest, recorded class=init
+# (target-owned; upgrade never removes or overwrites it) precisely because it
+# is not one of the brand-new-repository INIT_FILES. No other path may be
+# misclassified this way.
+[[ $(yq -p json -r '[.files[] | select(.class == "init") | .path] | join(",")' "$upgrade_target/.agentic-loop/manifest.json") == '.agentic-loop/capabilities.toml' ]] || fail 'an install-mode manifest recorded an unexpected init-class file'
 git -C "$upgrade_target" add -A && git -C "$upgrade_target" commit --quiet -m 'install foundation' && git -C "$upgrade_target" push --quiet
 
 # A "new" Foundation revision: this checkout, plus a shared-file update and a
@@ -4314,9 +4381,32 @@ grep -Fq '[foundation]' "$migration_target/.agentic-loop.toml" || fail 'migratio
 resolved_revision=$(git -C "$PROJECT_ROOT" rev-parse HEAD)
 assert_contains "$migration_target/.agentic-loop.toml" "revision = \"$resolved_revision\"" 'migration apply did not pin the applied revision'
 [[ $(yq -p json -o yaml '.source.revision' "$migration_target/.agentic-loop/manifest.json") == "$resolved_revision" ]] || fail 'upgrade manifest did not record the applied revision'
-[[ $(yq -p json -o yaml '.migration_level' "$migration_target/.agentic-loop/manifest.json") -eq 2 ]] || fail 'manifest migration_level was not bumped after applying the migration'
+[[ $(yq -p json -o yaml '.migration_level' "$migration_target/.agentic-loop/manifest.json") -eq 3 ]] || fail 'manifest migration_level was not bumped after applying the migration'
 migration_rerun=$("$migration_target/bin/agentic-loop" upgrade --source "$PROJECT_ROOT")
 [[ $migration_rerun == *'変更はありません'* ]] || fail 'rerunning upgrade after a completed migration was not a no-op'
+
+# Migration 0003 (Issue #56, ADR 0018): an install predating the capability
+# manifest feature (simulated, like 0001/0002 above, by removing the feature
+# being migrated from an old Foundation source -- here, install-target.sh's
+# generation step) has no capabilities.toml; upgrade detects it as pending,
+# applies it idempotently via the same detection-only capability_generate
+# used by install, and a rerun is a no-op.
+cap_old_source="$TEST_ROOT/foundation-pre-capability"
+cp -a "$PROJECT_ROOT" "$cap_old_source"
+# shellcheck disable=SC2016 # Single-quoted on purpose: a literal sed pattern, not shell expansion.
+sed -i '/capability_generate "\$target"/d' "$cap_old_source/scripts/install-target.sh"
+cap_migration_target=$(new_repository capability-migration-target)
+AGENTIC_LOOP_SOURCE="$cap_old_source" AGENTIC_LOOP_TARGET="$cap_migration_target" AGENTIC_LOOP_SKIP_START=1 "$PROJECT_ROOT/install.sh" >/dev/null
+[[ ! -e $cap_migration_target/.agentic-loop/capabilities.toml ]] || fail 'pre-upgrade fixture unexpectedly already has a capability manifest'
+git -C "$cap_migration_target" add -A && git -C "$cap_migration_target" commit --quiet -m 'pre-capability install' && git -C "$cap_migration_target" push --quiet
+cap_migration_out=$("$cap_migration_target/bin/agentic-loop" upgrade --source "$PROJECT_ROOT")
+[[ $cap_migration_out == *'[migration] 0003-capability-manifest'* ]] || fail 'dry-run did not report the pending capability-manifest migration'
+"$cap_migration_target/bin/agentic-loop" upgrade --source "$PROJECT_ROOT" --apply --skip-verify >/dev/null || fail 'apply of the pending capability-manifest migration failed'
+[[ -f $cap_migration_target/.agentic-loop/capabilities.toml ]] || fail 'migration did not generate a capability manifest'
+cap_migration_json=$("$cap_migration_target/bin/agentic-loop" capabilities --format json)
+[[ $(yq -p json -r '.data.validation.secret_guard' <<< "$cap_migration_json") == '.agentic-loop/guard-secrets.sh' ]] || fail 'migration-generated capability manifest did not detect the secret guard entry point'
+cap_migration_rerun=$("$cap_migration_target/bin/agentic-loop" upgrade --source "$PROJECT_ROOT")
+[[ $cap_migration_rerun == *'変更はありません'* ]] || fail 'rerunning upgrade after the capability-manifest migration was not a no-op'
 
 # Approval gate: a breaking/irreversible migration blocks --apply until --approve.
 approval_source="$TEST_ROOT/foundation-breaking"

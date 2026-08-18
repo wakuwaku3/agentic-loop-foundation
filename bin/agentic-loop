@@ -116,6 +116,8 @@ CONFIG_PROPS=''
 source "$SCRIPT_ROOT/bin/lib/agentic-loop/common.sh"
 # shellcheck source=lib/agentic-loop/config.sh
 source "$SCRIPT_ROOT/bin/lib/agentic-loop/config.sh"
+# shellcheck source=lib/agentic-loop/capability.sh
+source "$SCRIPT_ROOT/bin/lib/agentic-loop/capability.sh"
 # shellcheck source=lib/agentic-loop/api.sh
 source "$SCRIPT_ROOT/bin/lib/agentic-loop/api.sh"
 # shellcheck source=lib/agentic-loop/agent.sh
@@ -157,7 +159,7 @@ load_config || { [[ ${1:-} == doctor ]] || fail "$CONFIG_ERROR"; }
 
 usage() {
   cat >&2 <<EOF
-Usage: $PROGRAM_NAME {setup|sync-issue ISSUE|dispose ISSUE --reason cancelled|superseded|duplicate|merged [--target ISSUE]|resume ISSUE|priority ISSUE N|start|stop|status [--format json] [--watch [N]]|doctor [--format json]|metrics [--days N] [--as-of EPOCH] [--format json]|tail [--issue N] [--follow]|trace ISSUE [--format json]|trace --audit [--days N] [--format json]|upgrade [--source PATH|--revision SHA] [--apply] [--approve] [--rollback] [--skip-verify] [--overwrite PATH]... [--format json]}
+Usage: $PROGRAM_NAME {setup|sync-issue ISSUE|dispose ISSUE --reason cancelled|superseded|duplicate|merged [--target ISSUE]|resume ISSUE|priority ISSUE N|start|stop|status [--format json] [--watch [N]]|doctor [--format json]|metrics [--days N] [--as-of EPOCH] [--format json]|tail [--issue N] [--follow]|trace ISSUE [--format json]|trace --audit [--days N] [--format json]|capabilities [--format json]|upgrade [--source PATH|--revision SHA] [--apply] [--approve] [--rollback] [--skip-verify] [--overwrite PATH]... [--format json]}
 
   setup   Create or reuse this repository's labels and Project
   sync-issue  Add one Issue to the Project now, or queue a retry
@@ -173,6 +175,7 @@ Usage: $PROGRAM_NAME {setup|sync-issue ISSUE|dispose ISSUE --reason cancelled|su
   metrics Read-only queue/lifecycle metrics over recent history (always exit 0)
   tail    Stream supervisor/worker stage/progress events with timestamps (REST 0)
   trace   Read-only requirement-to-evidence traceability for one Issue, or --audit across the repository (exit 1 on unmet criteria or a missing PR)
+  capabilities  Read-only repository capability manifest (validation/environment/skills/etc.); exit 1 on an unsafe or unreadable manifest
   upgrade Preview (default) or apply a Foundation update; see docs/operations/upgrade.md
 EOF
 }
@@ -191,6 +194,7 @@ main() {
     metrics) cmd_metrics "$@" ;;
     tail) cmd_tail "${@:2}" ;;
     trace) cmd_trace "${@:2}" ;;
+    capabilities) cmd_capabilities "$@" ;;
     upgrade) cmd_upgrade "$@" ;;
     _service) [[ $# -eq 1 ]] || exit 2; cmd_service ;;
     _supervise) supervise ;;
