@@ -29,6 +29,7 @@ $repository の GitHub Issue #$issue に対する実装計画を作成してく�
 Issueとそのコメントを要求として扱い、この専用worktreeとリポジトリを調査し、変更方針、影響範囲、検証手順、観測可能な受け入れ条件を日本語で具体化してください。このplan段階ではファイルの変更、commit、push、PR作成、GitHubの状態変更を行わず、最終メッセージに計画本文だけを出力してください。
 計画本文の最後の行に、変更が触れる見込みのpathとexternal環境を示すmarkerを1行だけ出力してください: \`<!-- agentic-loop:scope paths=path1,path2 env=name1,name2 -->\`。repository全体に及ぶ場合は \`paths=*\` としてください。fileのrename/moveやdirectory再編など構造的変更を含む計画では \`structural=1\` も付け加えてください（構造的変更はpathが重なる他Issueと直列化されます）。見積もれない場合はこの行を省略してください（安全な既定動作にフォールバックします）。このmarkerはSupervisorが並列worker間の変更scope競合を避けるための機械可読情報であり、実装の一部ではありません。
 一つのworkerで安全に完遂できない要求だけは、scopeが独立し個別にmerge・rollback・検証できる直接の子が2〜6件である場合に限り、計画の末尾（scope markerの前）へ JSON の \`agentic-loop:decomposition\` code blockを置けます。schema=1、mode=children、integration_acceptance_criteria、children（key/title/purpose/acceptance_criteria/scope/depends_on）を含めてください。keyは英小文字・数字・\`-\`のみで一意、scopeは既存scope markerと同じ \`paths=... env=...\` 形式、depends_onは同じmanifestのkeyだけです。循環、共有変更、上限超過、統合条件を定義できない場合はmanifestを出さず、通常の単一PRとして計画してください。
+計画本文の中（scope markerより前）に、JSON の \`agentic-loop:preflight\` code blockを1つ出力してください。schema=1、issue=$issue、risks（security/confidentiality/integrity/availability/data_migration/external_environment/cost/compatibility/release_deploy/rollbackの10軸すべてを1回ずつ、各軸に level=low|medium|high|unknown。lowでなければreason必須、200文字以内・改行/backtick禁止。unknownなら追加でmissingに不足情報を200文字以内で明記し、低リスク扱いにしないこと）、change（scope/tests/external_operations/rollbackの短い説明、いずれも200文字以内・改行/backtick禁止）、approval（required真偽値、triggersはdestructive/irreversible/cost/security/permission/external-deploy/data-migration/rollback-blockedのうち該当するものの配列）を含めてください。破壊的・不可逆・重大costまたはsecurity上のリスクがあるなら、必ず該当軸をhighにするか対応するtriggerを含め、approval.required=trueとしてください。秘密情報や攻撃に利用できる詳細は書かないこと。
 EOF
   if [[ -n $failure_context ]]; then
     cat <<EOF
@@ -44,6 +45,10 @@ exec_prompt() {
   local issue=$1 repository=$2 plan_file=$3 resume_context=${4:-}
   [[ -n $resume_context ]] && printf '%s\n' "$resume_context"
   issue_prompt "$issue" "$repository"
+  if [[ -n ${PREFLIGHT_VERDICT:-} && ${PREFLIGHT:-off} != off ]]; then
+    printf '変更影響とリスクのpreflight判定: %s（detail=%s）%s。実装中に、宣言した変更scope・外部操作・リスク水準を超える破壊的・不可逆・重大costまたはsecurity上のリスクを新たに発見した場合は、実装や変更を進めず、最終応答を AGENTIC_LOOP_RESULT=needs-input で終えてください。\n' \
+      "$PREFLIGHT_VERDICT" "${PREFLIGHT_DETAIL:-}" "${PREFLIGHT_APPROVAL_TOKEN:+ (承認済みenvelope token=$PREFLIGHT_APPROVAL_TOKEN)}"
+  fi
   cat <<'EOF'
 PR本文に、各受け入れ条件と実装変更・検証結果を対応付ける `agentic-loop:traceability` code blockを含めてください（`.github/PULL_REQUEST_TEMPLATE.md` の雛形と `docs/operations/traceability.md` を参照）。schema=1、issue番号、criteria配列（各要素はid=`ac-`+条件文正規化のsha256先頭8桁、source、status、verification、必要に応じてchanges/checks/reason/superseded_by）を持つJSONです。行番号やcommit SHAではなくidとpathで対象を示し、秘密やlog全文は含めないでください。この記録はGitHubの観測結果（checks結論、変更path）と照合されるため、実際に行った変更・実行した検証とだけ一致させてください。
 CI・required checks・AI reviewなどの外部完了待ちは、このturn内で前景実行してください。`gh pr checks --watch` 等にはtimeoutを付け、未確定なら状態を再確認して同じturn内で繰り返します。background process、別agent、別sessionへ待機を委譲してはいけません。checksがpending、review feedbackが未対応、またはmergeとdefault branch上の検証が未完了のまま最終応答を書いてはいけません。「待機中です」などの待機報告で終了してはいけません。
@@ -584,7 +589,9 @@ worker() {
     pr-merged)
       local cleaned=1
       worker_critical_begin "$issue"
-      if trace_gate "$issue" "$RESUME_PR" "$RESUME_HEAD" "${RESUME_MERGE_COMMIT:-$RESUME_HEAD}" "${RESUME_BASE_BRANCH:-$default_branch}"; then
+      if ! preflight_reevaluate_diff "$issue" "$RESUME_HEAD" "$default_branch"; then
+        :
+      elif trace_gate "$issue" "$RESUME_PR" "$RESUME_HEAD" "${RESUME_MERGE_COMMIT:-$RESUME_HEAD}" "${RESUME_BASE_BRANCH:-$default_branch}"; then
         if [[ -e $worktree ]]; then
           cleanup_completed_worker "$worktree" "$branch" "$RESUME_HEAD" || cleaned=0
         else
@@ -683,6 +690,13 @@ worker() {
       say 'plan段の全候補が失敗したため、plan結果なしでexecへ進みます。' >&2
     fi
     worker_refine_scope_from_plan "$issue" "$plan_file"
+    progress_touch "$issue" preflight
+    if ! preflight_gate "$issue" "$plan_file"; then
+      kill "$heartbeat_pid" 2>/dev/null || true; wait "$heartbeat_pid" 2>/dev/null || true
+      lease_release "$issue" "$worker"
+      clear_worker_local "$issue"
+      return 0
+    fi
     if [[ -n $(decomposition_manifest_from_plan "$plan_file") ]]; then
       local existing_children
       existing_children=$(repo_api "issues/$issue/sub_issues" --jq 'length' 2>/dev/null || true)
@@ -785,7 +799,9 @@ worker() {
     IFS=$'\t' read -r merged_pr merged_oid merged_number merged_base merged_commit < <(repo_api pulls --method GET -f state=closed -f head="${repository%%/*}:$branch" -f per_page=100 --jq 'map(select(.merged_at != null and .head.ref == "'"$branch"'")) | first | [.html_url, .head.sha, (.number|tostring), .base.ref, (.merge_commit_sha // .head.sha)] | @tsv' 2>/dev/null || true) || true
     progress_touch "$issue" cleanup
     if [[ -n $merged_pr && $merged_oid =~ ^[0-9a-fA-F]{40}$ ]]; then
-      if trace_gate "$issue" "$merged_number" "$merged_oid" "$merged_commit" "$merged_base"; then
+      if ! preflight_reevaluate_diff "$issue" "$merged_oid" "$default_branch"; then
+        :
+      elif trace_gate "$issue" "$merged_number" "$merged_oid" "$merged_commit" "$merged_base"; then
         if cleanup_completed_worker "$worktree" "$branch" "$merged_oid"; then
           clear_attempts "$issue"
           progress_touch "$issue" 'done'

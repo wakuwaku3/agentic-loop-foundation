@@ -354,3 +354,9 @@ Providerを起動する直前に `worker_confirm_running_label()` がGitHub上�
 workerの完了確定（通常のmerge後、および再開時の`pr-merged`確認の両方）は、`[queue].traceability`が`off`以外のとき、PR本文の`agentic-loop:traceability` fenced JSON blockを評価する`trace_gate`を通る。record不在・検証失敗時、`require`はIssueをcloseせず`agent:failed`にしてworktree/branchを保持し、`warn`は完了を継続しつつ助言commentを1件残す。詳細なrecordの書き方・失敗理由コード・`bin/agentic-loop trace`の使い方は[docs/operations/traceability.md](traceability.md)、設計判断（recordの正本の選び方、識別子の方式、自己申告を信用しない理由、既定modeの根拠）は[ADR 0017](../decisions/0017-requirement-traceability.md)を参照。
 
 mode切替は`.agentic-loop.toml`の`queue.traceability`を`off`/`warn`/`require`のいずれかへ書き換えるだけで、GitHub側の設定変更は不要である。新規導入は`warn`から始まり、記録が定着した運用では`require`へ切り替えることを推奨する。
+
+## 変更影響とリスクのpreflight
+
+planとexecの間には、着手前に変更影響とリスクを判定するpreflight gateがある。plan段は`security`/`confidentiality`/`integrity`/`availability`/`data_migration`/`external_environment`/`cost`/`compatibility`/`release_deploy`/`rollback`の10軸を`agentic-loop:preflight` fenced JSON blockとして自己申告し、`preflight_gate`はこれを単独では信用せず、`.agentic-loop/capabilities.toml`とIssueの変更scopeから導いた`signal`と照合する。破壊的・不可逆・重大costまたはsecurity上のリスク（`approval-required`）、判定不能（`undetermined`）、recordとsignalの矛盾（`signal-mismatch`）は、`[queue].preflight`（既定`warn`）が`off`でない限り既存の`agent:needs-input`へgateし、認可済み運用者が`bin/agentic-loop preflight ISSUE --approve --token TOKEN`で承認するまで処理を進めない。execが実装からPRのmergeまでを1 turnで完遂する構造上、実装中に承認範囲を超えるscope拡大を検出した場合は完了確定（cleanup・close）の直前で再評価し、Issueをcloseせずworktree・branch・PRを保持したまま停止する。record・signal・verdict・mode・承認手順・`category`/検証ハーネス/継続的デリバリー各ポリシーとの関係の詳細は[docs/operations/preflight.md](preflight.md)、設計判断は[ADR 0020](../decisions/0020-change-risk-preflight.md)を参照。
+
+読み取り専用の確認は `bin/agentic-loop preflight ISSUE [--format json]` で行える（signalが`approval`なら終了code 1）。

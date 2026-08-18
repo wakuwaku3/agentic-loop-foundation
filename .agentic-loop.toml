@@ -131,6 +131,18 @@ exclusive_paths = ""
 # starts recording evidence immediately without blocking completion; switch to
 # "require" once the PR-body convention is consistently followed.
 traceability = "warn"
+# Change-risk preflight gate (see docs/decisions/0020-change-risk-preflight.md,
+# docs/operations/preflight.md): the plan stage may self-declare risk on 10
+# fixed axes; this is cross-checked against a signal derived only from
+# .agentic-loop/capabilities.toml and the Issue's cached change scope (zero
+# extra API calls). "require" gates every non-autonomous verdict (including a
+# missing/invalid record) into agent:needs-input before exec runs; "warn"
+# gates only genuinely risky verdicts (approval-required/undetermined/
+# signal-mismatch) and otherwise posts an audit/advisory comment and
+# continues; "off" disables evaluation entirely. This repository ships "warn"
+# so its own queue does not self-lock on introduction; switch to "require"
+# once the plan-stage record convention is consistently followed.
+preflight = "warn"
 
 [foundation]
 # Foundationの配布元repository。`agentic-loop upgrade` はここを基準に新しいrevisionを取得する。
