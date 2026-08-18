@@ -14,7 +14,7 @@ undetermined = []          # 確定できなかったdotted keyの一覧。捏�
 full_check = "devbox run --pure check"   # repository共通の完全検証入口
 fast_check = ".githooks/pre-commit"      # commit前などの短時間・決定的な検証
 secret_guard = ".agentic-loop/guard-secrets.sh"
-secret_guard_modes = ["--staged", "--push", "--all", "--text"]
+secret_guard_modes = ["--staged", "--push", "--all", "--text", "--history", "--audit"]
 full_check_seconds = 300                 # 実測に基づく想定所要秒数。0=未計測
 # local affected check（gateではない。ADR 0021）。任意宣言。
 affected_check = "devbox run --pure affected"

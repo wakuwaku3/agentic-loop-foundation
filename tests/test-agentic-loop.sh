@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# shellcheck disable=SC2155,SC2209
+# shellcheck disable=SC2155,SC2209,SC2016
 set -euo pipefail
 
 readonly PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -4526,6 +4526,138 @@ cp "$PROJECT_ROOT/.agentic-loop/guard-secrets.sh" "$secret_target/guard-secrets.
 printf 'token=ghp_%s%s\n' '123456789012345678' '901234567890123456' > "$secret_target/leak.txt"
 git -C "$secret_target" add leak.txt
 if (cd "$secret_target" && ./guard-secrets.sh --staged) >/dev/null 2>&1; then fail 'secret guard accepted a credential-like value'; fi
+
+# --- secret scanning: gitleaks scanner layer (Issue #61, ADR 0024) ---
+
+# A curated PATH with every ordinary tool this Foundation's own Devbox
+# profile provides EXCEPT gitleaks, so "unresolved scanner" fixtures below
+# cannot accidentally see a real gitleaks through PATH search.
+no_gitleaks_bin="$TEST_ROOT/no-gitleaks-bin"
+mkdir -p "$no_gitleaks_bin"
+no_gitleaks_real_bin=$(command -v yq); no_gitleaks_real_bin=${no_gitleaks_real_bin%/*}
+for real_tool in "$no_gitleaks_real_bin"/*; do
+  tool_name=${real_tool##*/}
+  [[ $tool_name == gitleaks ]] || ln -sf "$real_tool" "$no_gitleaks_bin/$tool_name"
+done
+
+gitleaks_target="$TEST_ROOT/gitleaks-project"
+mkdir -p "$gitleaks_target/.agentic-loop"
+git -C "$gitleaks_target" init --quiet
+git -C "$gitleaks_target" config user.email t@example.com; git -C "$gitleaks_target" config user.name t
+cp "$PROJECT_ROOT/.agentic-loop/guard-secrets.sh" "$gitleaks_target/.agentic-loop/guard-secrets.sh"
+cp "$PROJECT_ROOT/.agentic-loop/gitleaks.toml" "$gitleaks_target/.agentic-loop/gitleaks.toml"
+# Derived from a benign seed at runtime (never a Stripe-shaped literal in
+# this file) so this very file's own secret guard scan of its tracked-file
+# content, and gitleaks' default rules over this repository, never trip on
+# the fixture itself; see the pre-existing ghp_ fixture above for the same
+# general convention (a non-matching source form that only becomes the real
+# shape once written to a throwaway fixture file).
+stripe_secret_value="sk_live_$(printf 'stripe-fixture-seed' | sha256sum | cut -c1-48)"
+gitleaks_stripe_fixture="stripe_test = \"$stripe_secret_value\""
+
+# Additive coverage: the baseline regex does not know the Stripe token shape,
+# so a clean baseline scan of the same content proves the scanner layer (not
+# baseline) is what catches it.
+if grep -Eq '(AKIA[0-9A-Z]{16}|ASIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{30,}|sk-(proj-)?[A-Za-z0-9_-]{20,}|BEGIN [A-Z ]*PRIVATE KEY|xox[baprs]-[A-Za-z0-9-]{10,})' <<< "$gitleaks_stripe_fixture"; then
+  fail 'internal test error: the Stripe fixture unexpectedly matches the baseline pattern'
+fi
+printf '%s\n' "$gitleaks_stripe_fixture" > "$gitleaks_target/stripe.txt"
+git -C "$gitleaks_target" add stripe.txt
+if gitleaks_out=$(cd "$gitleaks_target" && ./.agentic-loop/guard-secrets.sh --staged 2>&1); then
+  fail 'secret guard accepted a Stripe-shaped credential the scanner layer should have caught'
+fi
+grep -Fq 'stripe-access-token' <<< "$gitleaks_out" || fail 'scanner-layer failure did not identify the matched gitleaks rule'
+grep -Fq "$stripe_secret_value" <<< "$gitleaks_out" && fail 'scanner-layer failure leaked the raw secret value'
+grep -Fq '失効' <<< "$gitleaks_out" || grep -Fiq 'rotate' <<< "$gitleaks_out" || fail 'scanner-layer failure did not include credential-rotation guidance'
+git -C "$gitleaks_target" reset --quiet stripe.txt
+rm -f "$gitleaks_target/stripe.txt"
+
+# Allowlist: a described, narrow allowlist entry lets the exact fixture value
+# through (and only that value; --audit accepts the config unchanged).
+printf '[extend]\nuseDefault = true\n\n[[allowlists]]\ndescription = "test fixture value used by tests/test-agentic-loop.sh"\nregexes = ["%s"]\n' \
+  "$stripe_secret_value" > "$gitleaks_target/.agentic-loop/gitleaks.toml"
+printf '%s\n' "$gitleaks_stripe_fixture" > "$gitleaks_target/stripe.txt"
+git -C "$gitleaks_target" add stripe.txt
+(cd "$gitleaks_target" && ./.agentic-loop/guard-secrets.sh --staged) || fail 'a described, narrow allowlist entry did not permit its exact fixture value'
+(cd "$gitleaks_target" && ./.agentic-loop/guard-secrets.sh --audit) || fail 'a valid, narrow allowlist entry failed --audit'
+git -C "$gitleaks_target" reset --quiet stripe.txt
+rm -f "$gitleaks_target/stripe.txt"
+
+# --audit governance: every rejection reason is enforced independently.
+audit_reject() {
+  local label=$1 config=$2
+  printf '%s' "$config" > "$gitleaks_target/.agentic-loop/gitleaks.toml"
+  if (cd "$gitleaks_target" && ./.agentic-loop/guard-secrets.sh --audit) >/dev/null 2>&1; then
+    fail "gitleaks config audit accepted: $label"
+  fi
+}
+audit_reject 'missing description' '[extend]
+useDefault = true
+
+[[allowlists]]
+regexes = ["abc"]
+'
+audit_reject 'overly broad pattern' '[extend]
+useDefault = true
+
+[[allowlists]]
+description = "too broad"
+regexes = [".*"]
+'
+audit_reject 'useDefault disabled' '[extend]
+useDefault = false
+'
+too_many_entries='[extend]
+useDefault = true
+'
+for n in 1 2 3 4 5 6 7 8 9; do
+  too_many_entries+=$'\n[[allowlists]]\ndescription = "entry '"$n"'"\nregexes = ["FIXTURE_TOKEN_'"$n"'"]\n'
+done
+audit_reject 'more than 8 allowlist entries' "$too_many_entries"
+printf '[extend]\nuseDefault = true\n' > "$gitleaks_target/.agentic-loop/gitleaks.toml"
+printf 'do not use fingerprint ignores\n' > "$gitleaks_target/.gitleaksignore"
+(cd "$gitleaks_target" && ./.agentic-loop/guard-secrets.sh --audit) >/dev/null 2>&1 && fail 'gitleaks config audit accepted a repository with .gitleaksignore present'
+rm -f "$gitleaks_target/.gitleaksignore"
+cp "$PROJECT_ROOT/.agentic-loop/gitleaks.toml" "$gitleaks_target/.agentic-loop/gitleaks.toml"
+(cd "$gitleaks_target" && ./.agentic-loop/guard-secrets.sh --audit) || fail 'internal test error: the restored gitleaks.toml should pass --audit'
+
+# --history reaches secrets already removed from the working tree; --all (and
+# --staged/--push) only ever see the current tree, so a secret committed and
+# then deleted is invisible to --all but must still be caught by --history.
+printf 'clean\n' > "$gitleaks_target/clean.txt"
+git -C "$gitleaks_target" add clean.txt
+git -C "$gitleaks_target" commit --quiet -m 'clean commit'
+printf '%s\n' "$gitleaks_stripe_fixture" > "$gitleaks_target/history-secret.txt"
+git -C "$gitleaks_target" add history-secret.txt
+git -C "$gitleaks_target" commit --quiet -m 'secret commit'
+git -C "$gitleaks_target" rm --quiet history-secret.txt
+git -C "$gitleaks_target" commit --quiet -m 'remove secret'
+(cd "$gitleaks_target" && ./.agentic-loop/guard-secrets.sh --all) || fail '--all must not see a secret already removed from the working tree'
+if (cd "$gitleaks_target" && ./.agentic-loop/guard-secrets.sh --history) >/dev/null 2>&1; then
+  fail '--history did not find a secret still present in Git history'
+fi
+
+# fail-closed vs. degrade: with the scanner unresolved, the pinned-environment
+# marker (or AGENTIC_LOOP_SECRET_SCAN=required) must block even harmless
+# input, while its absence must degrade to baseline-only with a warning
+# (never a silent pass with no diagnostic).
+harmless_target="$TEST_ROOT/harmless-project"
+mkdir -p "$harmless_target/.agentic-loop"
+git -C "$harmless_target" init --quiet
+git -C "$harmless_target" config user.email t@example.com; git -C "$harmless_target" config user.name t
+cp "$PROJECT_ROOT/.agentic-loop/guard-secrets.sh" "$harmless_target/.agentic-loop/guard-secrets.sh"
+cp "$PROJECT_ROOT/.agentic-loop/gitleaks.toml" "$harmless_target/.agentic-loop/gitleaks.toml"
+printf 'nothing secret here\n' > "$harmless_target/a.txt"
+git -C "$harmless_target" add a.txt
+
+if env PATH="$no_gitleaks_bin" AGENTIC_LOOP_GITLEAKS=/nonexistent/gitleaks AGENTIC_LOOP_SECRET_SCAN=required \
+  bash -c 'cd "$0" && ./.agentic-loop/guard-secrets.sh --staged' "$harmless_target" >/dev/null 2>&1; then
+  fail 'AGENTIC_LOOP_SECRET_SCAN=required did not fail-close when gitleaks was unresolved'
+fi
+degrade_out=$(env -u DEV_ENVIRONMENT PATH="$no_gitleaks_bin" AGENTIC_LOOP_GITLEAKS=/nonexistent/gitleaks \
+  bash -c 'cd "$0" && ./.agentic-loop/guard-secrets.sh --staged' "$harmless_target" 2>&1) ||
+  fail 'an unresolved scanner outside the pinned environment must degrade to baseline-only, not fail'
+grep -Fq 'degraded' <<< "$degrade_out" || fail 'a degraded secret scan did not warn that gitleaks was unresolved'
 
 # --- repository capability manifest (Issue #56, ADR 0018) ---
 

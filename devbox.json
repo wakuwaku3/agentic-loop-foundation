@@ -6,6 +6,7 @@
     "findutils@latest",
     "gawk@latest",
     "git@latest",
+    "gitleaks@8.30.1",
     "gnugrep@latest",
     "gnumake@latest",
     "gnused@latest",

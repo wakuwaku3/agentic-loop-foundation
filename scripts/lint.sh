@@ -11,7 +11,8 @@ required=(AGENTS.md README.md Makefile .editorconfig .gitignore .codex/config.to
   docs/decisions/0020-change-risk-preflight.md docs/operations/preflight.md bin/lib/agentic-loop/preflight.sh scripts/upgrade/migrations/0005-preflight-config.sh
   docs/decisions/0021-affected-check-selection.md docs/operations/affected-checks.md scripts/affected-check.sh tests/impact-map.toml
   docs/decisions/0022-flaky-test-detection-and-quarantine.md docs/operations/flaky-tests.md scripts/flaky.sh tests/flaky-registry.toml bin/lib/agentic-loop/flaky.sh
-  docs/policies/documentation.md docs/decisions/0023-documentation-readership-boundaries.md docs/development.md)
+  docs/policies/documentation.md docs/decisions/0023-documentation-readership-boundaries.md docs/development.md
+  docs/decisions/0024-secret-scanning.md docs/operations/secret-scanning.md .agentic-loop/gitleaks.toml)
 for file in "${required[@]}"; do
   [[ -f $file ]] || { printf 'Missing required file: %s\n' "$file" >&2; exit 1; }
 done
@@ -583,6 +584,29 @@ if grep -F '//$'"'"'\n'"'"'/\\n' bin/lib/agentic-loop/preflight.sh bin/lib/agent
   exit 1
 fi
 
+# --- secret scanning (Issue #61, ADR 0024) ---
+grep -Fq 'gitleaks@' devbox.json || { printf 'devbox.json does not pin a gitleaks version.\n' >&2; exit 1; }
+grep -Fq 'gitleaks' scripts/check-environment.sh || { printf 'scripts/check-environment.sh does not verify a pinned gitleaks.\n' >&2; exit 1; }
+grep -Fq '"--history"' .agentic-loop/capabilities.toml || { printf 'capabilities.toml secret_guard_modes is missing --history.\n' >&2; exit 1; }
+grep -Fq '"--audit"' .agentic-loop/capabilities.toml || { printf 'capabilities.toml secret_guard_modes is missing --audit.\n' >&2; exit 1; }
+for shared_secret_file in .agentic-loop/gitleaks.toml docs/decisions/0024-secret-scanning.md docs/operations/secret-scanning.md; do
+  grep -Fq "$shared_secret_file" scripts/lib/foundation-files.sh || {
+    printf '%s is not distributed.\n' "$shared_secret_file" >&2
+    exit 1
+  }
+done
+grep -Fq 'gitleaks' bin/lib/agentic-loop/doctor.sh || { printf 'doctor does not surface secret scanner (gitleaks) resolution.\n' >&2; exit 1; }
+for requirement in 'baseline層' 'fail-closed' '許可list'; do
+  grep -Fq "$requirement" docs/policies/validation-harness.md || {
+    printf 'validation-harness.md lacks a secret-scanning requirement: %s\n' "$requirement" >&2
+    exit 1
+  }
+done
+if [[ -e .gitleaksignore ]]; then
+  printf '.gitleaksignore is not permitted (use .agentic-loop/gitleaks.toml allowlists instead).\n' >&2
+  exit 1
+fi
+./.agentic-loop/guard-secrets.sh --audit
 ./.agentic-loop/guard-secrets.sh --all
 
 printf 'Lint passed.\n'
