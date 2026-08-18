@@ -326,13 +326,11 @@ trace_render_verdict() {
   external=$(trace_verification_count "$manifest" external)
   marker=$(printf '<!-- agentic-loop:traceability schema=1 issue=%s pr=%s merge_commit=%s base=%s checks=%s criteria=%s satisfied=%s partial=%s not-applicable=%s unmet=%s superseded=%s manual=%s external=%s unreferenced_paths=%s verdict=pass -->' \
     "$issue" "$pr" "$merge_commit" "$base" "$checks" "$criteria" "$satisfied" "$partial" "$na" "$unmet" "$superseded" "$manual" "$external" "$unref")
-  # comment_issue posts through a one-comment-per-line fake gh fixture (and a
-  # real embedded newline would still need escaping for -f body= consistency
-  # with every other agentic-loop:* comment in this codebase, see worker.sh),
-  # so the table's real newlines are folded into literal \n like every other
-  # multi-line comment body.
+  # comment_post/comment_patch (api.sh) expand a body's real newlines only at
+  # the GitHub write boundary (see common.sh's unfold_body, Issue #110), so
+  # the renderer just writes real newlines like ordinary multi-line text.
   table=$(trace_render_table "$manifest")
-  printf '%s\\n### トレーサビリティ検証結果\\n\\n%s' "$marker" "${table//$'\n'/\\n}"
+  printf '%s\n### トレーサビリティ検証結果\n\n%s' "$marker" "$table"
 }
 
 
@@ -345,7 +343,7 @@ trace_verdict_upsert() {
   file=$(trace_verdict_file "$issue")
   if [[ -r $file ]]; then
     read -r id < "$file" || id=''
-    if [[ $id =~ ^[0-9]+$ ]] && repo_api "issues/comments/$id" --method PATCH -f body="$body" >/dev/null 2>&1; then
+    if [[ $id =~ ^[0-9]+$ ]] && comment_patch "$id" "$body" >/dev/null 2>&1; then
       return 0
     fi
   fi
@@ -354,11 +352,11 @@ trace_verdict_upsert() {
   # REST(core) read, only paid when the file is missing) before creating a
   # second comment.
   id=$(repo_api "issues/$issue/comments" --method GET -f per_page=100 --jq '[.[] | select(.body | test("<!-- agentic-loop:traceability schema=1"))] | last.id // ""' 2>/dev/null | tr -d '[:space:]' || true)
-  if [[ $id =~ ^[0-9]+$ ]] && repo_api "issues/comments/$id" --method PATCH -f body="$body" >/dev/null 2>&1; then
+  if [[ $id =~ ^[0-9]+$ ]] && comment_patch "$id" "$body" >/dev/null 2>&1; then
     mkdir -p "$STATE_ROOT/workers"; printf '%s\n' "$id" > "$file"
     return 0
   fi
-  id=$(repo_api "issues/$issue/comments" --method POST -f body="$body" --jq '.id' 2>/dev/null | tr -d '[:space:]' || true)
+  id=$(comment_post "$issue" "$body" --jq '.id' 2>/dev/null | tr -d '[:space:]' || true)
   [[ $id =~ ^[0-9]+$ ]] && { mkdir -p "$STATE_ROOT/workers"; printf '%s\n' "$id" > "$file"; }
 }
 

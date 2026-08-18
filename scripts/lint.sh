@@ -241,7 +241,8 @@ grep -Fq 'recover_expired || true' "${AGENTIC_LOOP_SOURCES[@]}" || { printf 'Sup
 grep -Fq 'supervisor_graceful_shutdown' "${AGENTIC_LOOP_SOURCES[@]}" || { printf 'Graceful shutdown handler is missing.\n' >&2; exit 1; }
 grep -Fq 'setsid "$0" _worker' "${AGENTIC_LOOP_SOURCES[@]}" || { printf 'Workers are not started in their own process group.\n' >&2; exit 1; }
 grep -Fq 'worker_alive "$issue" && continue' "${AGENTIC_LOOP_SOURCES[@]}" || { printf 'Restart recovery lacks the local worker fast path.\n' >&2; exit 1; }
-grep -Fq 'issues/comments/$id" --method PATCH' "${AGENTIC_LOOP_SOURCES[@]}" || { printf 'Lease heartbeat does not update a single comment in place.\n' >&2; exit 1; }
+grep -Fq 'issues/comments/$1" --method PATCH' "${AGENTIC_LOOP_SOURCES[@]}" || { printf 'Lease heartbeat does not update a single comment in place.\n' >&2; exit 1; }
+grep -Fq 'comment_patch "$id" "$(lease_body' "${AGENTIC_LOOP_SOURCES[@]}" || { printf 'Lease heartbeat does not update a single comment in place.\n' >&2; exit 1; }
 grep -Fq 'core_budget_note_pause' "${AGENTIC_LOOP_SOURCES[@]}" || { printf 'REST(core) budget governor is missing from the claim gate.\n' >&2; exit 1; }
 grep -Fq 'next_poll_interval' "${AGENTIC_LOOP_SOURCES[@]}" || { printf 'Adaptive idle poll backoff is missing.\n' >&2; exit 1; }
 grep -Fq 'agentic-loop:dependency-blocked' "${AGENTIC_LOOP_SOURCES[@]}" || { printf 'Issue dependency gating is missing.\n' >&2; exit 1; }
@@ -563,6 +564,24 @@ grep -Fq 'runtime.path' docs/operations/issue-queue.md || {
   printf 'Fixed runtime PATH documentation was lost from docs/operations/issue-queue.md.\n' >&2
   exit 1
 }
+
+# --- Issue comment newline choke point (Issue #110) ---
+# Every Issue/PR comment body must reach GitHub through comment_post/
+# comment_patch (api.sh), the only place `\n` shorthand is expanded into a
+# real newline (see common.sh's unfold_body). A new "-f body=" call site
+# against a comments endpoint outside api.sh would silently reintroduce the
+# literal-`\n` bug for that one path.
+if grep -n -- '-f body=' "${AGENTIC_LOOP_SOURCES[@]}" | grep -Fv 'bin/lib/agentic-loop/api.sh:' | grep -F 'comments'; then
+  printf 'Issue/PR comment bodies must be posted through comment_post/comment_patch.\n' >&2
+  exit 1
+fi
+grep -Fq 'unfold_body' "${AGENTIC_LOOP_SOURCES[@]}" || { printf 'unfold_body is missing.\n' >&2; exit 1; }
+grep -Fq 'comment_post()' "${AGENTIC_LOOP_SOURCES[@]}" || { printf 'comment_post is missing.\n' >&2; exit 1; }
+grep -Fq 'comment_patch()' "${AGENTIC_LOOP_SOURCES[@]}" || { printf 'comment_patch is missing.\n' >&2; exit 1; }
+if grep -F '//$'"'"'\n'"'"'/\\n' bin/lib/agentic-loop/preflight.sh bin/lib/agentic-loop/trace.sh; then
+  printf 'preflight.sh/trace.sh must not fold real newlines back into literal \\n (that belongs only at the comment_post/comment_patch boundary).\n' >&2
+  exit 1
+fi
 
 ./.agentic-loop/guard-secrets.sh --all
 

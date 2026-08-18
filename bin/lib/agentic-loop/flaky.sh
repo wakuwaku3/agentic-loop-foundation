@@ -254,7 +254,7 @@ flaky_report_one() {
     body+="同一fingerprintの過去のIssue #$existing_closed はclose済みです。再発のため新規に作成します。\\n\\n"
   fi
   body+="<!-- $marker -->\\n<!-- agentic-loop:scope paths=tests/test-agentic-loop.sh,tests/run-e2e.sh env=unknown -->"
-  new_issue=$(repo_api issues --method POST -f title="$title" -f body="$body" --jq .number 2>/dev/null) || { say "flaky report: 修復Issueを作成できませんでした（unit=$unit）。" >&2; return 1; }
+  new_issue=$(repo_api issues --method POST -f title="$title" -f body="$(unfold_body "$body")" --jq .number 2>/dev/null) || { say "flaky report: 修復Issueを作成できませんでした（unit=$unit）。" >&2; return 1; }
   [[ $new_issue =~ ^[1-9][0-9]*$ ]] || { say "flaky report: 修復Issueの番号を確認できませんでした（unit=$unit）。" >&2; return 1; }
   repo_api "issues/$new_issue/labels" --method PUT --input - <<< '{"labels":["flaky","category:improvement","agent:queued"]}' >/dev/null 2>&1 || true
   project_add_issue "$new_issue" || true

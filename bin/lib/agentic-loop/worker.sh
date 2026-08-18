@@ -265,7 +265,7 @@ decomposition_materialize() {
     if [[ $existing =~ ^[1-9][0-9]*$ ]]; then child=$existing
     else
       body="## 目的\n\n$purpose\n\n## 親Issue\n\n#$parent の共通制約と統合受け入れ条件に従います。\n\n## 個別受け入れ条件\n\n$criteria\n\n<!-- agentic-loop:child parent=$parent key=$key plan=$hash -->\n<!-- agentic-loop:scope $scope -->"
-      child=$(repo_api issues --method POST -f title="$title" -f body="$body" --jq .number 2>/dev/null) || return 3
+      child=$(repo_api issues --method POST -f title="$title" -f body="$(unfold_body "$body")" --jq .number 2>/dev/null) || return 3
       [[ $child =~ ^[1-9][0-9]*$ ]] || return 3
     fi
     children["$key"]=$child
@@ -483,11 +483,11 @@ resume_handoff_upsert() {
   file=$(resume_handoff_file "$issue")
   if [[ -r $file ]]; then
     read -r id < "$file" || id=''
-    if [[ $id =~ ^[0-9]+$ ]] && repo_api "issues/comments/$id" --method PATCH -f body="$body" >/dev/null 2>&1; then
+    if [[ $id =~ ^[0-9]+$ ]] && comment_patch "$id" "$body" >/dev/null 2>&1; then
       return 0
     fi
   fi
-  id=$(repo_api "issues/$issue/comments" --method POST -f body="$body" --jq '.id' 2>/dev/null | tr -d '[:space:]' || true)
+  id=$(comment_post "$issue" "$body" --jq '.id' 2>/dev/null | tr -d '[:space:]' || true)
   [[ $id =~ ^[0-9]+$ ]] && { mkdir -p "$STATE_ROOT/workers"; printf '%s\n' "$id" > "$file"; }
 }
 

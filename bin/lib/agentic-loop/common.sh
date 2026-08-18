@@ -56,3 +56,12 @@ json_escape() {
   value=${value//$'\n'/\\n}; value=${value//$'\r'/\\r}; value=${value//$'\t'/\\t}
   printf '%s' "$value"
 }
+
+
+# Inverse of json_escape's newline direction, and the only transform
+# comment_post/comment_patch (api.sh) apply to a comment body: expand a
+# literal two-character `\n` (never a real newline) into one. Every
+# agentic-loop:* comment body in this codebase is written with that `\n`
+# shorthand for readability (see Issue #110); this is the single point where
+# the shorthand becomes the real newline GitHub renders.
+unfold_body() { printf '%s' "${1//\\n/$'\n'}"; }

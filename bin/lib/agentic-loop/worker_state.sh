@@ -161,7 +161,7 @@ worker_phase_file() { printf '%s/workers/%s.phase' "$STATE_ROOT" "$1"; }
 lease_start() {
   local issue=$1 worker=$2 now expires id
   now=$(date +%s); expires=$((now + LEASE_SECONDS))
-  id=$(repo_api "issues/$issue/comments" --method POST -f body="$(lease_body "$worker" "$now" "$expires")" --jq '.id' 2>/dev/null | tr -d '[:space:]' || true)
+  id=$(comment_post "$issue" "$(lease_body "$worker" "$now" "$expires")" --jq '.id' 2>/dev/null | tr -d '[:space:]' || true)
   if [[ $id =~ ^[0-9]+$ ]]; then
     mkdir -p "$STATE_ROOT/workers"
     printf '%s\t%s\t%s\n' "$id" "$expires" "$now" > "$(lease_file "$issue")"
@@ -183,7 +183,7 @@ claim_acquire() {
   current=$(repo_api "issues/$issue" --jq '[.state, ([.labels[].name] | join(","))] | @tsv' 2>/dev/null) || return 1
   IFS=$'\t' read -r state labels <<< "$current"
   [[ $state == open && ,$labels, == *,agent:queued,* ]] || return 1
-  id=$(repo_api "issues/$issue/comments" --method POST -f body="$(lease_body "$worker" "$now" "$expires")" --jq '.id' 2>/dev/null | tr -d '[:space:]' || true)
+  id=$(comment_post "$issue" "$(lease_body "$worker" "$now" "$expires")" --jq '.id' 2>/dev/null | tr -d '[:space:]' || true)
   [[ $id =~ ^[0-9]+$ ]] || return 1
   # The total ordering by comment id decides ownership; no wall-clock ordering
   # or timing window is used. A contender posting after this read will observe
@@ -199,7 +199,7 @@ claim_acquire() {
     [[ -z $winner || $cid -lt $winner ]] && winner=$cid
   done < <(repo_api "issues/$issue/comments" --method GET -f since="$since" -f per_page=100 --paginate --jq '.[] | select(.body | contains("agentic-loop:claim")) | [.id, .body] | @tsv | @base64' 2>/dev/null || true)
   if [[ $winner != "$id" ]]; then
-    repo_api "issues/comments/$id" --method PATCH -f body="<!-- agentic-loop:claim worker=$worker created=$now expires=0 -->\\nclaim競合に敗れたため解放しました。" >/dev/null 2>&1 || true
+    comment_patch "$id" "<!-- agentic-loop:claim worker=$worker created=$now expires=0 -->\\nclaim競合に敗れたため解放しました。" >/dev/null 2>&1 || true
     return 1
   fi
   mkdir -p "$STATE_ROOT/workers"
@@ -218,7 +218,7 @@ lease_release() {
   IFS=$'\t' read -r id _ < "$file" || return 0
   [[ $id =~ ^[0-9]+$ ]] || return 0
   now=$(date +%s)
-  repo_api "issues/comments/$id" --method PATCH -f body="<!-- agentic-loop:claim worker=$worker created=$now expires=0 -->\\n<!-- agentic-loop:lease worker=$worker heartbeat=$now expires=0 -->\\nAgentic Loop worker \`$worker\` のハートビートです。処理終了に伴い、このホストはclaimを解放しました。" >/dev/null 2>&1 || true
+  comment_patch "$id" "<!-- agentic-loop:claim worker=$worker created=$now expires=0 -->\\n<!-- agentic-loop:lease worker=$worker heartbeat=$now expires=0 -->\\nAgentic Loop worker \`$worker\` のハートビートです。処理終了に伴い、このホストはclaimを解放しました。" >/dev/null 2>&1 || true
 }
 
 
@@ -230,7 +230,7 @@ lease_heartbeat() {
   now=$(date +%s); expires=$((now + LEASE_SECONDS))
   if [[ -r $file ]]; then
     IFS=$'\t' read -r id rest < "$file" || id=''
-    if [[ $id =~ ^[0-9]+$ ]] && repo_api "issues/comments/$id" --method PATCH -f body="$(lease_body "$worker" "$now" "$expires")" >/dev/null 2>&1; then
+    if [[ $id =~ ^[0-9]+$ ]] && comment_patch "$id" "$(lease_body "$worker" "$now" "$expires")" >/dev/null 2>&1; then
       printf '%s\t%s\t%s\n' "$id" "$expires" "$now" > "$file"
       return 0
     fi

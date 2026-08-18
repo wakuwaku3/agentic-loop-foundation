@@ -304,7 +304,7 @@ preflight_render_audit_body() {
     printf '### 変更影響とリスクのpreflight判定\n\n判定: 自律実行（全リスク軸が低〜中、承認triggerなし）\n\n'
     [[ ${PREFLIGHT_MANIFEST_VALID:-0} == 1 ]] && preflight_render_risks "$PREFLIGHT_MANIFEST"
   )
-  printf '%s' "${body//$'\n'/\\n}"
+  printf '%s' "$body"
 }
 
 
@@ -312,7 +312,7 @@ preflight_render_advisory_body() {
   local issue=$1 body
   body=$(printf '<!-- agentic-loop:preflight schema=1 issue=%s verdict=%s detail=%s -->\npreflight recordを検証できませんでした（verdict=%s detail=%s）。record本体はIssueへ転記していません。設定（%s）により処理を継続します。\n' \
     "$issue" "$PREFLIGHT_VERDICT" "$PREFLIGHT_DETAIL" "$PREFLIGHT_VERDICT" "$PREFLIGHT_DETAIL" "${PREFLIGHT:-warn}")
-  printf '%s' "${body//$'\n'/\\n}"
+  printf '%s' "$body"
 }
 
 
@@ -320,7 +320,7 @@ preflight_render_approved_body() {
   local issue=$1 token=$2 body
   body=$(printf '<!-- agentic-loop:preflight schema=1 issue=%s verdict=%s detail=%s token=%s approved=1 -->\n承認済みenvelope（token=%s）を確認したため、判定 %s（detail=%s）のまま処理を継続します。\n' \
     "$issue" "$PREFLIGHT_VERDICT" "$PREFLIGHT_DETAIL" "$token" "$token" "$PREFLIGHT_VERDICT" "$PREFLIGHT_DETAIL")
-  printf '%s' "${body//$'\n'/\\n}"
+  printf '%s' "$body"
 }
 
 
@@ -338,7 +338,7 @@ preflight_render_gate_body() {
     printf '\n承認するには、認可済みの運用者が次を実行してください: `bin/agentic-loop preflight %s --approve --token %s`\n' "$issue" "$token"
     printf '完了処理は行わず、worktree・branch・PR（存在する場合）を保持したまま停止します。\n'
   )
-  printf '%s' "${body//$'\n'/\\n}"
+  printf '%s' "$body"
 }
 
 
