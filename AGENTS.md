@@ -18,6 +18,7 @@
 - Supervisorの停止だけをIssue受付の失敗にしない。停止中も検証済みのIssueをqueuedとして永続化し、登録済みであること、停止中であること、処理開始にはSupervisorの起動が必要なことを報告する。GitHub権限または登録後状態を検証できない場合は成功扱いせず、[Issueキュー運用](docs/operations/issue-queue.md)の安全なfallbackに従う。
 - 読み取り専用の質問、診断、status確認、start・stopなどの運用コマンドはIssue化しない。
 - `agent:cancelled`、`agent:superseded`、`agent:duplicate`、`agent:merged` は終端状態であり、自動再queueしない。取消・統合・再開は認可済みの `bin/agentic-loop dispose`／`resume` だけで実行する。
+- `agent:parked` は終端状態ではなくopenの人間トリアージ待ちである（[ADR 0016](docs/decisions/0016-failure-park-not-close.md)）。リトライ予算を使い切っただけで要求が無効になったわけではないため、Supervisorのどの自動経路もparked Issueを再claimしない。再投入は認可済みの `bin/agentic-loop resume` だけで行う。
 
 ## 不変条件
 

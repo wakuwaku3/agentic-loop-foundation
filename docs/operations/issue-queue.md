@@ -2,7 +2,7 @@
 
 ## セットアップ
 
-`install.sh` は変更前に `git`、`gh`、設定 `agent.provider`（環境変数 `AGENT_PROVIDER` と git管理外 `.agentic-loop.local.toml` による上書きを含む）から解決したAI CLI（`codex`／`claude`／`opencode`、既定は `codex`）、GitHubログイン、origin、リポジトリ参照、Projects API権限を検査する。provider=opencodeならCodex CLIが存在しなくてもinstallは成立する。既存ファイルとの競合もコピー前に検査する。検査後、13個の状態Label、6個の `category:*` Labelと `Agentic Loop - OWNER/REPOSITORY` Projectを冪等に用意し、既定ではSupervisorを起動する。`priority:*` Labelは作成せず、既存の open Issue と label 定義があれば本文markerへ移行して削除する（[ADR 0015](../decisions/0015-numeric-priority-marker.md)）。Projectには同じ6選択肢の `Category` fieldを作成する。再installは保存済みのProject identityを再利用し、高コストなProject drift走査とqueued Issueの同期修復を行わない。明示的な `bin/agentic-loop setup` はProjectのrepository link・field・viewを収束させるが、既存Issue/PRの一括backfillは行わない。Issue受付とworkerが扱ったPRは、必要になった時点で個別にProjectへ登録する。
+`install.sh` は変更前に `git`、`gh`、設定 `agent.provider`（環境変数 `AGENT_PROVIDER` と git管理外 `.agentic-loop.local.toml` による上書きを含む）から解決したAI CLI（`codex`／`claude`／`opencode`、既定は `codex`）、GitHubログイン、origin、リポジトリ参照、Projects API権限を検査する。provider=opencodeならCodex CLIが存在しなくてもinstallは成立する。既存ファイルとの競合もコピー前に検査する。検査後、14個の状態Label、6個の `category:*` Labelと `Agentic Loop - OWNER/REPOSITORY` Projectを冪等に用意し、既定ではSupervisorを起動する。`priority:*` Labelは作成せず、既存の open Issue と label 定義があれば本文markerへ移行して削除する（[ADR 0015](../decisions/0015-numeric-priority-marker.md)）。Projectには同じ6選択肢の `Category` fieldを作成する。再installは保存済みのProject identityを再利用し、高コストなProject drift走査とqueued Issueの同期修復を行わない。明示的な `bin/agentic-loop setup` はProjectのrepository link・field・viewを収束させるが、既存Issue/PRの一括backfillは行わない。Issue受付とworkerが扱ったPRは、必要になった時点で個別にProjectへ登録する。
 
 GitHub tokenには対象リポジトリのIssue/PR操作権限と `project`、`read:project` scopeが必要である。不足時は `gh auth refresh -s project,read:project` など、利用中のGitHub認証方式に合う方法で追加する。Projectはuser/org所有のため、対象リポジトリとProjectの閲覧者が一致することを管理者が確認する。privateリポジトリの内容や秘密情報をProjectフィールドへ転記しない。
 
@@ -14,7 +14,7 @@ Project APIでlink、`Agent status` single-select、Issue item追加に加え、
 | `Queue` | `is:issue is:open label:"agent:queued"` | Priority（数値・降順）、Category、Created at、Issue番号の順で確認する。各値の順位はSupervisorのclaim順と同じにする。Priorityは本文marker（`bin/agentic-loop priority`）で管理し、Project fieldはソートの正本にしない |
 | `Active` | `is:issue is:open label:"agent:running","agent:in-review"` | Agent statusでgroupし、Updated at降順。Issue、関連Pull requestを表示する |
 | `Needs input` | `is:issue is:open label:"agent:needs-input"` | Updated at昇順。Title、Agent status、Updated atを表示し、Issue本文・commentを回答先とする |
-| `Recovery` | `is:issue label:"agent:failed","agent:stale"` | Agent statusでgroupし、Updated at昇順。期限切れleaseはSupervisorがqueuedへ復旧するまでrunningとしてIssue commentで検査する |
+| `Recovery` | `is:issue label:"agent:failed","agent:stale","agent:parked"` | Agent statusでgroupし、Updated at昇順。期限切れleaseはSupervisorがqueuedへ復旧するまでrunningとしてIssue commentで検査する。`agent:parked` はリトライ予算を使い切ったopenの人間トリアージ待ちで、自動closeされない（[ADR 0016](../decisions/0016-failure-park-not-close.md)） |
 | `Stopping` | `is:issue is:open label:"agent:stopping"` | 認可済み終了操作によるdrain中。worker成果物を削除しない |
 | `Disposed` | `is:issue label:"agent:cancelled","agent:superseded","agent:duplicate","agent:merged" updated:@today-30d` | 理由と統合先を監査commentから追跡する |
 | `Recently completed` | `is:issue label:"agent:completed" updated:@today-30d` | Updated at降順。対応Pull requestと完了証跡を追跡する |
@@ -55,12 +55,12 @@ CLIの公開入口は変更後も `bin/agentic-loop` のままである（[ADR 0
 
 `dispose ISSUE --reason cancelled|superseded|duplicate|merged [--target ISSUE]` は唯一の終了入口である。実行者はGitHub認証済みで対象repositoryのwrite/maintain/admin権限を持つ必要がある。`cancelled` は要求撤回、`superseded` は後続Issueへの置換、`duplicate` は同一成果の重複、`merged` は異なる要求の統合を表す。後三者はopenで未終了の同一repository Issueを `--target` として必要とし、自己参照を拒否する。
 
-running/in-reviewはまず`agent:stopping`へ遷移し、所有hostのworker process groupをTERM、`stop_timeout`後にのみKILLする。dirty worktree、未push commit、local/remote branchは保持する。終端化は`state_reason=not_planned`でcloseし、理由・実行者・統合先・時刻のmarkerと日本語説明を両Issueに残す。統合先は元Issue本文・コメント・依存関係を要求として調査する。終了済みIssueはSupervisorがclaim/retry/recovery経路からqueuedへ戻さない。再開は同じ認可を必要とする `resume ISSUE` だけで、履歴を保持してopen + `agent:queued` に戻す。merge済みPRを持つcompleted Issueはdisposeせず、revertまたは後続Issueを作成する。
+running/in-reviewはまず`agent:stopping`へ遷移し、所有hostのworker process groupをTERM、`stop_timeout`後にのみKILLする。dirty worktree、未push commit、local/remote branchは保持する。終端化は`state_reason=not_planned`でcloseし、理由・実行者・統合先・時刻のmarkerと日本語説明を両Issueに残す。統合先は元Issue本文・コメント・依存関係を要求として調査する。終了済みIssueはSupervisorがclaim/retry/recovery経路からqueuedへ戻さない。再開は同じ認可を必要とする `resume ISSUE` だけで、履歴を保持してopen + `agent:queued` に戻す。merge済みPRを持つcompleted Issueはdisposeせず、revertまたは後続Issueを作成する。`resume ISSUE` は同じ認可で `agent:parked`（closeされていないopenの人間トリアージ待ち。[ADR 0016](../decisions/0016-failure-park-not-close.md)）も直接 `agent:queued` へ再投入できる。
 
 - **Supervisor**: 稼働状態、pid、`max_workers`（既存の1行目の文言は不変）。
 - **Running Issues**: Issue番号・title・`(phase: ...)`・`(scope: ...)`に加え、`(started: 開始epoch, elapsed: 経過秒)`・`(timeout_at: 上限到達epoch[、超過なら「超過」]。`worker_timeout_seconds=0`では非表示)`・`(heartbeat: 最終heartbeat epoch)`・`(lease_expires: 期限epoch[、期限切れなら「期限切れ」])`・`(worktree: path[、dirty/diverged、または「なし」])`・`(pr: #番号 state=... checks=...)`を、追加のGitHub呼び出しなしでlocal state（`workers/<issue>.started`・`.lease`・`.resume`、scope cache）から表示する。加えて、workerがlocalへ書くprogress marker（`workers/<issue>.progress`、`epoch\tstage\tseq`。stageはenumのみ）から `(stage: plan|exec|...)`・`(progress: Ns ago)`・`(health: healthy|stalled|timeout)`を表示する。`health`は`timeout`（`worker_timeout_seconds`超過）> `stalled`（最後の進行から既定300秒超過）> `healthy`の順で、local stateのない他host所有Issueは`unknown`（「不明」）。色分けはTTYかつ`NO_COLOR`未設定のときだけANSI、pipe/JSONは無色。progress markerはworkerがstage境界と自ホスト制御区間で書く（heartbeatは更新しない）。worker logのmtimeは本文を読まずに副シグナルとして採用し、provider待ちの長考をstalledと誤判定しない。
 - **キュー / 次のclaim候補**: queued総数とclaim可能数、および`claim_next`と同じ順序（priority値（数値・降順）→category rank→created_at→Issue番号）の上位候補を、claimされない理由code（`scope-conflict`／`retry-cooldown`／`claim-paused`）付きで表示する。依存関係の再検証はしない（`agent:blocked`のIssueはqueuedに現れないため対象外であり、これはコスト方針上のbest-effortな割り切りである）。また、各phaseで次に選ばれる `pool` / `provider` / `model`（`agent_pick_tier` のlocal計算。usage実測はせず、pool markerと設定からの推論に限定）と、プール別のclaim pause理由（`pool=<pool> 枯渇（回復待ち）`、`全プール利用不可`）を表示する。
-- **状態サマリ**: `needs-input`／`failed`／`in-review`／`blocked`／`stale`の件数と、`https://github.com/OWNER/REPO/issues/N`形式のURL一覧（`stale`は直近100件までで打ち切りがある場合は明示する）。
+- **状態サマリ**: `needs-input`／`failed`／`parked`／`in-review`／`blocked`／`stale`の件数と、`https://github.com/OWNER/REPO/issues/N`形式のURL一覧（`stale`は直近100件までで打ち切りがある場合は明示する）。
 - **警告**: staleなsupervisor pid/lock、期限切れlease、実行時間上限を超過したlocal worker（`worker-timeout`。次回pollで停止し自動的に再試行キューへ戻る）、stall（`worker-stalled`。最後の進行から300秒以上経過しているが上限は未超過。観測のみで自動停止はしない）、local stateのないrunning Issue（`worker-missing`、多端末運用では正常）、GitHub上でrunningでないlocal worker（`worker-orphan`）、対応するrunning Issueのない残存worktree/branch、破損したlocal state file、Project同期の再試行待ち、claim一時停止中、をすべてlocal stateの読み取りだけで検出する。
 
 token、worker log本文、Issue本文・コメント、providerのresult fileは一切読まない・表示しない。
@@ -140,7 +140,7 @@ Supervisor停止中でも、キューのファイル、対象repositoryとIssue�
 
 読み取り専用要求と運用操作はその場で続行する。通常の変更要求は、専用branch/worktreeを利用でき、追加費用・秘密・破壊的操作に関する判断が不要な場合に限り、キューが利用不能であることを明示してworker workflowを同期実行する。それ以外は復旧方法または必要な判断を正確に提示して停止する。明示された同期・直接実行も同じworker workflowと不変条件に従う。
 
-`.agentic-loop.toml` の `[queue]` で `poll_seconds`、`max_workers`、`lease_seconds`、`stop_timeout`、`stale_days`、`graphql_reserve`、`rate_limit_cache_seconds`、`api_retry_attempts`、`api_retry_base_seconds`、`max_attempts`、`retry_cooldown_seconds`、`worker_timeout_seconds`、`unknown_scope`、`exclusive_paths` を変更できる。個人環境向けの上書きは git 管理外の `.agentic-loop.local.toml` に同じキーを書けば、キー単位で優先される。設定はTOMLで、読み取りには `yq` を用いる。既定の並列数は4とし、これを超えてむやみに増やさない。worker失敗の多くはtoken枯渇やセッション中断などの一時的要因であるため、失敗したIssueは即座にagent:failedへ留め置かない。Supervisorの`retry_failed`が、開いている全てのagent:failed（過去分・追跡外を含む）を`[queue].max_attempts`（既定3、総試行回数）まで`[queue].retry_cooldown_seconds`（既定600秒）のクールダウンを挟んで自動的にagent:queuedへ戻して再試行し、上限に達したら解決不能とみなしてIssueをcloseする。人手でのラベル付け替えは不要。workerが実施不要または実施不能と判断した場合は`AGENTIC_LOOP_RESULT=declined`でIssueをcloseできる。`[budget].weekly_reserve_percent` は緊急枠の確保用で、週次利用率が `100 - 値` を超える間はSupervisorが新規Issueのclaimを一時停止し、回復すると再開する。利用率はheadlessで取得できるCodexのセッションログ（最新の `token_count` の `secondary.used_percent`）から読むbest-effortで、取得できない場合やCodex以外のproviderのみの場合はfail open（claim継続）とする。0で無効化できる。増加はCodex契約上の制限、Git競合、端末資源を確認してから行う。stopは新規claimを止め、workerをdrainする。`STOP_TIMEOUT=0` は完了まで待つ。
+`.agentic-loop.toml` の `[queue]` で `poll_seconds`、`max_workers`、`lease_seconds`、`stop_timeout`、`stale_days`、`graphql_reserve`、`rate_limit_cache_seconds`、`api_retry_attempts`、`api_retry_base_seconds`、`max_attempts`、`retry_cooldown_seconds`、`worker_timeout_seconds`、`unknown_scope`、`exclusive_paths` を変更できる。個人環境向けの上書きは git 管理外の `.agentic-loop.local.toml` に同じキーを書けば、キー単位で優先される。設定はTOMLで、読み取りには `yq` を用いる。既定の並列数は4とし、これを超えてむやみに増やさない。worker失敗の多くはtoken枯渇やセッション中断などの一時的要因であるため、失敗したIssueは即座にagent:failedへ留め置かない。Supervisorの`retry_failed`が、開いている全てのagent:failed（過去分・追跡外を含む）を`[queue].max_attempts`（既定3、総試行回数）まで`[queue].retry_cooldown_seconds`（既定600秒）のクールダウンを挟んで自動的にagent:queuedへ戻して再試行し、上限に達してもcloseせず`agent:parked`（open・非claimの人間トリアージ待ち。[ADR 0016](../decisions/0016-failure-park-not-close.md)）へ移す。人手でのラベル付け替えは不要で、`resume`で再投入するかdisposeで終了するかは人間が判断する。workerが実施不要または実施不能と判断した場合は`AGENTIC_LOOP_RESULT=declined`を返すが、worker自身はcloseせず`agent:needs-input`へ載せ、認可済み運用者の判断（`dispose`等）を待つ。`[budget].weekly_reserve_percent` は緊急枠の確保用で、週次利用率が `100 - 値` を超える間はSupervisorが新規Issueのclaimを一時停止し、回復すると再開する。利用率はheadlessで取得できるCodexのセッションログ（最新の `token_count` の `secondary.used_percent`）から読むbest-effortで、取得できない場合やCodex以外のproviderのみの場合はfail open（claim継続）とする。0で無効化できる。増加はCodex契約上の制限、Git競合、端末資源を確認してから行う。stopは新規claimを止め、workerをdrainする。`STOP_TIMEOUT=0` は完了まで待つ。
 
 ### プール・モデルの優先順位と枠枯渇・回復（[ADR 0012](../decisions/0012-provider-pool-fallback.md)）
 
@@ -263,7 +263,7 @@ keyは一意の小文字英数ハイフン、依存は先行keyだけを参照�
 - stale: queuedのまま設定日数更新されず、監査コメント付きで自動closeされた
 - blocked: 依存Issueが未完了のためclaimを保留中。依存が解消すると自動的にqueuedへ戻る
 
-Supervisorは起動時に加えて各pollでもrunning Issueの最新leaseコメントを読み、期限切れをqueuedへ戻す。これにより、workerがクラッシュしてリースが切れたIssueは長時間稼働中でも自動でキューへ復帰し、agent:runningのまま滞留しない。ただし、完了前に繰り返し停止する（lease期限切れ・急死で `AGENTIC_LOOP_RESULT=failed` すら返さない）Issueが無限に再キューされ続けないよう、claim都度記録される試行回数が `max_attempts` に達した回復対象は、queuedへ戻さず `agent:failed` へ移し、`retry_failed` が解決不能とみなして自動closeする。
+Supervisorは起動時に加えて各pollでもrunning Issueの最新leaseコメントを読み、期限切れをqueuedへ戻す。これにより、workerがクラッシュしてリースが切れたIssueは長時間稼働中でも自動でキューへ復帰し、agent:runningのまま滞留しない。ただし、完了前に繰り返し停止する（lease期限切れ・急死で `AGENTIC_LOOP_RESULT=failed` すら返さない）Issueが無限に再キューされ続けないよう、claim都度記録される試行回数が `max_attempts` に達した回復対象は、queuedへ戻さず `agent:failed` へ移し、`retry_failed` が `agent:parked`（open・非claim。[ADR 0016](../decisions/0016-failure-park-not-close.md)）へ移す。closeはしない。
 
 ### ハングしたworkerの検出と停止（[ADR 0006](../decisions/0006-worker-hang-timeout.md)）
 
@@ -308,7 +308,7 @@ Providerを起動する直前に `worker_confirm_running_label()` がGitHub上�
 ### 失敗の分類
 
 - `needs-input`: 人の判断が必要（branchの分岐、merge済みPRとのcommit不一致、権限不足など）。返信で自動的にqueuedへ戻る。
-- `failed`: 再試行で回復しうる（一時的なAPI障害、破損metadata、別Issueの成果物との競合など）。`retry_failed` が自動的に再試行し、`max_attempts` 到達で解決不能とみなしcloseする。
+- `failed`: 再試行で回復しうる（一時的なAPI障害、破損metadata、別Issueの成果物との競合など）。`retry_failed` が自動的に再試行し、`max_attempts` 到達でも解決不能とみなさず `agent:parked`（open・非claimの人間トリアージ待ち）へ移す。closeしない（[ADR 0016](../decisions/0016-failure-park-not-close.md)）。
 - `exhausted`（`agent:queued` へ戻る）: プール枯渇（quota / 429 / usage limit / `insufficient_quota` / credit balance、および後方互換のため空result + 非0 exit）。該当プールのmarkerを書き、全プールが利用不可の間だけSupervisorのclaimを一時停止する。部分枯渇では次claimで他プールが使われる（[ADR 0012](../decisions/0012-provider-pool-fallback.md)）。
 - モデル固有失敗（`overloaded`、model解決失敗）: プール枯渇にしない。同一stage内で同プールの次モデルへ切り替える。
-- `declined`（close）: workerが実施不要または実施不能と判断した場合。
+- `declined`（`agent:needs-input`。closeしない）: workerが実施不要または実施不能と判断した場合。worker自身はcloseせず、認可済み運用者の判断（`dispose`等）を待つ。
