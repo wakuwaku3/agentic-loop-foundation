@@ -99,6 +99,7 @@ bin/agentic-loop doctor
 bin/agentic-loop metrics
 bin/agentic-loop trace
 bin/agentic-loop capabilities
+bin/agentic-loop flaky
 bin/agentic-loop upgrade
 ```
 
@@ -117,6 +118,8 @@ Supervisor全体を止めずに1件のIssueだけ実行を止めたい場合は�
 `trace` は、PR本文の`agentic-loop:traceability` recordとGitHubの観測結果（check-runs、変更ファイル一覧）を照合し、Issueの受け入れ条件が実際に何で満たされたかを確認する読み取り専用コマンドです（[ADR 0017](docs/decisions/0017-requirement-traceability.md)）。`trace ISSUE`は対応PRの評価結果を、`trace --audit`はrecordが不整合なIssueをリポジトリ全体から列挙します。`[queue].traceability`（既定`warn`）が`off`以外のとき、workerの完了確定でも同じ評価を行い、`require`ではrecord不在・不整合時にIssueをcloseせず保持します。詳細は [運用ドキュメント](docs/operations/traceability.md) を参照してください。
 
 `capabilities` は、`.agentic-loop/capabilities.toml`（あれば）が宣言する完全検証・短時間検証・secret guard・対応platform・重要directory/ownership・変更禁止領域・外部環境・release/deploy有無・利用可能skill・想定実行時間を検証済みの形で表示する読み取り専用コマンドです（[ADR 0018](docs/decisions/0018-repository-capability-manifest.md)）。worker・`doctor`・CIは同じparser/validator（`bin/lib/agentic-loop/capability.sh`）を経由するため、pathの workspace 外参照やcommandのシェルmetacharacterを含む不正なmanifest、未対応の`schema_version`はどの経路でも同じく失敗として扱われます。manifest自体は任意で、無い場合は警告のみで終了code 0です。詳細は [運用ドキュメント](docs/operations/capability-manifest.md) を参照してください。
+
+`tests/run-e2e.sh`は、E2E群が失敗した場合だけ最大2回まで単独で再試行し、`scripts/flaky.sh`が同一commit・同一固定環境での間欠的な失敗（flaky）を、決定的な失敗と区別して検知します（[ADR 0022](docs/decisions/0022-flaky-test-detection-and-quarantine.md)）。retryは検知・診断目的に限定し`passed`への昇格には使わず、`tests/flaky-registry.toml`への明示的な隔離宣言（期限最長14日、責任者・修復Issue必須）に一致しない限りmerge gateは弱まりません。`bin/agentic-loop flaky [--format json]`で隔離entryの期限・整合性を読み取り専用で確認でき、`flaky report`は直近の実行recordから修復Issueを作成・再利用します。詳細は [運用ドキュメント](docs/operations/flaky-tests.md) を参照してください。
 
 `upgrade` は導入済みのFoundationを、利用者の変更を失わず安全に更新するコマンドです（[ADR 0009](docs/decisions/0009-foundation-upgrade.md)）。既定は書き込みを一切行わないdry-runで、追加・更新・競合・削除候補・設定migrationを日本語で表示します。`--apply`で実際に適用し、破壊的・不可逆・追加費用・権限変更を伴う項目は`--approve`なしでは適用しません。適用後は`doctor`と完全検証を実行し、失敗時は`--rollback`または再実行の案内を表示します。詳細は [運用ドキュメント](docs/operations/upgrade.md) を参照してください。
 

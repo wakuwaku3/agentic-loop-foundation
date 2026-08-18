@@ -40,6 +40,7 @@ setup_labels() {
     setup_label "category:$name" "$color" "$description" "$current"
   done
   setup_label "$DIAGNOSIS_LABEL" D4C5F9 'Actionable finding from periodic codebase diagnosis' "$current"
+  setup_label "flaky" FEF2C0 'E2E test flagged flaky by tests/run-e2e.sh (see tests/flaky-registry.toml)' "$current"
 }
 
 
@@ -213,7 +214,7 @@ setup_project_views() {
   setup_project_view "$project_id" 'Stopping' 'is:issue is:open label:"agent:stopping"' "$views_tsv"
   setup_project_view "$project_id" 'Paused' 'is:issue is:open label:"agent:paused"' "$views_tsv"
   setup_project_view "$project_id" 'Needs input' 'is:issue is:open label:"agent:needs-input"' "$views_tsv"
-  setup_project_view "$project_id" 'Recovery' 'is:issue label:"agent:failed","agent:stale","agent:parked"' "$views_tsv"
+  setup_project_view "$project_id" 'Recovery' 'is:issue label:"agent:failed","agent:stale","agent:parked","flaky"' "$views_tsv"
   setup_project_view "$project_id" 'Recently completed' 'is:issue label:"agent:completed" updated:@today-30d' "$views_tsv"
   setup_project_view "$project_id" 'Disposed' 'is:issue label:"agent:cancelled","agent:superseded","agent:duplicate","agent:merged" updated:@today-30d' "$views_tsv"
   setup_project_view "$project_id" 'Open PRs' 'is:pr is:open' "$views_tsv"

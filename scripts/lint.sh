@@ -9,7 +9,8 @@ required=(AGENTS.md README.md Makefile .editorconfig .gitignore .codex/config.to
   .agentic-loop/capabilities.toml scripts/upgrade/migrations/0003-capability-manifest.sh
   docs/decisions/0019-issue-level-execution-control.md bin/lib/agentic-loop/control.sh scripts/upgrade/migrations/0004-pause-control-config.sh
   docs/decisions/0020-change-risk-preflight.md docs/operations/preflight.md bin/lib/agentic-loop/preflight.sh scripts/upgrade/migrations/0005-preflight-config.sh
-  docs/decisions/0021-affected-check-selection.md docs/operations/affected-checks.md scripts/affected-check.sh tests/impact-map.toml)
+  docs/decisions/0021-affected-check-selection.md docs/operations/affected-checks.md scripts/affected-check.sh tests/impact-map.toml
+  docs/decisions/0022-flaky-test-detection-and-quarantine.md docs/operations/flaky-tests.md scripts/flaky.sh tests/flaky-registry.toml bin/lib/agentic-loop/flaky.sh)
 for file in "${required[@]}"; do
   [[ -f $file ]] || { printf 'Missing required file: %s\n' "$file" >&2; exit 1; }
 done
@@ -435,6 +436,67 @@ if grep -Fq 'affected' .github/workflows/ci.yml; then
   exit 1
 fi
 ./scripts/affected-check.sh --audit || { printf 'tests/impact-map.toml failed --audit.\n' >&2; exit 1; }
+
+# --- flaky test detection and quarantine (Issue #60, ADR 0022) ---
+grep -Fq 'flaky) cmd_flaky' "${AGENTIC_LOOP_SOURCES[@]}" || { printf 'flaky command is not distributed through the queue CLI.\n' >&2; exit 1; }
+grep -Fq 'flaky_registry_validate' "${AGENTIC_LOOP_SOURCES[@]}" || { printf 'flaky registry validation is missing.\n' >&2; exit 1; }
+grep -Fq 'cmd_flaky_report' "${AGENTIC_LOOP_SOURCES[@]}" || { printf 'flaky report Issue creation is missing.\n' >&2; exit 1; }
+grep -Fq 'docs/decisions/0022-flaky-test-detection-and-quarantine.md' scripts/lib/foundation-files.sh || {
+  printf 'Flaky-test ADR is not distributed.\n' >&2
+  exit 1
+}
+grep -Fq 'docs/operations/flaky-tests.md' scripts/lib/foundation-files.sh || {
+  printf 'Flaky-test documentation is not distributed.\n' >&2
+  exit 1
+}
+grep -Fq 'scripts/flaky.sh' scripts/lib/foundation-files.sh || {
+  printf 'flaky.sh is not distributed.\n' >&2
+  exit 1
+}
+grep -Fq 'tests/flaky-registry.toml' scripts/lib/foundation-files.sh || {
+  printf 'flaky-registry.toml is not distributed.\n' >&2
+  exit 1
+}
+grep -Fq 'bin/lib/agentic-loop/flaky.sh' scripts/lib/foundation-files.sh || {
+  printf 'flaky.sh module is not distributed.\n' >&2
+  exit 1
+}
+# retry is diagnostic-only: quarantine must never become a general skip/
+# exclusion interface, on either the retry orchestrator or the classifier
+# (extends the ADR 0021 affected-check.sh invariant above; see ADR 0022).
+if grep -Fq -- '--exclude)' scripts/flaky.sh tests/run-e2e.sh; then
+  printf 'flaky.sh/run-e2e.sh must not gain an --exclude interface.\n' >&2
+  exit 1
+fi
+if grep -Fq -- '--skip)' scripts/flaky.sh tests/run-e2e.sh; then
+  printf 'flaky.sh/run-e2e.sh must not gain a --skip interface.\n' >&2
+  exit 1
+fi
+grep -Eq '^[[:space:]]*timeout-minutes:[[:space:]]*20$' .github/workflows/ci.yml || {
+  printf 'CI timeout-minutes was not raised for isolated flaky retries (see ADR 0022).\n' >&2
+  exit 1
+}
+grep -Fq '"flaky"' bin/lib/agentic-loop/setup.sh || { printf 'flaky label is not created by setup.\n' >&2; exit 1; }
+grep -Fq 'label:"agent:failed","agent:stale","agent:parked","flaky"' bin/lib/agentic-loop/setup.sh || {
+  printf 'Recovery view does not include the flaky label.\n' >&2
+  exit 1
+}
+grep -Fq 'flaky test registry' bin/lib/agentic-loop/doctor.sh || { printf 'doctor does not surface flaky registry findings.\n' >&2; exit 1; }
+for requirement in '再実行は検知・診断目的に限定' '最長14日'; do
+  grep -Fq "$requirement" docs/policies/testing.md || {
+    printf 'testing.md lacks a flaky-test requirement: %s\n' "$requirement" >&2
+    exit 1
+  }
+done
+grep -Fq '明示的な隔離は例外である' docs/policies/validation-harness.md || {
+  printf 'Missing flaky-quarantine exception invariant in validation-harness.md.\n' >&2
+  exit 1
+}
+grep -Fq 'bin/agentic-loop flaky' .agents/skills/diagnose-codebase/SKILL.md || {
+  printf 'diagnose-codebase skill does not reference the flaky registry as an evidence source.\n' >&2
+  exit 1
+}
+./scripts/flaky.sh audit || { printf 'tests/flaky-registry.toml failed audit.\n' >&2; exit 1; }
 
 ./.agentic-loop/guard-secrets.sh --all
 

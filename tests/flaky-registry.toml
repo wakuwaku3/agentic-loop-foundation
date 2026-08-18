@@ -1,0 +1,13 @@
+# flaky test隔離registry（Issue #60, ADR 0022）。唯一のsourceであり、
+# scripts/flaky.sh audit（scripts/lint.shから実行）が整合性を機械的に検査
+# する。出荷時は0件。書き方はdocs/operations/flaky-tests.mdを参照。
+#
+# [[entry]]
+# unit = "e2e:auxiliary"
+# fingerprint = "0123456789ab"
+# message = "簡潔な説明（200字以内、改行・backtick禁止）"
+# issue = 123
+# owner = "github-login"
+# first_seen = "2026-08-18"
+# until = "2026-08-25"
+schema_version = 1

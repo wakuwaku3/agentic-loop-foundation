@@ -60,6 +60,11 @@ units = ["e2e:auxiliary"]
 reason = "traceability評価はauxiliary群のfixtureが覆う"
 
 [[rule]]
+path = "bin/lib/agentic-loop/flaky.sh"
+units = ["e2e:auxiliary"]
+reason = "flaky判定・隔離・修復IssueのfixtureはauxiliaryのE2E群が覆う"
+
+[[rule]]
 path = "bin/lib/agentic-loop/capability.sh"
 units = ["e2e:lifecycle", "e2e:auxiliary", "e2e:upgrade"]
 reason = "capability manifestの検証はlifecycle/auxiliary/upgrade群にまたがる"
@@ -177,6 +182,14 @@ reason = "test-harness"
 
 [[widen]]
 path = "tests/impact-map.toml"
+reason = "test-harness"
+
+[[widen]]
+path = "scripts/flaky.sh"
+reason = "test-harness"
+
+[[widen]]
+path = "tests/flaky-registry.toml"
 reason = "test-harness"
 
 [[widen]]
