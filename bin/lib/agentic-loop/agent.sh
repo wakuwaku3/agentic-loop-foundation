@@ -469,8 +469,20 @@ core_budget_note_pause() {
 # compatibility) pauses that pool and re-queues the Issue. `overloaded` and
 # model-resolution failures are model-specific: the stage moves to the next
 # model in the pool instead of treating the whole subscription as spent.
+#
+# The quota signatures are matched only when the provider actually reported a
+# failure (a non-zero exit, or a structured error flag such as Claude's
+# --output-format json is_error). A stage that SUCCEEDED must never be read as
+# exhausted just because its OUTPUT discusses rate limits or quotas -- a plan
+# about scalability, finite-resource design, or the loop's own exhaustion
+# handling legitimately contains those words, and matching them there falsely
+# spends the whole pool and blocks the queue (see the regression tests in
+# tests/test-agentic-loop.sh). $3 is the provider-error flag from agent_run_stage
+# (STAGE_PROVIDER_ERROR); it defaults to 0 so existing two-argument callers keep
+# the exit-code-only behavior.
 agent_result_is_pool_exhausted() {
-  local result_file=$1 exit_code=$2
+  local result_file=$1 exit_code=$2 provider_error=${3:-0}
+  (( exit_code != 0 )) || (( provider_error == 1 )) || return 1
   [[ -r $result_file ]] && grep -qiE 'usage limit|rate.?limit|too many requests|(^|[^0-9])429([^0-9]|$)|insufficient_quota|quota exceeded|credit balance' "$result_file" && return 0
   (( exit_code != 0 )) && [[ ! -s $result_file ]] && return 0
   return 1
@@ -547,6 +559,12 @@ agent_run_stage() {
   local stage=$1 worktree=$2 git_common_dir=$3 agents_dir=$4 result_file=$5 usage_file=$6 prompt=$7 pool=$8 provider=$9 model=${10} effort=${11} raw_result stderr_file provider_rc=0
   raw_result="${result_file}.raw.$$"
   stderr_file="${result_file}.stderr.$$"
+  # Structured "the provider reported a failure" flag, consumed by
+  # agent_result_is_pool_exhausted so a SUCCESSFUL stage whose output merely
+  # mentions rate limits/quota is never misread as the pool being spent.  A
+  # non-zero provider exit always counts; Claude also exits zero on an API error
+  # under --output-format json, so its is_error flag is folded in below.
+  STAGE_PROVIDER_ERROR=0
   : > "$usage_file"
   : > "$result_file"
   : > "$stderr_file"
@@ -564,9 +582,26 @@ agent_run_stage() {
       [[ -n $model ]] && claude_args+=(--model "$model")
       (cd "$worktree" && claude "${claude_args[@]}" "$prompt") > "$raw_result" 2>"$stderr_file" || provider_rc=$?
       agent_usage_from_claude_json "$raw_result" >> "$usage_file" || true
+      # Claude exits zero even on an API failure under --output-format json and
+      # reports it through is_error/api_error_status in the envelope, so read that
+      # structured flag before extracting the plan text.  Without it, a
+      # successful plan whose .result discusses rate limits/quota would be
+      # misread as pool exhaustion; with it, only a real provider error is.
+      local claude_is_error claude_api_error
+      claude_is_error=$(yq -r '.is_error // false' "$raw_result" 2>/dev/null || printf 'false')
+      claude_api_error=$(yq -r '.api_error_status // ""' "$raw_result" 2>/dev/null || printf '')
+      if [[ $claude_is_error == true || ( -n $claude_api_error && $claude_api_error != null ) ]]; then
+        STAGE_PROVIDER_ERROR=1
+      fi
       # Claude's final assistant response is the JSON result field, not the
-      # surrounding transport object.
-      yq -r '.result // ""' "$raw_result" > "$result_file" 2>/dev/null || cp "$raw_result" "$result_file"
+      # surrounding transport object.  On a provider error keep the whole
+      # envelope so the classifier's quota signatures see api_error_status and
+      # any error text, not just .result.
+      if (( STAGE_PROVIDER_ERROR == 1 )); then
+        cp "$raw_result" "$result_file"
+      else
+        yq -r '.result // ""' "$raw_result" > "$result_file" 2>/dev/null || cp "$raw_result" "$result_file"
+      fi
       rm -f "$raw_result"
       ;;
     opencode)
@@ -724,9 +759,10 @@ run_stage_candidates() {
     tried+="${tried:+,}$key"
     tries=$((tries + 1))
     STAGE_EXIT_CODE=0
+    STAGE_PROVIDER_ERROR=0
     agent_run_stage "$phase" "$worktree" "$git_common_dir" "$agents_dir" "$result_file" "$usage_file" "$prompt" \
       "$CAND_POOL" "$CAND_PROVIDER" "$CAND_MODEL" "$CAND_EFFORT" || STAGE_EXIT_CODE=$?
-    if agent_result_is_pool_exhausted "$result_file" "$STAGE_EXIT_CODE"; then
+    if agent_result_is_pool_exhausted "$result_file" "$STAGE_EXIT_CODE" "$STAGE_PROVIDER_ERROR"; then
       LAST_EXHAUSTED_POOL=$CAND_POOL
       agent_mark_pool_exhausted "$CAND_POOL" "$result_file"
       pool_saw_exhausted=1
