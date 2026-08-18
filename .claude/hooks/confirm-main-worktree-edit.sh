@@ -3,6 +3,25 @@
 # worktree.  This is deliberately a confirmation gate, not a prohibition.
 set -euo pipefail
 
+# Restore the loop's pinned toolchain PATH (yq, git) before anything else.  This
+# hook runs in contexts -- Claude Code PreToolUse, login shells -- whose PATH may
+# omit the Nix-pinned bins.  Without yq the JSON parse below exits non-zero and
+# the fail-closed guards gate *every* edit, including ones in linked worktrees
+# that should pass through untouched.  runtime.path lives beside the primary
+# worktree's Git metadata; the hook is installed at <repo>/.claude/hooks, so
+# derive that repo from this script's own location and read runtime.path without
+# relying on any external tool.  If it is missing, fall back to the ambient PATH
+# (still fail-closed).  See Issue #160.
+hook_src=${BASH_SOURCE[0]}
+hook_dir=${hook_src%/*}
+project_dir=${hook_dir%/.claude/hooks}
+runtime_path_file="$project_dir/.git/agentic-loop/runtime.path"
+if [[ -r $runtime_path_file ]]; then
+  IFS= read -r runtime_path < "$runtime_path_file" || runtime_path=''
+  [[ -n $runtime_path ]] && PATH="$runtime_path:$PATH"
+fi
+export PATH
+
 ask() {
   printf '%s\n' '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask","permissionDecisionReason":"メイン作業ツリーの追跡ファイルを直接編集しようとしています。通常の変更要求は submit-requirement の queue-first intake で Issue キューへ登録し、専用worker worktreeで実施してください。明示的な同期実装など正規の例外であれば、内容を確認して承認するとこの操作を実行できます。"}}'
 }
