@@ -16,6 +16,10 @@ fast_check = ".githooks/pre-commit"      # commit前などの短時間・決定�
 secret_guard = ".agentic-loop/guard-secrets.sh"
 secret_guard_modes = ["--staged", "--push", "--all", "--text"]
 full_check_seconds = 300                 # 実測に基づく想定所要秒数。0=未計測
+# local affected check（gateではない。ADR 0021）。任意宣言。
+affected_check = "devbox run --pure affected"
+impact_map = "tests/impact-map.toml"
+affected_check_seconds = 150
 
 [environment]
 definition = ["devbox.json", "devbox.lock"]  # 環境定義の正本
@@ -101,7 +105,9 @@ manifestが存在しない場合は`installed: false`、警告1件（`not-instal
 | `.agentic-loop/guard-secrets.sh`が実行可能 | `validation.secret_guard`に記録 |
 | `devbox.json`/`devbox.lock`が存在 | `environment.definition`に記録 |
 | `.claude/skills/*/SKILL.md`が実在 | `skills.available`にdirectory名を記録 |
-| その他（`environment.platforms`、`release.*`、`ownership`、`protected`、`external_environment`、`validation.full_check_seconds`） | 常に`undetermined`（推測しない） |
+| `Makefile`に`affected:` targetがあり`tests/impact-map.toml`が実在 | `validation.affected_check = "devbox run --pure affected"`、`validation.impact_map = "tests/impact-map.toml"` |
+| 上記のいずれかが無い | `undetermined`へ`validation.affected_check`・`validation.impact_map` |
+| その他（`environment.platforms`、`release.*`、`ownership`、`protected`、`external_environment`、`validation.full_check_seconds`、`validation.affected_check_seconds`） | 常に`undetermined`（推測しない） |
 
 生成された`.agentic-loop/capabilities.toml`は`.agentic-loop/manifest.json`へ`class=init`（target所有）として記録され、`agentic-loop upgrade`は二度と上書き・削除しない。install/upgrade直後は未commitのため、`doctor`が「能力manifest: 未commit」を警告する。main worktreeの定期同期（`.agentic-loop/update-main.sh`）は、この未commit fileが1件だけ残っている状態を安全な例外として許容し、fast-forwardを止めない（fast-forwardは未追跡fileを書き換えないため安全）。
 
@@ -118,7 +124,7 @@ manifestが存在しない場合は`installed: false`、警告1件（`not-instal
 
 ## 再測定
 
-`full_check_seconds`は実測値であり、devbox/CIの構成を大きく変えた場合は`devbox run --pure check`の実測所要時間で更新する。`queue.worker_timeout_seconds`がこの値を下回っている場合、`doctor`が矛盾として警告する。
+`full_check_seconds`は実測値であり、devbox/CIの構成を大きく変えた場合は`devbox run --pure check`の実測所要時間で更新する。`queue.worker_timeout_seconds`がこの値を下回っている場合、`doctor`が矛盾として警告する。`affected_check_seconds`も同様に実測値であり、`full_check_seconds`以上になった場合は矛盾として警告する（[local affected checkの運用ドキュメント](affected-checks.md)を参照）。
 
 ## 費用
 

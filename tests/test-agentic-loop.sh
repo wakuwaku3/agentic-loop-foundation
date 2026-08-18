@@ -4433,6 +4433,179 @@ cap_rc=0
 ( source "$PROJECT_ROOT/bin/lib/agentic-loop/common.sh"; source "$PROJECT_ROOT/bin/lib/agentic-loop/capability.sh"; capability_validate "$schema_target" ) || cap_rc=$?
 [[ $cap_rc -ne 0 ]] || fail 'capability_validate accepted an unknown schema_version instead of failing closed'
 
+# --- local affected check (Issue #59, ADR 0021, docs/operations/affected-checks.md) ---
+affected_sh="$PROJECT_ROOT/scripts/affected-check.sh"
+real_impact_map="$PROJECT_ROOT/tests/impact-map.toml"
+
+affected_plan() {
+  printf '%s\n' "$1" | "$affected_sh" --files - --print-plan --format json
+}
+
+# 独立component: 一致したruleのunitsだけが選択され、拡大しない。
+plan_json=$(affected_plan 'bin/lib/agentic-loop/scope.sh')
+[[ $(yq -p json -r '.selected_units | join(",")' <<< "$plan_json") == 'e2e:queue' ]] || fail 'affected-check did not narrow an independent component change to its own unit'
+[[ $(yq -p json -r '.widened' <<< "$plan_json") == false ]] || fail 'affected-check widened an independent component change'
+
+# 共有依存: 常に全単位へ拡大する。
+plan_json=$(affected_plan 'bin/lib/agentic-loop/common.sh')
+[[ $(yq -p json -r '.widened' <<< "$plan_json") == true ]] || fail 'affected-check did not widen a shared-dependency change'
+[[ $(yq -p json -r '.widen_reasons | join(",")' <<< "$plan_json") == 'shared-dependency' ]] || fail 'affected-check reported the wrong widen reason for a shared dependency'
+[[ $(yq -p json -r '.selected_units | length' <<< "$plan_json") == 4 ]] || fail 'affected-check did not select all units for a shared-dependency change'
+
+# 設定変更: build/runtime設定は常に拡大する。
+plan_json=$(affected_plan '.agentic-loop.toml')
+[[ $(yq -p json -r '.widened' <<< "$plan_json") == true ]] || fail 'affected-check did not widen a runtime-config change'
+[[ $(yq -p json -r '.widen_reasons | join(",")' <<< "$plan_json") == 'runtime-config' ]] || fail 'affected-check reported the wrong widen reason for a runtime-config change'
+
+# 未知file: unmatchedへ計上した上で拡大する。
+plan_json=$(affected_plan 'services/unknown/main.go')
+[[ $(yq -p json -r '.widened' <<< "$plan_json") == true ]] || fail 'affected-check did not widen an unmatched change'
+[[ $(yq -p json -r '.unmatched | join(",")' <<< "$plan_json") == 'services/unknown/main.go' ]] || fail 'affected-check did not record the unmatched path'
+[[ $(yq -p json -r '.widen_reasons | join(",")' <<< "$plan_json") == 'unmatched' ]] || fail 'affected-check reported the wrong widen reason for an unmatched change'
+
+# test基盤自体の変更: diff行推定はせず常に拡大する。
+plan_json=$(affected_plan 'tests/test-agentic-loop.sh')
+[[ $(yq -p json -r '.widened' <<< "$plan_json") == true ]] || fail 'affected-check did not widen a test-harness change'
+[[ $(yq -p json -r '.widen_reasons | join(",")' <<< "$plan_json") == 'test-harness' ]] || fail 'affected-check reported the wrong widen reason for a test-harness change'
+
+# docs専用変更: E2E単位を1つも選ばない（environment/lintは常時実行のため対象外）。
+plan_json=$(affected_plan 'docs/policies/testing.md')
+[[ $(yq -p json -r '.selected_units | length' <<< "$plan_json") == 0 ]] || fail 'affected-check selected an E2E unit for a docs-only change'
+[[ $(yq -p json -r '.widened' <<< "$plan_json") == false ]] || fail 'affected-check widened a docs-only change'
+
+# 除外用のinterfaceは存在しない: 未知optionは終了code 2で拒否する。
+affected_rc=0
+"$affected_sh" --exclude e2e:queue >/dev/null 2>&1 || affected_rc=$?
+[[ $affected_rc -eq 2 ]] || fail 'affected-check.sh did not reject --exclude with exit code 2'
+grep -Eiq 'flaky|skip-group|known-failure' "$affected_sh" && fail 'affected-check.sh source mentions a flaky/skip-based exclusion token'
+grep -Fq -- '--exclude)' "$affected_sh" && fail 'affected-check.sh source implements an --exclude case branch'
+
+# 実repositoryのimpact-map.tomlはaudit自体を通過する(schema/到達可能性/path実在/全fileの明示的分類/full check同等性)。
+"$affected_sh" --audit >/dev/null || fail 'affected-check.sh --audit failed against the real tests/impact-map.toml'
+
+# --audit は壊れたmapを、それぞれ異なる理由で検出する。
+map_root="$TEST_ROOT/impact-map"
+mkdir -p "$map_root"
+
+cat > "$map_root/mismatch.toml" <<'EOF'
+schema_version = 1
+units = ["e2e:queue", "e2e:lifecycle"]
+always = ["environment", "lint"]
+[[rule]]
+path = "bin"
+units = ["e2e:queue"]
+reason = "x"
+[[rule]]
+path = "bin/lib/agentic-loop"
+units = ["e2e:lifecycle"]
+reason = "x"
+EOF
+audit_out=$("$affected_sh" --audit --map "$map_root/mismatch.toml" 2>&1) && fail 'affected-audit accepted a unit-set mismatched against run-e2e.sh/test-agentic-loop.sh'
+assert_contains <(printf '%s' "$audit_out") 'と一致しません' 'affected-audit did not report the unit-set mismatch'
+
+cat > "$map_root/orphan.toml" <<'EOF'
+schema_version = 1
+units = ["e2e:queue", "e2e:lifecycle", "e2e:auxiliary", "e2e:upgrade"]
+always = ["environment", "lint"]
+[[rule]]
+path = "bin"
+units = ["e2e:queue", "e2e:lifecycle", "e2e:auxiliary"]
+reason = "x"
+EOF
+audit_out=$("$affected_sh" --audit --map "$map_root/orphan.toml" 2>&1) && fail 'affected-audit accepted a map with an unreachable (orphan) unit'
+assert_contains <(printf '%s' "$audit_out") '孤立群' 'affected-audit did not report the orphan unit'
+
+cat > "$map_root/nonexistent.toml" <<'EOF'
+schema_version = 1
+units = ["e2e:queue", "e2e:lifecycle", "e2e:auxiliary", "e2e:upgrade"]
+always = ["environment", "lint"]
+[[rule]]
+path = "bin/lib/agentic-loop/scope.sh"
+units = ["e2e:queue"]
+reason = "x"
+[[rule]]
+path = "bin/lib/agentic-loop/worker.sh"
+units = ["e2e:lifecycle"]
+reason = "x"
+[[rule]]
+path = "bin/lib/agentic-loop/preflight.sh"
+units = ["e2e:auxiliary"]
+reason = "x"
+[[rule]]
+path = "bin/lib/agentic-loop/upgrade.sh"
+units = ["e2e:upgrade"]
+reason = "x"
+[[rule]]
+path = "this/path/does/not/exist.sh"
+units = ["e2e:queue"]
+reason = "x"
+EOF
+audit_out=$("$affected_sh" --audit --map "$map_root/nonexistent.toml" 2>&1) && fail 'affected-audit accepted a map referencing a nonexistent path'
+assert_contains <(printf '%s' "$audit_out") '存在しないpathを参照しています' 'affected-audit did not report the nonexistent rule path'
+
+cat > "$map_root/unclassified.toml" <<'EOF'
+schema_version = 1
+units = ["e2e:queue", "e2e:lifecycle", "e2e:auxiliary", "e2e:upgrade"]
+always = ["environment", "lint"]
+[[rule]]
+path = "bin/lib/agentic-loop/scope.sh"
+units = ["e2e:queue"]
+reason = "x"
+[[rule]]
+path = "bin/lib/agentic-loop/worker.sh"
+units = ["e2e:lifecycle"]
+reason = "x"
+[[rule]]
+path = "bin/lib/agentic-loop/preflight.sh"
+units = ["e2e:auxiliary"]
+reason = "x"
+[[rule]]
+path = "bin/lib/agentic-loop/upgrade.sh"
+units = ["e2e:upgrade"]
+reason = "x"
+EOF
+audit_out=$("$affected_sh" --audit --map "$map_root/unclassified.toml" 2>&1) && fail 'affected-audit accepted a map that leaves tracked files unclassified'
+assert_contains <(printf '%s' "$audit_out") 'unmatchedのまま' 'affected-audit did not report an unclassified tracked file'
+[[ -f $real_impact_map ]] || fail 'the real tests/impact-map.toml went missing during the affected-check fixtures'
+
+# capability manifestとの連携: Makefileにaffected: targetがあり impact map が
+# 実在すればcapability_generateが検出し、無ければundeterminedへ落とす。
+affected_cap_with="$TEST_ROOT/capability-affected-with"
+mkdir -p "$affected_cap_with/tests"
+printf 'check:\n\t/bin/true\naffected:\n\t/bin/true\n' > "$affected_cap_with/Makefile"
+printf 'schema_version = 1\n' > "$affected_cap_with/tests/impact-map.toml"
+( source "$PROJECT_ROOT/bin/lib/agentic-loop/common.sh"; source "$PROJECT_ROOT/bin/lib/agentic-loop/capability.sh"; capability_generate "$affected_cap_with" )
+grep -Fq 'affected_check = "devbox run --pure affected"' "$affected_cap_with/.agentic-loop/capabilities.toml" || fail 'capability_generate did not detect validation.affected_check'
+grep -Fq 'impact_map = "tests/impact-map.toml"' "$affected_cap_with/.agentic-loop/capabilities.toml" || fail 'capability_generate did not detect validation.impact_map'
+
+affected_cap_without="$TEST_ROOT/capability-affected-without"
+mkdir -p "$affected_cap_without"
+printf 'check:\n\t/bin/true\n' > "$affected_cap_without/Makefile"
+( source "$PROJECT_ROOT/bin/lib/agentic-loop/common.sh"; source "$PROJECT_ROOT/bin/lib/agentic-loop/capability.sh"; capability_generate "$affected_cap_without" )
+grep -Fxq 'validation.affected_check' <(yq -p toml -r '.undetermined[]' "$affected_cap_without/.agentic-loop/capabilities.toml") || fail 'capability_generate fabricated validation.affected_check without a Makefile affected: target'
+grep -Fxq 'validation.impact_map' <(yq -p toml -r '.undetermined[]' "$affected_cap_without/.agentic-loop/capabilities.toml") || fail 'capability_generate fabricated validation.impact_map without an impact map file'
+
+# drift検出: affected_check_secondsがfull_check_seconds以上になると警告する
+# (bin/lib/agentic-loop/doctor.shはdrift:*をwildcardで既に処理する)。
+drift_target="$TEST_ROOT/capability-affected-drift"
+mkdir -p "$drift_target/.agentic-loop"
+cat > "$drift_target/.agentic-loop/capabilities.toml" <<'EOF'
+schema_version = 1
+undetermined = []
+[validation]
+full_check = "make check"
+affected_check_seconds = 999
+full_check_seconds = 300
+EOF
+cap_rc=0
+drift_findings=$(
+  source "$PROJECT_ROOT/bin/lib/agentic-loop/common.sh"
+  source "$PROJECT_ROOT/bin/lib/agentic-loop/capability.sh"
+  capability_validate "$drift_target" || true
+  for cap_i in "${!CAPABILITY_CODES[@]}"; do printf '%s\n' "${CAPABILITY_CODES[$cap_i]}"; done
+)
+grep -Fxq 'drift:affected_check_seconds' <<< "$drift_findings" || fail 'capability_validate did not warn when affected_check_seconds >= full_check_seconds'
+
 # --- bin/agentic-loop metrics (see docs/decisions/0007, docs/operations/loop-metrics.md) ---
 write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=2 LEASE_SECONDS=30 STOP_TIMEOUT=10 STALE_DAYS=30
 metrics_issues="$FAKE_GH_ROOT/$state_key.metrics-issues"

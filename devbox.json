@@ -18,7 +18,9 @@
   },
   "shell": {
     "scripts": {
-      "check": "make check"
+      "check": "make check",
+      "affected": "make affected",
+      "affected-audit": "make affected-audit"
     }
   }
 }

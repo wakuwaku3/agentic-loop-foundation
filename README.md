@@ -10,6 +10,8 @@ Devboxを導入した `x86_64-linux` または `aarch64-linux` で、次の共�
 devbox run --pure check
 ```
 
+編集中のfeedback短縮用に、変更されたfileから関係するE2E群だけを選ぶ`devbox run --pure affected`もあります。これはgateではなく、push・merge前には常に`devbox run --pure check`が必要です（[ADR 0021](docs/decisions/0021-affected-check-selection.md)、[運用ドキュメント](docs/operations/affected-checks.md)）。
+
 ## インストール
 
 Devboxを導入した上で、導入したいディレクトリへ移動し、次の1コマンドを実行します。ホストへ`yq`を別途インストールする必要はありません。インストーラーは`yq`がPATHにない場合、取得した`devbox.json`と`devbox.lock`を使って固定環境内でpreflight、setup、Supervisor起動までを続行します。

@@ -8,7 +8,8 @@ required=(AGENTS.md README.md Makefile .editorconfig .gitignore .codex/config.to
   docs/decisions/0018-repository-capability-manifest.md docs/operations/capability-manifest.md bin/lib/agentic-loop/capability.sh
   .agentic-loop/capabilities.toml scripts/upgrade/migrations/0003-capability-manifest.sh
   docs/decisions/0019-issue-level-execution-control.md bin/lib/agentic-loop/control.sh scripts/upgrade/migrations/0004-pause-control-config.sh
-  docs/decisions/0020-change-risk-preflight.md docs/operations/preflight.md bin/lib/agentic-loop/preflight.sh scripts/upgrade/migrations/0005-preflight-config.sh)
+  docs/decisions/0020-change-risk-preflight.md docs/operations/preflight.md bin/lib/agentic-loop/preflight.sh scripts/upgrade/migrations/0005-preflight-config.sh
+  docs/decisions/0021-affected-check-selection.md docs/operations/affected-checks.md scripts/affected-check.sh tests/impact-map.toml)
 for file in "${required[@]}"; do
   [[ -f $file ]] || { printf 'Missing required file: %s\n' "$file" >&2; exit 1; }
 done
@@ -381,6 +382,60 @@ for pattern in "${codex_only_patterns[@]}"; do
     exit 1
   fi
 done
+
+# --- local affected check (Issue #59, ADR 0021) ---
+grep -Fq 'local affected check' docs/policies/validation-harness.md || {
+  printf 'Missing local affected check invariant.\n' >&2
+  exit 1
+}
+grep -Fq 'docs/decisions/0021-affected-check-selection.md' scripts/lib/foundation-files.sh || {
+  printf 'Affected-check ADR is not distributed.\n' >&2
+  exit 1
+}
+grep -Fq 'docs/operations/affected-checks.md' scripts/lib/foundation-files.sh || {
+  printf 'Affected-check documentation is not distributed.\n' >&2
+  exit 1
+}
+grep -Fq 'scripts/affected-check.sh' scripts/lib/foundation-files.sh || {
+  printf 'affected-check.sh is not distributed.\n' >&2
+  exit 1
+}
+grep -Fq 'tests/impact-map.toml' scripts/lib/foundation-files.sh || {
+  printf 'impact-map.toml is not distributed.\n' >&2
+  exit 1
+}
+grep -Fq 'tests/run-e2e.sh' scripts/lib/foundation-files.sh || {
+  printf 'run-e2e.sh is not distributed.\n' >&2
+  exit 1
+}
+grep -Eq '^affected:' Makefile || { printf 'affected Make target is missing.\n' >&2; exit 1; }
+grep -Eq '^affected-audit:' Makefile || { printf 'affected-audit Make target is missing.\n' >&2; exit 1; }
+grep -Fq '"affected": "make affected"' devbox.json || { printf 'affected devbox script is missing.\n' >&2; exit 1; }
+grep -Fq '"affected-audit": "make affected-audit"' devbox.json || { printf 'affected-audit devbox script is missing.\n' >&2; exit 1; }
+# affected-check.sh must never gain an exclusion/skip interface: flaky or
+# past-failure-based test exclusion is not allowed (see ADR 0021).
+if grep -Eiq 'flaky|skip-group|known-failure' scripts/affected-check.sh; then
+  printf 'affected-check.sh must not gain a flaky/skip-based exclusion interface.\n' >&2
+  exit 1
+fi
+if grep -Fq -- '--exclude)' scripts/affected-check.sh; then
+  printf 'affected-check.sh must not gain an --exclude interface.\n' >&2
+  exit 1
+fi
+grep -Eq '^check: environment lint test$' Makefile || {
+  printf 'check target prerequisites must remain "environment lint test" (affected must never become part of the gate).\n' >&2
+  exit 1
+}
+if ! grep -A1 -E '^test:' Makefile | grep -Fxq $'\t./tests/run-e2e.sh'; then
+  printf 'test target must invoke run-e2e.sh without group flags (affected check must not narrow the gate).\n' >&2
+  exit 1
+fi
+if grep -Fq 'affected' .github/workflows/ci.yml; then
+  printf 'CI must not reference the local affected check (see ADR 0021).\n' >&2
+  exit 1
+fi
+./scripts/affected-check.sh --audit || { printf 'tests/impact-map.toml failed --audit.\n' >&2; exit 1; }
+
 ./.agentic-loop/guard-secrets.sh --all
 
 printf 'Lint passed.\n'
