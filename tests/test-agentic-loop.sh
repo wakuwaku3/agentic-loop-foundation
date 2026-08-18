@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# shellcheck disable=SC2155
+# shellcheck disable=SC2155,SC2209
 set -euo pipefail
 
 readonly PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -481,7 +481,7 @@ case "${1:-} ${2:-}" in
         fi
       elif [[ $* == *html_url* ]]; then printf 'https://github.example/%s/pull/6\n' "$slug"; fi
     elif [[ $endpoint == collaborators/* ]]; then
-      printf 'admin\n'
+      printf '%s\n' "${FAKE_COLLABORATOR_PERMISSION:-admin}"
     elif [[ -z $endpoint ]]; then
       if [[ $* == *permissions.push* ]]; then printf 'true\n'; else printf 'main\n'; fi
     fi ;;
@@ -1115,8 +1115,8 @@ tail -n "+$((calls_before + 1))" "$FAKE_GH_ROOT/calls" > "$TEST_ROOT/reinstall-c
 project_creates=$(grep -c $'project create' "$FAKE_GH_ROOT/calls" || true)
 [[ $project_creates -eq 1 ]] || { sed -n '1,120p' "$FAKE_GH_ROOT/calls" >&2; fail "reinstall created the Project $project_creates times"; }
 view_creates=$(grep -c $'\tapi graphql -f query=mutation($projectId: ID!, $name: String!)' "$FAKE_GH_ROOT/calls" || true)
-[[ $view_creates -eq 13 ]] || { sed -n '1,220p' "$FAKE_GH_ROOT/calls" >&2; fail "reinstall created the Project views $view_creates times"; }
-for view in 'Triage' 'Queue' 'Hierarchy' 'Active' 'Needs input' 'Recovery' 'Recently completed' 'Open PRs' 'Closed PRs' 'All open issues' 'All closed issues'; do
+[[ $view_creates -eq 14 ]] || { sed -n '1,220p' "$FAKE_GH_ROOT/calls" >&2; fail "reinstall created the Project views $view_creates times"; }
+for view in 'Triage' 'Queue' 'Hierarchy' 'Active' 'Paused' 'Needs input' 'Recovery' 'Recently completed' 'Open PRs' 'Closed PRs' 'All open issues' 'All closed issues'; do
   [[ $(awk -F '\t' -v name="$view" '$2 == name {count++} END {print count+0}' "$FAKE_GH_ROOT/$state_key.views") -eq 1 ]] || fail "Project view is not idempotent: $view"
 done
 assert_contains "$FAKE_GH_ROOT/calls" 'filter=is:issue is:open no:category' 'Triage view filter was not configured'
@@ -2554,6 +2554,7 @@ write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=2 LEA
 if grep -Fq $'label create priority:critical' "$FAKE_GH_ROOT/calls" || grep -Fq $'label create priority:high' "$FAKE_GH_ROOT/calls" || grep -Fq $'label create priority:medium' "$FAKE_GH_ROOT/calls" || grep -Fq $'label create priority:low' "$FAKE_GH_ROOT/calls"; then fail 'setup created a legacy priority label'; fi
 grep -Fq $'label create agent:stale' "$FAKE_GH_ROOT/calls" || fail 'setup did not create the stale state label'
 grep -Fq $'label create agent:parked' "$FAKE_GH_ROOT/calls" || fail 'setup did not create the parked state label'
+grep -Fq $'label create agent:paused' "$FAKE_GH_ROOT/calls" || fail 'setup did not create the paused state label'
 for category in loop-continuity confidentiality-incident integrity-incident availability-incident feature improvement; do
   grep -Fq "label create category:$category" "$FAKE_GH_ROOT/calls" || fail "setup did not create category:$category"
 done
@@ -3789,6 +3790,125 @@ FAKE_CODEX_RESULT=AGENTIC_LOOP_RESULT=failed "$target/bin/agentic-loop" _worker 
 [[ ! -e $state_root/workers/5.progress ]] || fail 'a failed worker left its .progress marker behind'
 rm -rf "$state_root/workers" "$state_root/logs"
 
+# --- Issue-level execution control: pause / resume / abort (Issue #57, ADR 0019) ---
+# This is a separate, non-terminal layer from dispose (ADR 0010): pause/abort
+# never close an Issue, and only an authenticated repository write-or-better
+# operator (never an Issue comment, PR body, or provider self-report) may call
+# them.
+mkdir -p "$state_root/workers" "$state_root/logs"
+write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=2 LEASE_SECONDS=30 STOP_TIMEOUT=10 STALE_DAYS=30 PAUSE_GRACE_SECONDS=1
+
+# 1) pause on a queued Issue moves it straight to agent:paused (open,
+# non-claim) and never blocks an unrelated queued Issue from completing on
+# the same poll; pause is stable across further polls (no repeat comments,
+# no reclaim); resume re-verifies and returns a queued-origin pause straight
+# to agent:queued, which the next poll claims to completion.
+printf '190 queued open none 2026-01-01T00:00:00Z\n191 queued open none 2026-01-01T00:00:00Z\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+"$target/bin/agentic-loop" pause 190 --reason 'manual test pause'
+grep -Eq '^190 paused open' "$state" || fail 'pause did not move a queued Issue to agent:paused'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:pause schema=1' 'pause did not record its audit marker'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'from=queued' 'pause did not record the pre-pause state'
+AGENTIC_LOOP_RUN_ONCE=1 FAKE_CODEX_SLEEP=1 "$target/bin/agentic-loop" _supervise
+AGENTIC_LOOP_RUN_ONCE=1 FAKE_CODEX_SLEEP=1 "$target/bin/agentic-loop" _supervise
+grep -Eq '^190 paused open' "$state" || fail 'paused Issue was reclaimed by the supervisor'
+grep -Eq '^191 completed closed' "$state" || fail 'a paused Issue blocked an unrelated queued Issue from completing'
+[[ ! -e "$state_root/conflict/issue-191" ]] || fail 'a paused Issue left a stale conflict-wait entry for an unrelated Issue'
+comments_before=$(wc -l < "$FAKE_GH_ROOT/$state_key.comments")
+# An ordinary Issue comment whose text merely resembles a pause marker must
+# never be treated as a command: there is no comment-parsing trigger at all.
+printf '190 someone posts: please /pause this <!-- agentic-loop:pause schema=1 actor=impostor issue=190 from=queued at=1 -->\n' >> "$FAKE_GH_ROOT/$state_key.comments"
+AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _supervise
+grep -Eq '^190 paused open' "$state" || fail 'a paused Issue changed state after an impersonated comment'
+[[ $(wc -l < "$FAKE_GH_ROOT/$state_key.comments") -eq $((comments_before + 1)) ]] || fail 'a paused Issue accumulated supervisor comments across polls'
+"$target/bin/agentic-loop" resume 190
+grep -Eq '^190 queued open' "$state" || fail 'resume did not return a queued-origin pause to agent:queued'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:resume schema=1' 'resume did not record its audit marker'
+AGENTIC_LOOP_RUN_ONCE=1 FAKE_CODEX_SLEEP=1 "$target/bin/agentic-loop" _supervise
+grep -Eq '^190 completed closed' "$state" || fail 'a resumed paused Issue was not claimed and completed on the next poll'
+
+# 2) pause on a genuinely running Issue drains its local worker (a
+# cooperative stop-request, then TERM/KILL bounded by pause_grace_seconds)
+# and leaves it agent:paused with the worktree/branch/in-progress commit
+# untouched, recording a resume checkpoint (the same agentic-loop:handoff
+# comment worker resume already uses); resume of a running-origin pause
+# re-verifies lease/worktree/PR/checks before returning it to agent:queued
+# (never straight back to agent:running), and the next poll claims and
+# completes it, reusing the preserved worktree/branch.
+printf '192 queued open none 2026-01-01T00:00:00Z\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+rm -f "$state_root/stop.requested"
+FAKE_CODEX_SLEEP=30 "$target/bin/agentic-loop" _supervise &
+pause_sup_pid=$!
+pause_claimed=0
+for _ in $(seq 1 40); do [[ -e $state_root/workers/192.pid ]] && { pause_claimed=1; break; }; sleep 0.5; done
+[[ $pause_claimed == 1 ]] || { kill "$pause_sup_pid" 2>/dev/null; wait "$pause_sup_pid" 2>/dev/null; fail 'worker was not claimed before the running-pause test'; }
+"$target/bin/agentic-loop" pause 192 --reason 'incident freeze'
+kill "$pause_sup_pid" 2>/dev/null; wait "$pause_sup_pid" 2>/dev/null || true
+rm -f "$state_root/stop.requested"
+grep -Eq '^192 paused open' "$state" || fail 'pause did not drain a running worker to agent:paused'
+[[ ! -e $state_root/workers/192.pid ]] || fail 'pause left a worker pidfile behind'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:pause schema=1' 'pause of a running Issue did not record its audit marker'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'from=running' 'pause did not record running as the pre-pause state'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:handoff' 'pause did not leave a resume checkpoint'
+[[ -e "$target-worktrees/issue-192" ]] || fail 'pause deleted the in-progress worktree'
+git -C "$target-worktrees/issue-192" symbolic-ref -q HEAD | grep -Fq 'agent/issue-192' || fail 'pause disturbed the in-progress branch'
+"$target/bin/agentic-loop" resume 192
+grep -Eq '^192 queued open' "$state" || fail 'resume did not return a running-origin pause to agent:queued (not straight back to running)'
+AGENTIC_LOOP_RUN_ONCE=1 FAKE_CODEX_SLEEP=1 "$target/bin/agentic-loop" _supervise
+grep -Eq '^192 completed closed' "$state" || fail 'a resumed running-origin paused Issue was not claimed and completed on the next poll'
+[[ ! -e "$target-worktrees/issue-192" ]] || fail 'completed resumed Issue left its worktree behind'
+
+# 3) pause preserves the pre-pause state through resume for needs-input,
+# blocked, and failed (never promoting them to queued, and pausing a failed
+# Issue stops its automatic retry in the meantime).
+printf '193 needs-input open none 2026-01-01T00:00:00Z\n194 blocked open none 2026-01-01T00:00:00Z\n195 failed open none 2026-01-01T00:00:00Z\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+mkdir -p "$state_root/attempts"; printf '1\t0\n' > "$state_root/attempts/issue-195"
+"$target/bin/agentic-loop" pause 193
+"$target/bin/agentic-loop" pause 194
+"$target/bin/agentic-loop" pause 195
+grep -Eq '^193 paused open' "$state" || fail 'pause from needs-input did not move to agent:paused'
+grep -Eq '^194 paused open' "$state" || fail 'pause from blocked did not move to agent:paused'
+grep -Eq '^195 paused open' "$state" || fail 'pause from failed did not move to agent:paused'
+AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _supervise
+grep -Eq '^195 paused open' "$state" || fail 'a paused failed-origin Issue was auto-retried by retry_failed while paused'
+"$target/bin/agentic-loop" resume 193
+"$target/bin/agentic-loop" resume 194
+"$target/bin/agentic-loop" resume 195
+grep -Eq '^193 needs-input open' "$state" || fail 'resume promoted a needs-input-origin pause to queued instead of restoring needs-input'
+grep -Eq '^194 blocked open' "$state" || fail 'resume promoted a blocked-origin pause to queued instead of restoring blocked'
+grep -Eq '^195 queued open' "$state" || fail 'resume did not return a failed-origin pause to agent:queued'
+rm -f "$state_root/attempts/issue-195"
+
+# 4) authorization, idempotence, and cross-operation guards: pause/abort/
+# resume require repository write-or-better permission and change nothing on
+# denial; a second pause/abort is a harmless no-op; abort after pause moves
+# straight to agent:parked; pause after abort (already parked) is refused.
+printf '196 queued open none 2026-01-01T00:00:00Z\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+: > "$closes"
+if FAKE_COLLABORATOR_PERMISSION=read "$target/bin/agentic-loop" pause 196 2>/dev/null; then fail 'pause succeeded without repository write permission'; fi
+grep -Eq '^196 queued open' "$state" || fail 'a denied pause changed Issue state'
+[[ ! -s $FAKE_GH_ROOT/$state_key.comments ]] || fail 'a denied pause posted a comment'
+if FAKE_COLLABORATOR_PERMISSION=read "$target/bin/agentic-loop" abort 196 2>/dev/null; then fail 'abort succeeded without repository write permission'; fi
+grep -Eq '^196 queued open' "$state" || fail 'a denied abort changed Issue state'
+"$target/bin/agentic-loop" pause 196
+if FAKE_COLLABORATOR_PERMISSION=read "$target/bin/agentic-loop" resume 196 2>/dev/null; then fail 'resume succeeded without repository write permission'; fi
+grep -Eq '^196 paused open' "$state" || fail 'a denied resume changed Issue state'
+comments_before=$(wc -l < "$FAKE_GH_ROOT/$state_key.comments")
+"$target/bin/agentic-loop" pause 196
+[[ $(wc -l < "$FAKE_GH_ROOT/$state_key.comments") -eq $comments_before ]] || fail 'a repeated pause on an already-paused Issue was not a harmless no-op'
+"$target/bin/agentic-loop" abort 196 --reason 'cutting over to a manual fix'
+grep -Eq '^196 parked open' "$state" || fail 'abort after pause did not move the Issue to agent:parked'
+[[ ! -r "$closes" ]] || ! grep -Fq $'^196\t' "$closes" || fail 'abort must never close an Issue'
+if "$target/bin/agentic-loop" pause 196 2>/dev/null; then fail 'pause succeeded on an already-parked (aborted) Issue'; fi
+grep -Eq '^196 parked open' "$state" || fail 'a refused pause changed an aborted Issue'
+"$target/bin/agentic-loop" abort 196
+grep -Eq '^196 parked open' "$state" || fail 'a repeated abort on an already-parked Issue was not a harmless no-op'
+"$target/bin/agentic-loop" resume 196
+grep -Eq '^196 queued open' "$state" || fail 'resume did not re-queue an aborted (agent:parked) Issue through the existing dispose.sh path'
+
 fi
 
 if [[ $TEST_GROUP == all || $TEST_GROUP == auxiliary ]]; then
@@ -4381,7 +4501,7 @@ grep -Fq '[foundation]' "$migration_target/.agentic-loop.toml" || fail 'migratio
 resolved_revision=$(git -C "$PROJECT_ROOT" rev-parse HEAD)
 assert_contains "$migration_target/.agentic-loop.toml" "revision = \"$resolved_revision\"" 'migration apply did not pin the applied revision'
 [[ $(yq -p json -o yaml '.source.revision' "$migration_target/.agentic-loop/manifest.json") == "$resolved_revision" ]] || fail 'upgrade manifest did not record the applied revision'
-[[ $(yq -p json -o yaml '.migration_level' "$migration_target/.agentic-loop/manifest.json") -eq 3 ]] || fail 'manifest migration_level was not bumped after applying the migration'
+[[ $(yq -p json -o yaml '.migration_level' "$migration_target/.agentic-loop/manifest.json") -eq 4 ]] || fail 'manifest migration_level was not bumped after applying the migration'
 migration_rerun=$("$migration_target/bin/agentic-loop" upgrade --source "$PROJECT_ROOT")
 [[ $migration_rerun == *'変更はありません'* ]] || fail 'rerunning upgrade after a completed migration was not a no-op'
 

@@ -37,7 +37,7 @@ fi
 readonly WORKTREE_ROOT="$(dirname "$REPO_ROOT")/$(basename "$REPO_ROOT")-worktrees"
 readonly CONFIG_FILE="$REPO_ROOT/.agentic-loop.toml"
 readonly CONFIG_LOCAL="$REPO_ROOT/.agentic-loop.local.toml"
-readonly LABELS=(queued running needs-input in-review stopping completed failed parked stale blocked cancelled superseded duplicate merged)
+readonly LABELS=(queued running needs-input in-review stopping completed failed parked stale blocked paused cancelled superseded duplicate merged)
 readonly DISPOSITION_LABELS=(cancelled superseded duplicate merged)
 # Legacy priority:* label to numeric marker mapping, used only by the one-time
 # setup migration (docs/decisions/0015-numeric-priority-marker.md). New queue
@@ -95,6 +95,7 @@ POLL_MAX_SECONDS=120
 MAX_WORKERS=4
 LEASE_SECONDS=300
 STOP_TIMEOUT=0
+PAUSE_GRACE_SECONDS=120
 STALE_DAYS=30
 GRAPHQL_RESERVE=500
 CORE_RESERVE=500
@@ -142,6 +143,8 @@ source "$SCRIPT_ROOT/bin/lib/agentic-loop/project.sh"
 source "$SCRIPT_ROOT/bin/lib/agentic-loop/dispose.sh"
 # shellcheck source=lib/agentic-loop/worker_state.sh
 source "$SCRIPT_ROOT/bin/lib/agentic-loop/worker_state.sh"
+# shellcheck source=lib/agentic-loop/control.sh
+source "$SCRIPT_ROOT/bin/lib/agentic-loop/control.sh"
 # shellcheck source=lib/agentic-loop/dependency.sh
 source "$SCRIPT_ROOT/bin/lib/agentic-loop/dependency.sh"
 # shellcheck source=lib/agentic-loop/scope.sh
@@ -159,12 +162,14 @@ load_config || { [[ ${1:-} == doctor ]] || fail "$CONFIG_ERROR"; }
 
 usage() {
   cat >&2 <<EOF
-Usage: $PROGRAM_NAME {setup|sync-issue ISSUE|dispose ISSUE --reason cancelled|superseded|duplicate|merged [--target ISSUE]|resume ISSUE|priority ISSUE N|start|stop|status [--format json] [--watch [N]]|doctor [--format json]|metrics [--days N] [--as-of EPOCH] [--format json]|tail [--issue N] [--follow]|trace ISSUE [--format json]|trace --audit [--days N] [--format json]|capabilities [--format json]|upgrade [--source PATH|--revision SHA] [--apply] [--approve] [--rollback] [--skip-verify] [--overwrite PATH]... [--format json]}
+Usage: $PROGRAM_NAME {setup|sync-issue ISSUE|dispose ISSUE --reason cancelled|superseded|duplicate|merged [--target ISSUE]|resume ISSUE|pause ISSUE [--reason TEXT]|abort ISSUE [--reason TEXT]|priority ISSUE N|start|stop|status [--format json] [--watch [N]]|doctor [--format json]|metrics [--days N] [--as-of EPOCH] [--format json]|tail [--issue N] [--follow]|trace ISSUE [--format json]|trace --audit [--days N] [--format json]|capabilities [--format json]|upgrade [--source PATH|--revision SHA] [--apply] [--approve] [--rollback] [--skip-verify] [--overwrite PATH]... [--format json]}
 
   setup   Create or reuse this repository's labels and Project
   sync-issue  Add one Issue to the Project now, or queue a retry
   dispose     Authorized, auditable cancellation or consolidation of an Issue
-  resume      Authorized re-queue of a disposed (closed) or parked (open) Issue
+  resume      Authorized re-queue of a disposed (closed), parked (open), or paused (open) Issue
+  pause       Authorized, non-terminal pause of one Issue's execution (queue/worker untouched otherwise)
+  abort       Authorized, non-terminal abort of one Issue's execution into agent:parked (no disposal)
   priority    Set an Issue's numeric priority (0-100) via its body marker
   start   Start one background supervisor for this repository
   stop    Stop claiming work and drain running workers
@@ -186,6 +191,8 @@ main() {
     sync-issue) [[ $# -eq 2 ]] || fail 'sync-issue requires one Issue number'; cmd_sync_issue "$2" ;;
     dispose) cmd_dispose "${@:2}" ;;
     resume) [[ $# -eq 2 ]] || fail 'resume requires one Issue number'; cmd_resume "$2" ;;
+    pause) cmd_pause "${@:2}" ;;
+    abort) cmd_abort "${@:2}" ;;
     priority) cmd_priority "$2" "$3" ;;
     start) [[ $# -eq 1 ]] || fail 'start takes no arguments'; cmd_start ;;
     stop) [[ $# -eq 1 ]] || fail 'stop takes no arguments'; cmd_stop ;;

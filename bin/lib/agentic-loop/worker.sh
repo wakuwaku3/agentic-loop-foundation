@@ -583,6 +583,7 @@ worker() {
       ;;
     pr-merged)
       local cleaned=1
+      worker_critical_begin "$issue"
       if trace_gate "$issue" "$RESUME_PR" "$RESUME_HEAD" "${RESUME_MERGE_COMMIT:-$RESUME_HEAD}" "${RESUME_BASE_BRANCH:-$default_branch}"; then
         if [[ -e $worktree ]]; then
           cleanup_completed_worker "$worktree" "$branch" "$RESUME_HEAD" || cleaned=0
@@ -608,6 +609,7 @@ worker() {
         project_sync_state "$issue" failed
         comment_issue "$issue" "<!-- agentic-loop:failed worker=$worker reason=traceability-invalid detail=$TRACE_INVALID_REASON resumed=1 -->\n再開時の検査でPR $RESUME_PR_URL のmergeを確認しましたが、トレーサビリティ記録の検証に失敗したため完了処理を保留しました（detail=$TRACE_INVALID_REASON）。Issueはcloseせず、既存のworktree/branchを保持します。PR本文の \`agentic-loop:traceability\` code blockを確認し、修正後に \`agent:queued\` を再度付与してください。"
       fi
+      worker_critical_end "$issue"
       clear_worker_local "$issue"
       return 0
       ;;
@@ -652,6 +654,15 @@ worker() {
   local resume_context; resume_context=$(resume_context_block "$branch")
   max_retries=$(agent_plan_max_retries)
   while :; do
+    # A pause/abort's cooperative stop request is checked only at this stage
+    # boundary (never mid-provider-call): an authorized operator's own
+    # subsequent Label/comment transition owns the outcome, so this exit stays
+    # silent (see docs/decisions/0019-issue-level-execution-control.md).
+    if worker_stop_requested "$issue"; then
+      kill "$heartbeat_pid" 2>/dev/null || true; wait "$heartbeat_pid" 2>/dev/null || true
+      lease_release "$issue" "$worker"
+      return 0
+    fi
     started=$(date +%s)
     progress_touch "$issue" plan
     plan_rc=0
@@ -676,7 +687,12 @@ worker() {
       local existing_children
       existing_children=$(repo_api "issues/$issue/sub_issues" --jq 'length' 2>/dev/null || true)
       if [[ ${existing_children:-0} == 0 ]]; then
+        # Creating native sub-Issues/dependencies is unsafe to interrupt
+        # mid-sequence (see docs/decisions/0019); a pause/abort drain waits
+        # out this marker (bounded by pause_grace_seconds) before signaling.
+        worker_critical_begin "$issue"
         if decomposition_materialize "$issue" "$plan_file"; then
+          worker_critical_end "$issue"
           kill "$heartbeat_pid" 2>/dev/null || true; wait "$heartbeat_pid" 2>/dev/null || true
           lease_release "$issue" "$worker"
           progress_touch "$issue" blocked
@@ -685,6 +701,7 @@ worker() {
           scope_cache_clear "$issue"; clear_conflict_wait "$issue"; clear_worker_local "$issue"
           return 0
         fi
+        worker_critical_end "$issue"
         progress_touch "$issue" needs-input
         set_issue_state "$issue" needs-input; project_sync_state "$issue" needs-input || true
         comment_issue "$issue" '<!-- agentic-loop:decomposition-invalid -->\n分解manifestをGitHub変更前に検証または構成できませんでした。子Issueはqueueへ公開していません。manifestのscope・依存DAG・受け入れ条件・GitHub sub-issues権限を確認してください。' || true
@@ -739,6 +756,11 @@ worker() {
     { [[ $exit_code -eq 0 ]] && agent_result_is "$result" completed; } && break
     { [[ $exit_code -eq 0 ]] && agent_result_is "$result" needs-input; } && break
     { [[ $exit_code -eq 0 ]] && agent_result_is "$result" declined; } && break
+    if worker_stop_requested "$issue"; then
+      kill "$heartbeat_pid" 2>/dev/null || true; wait "$heartbeat_pid" 2>/dev/null || true
+      lease_release "$issue" "$worker"
+      return 0
+    fi
     (( attempt >= max_retries )) && break
     attempt=$((attempt + 1))
     failure_context=$(tail -c 2000 "$result" 2>/dev/null || true)
@@ -754,6 +776,10 @@ worker() {
   lease_release "$issue" "$worker"
   project_add_pull_requests "$branch"
   if [[ $exit_code -eq 0 ]] && agent_result_is "$result" completed; then
+    # Cleanup + the final Label/close transition is unsafe to interrupt
+    # mid-sequence (see docs/decisions/0019); a pause/abort drain waits out
+    # this marker (bounded by pause_grace_seconds) before signaling.
+    worker_critical_begin "$issue"
     progress_touch "$issue" merge
     local merged_number='' merged_base='' merged_commit=''
     IFS=$'\t' read -r merged_pr merged_oid merged_number merged_base merged_commit < <(repo_api pulls --method GET -f state=closed -f head="${repository%%/*}:$branch" -f per_page=100 --jq 'map(select(.merged_at != null and .head.ref == "'"$branch"'")) | first | [.html_url, .head.sha, (.number|tostring), .base.ref, (.merge_commit_sha // .head.sha)] | @tsv' 2>/dev/null || true) || true
@@ -788,6 +814,7 @@ worker() {
       project_sync_state "$issue" failed
       comment_issue "$issue" "<!-- agentic-loop:failed worker=$worker reason=merge-or-cleanup -->\nWorkerは完了を報告しましたが、branch \`$branch\` のmerge済みPRと一致するcommitを確認できないか、安全なcleanupを完了できませんでした。Issueはcloseせず、残っているworktreeまたはbranch dataを保持します。原因確認後に再試行するには \`agent:queued\` を再度付与してください。"
     fi
+    worker_critical_end "$issue"
   elif [[ $exit_code -eq 0 ]] && agent_result_is "$result" needs-input; then
     progress_touch "$issue" needs-input
     set_issue_state "$issue" needs-input

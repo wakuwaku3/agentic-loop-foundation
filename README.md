@@ -106,6 +106,8 @@ bin/agentic-loop upgrade
 
 不要になったIssueはLabelを手で置換せず、認可済みの運用者が `bin/agentic-loop dispose 123 --reason cancelled`、または `--reason superseded|duplicate|merged --target 456` を実行します。write/maintain/admin権限をRESTで確認し、監査marker、Project状態、GitHubの `not_planned` closeを一貫して記録します。`resume 123` は同じ認可を確認して履歴を残したままqueuedへ戻します。詳細は [ADR 0010](docs/decisions/0010-authorized-issue-disposition.md) を参照してください。
 
+Supervisor全体を止めずに1件のIssueだけ実行を止めたい場合は、同じ認可で `bin/agentic-loop pause 123`（closeせず `agent:paused` へ、`resume 123` で再検証のうえ再開）、打ち切りたい場合は `bin/agentic-loop abort 123`（`agent:parked` へ。要求そのものの終了ではない）を使用します。詳細は [ADR 0019](docs/decisions/0019-issue-level-execution-control.md) を参照してください。
+
 `doctor` はGitHub認証とrepository権限、origin/default branch、plan段・exec段が使用する各AI CLI（`codex`／`claude`／`opencode`、それぞれ `AI CLI (<provider>)` として個別に検査）、Devbox、固定runtime（記録済みディレクトリの実在と永続Devbox profileの生存、nix-storeが利用可能な環境ではGC root保護の実証も追加で検査）、hooks、Supervisor、systemd service/timer、GitHub Project、設定、残存worktree/branch/logを読み取り専用で検査します。各結果を成功・警告・失敗に分類し、影響と復旧方法を日本語で表示します。必須条件の失敗がある場合だけ終了code 1、警告だけなら0です。自動監視では `bin/agentic-loop doctor --format json` を使用できます。診断はtoken本体を表示せず、修復は `setup`、`start`、install再実行などの明示的な別操作で行います。
 
 `metrics` は既存のIssue/PR/comment履歴だけから、queue待ち時間・処理時間・失敗率・手戻り・worker稼働率などの傾向を再現可能に集計する読み取り専用コマンドです（[ADR 0007](docs/decisions/0007-loop-metrics.md)）。GitHub REST(core)読み取りは1回の実行あたり最大3回に固定し、Actions/CI・GraphQL・Projects APIは呼びません。追加の外部DB・有料monitoring・API課金は一切発生しません。Issue title・コメント本文・worker識別子は取得・出力せず、worker単位の内訳やランキングも出しません。`--as-of EPOCH`で窓の終端を固定すれば、同じ入力から常に同一の出力が得られます。詳細は [運用ドキュメント](docs/operations/loop-metrics.md) を参照してください。

@@ -32,6 +32,7 @@ load_config() {
       queue.max_workers) key=MAX_WORKERS ;;
       queue.lease_seconds) key=LEASE_SECONDS ;;
       queue.stop_timeout) key=STOP_TIMEOUT ;;
+      queue.pause_grace_seconds) key=PAUSE_GRACE_SECONDS ;;
       queue.stale_days) key=STALE_DAYS ;;
       queue.graphql_reserve) key=GRAPHQL_RESERVE ;;
       queue.core_reserve) key=CORE_RESERVE ;;
@@ -76,6 +77,7 @@ validate_config() {
   [[ $MAX_WORKERS =~ ^[1-9][0-9]*$ ]] || fail 'MAX_WORKERS must be a positive integer'
   [[ $LEASE_SECONDS =~ ^[1-9][0-9]*$ ]] || fail 'LEASE_SECONDS must be a positive integer'
   [[ $STOP_TIMEOUT =~ ^[0-9]+$ ]] || fail 'STOP_TIMEOUT must be a non-negative integer'
+  [[ $PAUSE_GRACE_SECONDS =~ ^[0-9]+$ ]] || fail 'PAUSE_GRACE_SECONDS must be a non-negative integer'
   [[ $STALE_DAYS =~ ^[0-9]+$ ]] || fail 'STALE_DAYS must be a non-negative integer'
   [[ $GRAPHQL_RESERVE =~ ^[0-9]+$ ]] || fail 'GRAPHQL_RESERVE must be a non-negative integer'
   [[ $CORE_RESERVE =~ ^[0-9]+$ ]] || fail 'CORE_RESERVE must be a non-negative integer'
