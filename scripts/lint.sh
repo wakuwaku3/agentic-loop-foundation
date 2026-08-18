@@ -3,7 +3,7 @@ set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
-required=(AGENTS.md README.md Makefile .editorconfig .gitignore .codex/config.toml .claude/settings.json .claude/hooks/confirm-main-worktree-edit.sh install.sh devbox.json devbox.lock docs/policies/cost.md docs/policies/testing.md docs/policies/external-environment.md docs/policies/development-environment.md docs/policies/ai-tool-neutrality.md docs/policies/github-language.md docs/policies/validation-harness.md docs/policies/continuous-delivery.md docs/decisions/0002-github-issue-queue.md docs/decisions/0003-supervisor-resilience-and-api-budget.md docs/decisions/0004-worker-resume-and-handoff.md docs/decisions/0005-status-observability.md docs/decisions/0006-worker-hang-timeout.md docs/decisions/0007-loop-metrics.md docs/decisions/0009-foundation-upgrade.md docs/decisions/0010-authorized-issue-disposition.md docs/decisions/0012-provider-pool-fallback.md docs/decisions/0013-agentic-loop-modules.md docs/decisions/0014-scope-structural-conflict.md docs/decisions/0015-numeric-priority-marker.md docs/operations/issue-queue.md docs/operations/codebase-diagnosis.md docs/operations/loop-metrics.md docs/operations/upgrade.md .agentic-loop.toml .agentic-loop/guard-secrets.sh .agentic-loop/update-main.sh .agentic-loop/diagnose-codebase.sh .githooks/pre-commit .githooks/pre-push .agents/skills/submit-requirement/SKILL.md .agents/skills/diagnose-codebase/SKILL.md .claude/skills/submit-requirement/SKILL.md .claude/skills/diagnose-codebase/SKILL.md bin/agentic-loop bin/agentic-loop-diagnose bin/lib/agentic-loop/common.sh bin/lib/agentic-loop/config.sh bin/lib/agentic-loop/api.sh bin/lib/agentic-loop/agent.sh bin/lib/agentic-loop/setup.sh bin/lib/agentic-loop/service.sh bin/lib/agentic-loop/status.sh bin/lib/agentic-loop/doctor.sh bin/lib/agentic-loop/upgrade.sh bin/lib/agentic-loop/metrics.sh bin/lib/agentic-loop/project.sh bin/lib/agentic-loop/dispose.sh bin/lib/agentic-loop/worker_state.sh bin/lib/agentic-loop/dependency.sh bin/lib/agentic-loop/scope.sh bin/lib/agentic-loop/priority.sh bin/lib/agentic-loop/supervisor.sh bin/lib/agentic-loop/worker.sh scripts/check-environment.sh scripts/install-target.sh scripts/lib/foundation-files.sh scripts/upgrade-target.sh scripts/upgrade/migrations/0001-foundation-config-section.sh)
+required=(AGENTS.md README.md Makefile .editorconfig .gitignore .codex/config.toml .claude/settings.json .claude/hooks/confirm-main-worktree-edit.sh install.sh devbox.json devbox.lock docs/policies/cost.md docs/policies/testing.md docs/policies/external-environment.md docs/policies/development-environment.md docs/policies/ai-tool-neutrality.md docs/policies/github-language.md docs/policies/validation-harness.md docs/policies/continuous-delivery.md docs/decisions/0002-github-issue-queue.md docs/decisions/0003-supervisor-resilience-and-api-budget.md docs/decisions/0004-worker-resume-and-handoff.md docs/decisions/0005-status-observability.md docs/decisions/0006-worker-hang-timeout.md docs/decisions/0007-loop-metrics.md docs/decisions/0009-foundation-upgrade.md docs/decisions/0010-authorized-issue-disposition.md docs/decisions/0012-provider-pool-fallback.md docs/decisions/0013-agentic-loop-modules.md docs/decisions/0014-scope-structural-conflict.md docs/decisions/0015-numeric-priority-marker.md docs/decisions/0016-failure-park-not-close.md docs/operations/issue-queue.md docs/operations/codebase-diagnosis.md docs/operations/loop-metrics.md docs/operations/upgrade.md .agentic-loop.toml .agentic-loop/guard-secrets.sh .agentic-loop/update-main.sh .agentic-loop/diagnose-codebase.sh .githooks/pre-commit .githooks/pre-push .agents/skills/submit-requirement/SKILL.md .agents/skills/diagnose-codebase/SKILL.md .claude/skills/submit-requirement/SKILL.md .claude/skills/diagnose-codebase/SKILL.md bin/agentic-loop bin/agentic-loop-diagnose bin/lib/agentic-loop/common.sh bin/lib/agentic-loop/config.sh bin/lib/agentic-loop/api.sh bin/lib/agentic-loop/agent.sh bin/lib/agentic-loop/setup.sh bin/lib/agentic-loop/service.sh bin/lib/agentic-loop/status.sh bin/lib/agentic-loop/doctor.sh bin/lib/agentic-loop/upgrade.sh bin/lib/agentic-loop/metrics.sh bin/lib/agentic-loop/project.sh bin/lib/agentic-loop/dispose.sh bin/lib/agentic-loop/worker_state.sh bin/lib/agentic-loop/dependency.sh bin/lib/agentic-loop/scope.sh bin/lib/agentic-loop/priority.sh bin/lib/agentic-loop/supervisor.sh bin/lib/agentic-loop/worker.sh scripts/check-environment.sh scripts/install-target.sh scripts/lib/foundation-files.sh scripts/upgrade-target.sh scripts/upgrade/migrations/0001-foundation-config-section.sh)
 for file in "${required[@]}"; do
   [[ -f $file ]] || { printf 'Missing required file: %s\n' "$file" >&2; exit 1; }
 done
@@ -179,7 +179,52 @@ grep -Fq 'docs/decisions/0012-provider-pool-fallback.md' scripts/lib/foundation-
 grep -Fq 'budget_allows_claim' "${AGENTIC_LOOP_SOURCES[@]}" || { printf 'Budget guard is missing.\n' >&2; exit 1; }
 grep -Fq 'retry_failed' "${AGENTIC_LOOP_SOURCES[@]}" || { printf 'Transient-failure retry is missing.\n' >&2; exit 1; }
 grep -Fq 'exhaustion_note_pause' "${AGENTIC_LOOP_SOURCES[@]}" || { printf 'Token-exhaustion pause is missing.\n' >&2; exit 1; }
-grep -Fq 'agentic-loop:unresolved' "${AGENTIC_LOOP_SOURCES[@]}" || { printf 'Unresolvable-close disposition is missing.\n' >&2; exit 1; }
+grep -Fq 'agentic-loop:parked' "${AGENTIC_LOOP_SOURCES[@]}" || { printf 'Retry-exhausted park disposition is missing.\n' >&2; exit 1; }
+grep -Fq 'park_issue' "${AGENTIC_LOOP_SOURCES[@]}" || { printf 'park_issue is missing.\n' >&2; exit 1; }
+if grep -Fq 'agentic-loop:unresolved' "${AGENTIC_LOOP_SOURCES[@]}"; then
+  printf 'Retry-budget exhaustion must never close an Issue (see docs/decisions/0016).\n' >&2
+  exit 1
+fi
+
+# Retry-budget exhaustion is never allowed to close an Issue (docs/decisions/
+# 0016): every `issues/$issue" --method PATCH -f state=closed` call site must
+# be one of the 4 allowlisted dispositions (worker.sh completed x2,
+# worker_state.sh stale x1, dispose.sh x1). A 5th call site, or one appearing
+# inside retry_failed/recover_expired, means a failure path started closing
+# Issues again.
+close_pattern='issues/$issue" --method PATCH -f state=closed'
+close_total=0
+for src in "${AGENTIC_LOOP_SOURCES[@]}"; do
+  count=$(grep -Fc -- "$close_pattern" "$src" 2>/dev/null || true)
+  close_total=$((close_total + count))
+done
+if (( close_total != 4 )); then
+  printf 'Issue-close call sites changed: expected exactly 4 (worker.sh completed x2, worker_state.sh stale x1, dispose.sh x1), found %s.\n' "$close_total" >&2
+  exit 1
+fi
+for guarded_fn in retry_failed recover_expired; do
+  fn_body=$(awk -v fn="$guarded_fn" '
+    $0 ~ "^" fn "\\(\\) \\{" { capture=1; next }
+    capture && /^}/ { capture=0 }
+    capture { print }
+  ' bin/lib/agentic-loop/worker_state.sh)
+  if grep -Fq 'state=closed' <<< "$fn_body"; then
+    printf '%s must not close Issues directly; retry-budget exhaustion must park, not close (see docs/decisions/0016).\n' "$guarded_fn" >&2
+    exit 1
+  fi
+done
+grep -Fq 'state=closed -f state_reason=not_planned' bin/lib/agentic-loop/worker_state.sh || {
+  printf 'Stale close must record state_reason=not_planned.\n' >&2
+  exit 1
+}
+grep -Fq 'state=closed -f state_reason=not_planned' bin/lib/agentic-loop/dispose.sh || {
+  printf 'Dispose close must record state_reason=not_planned.\n' >&2
+  exit 1
+}
+grep -Fq 'docs/decisions/0016-failure-park-not-close.md' scripts/lib/foundation-files.sh || {
+  printf 'Failure-park ADR is not distributed.\n' >&2
+  exit 1
+}
 grep -Fq 'recover_expired || true' "${AGENTIC_LOOP_SOURCES[@]}" || { printf 'Supervisor poll is not resilient to transient API errors.\n' >&2; exit 1; }
 grep -Fq 'supervisor_graceful_shutdown' "${AGENTIC_LOOP_SOURCES[@]}" || { printf 'Graceful shutdown handler is missing.\n' >&2; exit 1; }
 grep -Fq 'setsid "$0" _worker' "${AGENTIC_LOOP_SOURCES[@]}" || { printf 'Workers are not started in their own process group.\n' >&2; exit 1; }

@@ -121,7 +121,7 @@ project_add_content() {
 }
 
 
-project_option_for_state() { case $1 in queued) printf Queued;; running) printf Running;; needs-input) printf 'Needs input';; in-review) printf 'In review';; completed) printf Done;; failed) printf Failed;; stale) printf Stale;; blocked) printf Blocked;; stopping) printf Stopping;; cancelled) printf Cancelled;; superseded) printf Superseded;; duplicate) printf Duplicate;; merged) printf Merged;; *) printf Inbox;; esac; }
+project_option_for_state() { case $1 in queued) printf Queued;; running) printf Running;; needs-input) printf 'Needs input';; in-review) printf 'In review';; completed) printf Done;; failed) printf Failed;; parked) printf Parked;; stale) printf Stale;; blocked) printf Blocked;; stopping) printf Stopping;; cancelled) printf Cancelled;; superseded) printf Superseded;; duplicate) printf Duplicate;; merged) printf Merged;; *) printf Inbox;; esac; }
 
 project_option_for_category() { case $1 in loop-continuity) printf 'Loop continuity';; confidentiality-incident) printf 'Confidentiality incident';; integrity-incident) printf 'Integrity incident';; availability-incident) printf 'Availability incident';; feature) printf Feature;; improvement) printf Improvement;; *) return 1;; esac; }
 
@@ -267,6 +267,9 @@ rebuild_project_hints() {
 # poll. Without it, an idle poll performs separate list requests for running,
 # queued, needs-input, failed and blocked Issues. Rows are:
 # number<TAB>agent-state<TAB>updated_at<TAB>created_at<TAB>body(base64)<TAB>categories<TAB>category_rank<TAB>priority_value.
+# agent:parked deliberately falls into "other" here (no dedicated branch): it
+# must never be claimed, retried, or recovered by any automatic path (see
+# docs/decisions/0016), and "other" is consulted by none of those paths.
 SUPERVISOR_SNAPSHOT=''
 
 refresh_supervisor_snapshot() {

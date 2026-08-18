@@ -61,6 +61,7 @@ status_snapshot_fetch() {
       elif any(.labels[]; .name == "agent:queued") then "queued"
       elif any(.labels[]; .name == "agent:needs-input") then "needs-input"
       elif any(.labels[]; .name == "agent:failed") then "failed"
+      elif any(.labels[]; .name == "agent:parked") then "parked"
       elif any(.labels[]; .name == "agent:in-review") then "in-review"
       elif any(.labels[]; .name == "agent:blocked") then "blocked"
       else "other" end),
@@ -353,6 +354,7 @@ status_collect_snapshot() {
       queued) QUEUE_NUM+=("$num"); QUEUE_TITLE+=("$title"); QUEUE_PRIORITY+=("$priority"); QUEUE_CATRANK+=("$catrank"); QUEUE_CREATED+=("$created") ;;
       needs-input) NEEDSINPUT_NUM+=("$num"); NEEDSINPUT_TITLE+=("$title") ;;
       failed) FAILED_NUM+=("$num"); FAILED_TITLE+=("$title") ;;
+      parked) PARKED_NUM+=("$num"); PARKED_TITLE+=("$title") ;;
       in-review) INREVIEW_NUM+=("$num"); INREVIEW_TITLE+=("$title") ;;
       blocked) BLOCKED_NUM+=("$num"); BLOCKED_TITLE+=("$title") ;;
     esac
@@ -487,6 +489,7 @@ status_render_text() {
     printf '状態サマリ:\n'
     status_render_text_state_line needs-input NEEDSINPUT_NUM
     status_render_text_state_line failed FAILED_NUM
+    status_render_text_state_line parked PARKED_NUM
     status_render_text_state_line in-review INREVIEW_NUM
     status_render_text_state_line blocked BLOCKED_NUM
     status_render_text_state_line stale STALE_NUM
@@ -615,6 +618,8 @@ status_render_json() {
   printf ','
   status_render_json_state_group failed FAILED_NUM FAILED_TITLE
   printf ','
+  status_render_json_state_group parked PARKED_NUM PARKED_TITLE
+  printf ','
   status_render_json_state_group in-review INREVIEW_NUM INREVIEW_TITLE
   printf ','
   status_render_json_state_group blocked BLOCKED_NUM BLOCKED_TITLE
@@ -676,7 +681,7 @@ cmd_status() {
   fi
   declare -ga RUN_NUM=() RUN_TITLE=()
   declare -ga QUEUE_NUM=() QUEUE_TITLE=() QUEUE_PRIORITY=() QUEUE_CATRANK=() QUEUE_CREATED=()
-  declare -ga NEEDSINPUT_NUM=() NEEDSINPUT_TITLE=() FAILED_NUM=() FAILED_TITLE=() INREVIEW_NUM=() INREVIEW_TITLE=() BLOCKED_NUM=() BLOCKED_TITLE=()
+  declare -ga NEEDSINPUT_NUM=() NEEDSINPUT_TITLE=() FAILED_NUM=() FAILED_TITLE=() PARKED_NUM=() PARKED_TITLE=() INREVIEW_NUM=() INREVIEW_TITLE=() BLOCKED_NUM=() BLOCKED_TITLE=()
   declare -ga STALE_NUM=() STALE_TITLE=()
   declare -ga ANOMALY_LEVEL=() ANOMALY_CODE=() ANOMALY_SUBJECT=() ANOMALY_DETAIL=()
   declare -g STATUS_GITHUB_OK=1 STATUS_STALE_TRUNCATED=0 STATUS_SNAPSHOT_RAW='' STATUS_SNAPSHOT_FETCHED='' STATUS_STALE_RAW='' STATUS_STALE_FETCHED=''

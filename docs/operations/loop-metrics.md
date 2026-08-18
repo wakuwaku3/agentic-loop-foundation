@@ -49,7 +49,7 @@ Actions（CI run）、GraphQL、Projects APIは読まない。理由は[ADR 0007
 
 ### 転帰（disposition）
 
-`completed` / `unresolved` / `stale` / `declined` / `open` / `other` の6種。closedなIssueはそのclose時刻が窓に入っている場合だけ数え、`declined`markerが1件でもあれば（labelが更新されない既知の非対称性があるため）labelより優先して`declined`と判定する。それ以外はlabel（`agent:completed`→`completed`、`agent:failed`のままclose→`unresolved`、`agent:stale`→`stale`）で判定し、いずれにも当たらない場合は`other`とし、`warnings`に`label_marker_mismatch`として明示する。openなIssueは時間帰属なしで常に`open`に数える。
+`completed` / `unresolved` / `stale` / `declined` / `parked` / `open` / `other` の7種。closedなIssueはそのclose時刻が窓に入っている場合だけ数え、`declined`markerが1件でもあれば（labelが更新されない既知の非対称性があるため）labelより優先して`declined`と判定する。それ以外はlabel（`agent:completed`→`completed`、`agent:failed`のままclose→`unresolved`、`agent:stale`→`stale`）で判定し、いずれにも当たらない場合は`other`とし、`warnings`に`label_marker_mismatch`として明示する。openなIssueは時間帰属なしで数え、`agent:parked`（リトライ予算を使い切った人間トリアージ待ち。[ADR 0016](../decisions/0016-failure-park-not-close.md)）を持つものは`parked`、それ以外は`open`に分類する（`unresolved`は失敗由来のcloseがまだ存在した過去の窓との後方互換のためのキーで、本ADR以降は新規に発生しない）。
 
 ### category / priority別集計
 
@@ -59,7 +59,7 @@ Actions（CI run）、GraphQL、Projects APIは読まない。理由は[ADR 0007
 
 `conflict_wait` と `scope_conflict` は、直列化が必要な**hard conflictのみ**を数える。理由tokenは `structural:path`（rename/move・directory再編でpath重複）／`*`（全体・`exclusive_paths`昇格）／`unknown`（`unknown_scope=isolated` 同士）／`env:NAME`（外部環境の完全一致）のいずれかで、`scope-conflict` markerの `token=` に記録される。通常の同一path編集（soft overlap）は並列実行され、`scope-conflict` markerもカウントも発生しない（merge時はrebase・再検証で収束する。緩和前はpath重複の全件がカウントされていたため、件数は構造的衝突のみに縮小する）。
 
-`attempts`（=lease件数）、`retry`、`recovered`、`worker_timeout`、`exhausted`、`scope_conflict`、`dependency_block`、`needs_input_round`、`resume`（`handoff`の`phase!=fresh`）、`requeue`（retry+recovered+answer-detected+exhausted+shutdownの合計）、`replan`、`open_attempts`（終端未観測の試行数。現在進行中の試行も含む中立的な件数）、`unmerged_pr`。
+`attempts`（=lease件数）、`retry`、`recovered`、`worker_timeout`、`exhausted`、`scope_conflict`、`dependency_block`、`needs_input_round`、`resume`（`handoff`の`phase!=fresh`）、`requeue`（retry+recovered+answer-detected+exhausted+shutdownの合計）、`replan`、`parked`（`retry_failed`が`agent:parked`へ移した回数。区間自体は直前の`failed`/`recover-exhausted`markerで既に閉じているため`attempt_duration`には影響しない）、`open_attempts`（終端未観測の試行数。現在進行中の試行も含む中立的な件数）、`unmerged_pr`。
 
 ### 失敗理由（failures）
 
@@ -77,7 +77,7 @@ Actions（CI run）、GraphQL、Projects APIは読まない。理由は[ADR 0007
   "generated_at": 1700000000,
   "window": {"start": 1697408000, "end": 1700000000, "days": 30},
   "github_available": true,
-  "dispositions": {"completed": 0, "unresolved": 0, "stale": 0, "declined": 0, "open": 0, "other": 0},
+  "dispositions": {"completed": 0, "unresolved": 0, "stale": 0, "declined": 0, "cancelled": 0, "superseded": 0, "duplicate": 0, "merged": 0, "parked": 0, "open": 0, "other": 0},
   "durations": {"queue_wait": {"n": 0, "mean": null, "p50": null, "p90": null, "max": null}, "...": "..."},
   "counters": {"attempts": 0, "retry": 0, "...": "..."},
   "failures": {},
@@ -106,7 +106,7 @@ Actions（CI run）、GraphQL、Projects APIは読まない。理由は[ADR 0007
 
 ```
 対象期間: 2026-05-15 〜 2026-08-13（90日間、as-of epoch=1786579200)
-転帰: completed=15 unresolved=2 stale=0 declined=0 open=25 other=3
+転帰: completed=15 unresolved=2 stale=0 declined=0 cancelled=0 superseded=0 duplicate=0 merged=0 parked=0 open=25 other=3
 待ち時間・所要時間:
   queue_wait: n=468 mean=29466s p50=51109s p90=53448s max=65481s
   open_queue_wait: n=0（欠損）

@@ -8,7 +8,7 @@ issue_prompt() {
   local issue=$1 repository=$2
   cat <<EOF
 $repository の GitHub Issue #$issue を、リポジトリの submit-requirement workflow に従って完了してください。
-Issueとそのコメントを要求として扱い、この専用worktreeだけで作業します。まず調査し、安全で可逆的な判断を行い、全検証とsecret guardを実行し、commit、push、PR作成、checksとreview feedbackの確認、不具合修正、mergeまで完遂します。既存のCodex loginとworkspace-write sandboxだけを使用し、別途課金される認証情報、有料の外部service、安全でないsandbox bypass、hook bypassは使用しません。GitHubのIssue、Label、comment、PR、checkなどRESTで可能なcore操作は \`gh api\` のREST endpointを使い、GraphQLはbest-effortのProjects操作だけに限定します。GitHubのIssue、PR、それらへのコメントとレビューは、コード、ログ、識別子、固有名詞、引用の必要な原文を除き、日本語で記述します。Issueに進捗と検証証跡をコメントします。人の判断が必要な重大な決定または回復不能な権限問題がある場合に限り、正確な質問をコメントし、最終応答を AGENTIC_LOOP_RESULT=needs-input で終えます。mergeと検証が完了した場合は AGENTIC_LOOP_RESULT=completed で終えます。実施が不要（既に満たされている、要求が誤りや重複など）または実施すべきでないと判断した場合は、理由を説明し AGENTIC_LOOP_RESULT=declined で終えます（Issueはcloseされます）。それ以外は安全に再試行できる失敗理由を説明し、AGENTIC_LOOP_RESULT=failed で終えます（Supervisorが自動再試行し、上限到達でcloseします）。
+Issueとそのコメントを要求として扱い、この専用worktreeだけで作業します。まず調査し、安全で可逆的な判断を行い、全検証とsecret guardを実行し、commit、push、PR作成、checksとreview feedbackの確認、不具合修正、mergeまで完遂します。既存のCodex loginとworkspace-write sandboxだけを使用し、別途課金される認証情報、有料の外部service、安全でないsandbox bypass、hook bypassは使用しません。GitHubのIssue、Label、comment、PR、checkなどRESTで可能なcore操作は \`gh api\` のREST endpointを使い、GraphQLはbest-effortのProjects操作だけに限定します。GitHubのIssue、PR、それらへのコメントとレビューは、コード、ログ、識別子、固有名詞、引用の必要な原文を除き、日本語で記述します。Issueに進捗と検証証跡をコメントします。人の判断が必要な重大な決定または回復不能な権限問題がある場合に限り、正確な質問をコメントし、最終応答を AGENTIC_LOOP_RESULT=needs-input で終えます。mergeと検証が完了した場合は AGENTIC_LOOP_RESULT=completed で終えます。実施が不要（既に満たされている、要求が誤りや重複など）または実施すべきでないと判断した場合は、理由を説明し AGENTIC_LOOP_RESULT=declined で終えます（\`agent:needs-input\` に載り、workerはcloseしません。認可済みの運用者の判断を待ちます）。それ以外は安全に再試行できる失敗理由を説明し、AGENTIC_LOOP_RESULT=failed で終えます（Supervisorが自動再試行し、上限到達でもcloseせず \`agent:parked\`（人間トリアージ待ち）へ移します）。
 EOF
 }
 
@@ -779,7 +779,7 @@ worker() {
     progress_touch "$issue" failed
     set_issue_state "$issue" failed
     project_sync_state "$issue" failed
-    comment_issue "$issue" "<!-- agentic-loop:failed worker=$worker exit=$exit_code -->\nWorkerは検証済みのmergeを完了せずに停止しました。Logはlocalにのみ保持され、秘密情報はここに転記されません。Supervisorが自動的に再試行し、上限回数に達したら解決不能とみなしてcloseします。"
+    comment_issue "$issue" "<!-- agentic-loop:failed worker=$worker exit=$exit_code -->\nWorkerは検証済みのmergeを完了せずに停止しました。Logはlocalにのみ保持され、秘密情報はここに転記されません。Supervisorが自動的に再試行し、上限回数に達してもcloseせず \`agent:parked\`（人間トリアージ待ち）へ移します。"
   fi
   scope_cache_clear "$issue"
   clear_conflict_wait "$issue"

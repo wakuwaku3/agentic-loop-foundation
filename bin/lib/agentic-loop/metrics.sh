@@ -216,6 +216,11 @@ metrics_process_event() {
     replan)
       CNT_REPLAN=$((CNT_REPLAN + 1))
       ;;
+    parked)
+      # The attempt interval was already closed by the failed/recover-exhausted
+      # marker that preceded this park; this is purely a disposition counter.
+      CNT_PARKED=$((CNT_PARKED + 1))
+      ;;
     *) : ;;
   esac
   return 0
@@ -259,8 +264,8 @@ metrics_render_unavailable() {
 metrics_render_text() {
   local key
   say "対象期間: $(date -u -d "@$WINDOW_START" '+%Y-%m-%d') 〜 $(date -u -d "@$WINDOW_END" '+%Y-%m-%d')（${DAYS}日間、as-of epoch=$WINDOW_END)"
-  printf '転帰: completed=%s unresolved=%s stale=%s declined=%s cancelled=%s superseded=%s duplicate=%s merged=%s open=%s other=%s\n' \
-    "${DISP_COUNT[completed]}" "${DISP_COUNT[unresolved]}" "${DISP_COUNT[stale]}" "${DISP_COUNT[declined]}" "${DISP_COUNT[cancelled]}" "${DISP_COUNT[superseded]}" "${DISP_COUNT[duplicate]}" "${DISP_COUNT[merged]}" "${DISP_COUNT[open]}" "${DISP_COUNT[other]}"
+  printf '転帰: completed=%s unresolved=%s stale=%s declined=%s cancelled=%s superseded=%s duplicate=%s merged=%s parked=%s open=%s other=%s\n' \
+    "${DISP_COUNT[completed]}" "${DISP_COUNT[unresolved]}" "${DISP_COUNT[stale]}" "${DISP_COUNT[declined]}" "${DISP_COUNT[cancelled]}" "${DISP_COUNT[superseded]}" "${DISP_COUNT[duplicate]}" "${DISP_COUNT[merged]}" "${DISP_COUNT[parked]}" "${DISP_COUNT[open]}" "${DISP_COUNT[other]}"
   printf '待ち時間・所要時間:\n'
   metrics_dist_text queue_wait "$DIST_QUEUE"
   metrics_dist_text open_queue_wait "$DIST_OPENQUEUE"
@@ -275,8 +280,8 @@ metrics_render_text() {
   metrics_dist_text plan_seconds "$DIST_PLANSEC"
   metrics_dist_text exec_seconds "$DIST_EXECSEC"
   metrics_dist_text pr_review_wait "$DIST_PRWAIT"
-  printf '件数: attempts=%s retry=%s recovered=%s worker_timeout=%s exhausted=%s scope_conflict=%s dependency_block=%s needs_input_round=%s resume=%s requeue=%s replan=%s open_attempts=%s unmerged_pr=%s\n' \
-    "$CNT_ATTEMPTS" "$CNT_RETRY" "$CNT_RECOVERED" "$CNT_WORKERTIMEOUT" "$CNT_EXHAUSTED" "$CNT_SCOPECONFLICT" "$CNT_DEPBLOCK" "$CNT_NEEDSINPUT" "$CNT_RESUME" "$CNT_REQUEUE" "$CNT_REPLAN" "${#ATTOPEN[@]}" "$UNMERGED_PR_COUNT"
+  printf '件数: attempts=%s retry=%s recovered=%s worker_timeout=%s exhausted=%s scope_conflict=%s dependency_block=%s needs_input_round=%s resume=%s requeue=%s replan=%s parked=%s open_attempts=%s unmerged_pr=%s\n' \
+    "$CNT_ATTEMPTS" "$CNT_RETRY" "$CNT_RECOVERED" "$CNT_WORKERTIMEOUT" "$CNT_EXHAUSTED" "$CNT_SCOPECONFLICT" "$CNT_DEPBLOCK" "$CNT_NEEDSINPUT" "$CNT_RESUME" "$CNT_REQUEUE" "$CNT_REPLAN" "$CNT_PARKED" "${#ATTOPEN[@]}" "$UNMERGED_PR_COUNT"
   if (( ${#FAILREASON[@]} > 0 )); then
     printf '失敗理由:\n'
     for key in $(printf '%s\n' "${!FAILREASON[@]}" | sort); do
@@ -308,16 +313,16 @@ metrics_render_json() {
   local sep='' key
   printf '{"schema_version":1,"generated_at":%s,"window":{"start":%s,"end":%s,"days":%s},"github_available":true,' \
     "$(date +%s)" "$WINDOW_START" "$WINDOW_END" "$DAYS"
-  printf '"dispositions":{"completed":%s,"unresolved":%s,"stale":%s,"declined":%s,"cancelled":%s,"superseded":%s,"duplicate":%s,"merged":%s,"open":%s,"other":%s},' \
-    "${DISP_COUNT[completed]}" "${DISP_COUNT[unresolved]}" "${DISP_COUNT[stale]}" "${DISP_COUNT[declined]}" "${DISP_COUNT[cancelled]}" "${DISP_COUNT[superseded]}" "${DISP_COUNT[duplicate]}" "${DISP_COUNT[merged]}" "${DISP_COUNT[open]}" "${DISP_COUNT[other]}"
+  printf '"dispositions":{"completed":%s,"unresolved":%s,"stale":%s,"declined":%s,"cancelled":%s,"superseded":%s,"duplicate":%s,"merged":%s,"parked":%s,"open":%s,"other":%s},' \
+    "${DISP_COUNT[completed]}" "${DISP_COUNT[unresolved]}" "${DISP_COUNT[stale]}" "${DISP_COUNT[declined]}" "${DISP_COUNT[cancelled]}" "${DISP_COUNT[superseded]}" "${DISP_COUNT[duplicate]}" "${DISP_COUNT[merged]}" "${DISP_COUNT[parked]}" "${DISP_COUNT[open]}" "${DISP_COUNT[other]}"
   printf '"durations":{"queue_wait":%s,"open_queue_wait":%s,"attempt_duration":%s,"needs_input_wait":%s,"open_needs_input_wait":%s,"conflict_wait":%s,"open_conflict_wait":%s,"dependency_wait":%s,"open_dependency_wait":%s,"lead_time":%s,"plan_seconds":%s,"exec_seconds":%s,"pr_review_wait":%s},' \
     "$(metrics_dist_json "$DIST_QUEUE")" "$(metrics_dist_json "$DIST_OPENQUEUE")" "$(metrics_dist_json "$DIST_ATTEMPT")" \
     "$(metrics_dist_json "$DIST_NEEDSINPUT")" "$(metrics_dist_json "$DIST_OPENNEEDSINPUT")" \
     "$(metrics_dist_json "$DIST_CONFLICT")" "$(metrics_dist_json "$DIST_OPENCONFLICT")" \
     "$(metrics_dist_json "$DIST_DEPENDENCY")" "$(metrics_dist_json "$DIST_OPENDEPENDENCY")" \
     "$(metrics_dist_json "$DIST_LEADTIME")" "$(metrics_dist_json "$DIST_PLANSEC")" "$(metrics_dist_json "$DIST_EXECSEC")" "$(metrics_dist_json "$DIST_PRWAIT")"
-  printf '"counters":{"attempts":%s,"retry":%s,"recovered":%s,"worker_timeout":%s,"exhausted":%s,"scope_conflict":%s,"dependency_block":%s,"needs_input_round":%s,"resume":%s,"requeue":%s,"replan":%s,"open_attempts":%s,"unmerged_pr":%s},' \
-    "$CNT_ATTEMPTS" "$CNT_RETRY" "$CNT_RECOVERED" "$CNT_WORKERTIMEOUT" "$CNT_EXHAUSTED" "$CNT_SCOPECONFLICT" "$CNT_DEPBLOCK" "$CNT_NEEDSINPUT" "$CNT_RESUME" "$CNT_REQUEUE" "$CNT_REPLAN" "${#ATTOPEN[@]}" "$UNMERGED_PR_COUNT"
+  printf '"counters":{"attempts":%s,"retry":%s,"recovered":%s,"worker_timeout":%s,"exhausted":%s,"scope_conflict":%s,"dependency_block":%s,"needs_input_round":%s,"resume":%s,"requeue":%s,"replan":%s,"parked":%s,"open_attempts":%s,"unmerged_pr":%s},' \
+    "$CNT_ATTEMPTS" "$CNT_RETRY" "$CNT_RECOVERED" "$CNT_WORKERTIMEOUT" "$CNT_EXHAUSTED" "$CNT_SCOPECONFLICT" "$CNT_DEPBLOCK" "$CNT_NEEDSINPUT" "$CNT_RESUME" "$CNT_REQUEUE" "$CNT_REPLAN" "$CNT_PARKED" "${#ATTOPEN[@]}" "$UNMERGED_PR_COUNT"
   printf '"failures":{'
   sep=''
   for key in $(printf '%s\n' "${!FAILREASON[@]}" | sort); do
@@ -365,14 +370,14 @@ cmd_metrics() {
 
   declare -gA ISSUE_CREATED=() ISSUE_CLOSED=() ISSUE_STATE=() ISSUE_CATEGORY=() ISSUE_PRIORITY=() ISSUE_AGENT=()
   declare -gA QSTART=() ATTOPEN=() NISTART=() CONFLSTART=() DEPSTART=() LAST_COMPLETED_AT=() HAS_DECLINED=() FAILREASON=()
-  declare -gA DISP_COUNT=([completed]=0 [unresolved]=0 [stale]=0 [declined]=0 [cancelled]=0 [superseded]=0 [duplicate]=0 [merged]=0 [open]=0 [other]=0)
+  declare -gA DISP_COUNT=([completed]=0 [unresolved]=0 [stale]=0 [declined]=0 [cancelled]=0 [superseded]=0 [duplicate]=0 [merged]=0 [parked]=0 [open]=0 [other]=0)
   declare -gA CATCOUNT=() PRICOUNT=()
   local label
   for label in "${CATEGORY_LABELS[@]}"; do CATCOUNT[$label]=0; done
   declare -ga DUR_QUEUE=() DUR_ATTEMPT=() DUR_NEEDSINPUT=() DUR_CONFLICT=() DUR_DEPENDENCY=() DUR_LEADTIME=() DUR_PLANSEC=() DUR_EXECSEC=() DUR_PRWAIT=()
   declare -ga OPEN_QUEUE=() OPEN_NEEDSINPUT=() OPEN_CONFLICT=() OPEN_DEPENDENCY=()
   declare -ga WARNINGS=()
-  declare -g CNT_ATTEMPTS=0 CNT_RETRY=0 CNT_RECOVERED=0 CNT_WORKERTIMEOUT=0 CNT_EXHAUSTED=0 CNT_SCOPECONFLICT=0 CNT_DEPBLOCK=0 CNT_NEEDSINPUT=0 CNT_RESUME=0 CNT_REQUEUE=0 CNT_REPLAN=0
+  declare -g CNT_ATTEMPTS=0 CNT_RETRY=0 CNT_RECOVERED=0 CNT_WORKERTIMEOUT=0 CNT_EXHAUSTED=0 CNT_SCOPECONFLICT=0 CNT_DEPBLOCK=0 CNT_NEEDSINPUT=0 CNT_RESUME=0 CNT_REQUEUE=0 CNT_REPLAN=0 CNT_PARKED=0
   declare -g UTIL_SUM=0 UNMERGED_PR_COUNT=0
 
   local since_iso issues_raw events_raw pulls_raw
@@ -437,6 +442,8 @@ cmd_metrics() {
         [[ $disposition == completed && -n ${LAST_COMPLETED_AT[$n]:-} ]] && \
           DUR_LEADTIME+=("$((LAST_COMPLETED_AT[$n] - ISSUE_CREATED[$n]))")
       fi
+    elif [[ ,${ISSUE_AGENT[$n]}, == *,agent:parked,* ]]; then
+      DISP_COUNT[parked]=$(( DISP_COUNT[parked] + 1 ))
     else
       DISP_COUNT[open]=$(( DISP_COUNT[open] + 1 ))
     fi
