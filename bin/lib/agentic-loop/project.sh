@@ -121,7 +121,7 @@ project_add_content() {
 }
 
 
-project_option_for_state() { case $1 in queued) printf Queued;; running) printf Running;; needs-input) printf 'Needs input';; in-review) printf 'In review';; completed) printf Done;; failed) printf Failed;; parked) printf Parked;; stale) printf Stale;; blocked) printf Blocked;; stopping) printf Stopping;; cancelled) printf Cancelled;; superseded) printf Superseded;; duplicate) printf Duplicate;; merged) printf Merged;; *) printf Inbox;; esac; }
+project_option_for_state() { case $1 in queued) printf Queued;; running) printf Running;; needs-input) printf 'Needs input';; in-review) printf 'In review';; completed) printf Done;; failed) printf Failed;; parked) printf Parked;; stale) printf Stale;; blocked) printf Blocked;; paused) printf Paused;; stopping) printf Stopping;; cancelled) printf Cancelled;; superseded) printf Superseded;; duplicate) printf Duplicate;; merged) printf Merged;; *) printf Inbox;; esac; }
 
 project_option_for_category() { case $1 in loop-continuity) printf 'Loop continuity';; confidentiality-incident) printf 'Confidentiality incident';; integrity-incident) printf 'Integrity incident';; availability-incident) printf 'Availability incident';; feature) printf Feature;; improvement) printf Improvement;; *) return 1;; esac; }
 
@@ -142,6 +142,10 @@ project_issue_snapshot() {
 
 project_desired_blocked_by() {
   local issue=$1 refs body_refs native_refs other reason
+  if control_pause_record_read "$issue"; then
+    printf '一時停止: @%s %s（再開: bin/agentic-loop resume %s）' "$CONTROL_PAUSE_ACTOR" "$(date -u -d "@$CONTROL_PAUSE_AT" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || printf '%s' "$CONTROL_PAUSE_AT")" "$issue"
+    return 0
+  fi
   if [[ -r $(conflict_wait_file "$issue") ]]; then IFS=$'\t' read -r other reason < "$(conflict_wait_file "$issue")" || return 1; printf '#%s scope重複: %s' "$other" "$reason"; return 0; fi
   body_refs=$(dependency_refs_from_body "$PROJECT_ISSUE_BODY") || return 1
   local native_rc=0
@@ -270,6 +274,12 @@ rebuild_project_hints() {
 # agent:parked deliberately falls into "other" here (no dedicated branch): it
 # must never be claimed, retried, or recovered by any automatic path (see
 # docs/decisions/0016), and "other" is consulted by none of those paths.
+# agent:paused gets its own "paused" branch instead, but it is consulted by
+# exactly one caller (drain_paused_workers, see docs/decisions/0019): every
+# other automatic path (claim_next, retry_failed, recover_expired,
+# triage_stale_queued, reconcile_queued_categories, requeue_answered,
+# requeue_dependency_ready) reads a different bucket, so a paused Issue is
+# structurally excluded from all of them, the same guarantee agent:parked has.
 SUPERVISOR_SNAPSHOT=''
 
 refresh_supervisor_snapshot() {
@@ -282,6 +292,7 @@ refresh_supervisor_snapshot() {
       elif any(.labels[]; .name == "agent:needs-input") then "needs-input"
       elif any(.labels[]; .name == "agent:failed") then "failed"
       elif any(.labels[]; .name == "agent:blocked") then "blocked"
+      elif any(.labels[]; .name == "agent:paused") then "paused"
       else "other" end),
      (.updated_at // "-"), .created_at,
      (if (.body // "") == "" then "-" else ((.body // "") | @base64) end),

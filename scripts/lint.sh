@@ -6,7 +6,8 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 required=(AGENTS.md README.md Makefile .editorconfig .gitignore .codex/config.toml .claude/settings.json .claude/hooks/confirm-main-worktree-edit.sh install.sh devbox.json devbox.lock docs/policies/cost.md docs/policies/testing.md docs/policies/external-environment.md docs/policies/development-environment.md docs/policies/ai-tool-neutrality.md docs/policies/github-language.md docs/policies/validation-harness.md docs/policies/continuous-delivery.md docs/decisions/0002-github-issue-queue.md docs/decisions/0003-supervisor-resilience-and-api-budget.md docs/decisions/0004-worker-resume-and-handoff.md docs/decisions/0005-status-observability.md docs/decisions/0006-worker-hang-timeout.md docs/decisions/0007-loop-metrics.md docs/decisions/0009-foundation-upgrade.md docs/decisions/0010-authorized-issue-disposition.md docs/decisions/0012-provider-pool-fallback.md docs/decisions/0013-agentic-loop-modules.md docs/decisions/0014-scope-structural-conflict.md docs/decisions/0015-numeric-priority-marker.md docs/decisions/0016-failure-park-not-close.md docs/operations/issue-queue.md docs/operations/codebase-diagnosis.md docs/operations/loop-metrics.md docs/operations/upgrade.md .agentic-loop.toml .agentic-loop/guard-secrets.sh .agentic-loop/update-main.sh .agentic-loop/diagnose-codebase.sh .githooks/pre-commit .githooks/pre-push .agents/skills/submit-requirement/SKILL.md .agents/skills/diagnose-codebase/SKILL.md .claude/skills/submit-requirement/SKILL.md .claude/skills/diagnose-codebase/SKILL.md bin/agentic-loop bin/agentic-loop-diagnose bin/lib/agentic-loop/common.sh bin/lib/agentic-loop/config.sh bin/lib/agentic-loop/api.sh bin/lib/agentic-loop/agent.sh bin/lib/agentic-loop/setup.sh bin/lib/agentic-loop/service.sh bin/lib/agentic-loop/status.sh bin/lib/agentic-loop/doctor.sh bin/lib/agentic-loop/upgrade.sh bin/lib/agentic-loop/metrics.sh bin/lib/agentic-loop/project.sh bin/lib/agentic-loop/dispose.sh bin/lib/agentic-loop/worker_state.sh bin/lib/agentic-loop/dependency.sh bin/lib/agentic-loop/scope.sh bin/lib/agentic-loop/priority.sh bin/lib/agentic-loop/supervisor.sh bin/lib/agentic-loop/worker.sh bin/lib/agentic-loop/trace.sh scripts/check-environment.sh scripts/install-target.sh scripts/lib/foundation-files.sh scripts/upgrade-target.sh scripts/upgrade/migrations/0001-foundation-config-section.sh scripts/upgrade/migrations/0002-traceability-config.sh
   docs/decisions/0017-requirement-traceability.md docs/operations/traceability.md .github/PULL_REQUEST_TEMPLATE.md
   docs/decisions/0018-repository-capability-manifest.md docs/operations/capability-manifest.md bin/lib/agentic-loop/capability.sh
-  .agentic-loop/capabilities.toml scripts/upgrade/migrations/0003-capability-manifest.sh)
+  .agentic-loop/capabilities.toml scripts/upgrade/migrations/0003-capability-manifest.sh
+  docs/decisions/0019-issue-level-execution-control.md bin/lib/agentic-loop/control.sh scripts/upgrade/migrations/0004-pause-control-config.sh)
 for file in "${required[@]}"; do
   [[ -f $file ]] || { printf 'Missing required file: %s\n' "$file" >&2; exit 1; }
 done
@@ -298,6 +299,36 @@ fi
   printf 'This Foundation repository knows all of its own capabilities; capabilities.toml must not leave anything undetermined for itself.\n' >&2
   exit 1
 }
+
+# --- Issue-level execution control: pause/resume/abort (Issue #57, ADR 0019) ---
+grep -Fq 'pause) cmd_pause' "${AGENTIC_LOOP_SOURCES[@]}" || { printf 'Pause command is not distributed through the queue CLI.\n' >&2; exit 1; }
+grep -Fq 'abort) cmd_abort' "${AGENTIC_LOOP_SOURCES[@]}" || { printf 'Abort command is not distributed through the queue CLI.\n' >&2; exit 1; }
+grep -Fq 'control_resume_paused' "${AGENTIC_LOOP_SOURCES[@]}" || { printf 'Paused-Issue resume is missing.\n' >&2; exit 1; }
+grep -Fq 'agentic-loop:pause schema=1' "${AGENTIC_LOOP_SOURCES[@]}" || { printf 'Pause audit marker is missing.\n' >&2; exit 1; }
+grep -Fq 'agentic-loop:abort schema=1' "${AGENTIC_LOOP_SOURCES[@]}" || { printf 'Abort audit marker is missing.\n' >&2; exit 1; }
+grep -Fq 'drain_paused_workers' "${AGENTIC_LOOP_SOURCES[@]}" || { printf 'Paused-Issue worker drain on restart/poll is missing.\n' >&2; exit 1; }
+grep -Fq 'worker_stop_requested' "${AGENTIC_LOOP_SOURCES[@]}" || { printf 'Cooperative worker stop-request check is missing.\n' >&2; exit 1; }
+grep -Fq 'worker_critical_active' "${AGENTIC_LOOP_SOURCES[@]}" || { printf 'Unsafe-to-interrupt critical-section guard is missing.\n' >&2; exit 1; }
+grep -Eq '^pause_grace_seconds[[:space:]]*=[[:space:]]*120$' .agentic-loop.toml || { printf 'Unsafe pause_grace_seconds default.\n' >&2; exit 1; }
+grep -Fq 'pause ISSUE' docs/operations/issue-queue.md || { printf 'pause command is not documented.\n' >&2; exit 1; }
+grep -Fq '一時停止' docs/operations/issue-queue.md || { printf 'Pause/resume/abort documentation is missing.\n' >&2; exit 1; }
+grep -Fq 'docs/decisions/0019-issue-level-execution-control.md' scripts/lib/foundation-files.sh || { printf 'Issue-level execution control ADR is not distributed.\n' >&2; exit 1; }
+grep -Fq 'bin/lib/agentic-loop/control.sh' scripts/lib/foundation-files.sh || { printf 'control.sh module is not distributed.\n' >&2; exit 1; }
+grep -Fq '追加費用ゼロ' docs/decisions/0019-issue-level-execution-control.md || { printf 'Execution control cost-neutrality is not documented.\n' >&2; exit 1; }
+# Pause/abort/resume must never close an Issue (see docs/decisions/0016): the
+# same allowlisted 4 call sites as before must remain the only ones, and the
+# new control.sh functions must not introduce a 5th.
+for guarded_fn in cmd_pause cmd_abort control_resume_paused; do
+  fn_body=$(awk -v fn="$guarded_fn" '
+    $0 ~ "^" fn "\\(\\) \\{" { capture=1; next }
+    capture && /^}/ { capture=0 }
+    capture { print }
+  ' bin/lib/agentic-loop/control.sh)
+  if grep -Fq 'state=closed' <<< "$fn_body"; then
+    printf '%s must not close Issues; pause/abort are execution control, not disposal (see docs/decisions/0019).\n' "$guarded_fn" >&2
+    exit 1
+  fi
+done
 
 for doc in README.md docs/operations/issue-queue.md docs/operations/codebase-diagnosis.md; do
   grep -Fq 'opencode' "$doc" || {

@@ -264,8 +264,8 @@ metrics_render_unavailable() {
 metrics_render_text() {
   local key
   say "対象期間: $(date -u -d "@$WINDOW_START" '+%Y-%m-%d') 〜 $(date -u -d "@$WINDOW_END" '+%Y-%m-%d')（${DAYS}日間、as-of epoch=$WINDOW_END)"
-  printf '転帰: completed=%s unresolved=%s stale=%s declined=%s cancelled=%s superseded=%s duplicate=%s merged=%s parked=%s open=%s other=%s\n' \
-    "${DISP_COUNT[completed]}" "${DISP_COUNT[unresolved]}" "${DISP_COUNT[stale]}" "${DISP_COUNT[declined]}" "${DISP_COUNT[cancelled]}" "${DISP_COUNT[superseded]}" "${DISP_COUNT[duplicate]}" "${DISP_COUNT[merged]}" "${DISP_COUNT[parked]}" "${DISP_COUNT[open]}" "${DISP_COUNT[other]}"
+  printf '転帰: completed=%s unresolved=%s stale=%s declined=%s cancelled=%s superseded=%s duplicate=%s merged=%s parked=%s paused=%s open=%s other=%s\n' \
+    "${DISP_COUNT[completed]}" "${DISP_COUNT[unresolved]}" "${DISP_COUNT[stale]}" "${DISP_COUNT[declined]}" "${DISP_COUNT[cancelled]}" "${DISP_COUNT[superseded]}" "${DISP_COUNT[duplicate]}" "${DISP_COUNT[merged]}" "${DISP_COUNT[parked]}" "${DISP_COUNT[paused]}" "${DISP_COUNT[open]}" "${DISP_COUNT[other]}"
   printf '待ち時間・所要時間:\n'
   metrics_dist_text queue_wait "$DIST_QUEUE"
   metrics_dist_text open_queue_wait "$DIST_OPENQUEUE"
@@ -313,8 +313,8 @@ metrics_render_json() {
   local sep='' key
   printf '{"schema_version":1,"generated_at":%s,"window":{"start":%s,"end":%s,"days":%s},"github_available":true,' \
     "$(date +%s)" "$WINDOW_START" "$WINDOW_END" "$DAYS"
-  printf '"dispositions":{"completed":%s,"unresolved":%s,"stale":%s,"declined":%s,"cancelled":%s,"superseded":%s,"duplicate":%s,"merged":%s,"parked":%s,"open":%s,"other":%s},' \
-    "${DISP_COUNT[completed]}" "${DISP_COUNT[unresolved]}" "${DISP_COUNT[stale]}" "${DISP_COUNT[declined]}" "${DISP_COUNT[cancelled]}" "${DISP_COUNT[superseded]}" "${DISP_COUNT[duplicate]}" "${DISP_COUNT[merged]}" "${DISP_COUNT[parked]}" "${DISP_COUNT[open]}" "${DISP_COUNT[other]}"
+  printf '"dispositions":{"completed":%s,"unresolved":%s,"stale":%s,"declined":%s,"cancelled":%s,"superseded":%s,"duplicate":%s,"merged":%s,"parked":%s,"paused":%s,"open":%s,"other":%s},' \
+    "${DISP_COUNT[completed]}" "${DISP_COUNT[unresolved]}" "${DISP_COUNT[stale]}" "${DISP_COUNT[declined]}" "${DISP_COUNT[cancelled]}" "${DISP_COUNT[superseded]}" "${DISP_COUNT[duplicate]}" "${DISP_COUNT[merged]}" "${DISP_COUNT[parked]}" "${DISP_COUNT[paused]}" "${DISP_COUNT[open]}" "${DISP_COUNT[other]}"
   printf '"durations":{"queue_wait":%s,"open_queue_wait":%s,"attempt_duration":%s,"needs_input_wait":%s,"open_needs_input_wait":%s,"conflict_wait":%s,"open_conflict_wait":%s,"dependency_wait":%s,"open_dependency_wait":%s,"lead_time":%s,"plan_seconds":%s,"exec_seconds":%s,"pr_review_wait":%s},' \
     "$(metrics_dist_json "$DIST_QUEUE")" "$(metrics_dist_json "$DIST_OPENQUEUE")" "$(metrics_dist_json "$DIST_ATTEMPT")" \
     "$(metrics_dist_json "$DIST_NEEDSINPUT")" "$(metrics_dist_json "$DIST_OPENNEEDSINPUT")" \
@@ -370,7 +370,7 @@ cmd_metrics() {
 
   declare -gA ISSUE_CREATED=() ISSUE_CLOSED=() ISSUE_STATE=() ISSUE_CATEGORY=() ISSUE_PRIORITY=() ISSUE_AGENT=()
   declare -gA QSTART=() ATTOPEN=() NISTART=() CONFLSTART=() DEPSTART=() LAST_COMPLETED_AT=() HAS_DECLINED=() FAILREASON=()
-  declare -gA DISP_COUNT=([completed]=0 [unresolved]=0 [stale]=0 [declined]=0 [cancelled]=0 [superseded]=0 [duplicate]=0 [merged]=0 [parked]=0 [open]=0 [other]=0)
+  declare -gA DISP_COUNT=([completed]=0 [unresolved]=0 [stale]=0 [declined]=0 [cancelled]=0 [superseded]=0 [duplicate]=0 [merged]=0 [parked]=0 [paused]=0 [open]=0 [other]=0)
   declare -gA CATCOUNT=() PRICOUNT=()
   local label
   for label in "${CATEGORY_LABELS[@]}"; do CATCOUNT[$label]=0; done
@@ -444,6 +444,8 @@ cmd_metrics() {
       fi
     elif [[ ,${ISSUE_AGENT[$n]}, == *,agent:parked,* ]]; then
       DISP_COUNT[parked]=$(( DISP_COUNT[parked] + 1 ))
+    elif [[ ,${ISSUE_AGENT[$n]}, == *,agent:paused,* ]]; then
+      DISP_COUNT[paused]=$(( DISP_COUNT[paused] + 1 ))
     else
       DISP_COUNT[open]=$(( DISP_COUNT[open] + 1 ))
     fi

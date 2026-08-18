@@ -60,6 +60,24 @@ claim_next() {
 }
 
 
+# Drain this host's local worker for any Issue an operator paused since the
+# last poll (see docs/decisions/0019-issue-level-execution-control.md and
+# control.sh). `pause` itself already drains a worker it can see directly;
+# this closes the remaining race where claim/worker-start happened on this
+# host between the operator's read and its own drain attempt, or where the
+# operator issued `pause` against a snapshot owned by a different host. Reads
+# only the snapshot refresh_supervisor_snapshot already fetched this poll, so
+# this adds no extra GitHub API calls.
+drain_paused_workers() {
+  local issue
+  while IFS= read -r issue; do
+    [[ -n $issue ]] || continue
+    worker_pid_live "$issue" || continue
+    control_drain_local_worker "$issue"
+  done < <(snapshot_state_rows paused | cut -f1 || true)
+}
+
+
 worker_count() {
   local count=0 pid
   shopt -s nullglob
@@ -151,6 +169,7 @@ supervise() {
       continue
     else
       recover_expired || true
+      drain_paused_workers || true
       enforce_worker_timeout || true
       reconcile_pending_project || true
       reconcile_queued_categories || true

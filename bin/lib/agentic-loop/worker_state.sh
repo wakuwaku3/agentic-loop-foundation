@@ -124,8 +124,30 @@ worker_elapsed_seconds() {
 # keeps updating the same durable comment instead of creating a new one (see
 # docs/decisions/0004).
 clear_worker_local() {
-  rm -f "$STATE_ROOT/workers/$1.pid" "$(lease_file "$1")" "$(worker_phase_file "$1")" "$(worker_started_file "$1")" "$(worker_resume_file "$1")" "$(worker_progress_file "$1")"
+  rm -f "$STATE_ROOT/workers/$1.pid" "$(lease_file "$1")" "$(worker_phase_file "$1")" "$(worker_started_file "$1")" "$(worker_resume_file "$1")" "$(worker_progress_file "$1")" "$(worker_stop_request_file "$1")" "$(worker_critical_file "$1")"
 }
+
+
+# --- Cooperative stop / critical-section markers (Issue #57) ---
+# A stop request is a plain marker file the worker checks only at its own
+# stage boundaries (loop top, pre-replan): it can never interrupt mid-provider-
+# call, only skip starting the next stage. `control.sh`'s drain function waits
+# out an active critical section before escalating to TERM/KILL, so a write
+# sequence the worker itself marked unsafe-to-interrupt (see worker_critical_
+# begin call sites in worker.sh) gets a bounded chance to finish first.
+worker_stop_request_file() { printf '%s/workers/%s.stop-requested' "$STATE_ROOT" "$1"; }
+
+worker_request_stop() { mkdir -p "$STATE_ROOT/workers"; : > "$(worker_stop_request_file "$1")"; }
+
+worker_stop_requested() { [[ -e $(worker_stop_request_file "$1") ]]; }
+
+worker_critical_file() { printf '%s/workers/%s.critical' "$STATE_ROOT" "$1"; }
+
+worker_critical_begin() { mkdir -p "$STATE_ROOT/workers"; : > "$(worker_critical_file "$1")"; }
+
+worker_critical_end() { rm -f "$(worker_critical_file "$1")"; }
+
+worker_critical_active() { [[ -e $(worker_critical_file "$1") ]]; }
 
 worker_phase_file() { printf '%s/workers/%s.phase' "$STATE_ROOT" "$1"; }
 

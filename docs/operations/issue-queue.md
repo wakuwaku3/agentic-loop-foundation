@@ -16,6 +16,7 @@ Project APIでlink、`Agent status` single-select、Issue item追加に加え、
 | `Needs input` | `is:issue is:open label:"agent:needs-input"` | Updated at昇順。Title、Agent status、Updated atを表示し、Issue本文・commentを回答先とする |
 | `Recovery` | `is:issue label:"agent:failed","agent:stale","agent:parked"` | Agent statusでgroupし、Updated at昇順。期限切れleaseはSupervisorがqueuedへ復旧するまでrunningとしてIssue commentで検査する。`agent:parked` はリトライ予算を使い切ったopenの人間トリアージ待ちで、自動closeされない（[ADR 0016](../decisions/0016-failure-park-not-close.md)） |
 | `Stopping` | `is:issue is:open label:"agent:stopping"` | 認可済み終了操作によるdrain中。worker成果物を削除しない |
+| `Paused` | `is:issue is:open label:"agent:paused"` | 認可済み運用者が`pause`で実行を一時停止したIssue（[ADR 0019](../decisions/0019-issue-level-execution-control.md)）。`Blocked by`に操作者・時刻・再開方法を表示する |
 | `Disposed` | `is:issue label:"agent:cancelled","agent:superseded","agent:duplicate","agent:merged" updated:@today-30d` | 理由と統合先を監査commentから追跡する |
 | `Recently completed` | `is:issue label:"agent:completed" updated:@today-30d` | Updated at降順。対応Pull requestと完了証跡を追跡する |
 | `Open PRs` / `Closed PRs` | `is:pr is:open` / `is:pr is:closed` | Updated at降順。Title、Status、Updated at、Repositoryを表示する |
@@ -38,6 +39,9 @@ bin/agentic-loop stop
 bin/agentic-loop doctor
 bin/agentic-loop metrics
 bin/agentic-loop priority ISSUE N
+bin/agentic-loop pause ISSUE [--reason TEXT]
+bin/agentic-loop resume ISSUE
+bin/agentic-loop abort ISSUE [--reason TEXT]
 bin/agentic-loop upgrade
 ```
 
@@ -55,13 +59,36 @@ CLIの公開入口は変更後も `bin/agentic-loop` のままである（[ADR 0
 
 `dispose ISSUE --reason cancelled|superseded|duplicate|merged [--target ISSUE]` は唯一の終了入口である。実行者はGitHub認証済みで対象repositoryのwrite/maintain/admin権限を持つ必要がある。`cancelled` は要求撤回、`superseded` は後続Issueへの置換、`duplicate` は同一成果の重複、`merged` は異なる要求の統合を表す。後三者はopenで未終了の同一repository Issueを `--target` として必要とし、自己参照を拒否する。
 
-running/in-reviewはまず`agent:stopping`へ遷移し、所有hostのworker process groupをTERM、`stop_timeout`後にのみKILLする。dirty worktree、未push commit、local/remote branchは保持する。終端化は`state_reason=not_planned`でcloseし、理由・実行者・統合先・時刻のmarkerと日本語説明を両Issueに残す。統合先は元Issue本文・コメント・依存関係を要求として調査する。終了済みIssueはSupervisorがclaim/retry/recovery経路からqueuedへ戻さない。再開は同じ認可を必要とする `resume ISSUE` だけで、履歴を保持してopen + `agent:queued` に戻す。merge済みPRを持つcompleted Issueはdisposeせず、revertまたは後続Issueを作成する。`resume ISSUE` は同じ認可で `agent:parked`（closeされていないopenの人間トリアージ待ち。[ADR 0016](../decisions/0016-failure-park-not-close.md)）も直接 `agent:queued` へ再投入できる。
+running/in-reviewはまず`agent:stopping`へ遷移し、所有hostのworker process groupをTERM、`stop_timeout`後にのみKILLする。dirty worktree、未push commit、local/remote branchは保持する。終端化は`state_reason=not_planned`でcloseし、理由・実行者・統合先・時刻のmarkerと日本語説明を両Issueに残す。統合先は元Issue本文・コメント・依存関係を要求として調査する。終了済みIssueはSupervisorがclaim/retry/recovery経路からqueuedへ戻さない。再開は同じ認可を必要とする `resume ISSUE` だけで、履歴を保持してopen + `agent:queued` に戻す。merge済みPRを持つcompleted Issueはdisposeせず、revertまたは後続Issueを作成する。`resume ISSUE` は同じ認可で `agent:parked`（closeされていないopenの人間トリアージ待ち。[ADR 0016](../decisions/0016-failure-park-not-close.md)）や `agent:paused`（下記）も直接再開できる。
+
+### 実行の一時停止・再開・打ち切り（[ADR 0019](../decisions/0019-issue-level-execution-control.md)）
+
+`pause`/`abort`はdisposeとは別の**実行制御層**であり、Issueをcloseしない。実行者は`dispose`/`resume`と同じ認可（GitHub認証済みで対象repositoryのwrite/maintain/admin権限）を必要とし、Issueコメント・PR本文・provider出力を解析して起動する経路は存在しない（CLI入口だけが命令であり、コメント中の偶然の文言は状態に影響しない）。
+
+`pause ISSUE [--reason TEXT]` はSupervisor全体を止めずに1件のIssueだけ実行を止める。`queued`/`needs-input`/`blocked`/`failed`からは即座に`agent:paused`へ、`running`/`in-review`からはworkerを安全にdrainしてから`agent:paused`へ移る。`agent:parked`は既に非claimのため拒否（`abort`と役割が重複する）、終端4種・closed・二重pauseはそれぞれ拒否／冪等成功で応答する。
+
+| pause元 | pause時の動作 | resume復帰先 |
+| --- | --- | --- |
+| `queued` | 即座に`paused` | `queued` |
+| `running` | drainしてから`paused` | `queued`（`running`へは直接戻さず、claim経由のみ） |
+| `in-review` | 同上 | `queued` |
+| `needs-input` | 即座に`paused` | `needs-input`（回答待ちを飛ばさない） |
+| `blocked` | 即座に`paused` | `blocked` |
+| `failed` | 即座に`paused`（自動retryの停止に有効） | `queued` |
+
+workerのdrainは協調停止が基本である。workerは自身のstage境界（planループ先頭、replan直前）でだけ停止要求marker（`workers/<issue>.stop-requested`）を確認し、真なら静かに（Label・コメントを変更せず）終了する。それ以外は`pause_grace_seconds`（既定120秒）だけ待ってからTERM、5秒後にKILLする。native sub-issue作成や完了確定シーケンスなど不可分な区間は`workers/<issue>.critical`markerで保護し、drainはこのmarkerが立っている間`pause_grace_seconds`を上限に待機してから初めてTERMを送る。checkpoint（`agentic-loop:handoff`コメントの更新）は既存の「中断からの再開」節にある再開観測（`resume_probe`）を再実行するだけで、新しい仕組みは追加していない。
+
+`resume ISSUE`は`agent:paused`のIssueについて、lease（このhostのlocal workerまたは他hostの有効なlease）・専用worktree/branch・PR・checksを再検証してから、上表の復帰先へ戻す。他hostの有効なlease・生存中のlocal worker・`unsafe-foreign`/`needs-decision`（「中断からの再開」節を参照）のいずれかがあれば拒否し、Label・Git状態を一切変更しない。
+
+`abort ISSUE [--reason TEXT]`は進行中の実行を打ち切り、新しい終端状態を作らず既存の`agent:parked`（open・非claim・人間トリアージ待ち、[ADR 0016](../decisions/0016-failure-park-not-close.md)）へ移す。許可元は`queued|running|in-review|needs-input|blocked|failed|paused`で、`running`/`in-review`は`pause`と同じ協調drainを経る。`agent:parked`は冪等成功、終端4種・closedは拒否する。worktree・branch・PR・commitは削除しない。要求そのものの終了には引き続き`dispose`を使う。
+
+`agent:paused`はGitHub Labelとして保持されるためSupervisor再起動後も維持され、`claim_next`・`retry_failed`・`recover_expired`・`triage_stale_queued`・`reconcile_queued_categories`・`requeue_answered`・`requeue_dependency_ready`のいずれからも構造的に対象外である（`agent:parked`と同じ設計）。他hostが所有するworkerへの`pause`/`abort`は、所有hostが次pollの`drain_paused_workers`で自律的にdrainする（追加のGitHub API呼び出しは発生しない）。`status`はpaused件数・URLに加え、local pause記録がある場合は操作者・時刻・pause前状態を併記し（Issue本文・コメント・worker logは読まない）、Project `Agent status`には`Paused`、`Blocked by`には一時停止理由と再開方法を表示する。
 
 - **Supervisor**: 稼働状態、pid、`max_workers`（既存の1行目の文言は不変）。
 - **Running Issues**: Issue番号・title・`(phase: ...)`・`(scope: ...)`に加え、`(started: 開始epoch, elapsed: 経過秒)`・`(timeout_at: 上限到達epoch[、超過なら「超過」]。`worker_timeout_seconds=0`では非表示)`・`(heartbeat: 最終heartbeat epoch)`・`(lease_expires: 期限epoch[、期限切れなら「期限切れ」])`・`(worktree: path[、dirty/diverged、または「なし」])`・`(pr: #番号 state=... checks=...)`を、追加のGitHub呼び出しなしでlocal state（`workers/<issue>.started`・`.lease`・`.resume`、scope cache）から表示する。加えて、workerがlocalへ書くprogress marker（`workers/<issue>.progress`、`epoch\tstage\tseq`。stageはenumのみ）から `(stage: plan|exec|...)`・`(progress: Ns ago)`・`(health: healthy|stalled|timeout)`を表示する。`health`は`timeout`（`worker_timeout_seconds`超過）> `stalled`（最後の進行から既定300秒超過）> `healthy`の順で、local stateのない他host所有Issueは`unknown`（「不明」）。色分けはTTYかつ`NO_COLOR`未設定のときだけANSI、pipe/JSONは無色。progress markerはworkerがstage境界と自ホスト制御区間で書く（heartbeatは更新しない）。worker logのmtimeは本文を読まずに副シグナルとして採用し、provider待ちの長考をstalledと誤判定しない。
 - **キュー / 次のclaim候補**: queued総数とclaim可能数、および`claim_next`と同じ順序（priority値（数値・降順）→category rank→created_at→Issue番号）の上位候補を、claimされない理由code（`scope-conflict`／`retry-cooldown`／`claim-paused`）付きで表示する。依存関係の再検証はしない（`agent:blocked`のIssueはqueuedに現れないため対象外であり、これはコスト方針上のbest-effortな割り切りである）。また、各phaseで次に選ばれる `pool` / `provider` / `model`（`agent_pick_tier` のlocal計算。usage実測はせず、pool markerと設定からの推論に限定）と、プール別のclaim pause理由（`pool=<pool> 枯渇（回復待ち）`、`全プール利用不可`）を表示する。
-- **状態サマリ**: `needs-input`／`failed`／`parked`／`in-review`／`blocked`／`stale`の件数と、`https://github.com/OWNER/REPO/issues/N`形式のURL一覧（`stale`は直近100件までで打ち切りがある場合は明示する）。
-- **警告**: staleなsupervisor pid/lock、期限切れlease、実行時間上限を超過したlocal worker（`worker-timeout`。次回pollで停止し自動的に再試行キューへ戻る）、stall（`worker-stalled`。最後の進行から300秒以上経過しているが上限は未超過。観測のみで自動停止はしない）、local stateのないrunning Issue（`worker-missing`、多端末運用では正常）、GitHub上でrunningでないlocal worker（`worker-orphan`）、対応するrunning Issueのない残存worktree/branch、破損したlocal state file、Project同期の再試行待ち、claim一時停止中、をすべてlocal stateの読み取りだけで検出する。
+- **状態サマリ**: `needs-input`／`failed`／`parked`／`in-review`／`blocked`／`paused`／`stale`の件数と、`https://github.com/OWNER/REPO/issues/N`形式のURL一覧（`stale`は直近100件までで打ち切りがある場合は明示する）。`paused`はlocal pause記録があるIssueに限り操作者・時刻・pause前状態も表示する。
+- **警告**: staleなsupervisor pid/lock、期限切れlease、実行時間上限を超過したlocal worker（`worker-timeout`。次回pollで停止し自動的に再試行キューへ戻る）、stall（`worker-stalled`。最後の進行から300秒以上経過しているが上限は未超過。観測のみで自動停止はしない）、local stateのないrunning Issue（`worker-missing`、多端末運用では正常）、GitHub上でrunningでないlocal worker（`worker-orphan`）、対応するrunning Issueのない残存worktree/branch、破損したlocal state file、Project同期の再試行待ち、claim一時停止中、`agent:paused`なのにこのhostのlocal workerがまだ生存している（`paused-worker-live`。次回pollの`drain_paused_workers`で停止する）、をすべてlocal stateの読み取りだけで検出する。
 
 token、worker log本文、Issue本文・コメント、providerのresult fileは一切読まない・表示しない。
 
@@ -270,6 +297,7 @@ keyは一意の小文字英数ハイフン、依存は先行keyだけを参照�
 - failed: mergeを証明できず終了。原因確認後にqueuedを付けて再試行する
 - stale: queuedのまま設定日数更新されず、監査コメント付きで自動closeされた
 - blocked: 依存Issueが未完了のためclaimを保留中。依存が解消すると自動的にqueuedへ戻る
+- paused: 認可済み運用者が`pause`で実行を一時停止（open・非claim）。closeされず、`resume`で一時停止前の状態へ戻る（[ADR 0019](../decisions/0019-issue-level-execution-control.md)）
 
 Supervisorは起動時に加えて各pollでもrunning Issueの最新leaseコメントを読み、期限切れをqueuedへ戻す。これにより、workerがクラッシュしてリースが切れたIssueは長時間稼働中でも自動でキューへ復帰し、agent:runningのまま滞留しない。ただし、完了前に繰り返し停止する（lease期限切れ・急死で `AGENTIC_LOOP_RESULT=failed` すら返さない）Issueが無限に再キューされ続けないよう、claim都度記録される試行回数が `max_attempts` に達した回復対象は、queuedへ戻さず `agent:failed` へ移し、`retry_failed` が `agent:parked`（open・非claim。[ADR 0016](../decisions/0016-failure-park-not-close.md)）へ移す。closeはしない。
 

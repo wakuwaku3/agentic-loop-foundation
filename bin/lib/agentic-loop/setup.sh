@@ -19,6 +19,7 @@ setup_labels() {
       parked) color=E99695; description='Retry budget exhausted; waiting for human triage' ;;
       stale) color=6E7781; description='Queued work closed after the configured inactivity period' ;;
       blocked) color=C5DEF5; description='Waiting for verified Issue dependencies' ;;
+      paused) color=BFD4F2; description='Execution paused by an authorized operator' ;;
       stopping) color=FBCA04; description='Authorized disposal is draining an active worker' ;;
       cancelled) color=6E7781; description='Requirement was withdrawn by an authorized operator' ;;
       superseded) color=5319E7; description='Requirement is continued by a successor Issue' ;;
@@ -107,7 +108,7 @@ setup_project() {
   fields=$(gh project field-list "$number" --owner "$owner" --format json --jq '.fields[].name' 2>/dev/null || true)
   if ! grep -Fxq 'Agent status' <<< "$fields"; then
     gh project field-create "$number" --owner "$owner" --name 'Agent status' --data-type SINGLE_SELECT \
-      --single-select-options 'Inbox,Queued,Running,Needs input,In review,Stopping,Done,Failed,Parked,Stale,Blocked,Cancelled,Superseded,Duplicate,Merged' >/dev/null 2>&1 || true
+      --single-select-options 'Inbox,Queued,Running,Needs input,In review,Stopping,Done,Failed,Parked,Stale,Blocked,Paused,Cancelled,Superseded,Duplicate,Merged' >/dev/null 2>&1 || true
   fi
   if ! grep -Fxq 'Category' <<< "$fields"; then
     gh project field-create "$number" --owner "$owner" --name 'Category' --data-type SINGLE_SELECT \
@@ -140,7 +141,7 @@ setup_project_migrate_status_options() {
     node(id: $field) { ... on ProjectV2SingleSelectField { options { name color description } } }
   }' -F field="$field_id" --jq '.data.node.options[] | [.name, .color, .description] | @tsv' 2>/dev/null) || return 0
   [[ -n $options_tsv ]] || return 0
-  local required_statuses=(Stopping Blocked Parked Cancelled Superseded Duplicate Merged) required missing=''
+  local required_statuses=(Stopping Blocked Paused Parked Cancelled Superseded Duplicate Merged) required missing=''
   for required in "${required_statuses[@]}"; do grep -Fq "${required}"$'\t' <<< "$options_tsv" || missing+=" $required"; done
   [[ -z $missing ]] && return 0
   mutation_options=''
@@ -153,6 +154,7 @@ setup_project_migrate_status_options() {
     case $required in
       Stopping) mutation_options+='{name: "Stopping", color: YELLOW, description: "Authorized disposal is draining an active worker"}, ' ;;
       Blocked) mutation_options+='{name: "Blocked", color: GRAY, description: "Waiting on unresolved Issue dependencies"}, ' ;;
+      Paused) mutation_options+='{name: "Paused", color: BLUE, description: "Execution paused by an authorized operator"}, ' ;;
       Parked) mutation_options+='{name: "Parked", color: RED, description: "Retry budget exhausted; waiting for human triage"}, ' ;;
       Cancelled) mutation_options+='{name: "Cancelled", color: GRAY, description: "Requirement was withdrawn"}, ' ;;
       Superseded) mutation_options+='{name: "Superseded", color: PURPLE, description: "Continued by a successor Issue"}, ' ;;
@@ -209,6 +211,7 @@ setup_project_views() {
   setup_project_view "$project_id" 'Hierarchy' 'is:issue is:open' "$views_tsv"
   setup_project_view "$project_id" 'Active' 'is:issue is:open label:"agent:running","agent:in-review"' "$views_tsv"
   setup_project_view "$project_id" 'Stopping' 'is:issue is:open label:"agent:stopping"' "$views_tsv"
+  setup_project_view "$project_id" 'Paused' 'is:issue is:open label:"agent:paused"' "$views_tsv"
   setup_project_view "$project_id" 'Needs input' 'is:issue is:open label:"agent:needs-input"' "$views_tsv"
   setup_project_view "$project_id" 'Recovery' 'is:issue label:"agent:failed","agent:stale","agent:parked"' "$views_tsv"
   setup_project_view "$project_id" 'Recently completed' 'is:issue label:"agent:completed" updated:@today-30d' "$views_tsv"

@@ -75,6 +75,12 @@ max_workers = 4
 lease_seconds = 300
 # Zero waits indefinitely for workers during a graceful stop.
 stop_timeout = 0
+# `pause`/`abort` drain the owning host's worker cooperatively (a stop-request
+# file the worker checks at its own stage boundaries) for up to this many
+# seconds before escalating to TERM, then 5s later to KILL, so an unsafe-to-
+# interrupt section (see `queue.worker_timeout_seconds`'s process-group kill,
+# which this mirrors) gets a bounded chance to finish on its own first.
+pause_grace_seconds = 120
 # Zero disables automatic stale closure. Otherwise queued Issues inactive for
 # this many days are marked agent:stale and closed before work is claimed.
 stale_days = 30

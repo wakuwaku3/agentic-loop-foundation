@@ -123,7 +123,9 @@ cmd_resume() {
     set_issue_state "$issue" queued; project_sync_state "$issue" queued
     comment_issue "$issue" "<!-- agentic-loop:resume schema=1 actor=$actor issue=$issue at=$(date +%s) -->\n認可済みの再開操作により、\`agent:parked\` のIssueを \`agent:queued\` として再投入しました。"
     say "Issue #$issue を再投入しました。"
+  elif [[ $state == open ]] && [[ ,$labels, == *,agent:paused,* ]]; then
+    control_resume_paused "$issue" "$actor"
   else
-    fail 'resume is only for a closed disposed Issue or an open agent:parked Issue'
+    fail 'resume is only for a closed disposed Issue, an open agent:parked Issue, or an open agent:paused Issue'
   fi
 }

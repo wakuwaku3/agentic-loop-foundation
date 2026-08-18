@@ -64,6 +64,7 @@ status_snapshot_fetch() {
       elif any(.labels[]; .name == "agent:parked") then "parked"
       elif any(.labels[]; .name == "agent:in-review") then "in-review"
       elif any(.labels[]; .name == "agent:blocked") then "blocked"
+      elif any(.labels[]; .name == "agent:paused") then "paused"
       else "other" end),
      '"$(queue_rank_jq)"', .created_at] | @tsv'
 }
@@ -329,6 +330,11 @@ status_collect_anomalies() {
     (( count > 0 )) && anomaly_add info project-sync-pending project "Project同期の再試行待ちが $count 件あります。"
   fi
 
+  for i in "${!PAUSED_NUM[@]}"; do
+    issue=${PAUSED_NUM[$i]}
+    worker_pid_live "$issue" && anomaly_add warning paused-worker-live "#$issue" 'agent:pausedですが、このホストのlocal workerがまだ生存しています。次回pollのdrain_paused_workersで停止します。'
+  done
+
   pause=$(status_claim_pause_reasons)
   [[ -n $pause ]] && anomaly_add info claim-paused supervisor "claimを一時停止しています: $pause"
   return 0
@@ -357,6 +363,7 @@ status_collect_snapshot() {
       parked) PARKED_NUM+=("$num"); PARKED_TITLE+=("$title") ;;
       in-review) INREVIEW_NUM+=("$num"); INREVIEW_TITLE+=("$title") ;;
       blocked) BLOCKED_NUM+=("$num"); BLOCKED_TITLE+=("$title") ;;
+      paused) PAUSED_NUM+=("$num"); PAUSED_TITLE+=("$title") ;;
     esac
   done <<< "$raw"
   return 0
@@ -492,6 +499,12 @@ status_render_text() {
     status_render_text_state_line parked PARKED_NUM
     status_render_text_state_line in-review INREVIEW_NUM
     status_render_text_state_line blocked BLOCKED_NUM
+    status_render_text_state_line paused PAUSED_NUM
+    for i in "${!PAUSED_NUM[@]}"; do
+      if control_pause_record_read "${PAUSED_NUM[$i]}"; then
+        printf '    #%s (paused: @%s, at: %s, from: %s)\n' "${PAUSED_NUM[$i]}" "$CONTROL_PAUSE_ACTOR" "$CONTROL_PAUSE_AT" "$CONTROL_PAUSE_FROM"
+      fi
+    done
     status_render_text_state_line stale STALE_NUM
     (( STATUS_STALE_TRUNCATED )) && say '  stale は直近100件までの表示です（打ち切りあり）。'
   fi
@@ -624,6 +637,8 @@ status_render_json() {
   printf ','
   status_render_json_state_group blocked BLOCKED_NUM BLOCKED_TITLE
   printf ','
+  status_render_json_state_group paused PAUSED_NUM PAUSED_TITLE
+  printf ','
   printf '"stale":{"count":%s,"truncated":%s,"issues":[' "${#STALE_NUM[@]}" "$( ((STATUS_STALE_TRUNCATED)) && printf true || printf false )"
   sep=''
   for i in "${!STALE_NUM[@]}"; do
@@ -681,7 +696,7 @@ cmd_status() {
   fi
   declare -ga RUN_NUM=() RUN_TITLE=()
   declare -ga QUEUE_NUM=() QUEUE_TITLE=() QUEUE_PRIORITY=() QUEUE_CATRANK=() QUEUE_CREATED=()
-  declare -ga NEEDSINPUT_NUM=() NEEDSINPUT_TITLE=() FAILED_NUM=() FAILED_TITLE=() PARKED_NUM=() PARKED_TITLE=() INREVIEW_NUM=() INREVIEW_TITLE=() BLOCKED_NUM=() BLOCKED_TITLE=()
+  declare -ga NEEDSINPUT_NUM=() NEEDSINPUT_TITLE=() FAILED_NUM=() FAILED_TITLE=() PARKED_NUM=() PARKED_TITLE=() INREVIEW_NUM=() INREVIEW_TITLE=() BLOCKED_NUM=() BLOCKED_TITLE=() PAUSED_NUM=() PAUSED_TITLE=()
   declare -ga STALE_NUM=() STALE_TITLE=()
   declare -ga ANOMALY_LEVEL=() ANOMALY_CODE=() ANOMALY_SUBJECT=() ANOMALY_DETAIL=()
   declare -g STATUS_GITHUB_OK=1 STATUS_STALE_TRUNCATED=0 STATUS_SNAPSHOT_RAW='' STATUS_SNAPSHOT_FETCHED='' STATUS_STALE_RAW='' STATUS_STALE_FETCHED=''
