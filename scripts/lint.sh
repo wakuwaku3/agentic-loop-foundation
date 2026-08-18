@@ -10,7 +10,8 @@ required=(AGENTS.md README.md Makefile .editorconfig .gitignore .codex/config.to
   docs/decisions/0019-issue-level-execution-control.md bin/lib/agentic-loop/control.sh scripts/upgrade/migrations/0004-pause-control-config.sh
   docs/decisions/0020-change-risk-preflight.md docs/operations/preflight.md bin/lib/agentic-loop/preflight.sh scripts/upgrade/migrations/0005-preflight-config.sh
   docs/decisions/0021-affected-check-selection.md docs/operations/affected-checks.md scripts/affected-check.sh tests/impact-map.toml
-  docs/decisions/0022-flaky-test-detection-and-quarantine.md docs/operations/flaky-tests.md scripts/flaky.sh tests/flaky-registry.toml bin/lib/agentic-loop/flaky.sh)
+  docs/decisions/0022-flaky-test-detection-and-quarantine.md docs/operations/flaky-tests.md scripts/flaky.sh tests/flaky-registry.toml bin/lib/agentic-loop/flaky.sh
+  docs/policies/documentation.md docs/decisions/0023-documentation-readership-boundaries.md docs/development.md)
 for file in "${required[@]}"; do
   [[ -f $file ]] || { printf 'Missing required file: %s\n' "$file" >&2; exit 1; }
 done
@@ -497,6 +498,71 @@ grep -Fq 'bin/agentic-loop flaky' .agents/skills/diagnose-codebase/SKILL.md || {
   exit 1
 }
 ./scripts/flaky.sh audit || { printf 'tests/flaky-registry.toml failed audit.\n' >&2; exit 1; }
+
+# --- documentation readership boundaries (Issue #64, ADR 0023) ---
+grep -Fq '[文書ポリシー](docs/policies/documentation.md)' AGENTS.md || {
+  printf 'Missing documentation policy invariant.\n' >&2
+  exit 1
+}
+for requirement in '基本利用者' '第一読者' '正本' '重複' '更新責務' 'Agentic Loop（AI）' 'README.md' 'docs/development.md' 'docs/operations' 'docs/policies' 'docs/decisions' 'AGENTS.md' 'machine-readable'; do
+  grep -Fq "$requirement" docs/policies/documentation.md || {
+    printf 'Documentation policy lacks requirement: %s\n' "$requirement" >&2
+    exit 1
+  }
+done
+for shared_doc in docs/policies/documentation.md docs/decisions/0023-documentation-readership-boundaries.md; do
+  grep -Fq "$shared_doc" scripts/lib/foundation-files.sh || {
+    printf '%s is not distributed.\n' "$shared_doc" >&2
+    exit 1
+  }
+done
+if awk '/^readonly SHARED_FILES=\(/,/^\)/' scripts/lib/foundation-files.sh | grep -Fq 'docs/development.md'; then
+  printf 'docs/development.md must be an INIT_FILES seed, not a SHARED_FILES distribution.\n' >&2
+  exit 1
+fi
+awk '/^readonly INIT_FILES=\(/,/^\)/' scripts/lib/foundation-files.sh | grep -Fq 'docs/development.md' || {
+  printf 'docs/development.md is not seeded as an INIT_FILES entry.\n' >&2
+  exit 1
+}
+readme_forbidden_pattern='devbox run --pure|make check|tests/|scripts/|bin/lib/|docs/decisions/|```toml|reasoning_effort|worker_timeout_seconds|systemctl --user|runtime\.path|\.git/agentic-loop'
+if grep -Eq "$readme_forbidden_pattern" README.md; then
+  printf 'README.md leaked development/internal content across the documentation readership boundary.\n' >&2
+  exit 1
+fi
+for requirement in '## できること' '## 導入' '## 要求を出す' '## 日常の操作' '## 困ったときは' '## 文書の案内' 'curl -fsSL' 'submit-requirement' 'bin/agentic-loop status' 'bin/agentic-loop doctor' 'docs/development.md' 'docs/operations/issue-queue.md'; do
+  grep -Fq "$requirement" README.md || {
+    printf 'README.md lacks required basic-user element: %s\n' "$requirement" >&2
+    exit 1
+  }
+done
+for requirement in '要求の伝え方' 'レビュー' '復旧'; do
+  grep -Fq "$requirement" docs/development.md || {
+    printf 'docs/development.md lacks requirement: %s\n' "$requirement" >&2
+    exit 1
+  }
+done
+for requirement in 'policies/development-environment.md' 'operations/issue-queue.md'; do
+  grep -Fq "$requirement" docs/development.md || {
+    printf 'docs/development.md does not link to its authoritative source: %s\n' "$requirement" >&2
+    exit 1
+  }
+done
+if grep -Fq '```toml' docs/development.md || grep -Fq 'worker_timeout_seconds' docs/development.md; then
+  printf 'docs/development.md must not duplicate operations/policy rule bodies (TOML examples or config values).\n' >&2
+  exit 1
+fi
+grep -Fq 'agentic-loop-main-sync-' docs/operations/upgrade.md || {
+  printf 'Main-sync timer documentation was lost from docs/operations/upgrade.md.\n' >&2
+  exit 1
+}
+grep -Fq 'plan_max' docs/operations/issue-queue.md || {
+  printf 'Two-stage plan/exec documentation was lost from docs/operations/issue-queue.md.\n' >&2
+  exit 1
+}
+grep -Fq 'runtime.path' docs/operations/issue-queue.md || {
+  printf 'Fixed runtime PATH documentation was lost from docs/operations/issue-queue.md.\n' >&2
+  exit 1
+}
 
 ./.agentic-loop/guard-secrets.sh --all
 

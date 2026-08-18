@@ -8,7 +8,8 @@
 readonly SHARED_FILES=(
   AGENTS.md .codex/config.toml .claude/settings.json .claude/hooks/confirm-main-worktree-edit.sh docs/policies/cost.md docs/policies/testing.md docs/policies/external-environment.md docs/policies/development-environment.md docs/policies/ai-tool-neutrality.md
   docs/policies/github-language.md docs/policies/validation-harness.md docs/policies/continuous-delivery.md
-  docs/decisions/0002-github-issue-queue.md docs/decisions/0003-supervisor-resilience-and-api-budget.md docs/decisions/0004-worker-resume-and-handoff.md docs/decisions/0005-status-observability.md docs/decisions/0006-worker-hang-timeout.md docs/decisions/0007-loop-metrics.md docs/decisions/0008-multi-host-claim.md docs/decisions/0009-foundation-upgrade.md docs/decisions/0010-authorized-issue-disposition.md docs/decisions/0011-installed-runtime-profile.md docs/decisions/0012-provider-pool-fallback.md docs/decisions/0013-agentic-loop-modules.md docs/decisions/0014-scope-structural-conflict.md docs/decisions/0015-numeric-priority-marker.md docs/decisions/0016-failure-park-not-close.md docs/decisions/0017-requirement-traceability.md docs/decisions/0018-repository-capability-manifest.md docs/decisions/0019-issue-level-execution-control.md docs/decisions/0020-change-risk-preflight.md docs/decisions/0021-affected-check-selection.md docs/decisions/0022-flaky-test-detection-and-quarantine.md docs/operations/issue-queue.md docs/operations/codebase-diagnosis.md docs/operations/loop-metrics.md docs/operations/upgrade.md docs/operations/traceability.md docs/operations/capability-manifest.md docs/operations/preflight.md docs/operations/affected-checks.md docs/operations/flaky-tests.md
+  docs/policies/documentation.md
+  docs/decisions/0002-github-issue-queue.md docs/decisions/0003-supervisor-resilience-and-api-budget.md docs/decisions/0004-worker-resume-and-handoff.md docs/decisions/0005-status-observability.md docs/decisions/0006-worker-hang-timeout.md docs/decisions/0007-loop-metrics.md docs/decisions/0008-multi-host-claim.md docs/decisions/0009-foundation-upgrade.md docs/decisions/0010-authorized-issue-disposition.md docs/decisions/0011-installed-runtime-profile.md docs/decisions/0012-provider-pool-fallback.md docs/decisions/0013-agentic-loop-modules.md docs/decisions/0014-scope-structural-conflict.md docs/decisions/0015-numeric-priority-marker.md docs/decisions/0016-failure-park-not-close.md docs/decisions/0017-requirement-traceability.md docs/decisions/0018-repository-capability-manifest.md docs/decisions/0019-issue-level-execution-control.md docs/decisions/0020-change-risk-preflight.md docs/decisions/0021-affected-check-selection.md docs/decisions/0022-flaky-test-detection-and-quarantine.md docs/decisions/0023-documentation-readership-boundaries.md docs/operations/issue-queue.md docs/operations/codebase-diagnosis.md docs/operations/loop-metrics.md docs/operations/upgrade.md docs/operations/traceability.md docs/operations/capability-manifest.md docs/operations/preflight.md docs/operations/affected-checks.md docs/operations/flaky-tests.md
   .agents/skills/submit-requirement/SKILL.md
   .agents/skills/submit-requirement/agents/openai.yaml
   .agents/skills/diagnose-codebase/SKILL.md
@@ -27,7 +28,7 @@ readonly SHARED_FILES=(
   bin/lib/agentic-loop/flaky.sh
 )
 readonly INIT_FILES=(
-  README.md .editorconfig .gitignore Makefile install.sh devbox.json devbox.lock
+  README.md docs/development.md .editorconfig .gitignore Makefile install.sh devbox.json devbox.lock
   docs/decisions/0001-minimal-foundation.md scripts/format.sh scripts/lint.sh scripts/check-environment.sh scripts/install-target.sh
   tests/test-agentic-loop.sh tests/run-e2e.sh .github/workflows/ci.yml .github/PULL_REQUEST_TEMPLATE.md
   .agentic-loop/capabilities.toml
