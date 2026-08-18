@@ -69,6 +69,10 @@ doctor_collect() {
       doctor_add warning '設定値: WORKER_TIMEOUT_SECONDS' '正常に進行中のworkerを誤って停止する恐れがあります。' "docs/operations/issue-queue.md を確認し、worker_timeout_seconds を ${WORKER_TIMEOUT_MIN_SAFE_SECONDS}秒以上、または実測の所要時間に基づく値へ見直してください。"
     fi
     doctor_enum_config UNKNOWN_SCOPE "$UNKNOWN_SCOPE" isolated exclusive open
+    doctor_enum_config TRACEABILITY "$TRACEABILITY" require warn off
+    if [[ $TRACEABILITY == require || $TRACEABILITY == warn || $TRACEABILITY == off ]]; then
+      doctor_add success 'トレーサビリティgate' "現在のmodeは $TRACEABILITY です（require=完了をblock、warn=助言のみ、off=無効）。" '対応は不要です。'
+    fi
     (( DOCTOR_FAILURES == 0 )) && doctor_add success '設定ファイル' '設定値を安全に解釈できます。' '対応は不要です。'
   fi
 

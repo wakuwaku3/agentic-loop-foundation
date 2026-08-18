@@ -25,8 +25,20 @@ scan_patch() {
   fi
 }
 
+scan_text() {
+  local file=$1
+  if grep -E "$SECRET_PATTERN" "$file" >/dev/null 2>&1; then
+    fail 'credential-like content detected'
+  fi
+}
+
 main() {
   local patch
+  if [[ ${1:-} == --text ]]; then
+    [[ -n ${2:-} && -f $2 ]] || { printf 'Usage: %s --text FILE\n' "${0##*/}" >&2; exit 2; }
+    scan_text "$2"
+    return 0
+  fi
   patch=$(mktemp)
   trap "rm -f '$patch'" EXIT
   case ${1:---all} in
@@ -58,7 +70,7 @@ main() {
         git diff --no-index --unified=0 /dev/null "$file" >> "$patch" || true
       done < <(git ls-files)
       ;;
-    *) printf 'Usage: %s [--staged|--push|--all]\n' "${0##*/}" >&2; exit 2 ;;
+    *) printf 'Usage: %s [--staged|--push|--all|--text FILE]\n' "${0##*/}" >&2; exit 2 ;;
   esac
   scan_patch "$patch"
 }

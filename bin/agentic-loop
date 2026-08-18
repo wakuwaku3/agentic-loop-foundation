@@ -106,6 +106,7 @@ RETRY_COOLDOWN_SECONDS=600
 WORKER_TIMEOUT_SECONDS=14400
 UNKNOWN_SCOPE=isolated
 EXCLUSIVE_PATHS=''
+TRACEABILITY=off
 CONFIG_ERROR=''
 CONFIG_PROPS=''
 
@@ -143,6 +144,8 @@ source "$SCRIPT_ROOT/bin/lib/agentic-loop/worker_state.sh"
 source "$SCRIPT_ROOT/bin/lib/agentic-loop/dependency.sh"
 # shellcheck source=lib/agentic-loop/scope.sh
 source "$SCRIPT_ROOT/bin/lib/agentic-loop/scope.sh"
+# shellcheck source=lib/agentic-loop/trace.sh
+source "$SCRIPT_ROOT/bin/lib/agentic-loop/trace.sh"
 # shellcheck source=lib/agentic-loop/supervisor.sh
 source "$SCRIPT_ROOT/bin/lib/agentic-loop/supervisor.sh"
 # shellcheck source=lib/agentic-loop/worker.sh
@@ -154,7 +157,7 @@ load_config || { [[ ${1:-} == doctor ]] || fail "$CONFIG_ERROR"; }
 
 usage() {
   cat >&2 <<EOF
-Usage: $PROGRAM_NAME {setup|sync-issue ISSUE|dispose ISSUE --reason cancelled|superseded|duplicate|merged [--target ISSUE]|resume ISSUE|priority ISSUE N|start|stop|status [--format json] [--watch [N]]|doctor [--format json]|metrics [--days N] [--as-of EPOCH] [--format json]|tail [--issue N] [--follow]|upgrade [--source PATH|--revision SHA] [--apply] [--approve] [--rollback] [--skip-verify] [--overwrite PATH]... [--format json]}
+Usage: $PROGRAM_NAME {setup|sync-issue ISSUE|dispose ISSUE --reason cancelled|superseded|duplicate|merged [--target ISSUE]|resume ISSUE|priority ISSUE N|start|stop|status [--format json] [--watch [N]]|doctor [--format json]|metrics [--days N] [--as-of EPOCH] [--format json]|tail [--issue N] [--follow]|trace ISSUE [--format json]|trace --audit [--days N] [--format json]|upgrade [--source PATH|--revision SHA] [--apply] [--approve] [--rollback] [--skip-verify] [--overwrite PATH]... [--format json]}
 
   setup   Create or reuse this repository's labels and Project
   sync-issue  Add one Issue to the Project now, or queue a retry
@@ -169,6 +172,7 @@ Usage: $PROGRAM_NAME {setup|sync-issue ISSUE|dispose ISSUE --reason cancelled|su
   doctor  Read-only checks with remediation guidance (exit 1 on failures)
   metrics Read-only queue/lifecycle metrics over recent history (always exit 0)
   tail    Stream supervisor/worker stage/progress events with timestamps (REST 0)
+  trace   Read-only requirement-to-evidence traceability for one Issue, or --audit across the repository (exit 1 on unmet criteria or a missing PR)
   upgrade Preview (default) or apply a Foundation update; see docs/operations/upgrade.md
 EOF
 }
@@ -186,6 +190,7 @@ main() {
     doctor) cmd_doctor "$@" ;;
     metrics) cmd_metrics "$@" ;;
     tail) cmd_tail "${@:2}" ;;
+    trace) cmd_trace "${@:2}" ;;
     upgrade) cmd_upgrade "$@" ;;
     _service) [[ $# -eq 1 ]] || exit 2; cmd_service ;;
     _supervise) supervise ;;
