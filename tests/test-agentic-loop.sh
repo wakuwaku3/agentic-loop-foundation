@@ -5329,6 +5329,40 @@ hook_result=$(run_edit_hook Edit "$hook_outside/main-link/tracked file.txt" "$ho
 hook_result=$(printf '{"tool_name":"Edit","tool_input":{},"cwd":"%s"}' "$hook_main" | "$PROJECT_ROOT/.claude/hooks/confirm-main-worktree-edit.sh")
 [[ $hook_result == *'"permissionDecision":"ask"'* ]] || fail 'malformed edit input did not fail safely'
 
+# Regression (Issue #160): the hook must resolve its JSON parser (yq) even when
+# invoked with a PATH that omits the Nix-pinned bins -- Claude Code PreToolUse
+# and login shells are such contexts. It restores the recorded runtime.path
+# (which lives beside the installed repo's Git metadata) before parsing. Without
+# that, yq exits non-zero and the fail-closed guards gate *every* edit, including
+# linked worker worktrees that must pass through, so no edit proceeds without a
+# prompt. Build an installed-shaped repo whose runtime.path points at the pinned
+# toolchain, then invoke its hook with yq stripped from PATH.
+hook_rt_main="$TEST_ROOT/hook runtime main"
+hook_rt_worker="$TEST_ROOT/hook runtime worker"
+mkdir -p "$hook_rt_main"
+git -C "$hook_rt_main" init --quiet
+git -C "$hook_rt_main" config user.email test@example.invalid
+git -C "$hook_rt_main" config user.name test
+printf 'tracked\n' > "$hook_rt_main/tracked.txt"
+git -C "$hook_rt_main" add tracked.txt
+git -C "$hook_rt_main" commit --quiet -m tracked
+git -C "$hook_rt_main" worktree add --quiet -b hook-rt-worker "$hook_rt_worker"
+mkdir -p "$hook_rt_main/.claude/hooks" "$hook_rt_main/.git/agentic-loop"
+cp "$PROJECT_ROOT/.claude/hooks/confirm-main-worktree-edit.sh" "$hook_rt_main/.claude/hooks/confirm-main-worktree-edit.sh"
+chmod +x "$hook_rt_main/.claude/hooks/confirm-main-worktree-edit.sh"
+# runtime.path records the pinned toolchain directories (where git and yq really
+# live), mirroring what install writes.
+printf '%s:%s\n' "$(dirname "$(command -v git)")" "$(dirname "$(command -v yq)")" > "$hook_rt_main/.git/agentic-loop/runtime.path"
+run_edit_hook_nopath() {
+  local tool=$1 path=$2 cwd=$3
+  printf '{"tool_name":"%s","tool_input":{"file_path":"%s"},"cwd":"%s"}' "$tool" "$path" "$cwd" |
+    PATH=/usr/bin:/bin "$hook_rt_main/.claude/hooks/confirm-main-worktree-edit.sh"
+}
+# yq is absent from PATH here; only runtime.path restoration lets the hook parse.
+hook_rt_result=$(run_edit_hook_nopath Edit "$hook_rt_main/tracked.txt" "$hook_rt_main")
+[[ $hook_rt_result == *'"permissionDecision":"ask"'* ]] || fail 'hook could not resolve yq from runtime.path for a main-worktree edit (Issue #160)'
+[[ -z $(run_edit_hook_nopath Edit "$hook_rt_worker/tracked.txt" "$hook_rt_worker") ]] || fail 'hook gated a linked worker worktree because yq was unresolved (Issue #160)'
+
 # The project settings and executable hook are Foundation-managed shared files.
 settings_conflict_target=$(new_repository settings-conflict-target)
 mkdir -p "$settings_conflict_target/.claude"
