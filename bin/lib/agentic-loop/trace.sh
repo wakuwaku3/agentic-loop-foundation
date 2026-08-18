@@ -59,8 +59,8 @@ trace_derived_ids() {
     [[ -n $line ]] || continue
     norm=$(trace_normalize_criterion "$line")
     [[ -n $norm ]] || continue
-    trace_criterion_id "$norm"
-  done < <(trace_derive_criteria "$body")
+    printf '%s\n' "$(trace_criterion_id "$norm")"
+  done <<< "$(trace_derive_criteria "$body")"
 }
 
 
@@ -143,7 +143,7 @@ trace_validate_schema() {
     ccount=$(yq -p json -r '.changes // [] | length' <<< "$item" 2>/dev/null) || ccount=0
     [[ $ccount =~ ^[0-9]+$ ]] || { TRACE_INVALID_REASON='schema-invalid'; return 1; }
     for ((ci = 0; ci < ccount; ci++)); do
-      citem=$(yq -p json -c ".changes[$ci]" <<< "$item" 2>/dev/null) || { TRACE_INVALID_REASON='schema-invalid'; return 1; }
+      citem=$(yq -p json -o json -I=0 ".changes[$ci]" <<< "$item" 2>/dev/null) || { TRACE_INVALID_REASON='schema-invalid'; return 1; }
       cikeys=$(yq -p json -r 'keys | .[]' <<< "$citem" 2>/dev/null) || { TRACE_INVALID_REASON='schema-invalid'; return 1; }
       while IFS= read -r k; do case $k in path | anchor) ;; *) TRACE_INVALID_REASON='schema-invalid'; return 1 ;; esac; done <<< "$cikeys"
       cpath=$(yq -p json -r '.path // ""' <<< "$citem")
@@ -156,7 +156,7 @@ trace_validate_schema() {
     kcount=$(yq -p json -r '.checks // [] | length' <<< "$item" 2>/dev/null) || kcount=0
     [[ $kcount =~ ^[0-9]+$ ]] || { TRACE_INVALID_REASON='schema-invalid'; return 1; }
     for ((ci = 0; ci < kcount; ci++)); do
-      kitem=$(yq -p json -c ".checks[$ci]" <<< "$item" 2>/dev/null) || { TRACE_INVALID_REASON='schema-invalid'; return 1; }
+      kitem=$(yq -p json -o json -I=0 ".checks[$ci]" <<< "$item" 2>/dev/null) || { TRACE_INVALID_REASON='schema-invalid'; return 1; }
       kikeys=$(yq -p json -r 'keys | .[]' <<< "$kitem" 2>/dev/null) || { TRACE_INVALID_REASON='schema-invalid'; return 1; }
       while IFS= read -r k; do case $k in name | result) ;; *) TRACE_INVALID_REASON='schema-invalid'; return 1 ;; esac; done <<< "$kikeys"
       cname=$(yq -p json -r '.name // ""' <<< "$kitem")
@@ -164,7 +164,7 @@ trace_validate_schema() {
       cresult=$(yq -p json -r '.result // ""' <<< "$kitem")
       grep -Fxq "$cresult" <<< "${TRACE_ALLOWED_CHECK_RESULT// /$'\n'}" || { TRACE_INVALID_REASON='schema-invalid'; return 1; }
     done
-  done < <(yq -p json -c '.criteria[]' <<< "$manifest" 2>/dev/null)
+  done < <(yq -p json -o json -I=0 '.criteria[]' <<< "$manifest" 2>/dev/null)
   return 0
 }
 
@@ -191,19 +191,31 @@ trace_validate_coverage() {
 # failure. Only the check-runs attached to the PR's own head commit are ever
 # read, so a failing run that was later fixed and re-run at the same head is
 # reconciled by its final conclusion only.
+# mikefarah/yq has no if/then/else/end (unlike jq); yq only extracts the raw
+# fields here and awk does the three-way classification.
 trace_checkrun_verdict() {
-  yq -p json -r '.[] | [.name, (if (.conclusion == "success" or .conclusion == "neutral") then "success" elif .conclusion == "skipped" then "skipped" else "failure" end)] | @tsv' <<< "$1" 2>/dev/null
+  yq -p json -r '.[] | [.name, (.conclusion // "")] | @tsv' <<< "$1" 2>/dev/null | awk -F'\t' '{
+    v = ($2 == "success" || $2 == "neutral") ? "success" : ($2 == "skipped" ? "skipped" : "failure")
+    printf "%s\t%s\n", $1, v
+  }'
 }
 
 
 trace_checks_overall() {
-  yq -p json -r '
-    ([.[].conclusion, .[].status] | map(select(. != null))) as $s |
-    if ($s | any(. == "failure" or . == "timed_out" or . == "cancelled")) then "failure"
-    elif ($s | any(. == "in_progress" or . == "queued")) then "in_progress"
-    elif (($s | length) > 0 and ($s | all(. == "success" or . == "neutral" or . == "skipped"))) then "success"
-    else "unknown" end
-  ' <<< "$1" 2>/dev/null
+  yq -p json -r '.[] | [(.conclusion // ""), (.status // "")] | @tsv' <<< "$1" 2>/dev/null | awk -F'\t' '
+    {
+      count++
+      if ($1 == "failure" || $1 == "timed_out" || $1 == "cancelled") failure = 1
+      if ($2 == "in_progress" || $2 == "queued") pending = 1
+      if (!($1 == "success" || $1 == "neutral" || $1 == "skipped")) not_all_ok = 1
+    }
+    END {
+      if (failure) print "failure"
+      else if (pending) print "in_progress"
+      else if (count > 0 && !not_all_ok) print "success"
+      else print "unknown"
+    }
+  '
 }
 
 
@@ -231,7 +243,7 @@ trace_reconcile_paths() {
   while IFS= read -r path; do
     [[ -n $path ]] || continue
     grep -Fxq "$path" <<< "$files_list" || { TRACE_INVALID_REASON='evidence-mismatch'; return 1; }
-  done < <(yq -p json -r '.criteria[].changes[]?.path // empty' <<< "$manifest" 2>/dev/null)
+  done < <(yq -p json -r '.criteria[].changes[]?.path | select(. != null)' <<< "$manifest" 2>/dev/null)
   return 0
 }
 
@@ -242,7 +254,7 @@ trace_reconcile_paths() {
 # surface it.
 trace_unreferenced_paths_count() {
   local manifest=$1 files_list=$2 referenced f count=0
-  referenced=$(yq -p json -r '.criteria[].changes[]?.path // empty' <<< "$manifest" 2>/dev/null | sort -u)
+  referenced=$(yq -p json -r '.criteria[].changes[]?.path | select(. != null)' <<< "$manifest" 2>/dev/null | sort -u)
   while IFS= read -r f; do
     [[ -n $f ]] || continue
     grep -Fxq "$f" <<< "$referenced" || count=$((count + 1))
@@ -251,8 +263,10 @@ trace_unreferenced_paths_count() {
 }
 
 
-trace_status_count() { yq -p json -r --arg s "$2" '[.criteria[] | select(.status == $s)] | length' <<< "$1" 2>/dev/null || printf 0; }
-trace_verification_count() { yq -p json -r --arg v "$2" '[.criteria[] | select((.verification // "none") == $v)] | length' <<< "$1" 2>/dev/null || printf 0; }
+# mikefarah/yq has no --arg flag (unlike jq); env() is its documented way to
+# pass a value into an expression without string-interpolation injection risk.
+trace_status_count() { TRACE_STATUS_ARG=$2 yq -p json -r '[.criteria[] | select(.status == env(TRACE_STATUS_ARG))] | length' <<< "$1" 2>/dev/null || printf 0; }
+trace_verification_count() { TRACE_VERIFICATION_ARG=$2 yq -p json -r '[.criteria[] | select((.verification // "none") == env(TRACE_VERIFICATION_ARG))] | length' <<< "$1" 2>/dev/null || printf 0; }
 
 
 # --- Evaluation (read-only; never mutates GitHub or comments) ---------------
@@ -301,7 +315,7 @@ trace_render_table() {
 # metrics_field) followed by a Japanese human-readable table.
 trace_render_verdict() {
   local issue=$1 pr=$2 merge_commit=$3 base=$4 checks=$5 manifest=$6 unref=$7
-  local criteria satisfied partial na unmet superseded manual external marker
+  local criteria satisfied partial na unmet superseded manual external marker table
   criteria=$(yq -p json -r '.criteria | length' <<< "$manifest" 2>/dev/null || printf 0)
   satisfied=$(trace_status_count "$manifest" satisfied)
   partial=$(trace_status_count "$manifest" partial)
@@ -312,7 +326,13 @@ trace_render_verdict() {
   external=$(trace_verification_count "$manifest" external)
   marker=$(printf '<!-- agentic-loop:traceability schema=1 issue=%s pr=%s merge_commit=%s base=%s checks=%s criteria=%s satisfied=%s partial=%s not-applicable=%s unmet=%s superseded=%s manual=%s external=%s unreferenced_paths=%s verdict=pass -->' \
     "$issue" "$pr" "$merge_commit" "$base" "$checks" "$criteria" "$satisfied" "$partial" "$na" "$unmet" "$superseded" "$manual" "$external" "$unref")
-  printf '%s\n### トレーサビリティ検証結果\n\n%s\n' "$marker" "$(trace_render_table "$manifest")"
+  # comment_issue posts through a one-comment-per-line fake gh fixture (and a
+  # real embedded newline would still need escaping for -f body= consistency
+  # with every other agentic-loop:* comment in this codebase, see worker.sh),
+  # so the table's real newlines are folded into literal \n like every other
+  # multi-line comment body.
+  table=$(trace_render_table "$manifest")
+  printf '%s\\n### トレーサビリティ検証結果\\n\\n%s' "$marker" "${table//$'\n'/\\n}"
 }
 
 
