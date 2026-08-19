@@ -343,7 +343,20 @@ resume_probe() {
     [[ -n $other ]] && { RESUME_PHASE="unsafe-foreign"; return 0; }
   fi
 
-  git -C "$REPO_ROOT" show-ref --verify --quiet "$branch_ref" || return 0
+  if ! git -C "$REPO_ROOT" show-ref --verify --quiet "$branch_ref"; then
+    # The local branch is gone (a different host progressed it, or a local
+    # cleanup removed it) but the remote agent branch may still carry
+    # push-completed work. Best-effort fetch and, if found, materialize a
+    # local branch at the same commit so the ordinary phase derivation below
+    # (and the later worktree-add step in worker()) resumes from it instead of
+    # silently discarding pushed work and starting over from the default
+    # branch. A remote branch that does not exist leaves this a true fresh
+    # start, unchanged from before.
+    git -C "$REPO_ROOT" fetch origin "$branch" >/dev/null 2>&1 || true
+    local remote_tracking_ref="refs/remotes/origin/$branch"
+    git -C "$REPO_ROOT" show-ref --verify --quiet "$remote_tracking_ref" || return 0
+    git -C "$REPO_ROOT" branch "$branch" "$remote_tracking_ref" >/dev/null 2>&1 || return 0
+  fi
   RESUME_HEAD=$(git -C "$REPO_ROOT" rev-parse --verify "$branch_ref" 2>/dev/null) || return 0
 
   main_sha=$(git -C "$REPO_ROOT" rev-parse --verify -q "refs/remotes/origin/$default_branch" 2>/dev/null || true)

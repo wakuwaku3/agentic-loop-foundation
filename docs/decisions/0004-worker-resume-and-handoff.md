@@ -19,7 +19,7 @@ lease切れ、Supervisor再起動、端末再起動、worker異常終了は運�
 
 | phase | 導出条件 | 再開時の動作 |
 | --- | --- | --- |
-| `fresh` | branchが存在しない | 新規worktree/branchを作成してplan/execを実行 |
+| `fresh` | local branchが存在せず、remoteの`origin/<branch>`も存在しない | `origin/<default-branch>`から新規worktree/branchを作成してplan/execを実行 |
 | `worktree-ready` | branchのheadがdefault branchのtipと同一 | 既存worktree/branchを再利用してplan/execを実行（追加API呼び出し0） |
 | `committed-unpushed` | local commitがあり、remoteと一致しない | plan/execを継続 |
 | `pushed-no-pr` | remote tipとheadが一致し、PRがない | plan/execを継続（PR作成から） |
@@ -30,6 +30,8 @@ lease切れ、Supervisor再起動、端末再起動、worker異常終了は運�
 | `unsafe-foreign` | 専用worktree pathが別branchに登録済み、またはbranchが別worktreeで使用中 | providerを起動せず `agent:failed` にし、既存成果物は一切変更しない |
 
 dirty worktree（未commit変更）は単独では異常としない。同一Issueの自分の未commit変更として扱い、そのままplan/execへ引き継ぐ。分岐（`needs-decision`）と組み合わさる場合のみ人手判断が必要になるが、分岐自体が既に人手判断を要するため、dirtyかどうかで判定を変えない。
+
+local branchが存在しない場合、`resume_probe()` はまず（別ホストで進行後やlocal掃除後を想定して）`origin/<branch>` をbest-effortで`fetch`する。remoteに同名branchが存在すれば、そのtipを指すlocal branchをその場で作成してから上記の判定を継続するため、push済みの成果があれば`worktree-ready`／`committed-unpushed`はあり得ず、実際の状態に応じて`pushed-no-pr`・`pr-open`・`needs-rebase`・`pr-merged`・`needs-decision`のいずれかに正しく分類される。`fresh`は、local・remoteのどちらにもbranchが存在しない場合だけを指す（[#210](https://github.com/wakuwaku3/agentic-loop-foundation/issues/210)）。remote branchのfetchに失敗した場合は安全側に倒し、従来どおり`fresh`として`origin/<default-branch>`から新規作成する。
 
 `pr-merged`・`needs-decision`・`unsafe-foreign` はいずれもproviderを起動せずに確定するため、二重PR・二重merge・不正なcleanupが構造的に発生しない。`unsafe-foreign` は当ADRが修正する既存bug（別Issueのworktreeを無条件に再利用しうる）の直接の対策であり、worktreeが実在の別branchに登録されている場合だけ発火し、worktree未登録（既存の `resolve_worker_git_common_dir`／`resolve_worker_agents_dir` が別に検知する破損状態）には介入しない。
 
