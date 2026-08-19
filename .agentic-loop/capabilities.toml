@@ -47,7 +47,7 @@ binary_release = false
 distribution = "main-merge"
 
 [skills]
-available = ["submit-requirement", "diagnose-codebase"]
+available = ["submit-requirement", "diagnose-codebase", "postmortem"]
 
 [[ownership]]
 path = "bin"

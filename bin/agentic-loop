@@ -46,6 +46,7 @@ readonly DISPOSITION_LABELS=(cancelled superseded duplicate merged)
 readonly -A PRIORITY_LEGACY_VALUES=([critical]=90 [high]=75 [medium]=50 [low]=25)
 readonly CATEGORY_LABELS=(loop-continuity confidentiality-incident integrity-incident availability-incident feature improvement)
 readonly DIAGNOSIS_LABEL=diagnosis
+readonly POSTMORTEM_LABEL=postmortem
 # Grace before a lock without a published pid is treated as stale, so two
 # concurrent starts cannot tear down each other's fresh lock and double-run.
 readonly SUPERVISOR_LOCK_GRACE_SECONDS=10
@@ -110,6 +111,8 @@ EXCLUSIVE_PATHS=''
 TRACEABILITY=off
 PREFLIGHT=off
 WORKLOAD=off
+POSTMORTEM_AUTO_DETECT=off
+POSTMORTEM_MAX_AUTO_CREATED_PER_DAY=5
 CONFIG_ERROR=''
 CONFIG_PROPS=''
 
@@ -151,6 +154,8 @@ source "$SCRIPT_ROOT/bin/lib/agentic-loop/control.sh"
 source "$SCRIPT_ROOT/bin/lib/agentic-loop/dependency.sh"
 # shellcheck source=lib/agentic-loop/scope.sh
 source "$SCRIPT_ROOT/bin/lib/agentic-loop/scope.sh"
+# shellcheck source=lib/agentic-loop/postmortem.sh
+source "$SCRIPT_ROOT/bin/lib/agentic-loop/postmortem.sh"
 # shellcheck source=lib/agentic-loop/preflight.sh
 source "$SCRIPT_ROOT/bin/lib/agentic-loop/preflight.sh"
 # shellcheck source=lib/agentic-loop/workload.sh
@@ -170,7 +175,7 @@ load_config || { [[ ${1:-} == doctor ]] || fail "$CONFIG_ERROR"; }
 
 usage() {
   cat >&2 <<EOF
-Usage: $PROGRAM_NAME {setup|sync-issue ISSUE|dispose ISSUE --reason cancelled|superseded|duplicate|merged [--target ISSUE]|resume ISSUE|pause ISSUE [--reason TEXT]|abort ISSUE [--reason TEXT]|priority ISSUE N|start|stop|status [--format json] [--watch [N]]|doctor [--format json]|metrics [--days N] [--as-of EPOCH] [--format json]|tail [--issue N] [--follow]|trace ISSUE [--format json]|trace --audit [--days N] [--format json]|capabilities [--format json]|preflight ISSUE [--format json]|preflight ISSUE --approve --token TOKEN [--note TEXT]|workload [--format json]|flaky [--format json]|flaky report [--record PATH]|upgrade [--source PATH|--revision SHA] [--apply] [--approve] [--rollback] [--skip-verify] [--overwrite PATH]... [--format json]}
+Usage: $PROGRAM_NAME {setup|sync-issue ISSUE|dispose ISSUE --reason cancelled|superseded|duplicate|merged [--target ISSUE]|resume ISSUE|pause ISSUE [--reason TEXT]|abort ISSUE [--reason TEXT]|priority ISSUE N|start|stop|status [--format json] [--watch [N]]|doctor [--format json]|metrics [--days N] [--as-of EPOCH] [--format json]|tail [--issue N] [--follow]|trace ISSUE [--format json]|trace --audit [--days N] [--format json]|capabilities [--format json]|preflight ISSUE [--format json]|preflight ISSUE --approve --token TOKEN [--note TEXT]|workload [--format json]|flaky [--format json]|flaky report [--record PATH]|postmortem create --kind K --subject S --title T [--summary S] [--evidence-file PATH] [--category C]|postmortem link ISSUE ACTION_ISSUE...|postmortem status ISSUE|postmortem complete ISSUE|upgrade [--source PATH|--revision SHA] [--apply] [--approve] [--rollback] [--skip-verify] [--overwrite PATH]... [--format json]}
 
   setup   Create or reuse this repository's labels and Project
   sync-issue  Add one Issue to the Project now, or queue a retry
@@ -192,6 +197,7 @@ Usage: $PROGRAM_NAME {setup|sync-issue ISSUE|dispose ISSUE --reason cancelled|su
   preflight     Read-only change-risk preflight signal for one Issue (exit 1 when repository signals require approval); --approve records an authorized operator's approval of one risk envelope token
   workload      Read-only static scan for finite-resource/scalability violations (unbounded pagination, bypassed API boundary, loop-nested listing); exit 1 on any violation
   flaky   Read-only flaky-test registry status (exit 1 on an expired or invalid tests/flaky-registry.toml entry); flaky report creates/reuses repair Issues from the last run-e2e.sh record
+  postmortem  Closed-loop postmortem learning (see docs/policies/postmortem.md, docs/decisions/0026-postmortem-closed-loop.md): create (dedup-checked, explicit request), link (native sub-issue + dependency to action items, moves to agent:blocked), status (read-only action-item completion report), complete (gate: all action items verified + body filled in; marks the Issue ready for worker.sh's terminal close)
   upgrade Preview (default) or apply a Foundation update; see docs/operations/upgrade.md
 EOF
 }
@@ -216,6 +222,7 @@ main() {
     preflight) cmd_preflight "${@:2}" ;;
     workload) cmd_workload "${@:2}" ;;
     flaky) cmd_flaky "${@:2}" ;;
+    postmortem) cmd_postmortem "${@:2}" ;;
     upgrade) cmd_upgrade "$@" ;;
     _service) [[ $# -eq 1 ]] || exit 2; cmd_service ;;
     _supervise) supervise ;;

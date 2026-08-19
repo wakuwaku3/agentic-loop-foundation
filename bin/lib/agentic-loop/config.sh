@@ -47,6 +47,8 @@ load_config() {
       queue.traceability) TRACEABILITY=$value; continue ;;
       queue.preflight) PREFLIGHT=$value; continue ;;
       queue.workload) WORKLOAD=$value; continue ;;
+      postmortem.auto_detect) POSTMORTEM_AUTO_DETECT=$value; continue ;;
+      postmortem.max_auto_created_per_day) key=POSTMORTEM_MAX_AUTO_CREATED_PER_DAY ;;
       *) continue ;;
     esac
     if [[ ! $value =~ ^[0-9]+$ ]]; then
@@ -93,4 +95,6 @@ validate_config() {
   case $TRACEABILITY in require | warn | off) ;; *) fail 'TRACEABILITY must be require, warn, or off' ;; esac
   case $PREFLIGHT in require | warn | off) ;; *) fail 'PREFLIGHT must be require, warn, or off' ;; esac
   case $WORKLOAD in require | warn | off) ;; *) fail 'WORKLOAD must be require, warn, or off' ;; esac
+  case $POSTMORTEM_AUTO_DETECT in on | off) ;; *) fail 'POSTMORTEM_AUTO_DETECT must be on or off' ;; esac
+  [[ $POSTMORTEM_MAX_AUTO_CREATED_PER_DAY =~ ^[0-9]+$ && $POSTMORTEM_MAX_AUTO_CREATED_PER_DAY -ge 1 && $POSTMORTEM_MAX_AUTO_CREATED_PER_DAY -le 20 ]] || fail 'POSTMORTEM_MAX_AUTO_CREATED_PER_DAY must be an integer between 1 and 20'
 }

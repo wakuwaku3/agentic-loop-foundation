@@ -1,0 +1,4 @@
+interface:
+  display_name: "Postmortem"
+  short_description: "Blameless incident analysis with tracked action items"
+  default_prompt: "Use $postmortem to investigate this incident and track its action items to closure."

@@ -435,6 +435,7 @@ park_issue() {
   clear_conflict_wait "$issue"
   clear_worker_local "$issue"
   event_append "$issue" recover -
+  postmortem_consider_trigger repeated-failure "$issue" "Issue #$issue が $count 回の試行後もagent:parkedへ移った（reason=$reason）" || true
 }
 
 # Re-queue failures this loop already attempted, so a transient failure (e.g. an

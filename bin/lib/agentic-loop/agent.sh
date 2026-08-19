@@ -536,6 +536,7 @@ exhaustion_note_pause() {
       mkdir -p "$STATE_ROOT"
       : > "$STATE_ROOT/all-pools-paused"
       say '全プールが利用不可のため、Issueのclaimを一時停止します。' >&2
+      postmortem_consider_trigger resource-exhaustion all-pools '全provider poolが利用不可になり、Issueのclaimを一時停止した' || true
     fi
     return 1
   fi

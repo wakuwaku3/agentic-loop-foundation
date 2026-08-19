@@ -392,3 +392,7 @@ planとexecの間には、着手前に変更影響とリスクを判定するpre
 `tests/run-e2e.sh`は、attempt1（`queue`/`lifecycle`/`auxiliary`/`upgrade`4群並列のco-run文脈）が失敗した群だけを、最大2回、単独（isolated文脈）で追加試行し、`scripts/flaky.sh classify`が失敗fingerprint（`FAIL:`行のhash）と試行文脈からverdict（`passed`/`failing`/`flaky`/`flaky-unknown`）を決定する（[ADR 0022](../decisions/0022-flaky-test-detection-and-quarantine.md)）。retryは検知・診断目的に限定し、`tests/flaky-registry.toml`の明示的な隔離entry（期限最長14日、責任者・修復Issue必須）に一致しない限り、`verdict=flaky`は常に非ゼロで終了する。決定的失敗（`failing`）は隔離できない。`devbox run --pure check`とCIのmerge gateはこの機能によって一切弱まらない。詳細は[docs/operations/flaky-tests.md](flaky-tests.md)を参照。
 
 読み取り専用の確認は `bin/agentic-loop flaky [--format json]` で行える（registryが期限切れ・不正なら終了code 1）。`bin/agentic-loop flaky report [--record PATH]` は直近の実行recordから修復Issueを作成・再利用する（`make check`からは自動的に呼ばれない）。
+
+## ポストモーテム
+
+反復失敗の`agent:parked`到達、全provider poolの`all-pools-paused`遷移からは、`postmortem` labelと`category:*`を持つ日本語ポストモーテムIssueが重複抑止付きで自動起票されうる（[ADR 0026](../decisions/0026-postmortem-closed-loop.md)、`[postmortem].auto_detect`）。利用者・workerは`bin/agentic-loop postmortem create`で他の事象も明示的に起票できる。action itemは通常のIssueキューへ入り、既存の依存関係機構がその完了・検証を追跡する。CLI詳細・設定・トラブルシュートは[docs/operations/postmortem.md](postmortem.md)、非難しない原則・起動基準・完了条件の正本は[ポストモーテムポリシー](../policies/postmortem.md)を参照。

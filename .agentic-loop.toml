@@ -155,6 +155,18 @@ preflight = "warn"
 # record convention is consistently followed.
 workload = "warn"
 
+[postmortem]
+# Closed-loop postmortem learning (see docs/policies/postmortem.md,
+# docs/decisions/0026-postmortem-closed-loop.md). "on" lets the two
+# structurally cheap detection points (park_issue's repeated-failure, and
+# exhaustion_note_pause's all-pools-exhausted transition) create a dedup-
+# checked `postmortem`-labeled Issue; "off" disables automatic creation
+# entirely (explicit `bin/agentic-loop postmortem create` still works).
+auto_detect = "on"
+# Bound on total auto-created postmortem Issues per UTC day (1-20), so a
+# flapping failure/exhaustion condition cannot create unbounded Issues.
+max_auto_created_per_day = 5
+
 [foundation]
 # Foundationの配布元repository。`agentic-loop upgrade` はここを基準に新しいrevisionを取得する。
 repository = "wakuwaku3/agentic-loop-foundation"
