@@ -232,6 +232,14 @@ main() {
     upgrade) cmd_upgrade "$@" ;;
     _service) [[ $# -eq 1 ]] || exit 2; cmd_service ;;
     _supervise) supervise ;;
+    # A single synchronous reap_orphan_workers pass, with no polling loop
+    # around it. supervise() only ever runs this inline (see its startup and
+    # per-poll calls), so e2e coverage of Issue #193's grace/guard behavior
+    # would otherwise have to observe it through a live poll loop's real
+    # wall-clock cadence, which is racy under a contended CI runner (a single
+    # poll iteration can itself take far longer than POLL_SECONDS). This gives
+    # tests a deterministic boundary instead.
+    _reap-orphans) reap_orphan_workers ;;
     _pick-tier) [[ $# -eq 2 ]] || exit 2; agent_pick_tier "$2" || exit $? ;;
     _worker) [[ $# -eq 3 ]] || exit 2; worker "$2" "$3" ;;
     *) usage; exit 2 ;;

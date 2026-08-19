@@ -4202,26 +4202,24 @@ rm -f "$state_root/stop.requested"
 # (e.g. the Label mismatch was transient, mirroring the brief window a normal
 # completion passes through between its own Label update and process exit)
 # must not be killed, and its grace marker must be cleared rather than
-# lingering to poison a later, unrelated mismatch. This scenario refreshes
-# orphan-since to "now" right before the Label is restored (see below) so the
-# elapsed time the *next* poll computes does not include however long
-# detecting the mismatch took. That alone is not sufficient on a shared,
-# possibly contended CI runner: a poll already in flight when the refresh
-# happens can have read the old (much older) orphan-since value into a shell
-# variable moments earlier and act on that stale reading regardless of the
-# refresh, and a single poll's own recover_expired / enforce_worker_timeout /
-# reap_orphan_workers / snapshot-refresh work can itself stretch tens of
-# seconds under contention (observed in CI). Grace is set far above that
-# worst case (240s, not the file's usual small test values) purely to make
-# this scenario's assertion robust to CI scheduling noise; it is not a claim
-# about a useful production grace value. FAKE_CODEX_SLEEP is set well beyond
-# every wait budget below combined so the worker cannot finish its stage and
-# exit on its own before the assertions run.
-write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=300 STOP_TIMEOUT=10 STALE_DAYS=30 MAX_ATTEMPTS=3 RETRY_COOLDOWN_SECONDS=600 WORKER_TIMEOUT_SECONDS=999999 WORKER_ORPHAN_GRACE_SECONDS=240
+# lingering to poison a later, unrelated mismatch. Driving this through a
+# live, continuously-polling Supervisor (as the grace-exceeded scenario above
+# does) raced real wall-clock time between the Label flipping away and back
+# against a shared, possibly contended CI runner where a single poll -- and
+# even just detecting the mismatch -- can stretch far past POLL_SECONDS=1
+# (observed in CI repeatedly, at every grace value and wait budget tried).
+# This scenario instead uses `_reap-orphans`, a single synchronous
+# reap_orphan_workers pass with no polling loop, to drive the two observations
+# deterministically: the background Supervisor below only claims the Issue and
+# is then killed (SIGKILL, not TERM, so its graceful-shutdown drain never
+# fires and the still-running worker is left untouched), and every state
+# transition after that is followed immediately by exactly one `_reap-orphans`
+# call and a direct assertion, with no real-time race of any kind.
+write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=300 STOP_TIMEOUT=10 STALE_DAYS=30 MAX_ATTEMPTS=3 RETRY_COOLDOWN_SECONDS=600 WORKER_TIMEOUT_SECONDS=999999 WORKER_ORPHAN_GRACE_SECONDS=30
 printf '72 queued open none 2026-01-01T00:00:00Z\n' > "$state"
 : > "$FAKE_GH_ROOT/$state_key.comments"
 rm -f "$state_root/stop.requested"
-FAKE_CODEX_SLEEP=600 "$target/bin/agentic-loop" _supervise &
+FAKE_CODEX_SLEEP=60 "$target/bin/agentic-loop" _supervise &
 orphan2_sup_pid=$!
 orphan2_worker_pid=''
 for _ in $(seq 1 40); do
@@ -4239,29 +4237,27 @@ for _ in $(seq 1 40); do
   sleep 0.5
 done
 [[ $orphan2_claimed_seen == 1 ]] || { kill "$orphan2_sup_pid" 2>/dev/null; wait "$orphan2_sup_pid" 2>/dev/null; fail 'worker-orphan grace-reset test: the worker never passed its startup running-Label check before the Label was reverted'; }
-sed -i 's/^72 running/72 queued/' "$state"
-orphan2_since_seen=0
-for _ in $(seq 1 100); do
-  [[ -r $state_root/workers/72.orphan-since ]] && { orphan2_since_seen=1; break; }
-  sleep 0.5
-done
-[[ $orphan2_since_seen == 1 ]] || { kill "$orphan2_sup_pid" 2>/dev/null; wait "$orphan2_sup_pid" 2>/dev/null; fail 'worker-orphan grace-reset test: the Label mismatch was never observed'; }
-# Refresh orphan-since to "now" so the elapsed time reap_orphan_workers sees
-# from here on reflects this test's own transition, not however long the poll
-# above took to first notice the mismatch under CI load (see comment above).
-printf '%s\n' "$(date +%s)" > "$state_root/workers/72.orphan-since"
-# The mismatch resolves (Label restored) well within worker_orphan_grace_seconds=240.
-sed -i 's/^72 queued/72 running/' "$state"
-orphan2_marker_cleared=0
-for _ in $(seq 1 200); do
-  [[ ! -e $state_root/workers/72.orphan-since ]] && { orphan2_marker_cleared=1; break; }
-  sleep 0.5
-done
-[[ $orphan2_marker_cleared == 1 ]] || { kill "$orphan2_sup_pid" 2>/dev/null; wait "$orphan2_sup_pid" 2>/dev/null; fail 'worker-orphan grace-reset test: the orphan-since marker was not cleared once the Label mismatch resolved'; }
-kill -0 "$orphan2_worker_pid" 2>/dev/null || { kill "$orphan2_sup_pid" 2>/dev/null; wait "$orphan2_sup_pid" 2>/dev/null; fail 'worker-orphan grace-reset test: a transient Label mismatch killed the worker before its grace period elapsed'; }
-if grep -Fq 'agentic-loop:worker-orphan-reaped' "$FAKE_GH_ROOT/$state_key.comments"; then fail 'worker-orphan grace-reset test: a transient Label mismatch was falsely reaped'; fi
-kill -TERM "$orphan2_sup_pid" 2>/dev/null || true
+# The claim is done; hand control of the reap cadence over to _reap-orphans
+# below (SIGKILL so supervisor_graceful_shutdown never runs against the
+# still-running worker).
+kill -KILL "$orphan2_sup_pid" 2>/dev/null || true
 wait "$orphan2_sup_pid" 2>/dev/null || true
+sed -i 's/^72 running/72 queued/' "$state"
+"$target/bin/agentic-loop" _reap-orphans
+[[ -r $state_root/workers/72.orphan-since ]] || fail 'worker-orphan grace-reset test: the Label mismatch was not observed on the first reap pass'
+kill -0 "$orphan2_worker_pid" 2>/dev/null || fail 'worker-orphan grace-reset test: the worker was killed on the very first observation instead of waiting out the grace period'
+# The mismatch resolves (Label restored) before worker_orphan_grace_seconds
+# has elapsed; the very next reap pass must clear the marker without killing
+# anything (reap_orphan_workers matches the running-Issue list before ever
+# consulting elapsed/grace).
+sed -i 's/^72 queued/72 running/' "$state"
+"$target/bin/agentic-loop" _reap-orphans
+[[ ! -e $state_root/workers/72.orphan-since ]] || fail 'worker-orphan grace-reset test: the orphan-since marker was not cleared once the Label mismatch resolved'
+kill -0 "$orphan2_worker_pid" 2>/dev/null || fail 'worker-orphan grace-reset test: a transient Label mismatch killed the worker before its grace period elapsed'
+if grep -Fq 'agentic-loop:worker-orphan-reaped' "$FAKE_GH_ROOT/$state_key.comments"; then fail 'worker-orphan grace-reset test: a transient Label mismatch was falsely reaped'; fi
+kill -TERM "-$orphan2_worker_pid" 2>/dev/null || true
+wait "$orphan2_worker_pid" 2>/dev/null || true
+rm -f "$state_root/workers/72.pid" "$state_root/workers/72.started" "$state_root/workers/72.progress" "$state_root/workers/72.orphan-since"
 rm -f "$state_root/stop.requested"
 
 # --- worker-orphan: other-host Issues are structurally untouched, and the
