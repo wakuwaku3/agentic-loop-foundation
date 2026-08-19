@@ -54,6 +54,7 @@ status_dependency_waits() {
 # call backs every section below except the closed agent:stale summary (see
 # status_stale_fetch).
 status_snapshot_fetch() {
+  # workload-unbounded: on-demand human-facing read, not a per-poll path (see refresh_supervisor_snapshot for the poll-side aggregate); bound=open Issue count
   repo_api issues --method GET -f state=open -f per_page=100 --paginate --jq '
     .[] | select(.pull_request == null) |
     [.number, .title,

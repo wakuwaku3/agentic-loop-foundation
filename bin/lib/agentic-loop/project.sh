@@ -77,6 +77,7 @@ load_project_content() {
   # a member" (return 2); malformed/GraphQL-error responses are failures.
   while :; do
     query='query($owner:String!,$repo:String!,$number:Int!,$cursor:String){repository(owner:$owner,name:$repo){content:'"$kind"'(number:$number){projectItems(first:20,after:$cursor,includeArchived:false){nodes{id project{id} fieldValues(first:20){nodes{... on ProjectV2ItemFieldSingleSelectValue{name field{... on ProjectV2SingleSelectField{name}}} ... on ProjectV2ItemFieldTextValue{text field{... on ProjectV2Field{name}}}}} pageInfo{hasNextPage endCursor}}}}}}'
+    # workload-boundary: best-effort Projects (GraphQL) item lookup, not a REST core operation
     row=$(gh api graphql -f query="$query" -F owner="$(repo_name | cut -d/ -f1)" -F repo="$(repo_name | cut -d/ -f2)" -F number="$number" -f cursor="$cursor" --jq 'if (.errors or .data.repository == null or .data.repository.content == null) then error("Project content query failed") else .data.repository.content.projectItems as $items | ($items.nodes[] | select(.project.id == "'"$PROJECT_ID"'") | [.id, ([.fieldValues.nodes[] | select(.field.name == "Agent status") | .name][0] // ""), ([.fieldValues.nodes[] | select(.field.name == "Category") | .name][0] // ""), ([.fieldValues.nodes[] | select(.field.name == "Blocked by") | .text][0] // "")] | join("\u001f")), (if $items.pageInfo.hasNextPage then "NEXT\u001f" + ($items.pageInfo.endCursor // "") else "END" end)' 2>/dev/null) || return 1
     item_id=$(head -n 1 <<< "$row")
     if [[ $item_id != END && $item_id != NEXT$'\x1f'* ]]; then row=$item_id; break; fi
@@ -261,6 +262,7 @@ rebuild_project_hints() {
     return 0
   fi
   local rows
+  # workload-unbounded: explicit rare recovery path (lost local Project-sync state), not routine polling; bound=repository Issue count
   rows=$(repo_api issues --method GET -f state=all -f per_page=100 --paginate --jq '.[] | select(.pull_request == null) | .number') || return 1
   while read -r issue; do [[ $issue =~ ^[1-9][0-9]*$ ]] && queue_project_sync "issue $issue"; done <<< "$rows"
   PROJECT_HINTS_REBUILT=1
@@ -284,6 +286,7 @@ SUPERVISOR_SNAPSHOT=''
 
 refresh_supervisor_snapshot() {
   local target="$STATE_ROOT/open-issues.$$"
+  # workload-unbounded: the one aggregate open-Issue fetch every state maintenance path shares (see comment block above); bound=open Issue count, once per poll
   if repo_api issues --method GET -f state=open -f per_page=100 --paginate --jq '
     .[] | select(.pull_request == null) |
     [.number,

@@ -295,6 +295,7 @@ recover_expired() {
     if [[ -e $pidfile ]]; then
       clear_worker_local "$issue"
     else
+      # workload-unbounded: one per-Issue lease lookup per running Issue lacking a local pidfile, no batched multi-Issue endpoint exists; bound=running Issue count
       body=$(repo_api "issues/$issue/comments" --method GET -f since="$since" -f per_page=100 --paginate --jq '[.[].body | select(contains("agentic-loop:lease"))] | last // ""' 2>/dev/null | tail -n 1 || true)
       expires=$(printf '%s\n' "$body" | sed -n 's/.*expires=\([0-9][0-9]*\).*/\1/p' | head -n 1)
       [[ -n $expires && $expires -ge $now ]] && continue

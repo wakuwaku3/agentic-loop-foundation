@@ -46,6 +46,7 @@ load_config() {
       queue.exclusive_paths) EXCLUSIVE_PATHS=$value; continue ;;
       queue.traceability) TRACEABILITY=$value; continue ;;
       queue.preflight) PREFLIGHT=$value; continue ;;
+      queue.workload) WORKLOAD=$value; continue ;;
       *) continue ;;
     esac
     if [[ ! $value =~ ^[0-9]+$ ]]; then
@@ -91,4 +92,5 @@ validate_config() {
   case $UNKNOWN_SCOPE in isolated | exclusive | open) ;; *) fail 'UNKNOWN_SCOPE must be isolated, exclusive, or open' ;; esac
   case $TRACEABILITY in require | warn | off) ;; *) fail 'TRACEABILITY must be require, warn, or off' ;; esac
   case $PREFLIGHT in require | warn | off) ;; *) fail 'PREFLIGHT must be require, warn, or off' ;; esac
+  case $WORKLOAD in require | warn | off) ;; *) fail 'WORKLOAD must be require, warn, or off' ;; esac
 }

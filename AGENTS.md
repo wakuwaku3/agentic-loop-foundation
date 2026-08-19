@@ -34,3 +34,4 @@
 - [費用ポリシー](docs/policies/cost.md)をすべての機能・設計・運用に適用し、許容されない金銭的コストを発生させない。
 - [GitHub日本語運用ポリシー](docs/policies/github-language.md)に従い、Issue、PR、コメント、レビューは日本語で記述する。
 - [文書ポリシー](docs/policies/documentation.md)に従い、文書の対象読者と責務境界を守り、同じ事実を複数の文書へ重複させない。
+- [有限資源とスケーラビリティのポリシー](docs/policies/resource-scalability.md)に従い、処理量・外部I/O量・入力規模に対する増加率を設計と検証の対象にする。

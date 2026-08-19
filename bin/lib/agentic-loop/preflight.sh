@@ -264,6 +264,7 @@ preflight_compute_token() {
 preflight_approved() {
   local issue=$1 token=$2 found
   [[ $token =~ ^[0-9a-f]{12}$ ]] || return 1
+  # workload-unbounded: walks every comment on this Issue every time, growth proportional to its comment count; bound=comment count on this Issue; track=#197
   found=$(repo_api "issues/$issue/comments" --method GET -f per_page=100 --paginate --jq '[.[] | select((.body | contains("agentic-loop:preflight-approved")) and (.body | contains("token='"$token"'")))] | length' 2>/dev/null || printf 0)
   [[ $found =~ ^[1-9][0-9]*$ ]]
 }

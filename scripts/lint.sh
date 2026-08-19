@@ -12,7 +12,9 @@ required=(AGENTS.md README.md Makefile .editorconfig .gitignore .codex/config.to
   docs/decisions/0021-affected-check-selection.md docs/operations/affected-checks.md scripts/affected-check.sh tests/impact-map.toml
   docs/decisions/0022-flaky-test-detection-and-quarantine.md docs/operations/flaky-tests.md scripts/flaky.sh tests/flaky-registry.toml bin/lib/agentic-loop/flaky.sh
   docs/policies/documentation.md docs/decisions/0023-documentation-readership-boundaries.md docs/development.md
-  docs/decisions/0024-secret-scanning.md docs/operations/secret-scanning.md .agentic-loop/gitleaks.toml)
+  docs/decisions/0024-secret-scanning.md docs/operations/secret-scanning.md .agentic-loop/gitleaks.toml
+  docs/policies/resource-scalability.md docs/decisions/0025-resource-scalability-budget.md docs/operations/workload-budget.md
+  bin/lib/agentic-loop/workload.sh scripts/upgrade/migrations/0006-workload-config.sh)
 for file in "${required[@]}"; do
   [[ -f $file ]] || { printf 'Missing required file: %s\n' "$file" >&2; exit 1; }
 done
@@ -499,6 +501,10 @@ grep -Fq 'bin/agentic-loop flaky' .agents/skills/diagnose-codebase/SKILL.md || {
   printf 'diagnose-codebase skill does not reference the flaky registry as an evidence source.\n' >&2
   exit 1
 }
+grep -Fq 'bin/agentic-loop workload' .agents/skills/diagnose-codebase/SKILL.md || {
+  printf 'diagnose-codebase skill does not reference the workload budget scan as an evidence source.\n' >&2
+  exit 1
+}
 ./scripts/flaky.sh audit || { printf 'tests/flaky-registry.toml failed audit.\n' >&2; exit 1; }
 
 # --- documentation readership boundaries (Issue #64, ADR 0023) ---
@@ -608,5 +614,38 @@ if [[ -e .gitleaksignore ]]; then
 fi
 ./.agentic-loop/guard-secrets.sh --audit
 ./.agentic-loop/guard-secrets.sh --all
+
+# --- resource scalability and workload budget (Issue #130, ADR 0025) --------
+grep -Fq '[有限資源とスケーラビリティのポリシー](docs/policies/resource-scalability.md)' AGENTS.md || {
+  printf 'Missing resource scalability policy invariant.\n' >&2
+  exit 1
+}
+for requirement in '増加率' '停止条件' '集約' '例外の記録方法' '安全弁'; do
+  grep -Fq "$requirement" docs/policies/resource-scalability.md || {
+    printf 'Resource scalability policy lacks requirement: %s\n' "$requirement" >&2
+    exit 1
+  }
+done
+grep -Fq 'workload) cmd_workload' "${AGENTIC_LOOP_SOURCES[@]}" || { printf 'Workload command is not distributed through the queue CLI.\n' >&2; exit 1; }
+grep -Fq 'workload_gate' "${AGENTIC_LOOP_SOURCES[@]}" || { printf 'Workload budget gate is missing.\n' >&2; exit 1; }
+grep -Fq 'workload_scan' "${AGENTIC_LOOP_SOURCES[@]}" || { printf 'Workload static scan is missing.\n' >&2; exit 1; }
+grep -Fq 'agentic-loop:workload' "${AGENTIC_LOOP_SOURCES[@]}" || { printf 'Workload record marker is missing.\n' >&2; exit 1; }
+grep -Fq 'reason=workload-missing' "${AGENTIC_LOOP_SOURCES[@]}" || { printf 'Workload missing-record gate marker is missing.\n' >&2; exit 1; }
+grep -Fq 'reason=workload-invalid' "${AGENTIC_LOOP_SOURCES[@]}" || { printf 'Workload invalid-record gate marker is missing.\n' >&2; exit 1; }
+grep -Eq '^workload[[:space:]]*=[[:space:]]*"warn"$' .agentic-loop.toml || { printf 'Unsafe workload default.\n' >&2; exit 1; }
+grep -Fq 'docs/decisions/0025-resource-scalability-budget.md' scripts/lib/foundation-files.sh || { printf 'Workload ADR is not distributed.\n' >&2; exit 1; }
+grep -Fq 'docs/operations/workload-budget.md' scripts/lib/foundation-files.sh || { printf 'Workload documentation is not distributed.\n' >&2; exit 1; }
+grep -Fq 'docs/policies/resource-scalability.md' scripts/lib/foundation-files.sh || { printf 'Resource scalability policy is not distributed.\n' >&2; exit 1; }
+# Workload budget is execution control, never disposal (see docs/decisions/0016).
+workload_fn_body=$(awk '
+  $0 ~ "^workload_gate\\(\\) \\{" { capture=1; next }
+  capture && /^}/ { capture=0 }
+  capture { print }
+' bin/lib/agentic-loop/workload.sh)
+if grep -Fq 'state=closed' <<< "$workload_fn_body"; then
+  printf 'Workload gate must not close Issues (see docs/decisions/0016).\n' >&2
+  exit 1
+fi
+./bin/agentic-loop workload || { printf 'bin/agentic-loop workload detected an unannotated finite-resource/scalability violation.\n' >&2; exit 1; }
 
 printf 'Lint passed.\n'
