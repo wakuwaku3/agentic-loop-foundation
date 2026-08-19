@@ -240,6 +240,12 @@ main() {
     # poll iteration can itself take far longer than POLL_SECONDS). This gives
     # tests a deterministic boundary instead.
     _reap-orphans) reap_orphan_workers ;;
+    # A single synchronous prune_residual_worktrees pass, with no polling loop
+    # around it (see _reap-orphans above for the same rationale): supervise()
+    # only ever runs it inline, so e2e coverage of Issue #211's residual
+    # worktree/branch auto-prune needs a deterministic boundary instead of a
+    # live poll loop's wall-clock cadence.
+    _prune-worktrees) prune_residual_worktrees ;;
     _pick-tier) [[ $# -eq 2 ]] || exit 2; agent_pick_tier "$2" || exit $? ;;
     _worker) [[ $# -eq 3 ]] || exit 2; worker "$2" "$3" ;;
     *) usage; exit 2 ;;

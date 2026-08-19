@@ -4592,6 +4592,89 @@ statusgrace_disabled_output=$("$target/bin/agentic-loop" status)
 grep -Fq '自動停止は無効です' <<< "$statusgrace_disabled_output" || fail 'status did not report worker_orphan_grace_seconds=0 as disabling the automatic stop'
 rm -rf "$state_root/workers"
 
+# --- Residual worktree/branch auto-prune (Issue #211) ---
+# prune_residual_worktrees is exercised through the deterministic
+# `_prune-worktrees` boundary (mirrors `_reap-orphans`, see bin/agentic-loop)
+# rather than a live poll loop: it never spawns a provider worker, so there is
+# nothing for supervise()'s RUN_ONCE worker_count() wait to synchronize on.
+write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=300 STOP_TIMEOUT=10 STALE_DAYS=30
+rm -rf "$state_root/workers"
+bare="$TEST_ROOT/installed-project.git"
+
+# 1) A closed Issue's residual worktree/branch is discarded even with an
+# unpushed commit: the work is done or abandoned, so nothing here is worth
+# preserving.
+git -C "$target" worktree add --quiet -b agent/issue-9990 "$target-worktrees/issue-9990" origin/main
+printf 'unpushed\n' > "$target-worktrees/issue-9990/prune-closed.txt"
+git -C "$target-worktrees/issue-9990" add prune-closed.txt
+git -C "$target-worktrees/issue-9990" commit --quiet -m 'unpushed work on a closed Issue'
+printf '9990 completed closed\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+"$target/bin/agentic-loop" _prune-worktrees
+[[ ! -e $target-worktrees/issue-9990 ]] || fail 'prune did not remove a residual worktree left over from a closed Issue'
+git -C "$target" show-ref --verify --quiet refs/heads/agent/issue-9990 && fail 'prune did not remove a residual local branch left over from a closed Issue'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:pruned reason=closed' 'the closed-Issue residual prune was not audited on the Issue'
+
+# 2) An open Issue whose local branch is fully reflected on
+# `origin/agent/issue-N` has its local worktree/branch discarded, but the
+# remote branch is kept for another host or a future resume (Issue #210).
+git -C "$target" worktree add --quiet -b agent/issue-9991 "$target-worktrees/issue-9991" origin/main
+printf 'pushed\n' > "$target-worktrees/issue-9991/prune-pushed.txt"
+git -C "$target-worktrees/issue-9991" add prune-pushed.txt
+git -C "$target-worktrees/issue-9991" commit --quiet -m 'fully pushed work'
+git -C "$target-worktrees/issue-9991" push --quiet origin agent/issue-9991
+printf '9991 parked open\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+"$target/bin/agentic-loop" _prune-worktrees
+[[ ! -e $target-worktrees/issue-9991 ]] || fail 'prune did not remove a residual worktree fully reflected on its remote branch'
+git -C "$target" show-ref --verify --quiet refs/heads/agent/issue-9991 && fail 'prune did not remove the residual local branch once fully pushed'
+git -C "$bare" show-ref --verify --quiet refs/heads/agent/issue-9991 || fail 'prune deleted the remote branch of a fully pushed open Issue'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:pruned reason=pushed' 'the fully-pushed open-Issue prune was not audited on the Issue'
+
+# 3) An open Issue with an unpushed local commit is left untouched, silently
+# (no comment): an operator cannot act on local-only work they cannot observe
+# from GitHub anyway.
+git -C "$target" worktree add --quiet -b agent/issue-9992 "$target-worktrees/issue-9992" origin/main
+git -C "$target-worktrees/issue-9992" push --quiet origin agent/issue-9992
+printf 'unpushed\n' > "$target-worktrees/issue-9992/prune-unpushed.txt"
+git -C "$target-worktrees/issue-9992" add prune-unpushed.txt
+git -C "$target-worktrees/issue-9992" commit --quiet -m 'unpushed follow-up work'
+printf '9992 parked open\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+"$target/bin/agentic-loop" _prune-worktrees
+[[ -e $target-worktrees/issue-9992 ]] || fail 'prune removed a residual worktree that still had an unpushed commit'
+git -C "$target" show-ref --verify --quiet refs/heads/agent/issue-9992 || fail 'prune removed a residual local branch that still had an unpushed commit'
+[[ ! -s $FAKE_GH_ROOT/$state_key.comments ]] || fail 'prune commented on an Issue with unpushed local work still present'
+git -C "$target" worktree remove --force "$target-worktrees/issue-9992"
+git -C "$target" branch -D agent/issue-9992 >/dev/null
+
+# 4) An Issue with a live local worker on this host is never touched, even
+# when GitHub reports it closed.
+git -C "$target" worktree add --quiet -b agent/issue-9993 "$target-worktrees/issue-9993" origin/main
+mkdir -p "$state_root/workers"
+printf '%s\n' "$$" > "$state_root/workers/9993.pid"
+printf '9993 completed closed\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+"$target/bin/agentic-loop" _prune-worktrees
+[[ -e $target-worktrees/issue-9993 ]] || fail 'prune removed a worktree despite a live local worker pidfile'
+git -C "$target" show-ref --verify --quiet refs/heads/agent/issue-9993 || fail 'prune removed a branch despite a live local worker pidfile'
+[[ ! -s $FAKE_GH_ROOT/$state_key.comments ]] || fail 'prune commented on an Issue guarded by a live local worker'
+rm -f "$state_root/workers/9993.pid"
+git -C "$target" worktree remove --force "$target-worktrees/issue-9993"
+git -C "$target" branch -D agent/issue-9993 >/dev/null
+
+# 5) A residual branch with no matching worktree (e.g. left by a prior,
+# interrupted prune, or removed by hand) is pruned the same way once its
+# Issue closes.
+git -C "$target" branch --quiet agent/issue-9994 origin/main
+printf '9994 completed closed\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+"$target/bin/agentic-loop" _prune-worktrees
+git -C "$target" show-ref --verify --quiet refs/heads/agent/issue-9994 && fail 'prune did not remove a branch-only residual once its Issue closed'
+
+: > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+
 # --- Requirement traceability gate (Issue #53, ADR 0017) ---
 # These scenarios exercise trace_gate through the ordinary (non-resume)
 # completion path: a fresh "running" Issue with no worktree yet, so worker()
