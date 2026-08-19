@@ -11,7 +11,7 @@
 # body marker's maximum in-range N (0-100, unset=0); see docs/decisions/
 # 0015-numeric-priority-marker.md.
 queue_rank_jq() {
-  printf '%s' '('"$(queue_priority_jq)"'), (if any(.labels[]; .name == "category:loop-continuity") then 0 elif any(.labels[]; .name == "category:confidentiality-incident") then 1 elif any(.labels[]; .name == "category:integrity-incident") then 2 elif any(.labels[]; .name == "category:availability-incident") then 3 elif any(.labels[]; .name == "category:feature") then 4 else 5 end)'
+  printf '%s' '('"$(queue_priority_jq)"'), (if any(.labels[]; .name == "category:loop-continuity") then 0 elif any(.labels[]; .name == "category:confidentiality-incident") then 1 elif any(.labels[]; .name == "category:integrity-incident") then 2 elif any(.labels[]; .name == "category:availability-incident") then 3 elif any(.labels[]; .name == "category:bug") then 4 elif any(.labels[]; .name == "category:feature") then 5 else 6 end)'
 }
 
 

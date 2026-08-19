@@ -124,7 +124,7 @@ project_add_content() {
 
 project_option_for_state() { case $1 in queued) printf Queued;; running) printf Running;; needs-input) printf 'Needs input';; in-review) printf 'In review';; completed) printf Done;; failed) printf Failed;; parked) printf Parked;; stale) printf Stale;; blocked) printf Blocked;; paused) printf Paused;; stopping) printf Stopping;; cancelled) printf Cancelled;; superseded) printf Superseded;; duplicate) printf Duplicate;; merged) printf Merged;; *) printf Inbox;; esac; }
 
-project_option_for_category() { case $1 in loop-continuity) printf 'Loop continuity';; confidentiality-incident) printf 'Confidentiality incident';; integrity-incident) printf 'Integrity incident';; availability-incident) printf 'Availability incident';; feature) printf Feature;; improvement) printf Improvement;; *) return 1;; esac; }
+project_option_for_category() { case $1 in loop-continuity) printf 'Loop continuity';; confidentiality-incident) printf 'Confidentiality incident';; integrity-incident) printf 'Integrity incident';; availability-incident) printf 'Availability incident';; bug) printf Bug;; feature) printf Feature;; improvement) printf Improvement;; *) return 1;; esac; }
 
 
 project_issue_snapshot() {
@@ -300,7 +300,7 @@ refresh_supervisor_snapshot() {
      (.updated_at // "-"), .created_at,
      (if (.body // "") == "" then "-" else ((.body // "") | @base64) end),
      (([.labels[].name | select(startswith("category:"))] | join(",")) as $categories | if $categories == "" then "-" else $categories end),
-     (if any(.labels[]; .name == "category:loop-continuity") then 0 elif any(.labels[]; .name == "category:confidentiality-incident") then 1 elif any(.labels[]; .name == "category:integrity-incident") then 2 elif any(.labels[]; .name == "category:availability-incident") then 3 elif any(.labels[]; .name == "category:feature") then 4 else 5 end),
+     (if any(.labels[]; .name == "category:loop-continuity") then 0 elif any(.labels[]; .name == "category:confidentiality-incident") then 1 elif any(.labels[]; .name == "category:integrity-incident") then 2 elif any(.labels[]; .name == "category:availability-incident") then 3 elif any(.labels[]; .name == "category:bug") then 4 elif any(.labels[]; .name == "category:feature") then 5 else 6 end),
      '"$(queue_priority_jq)"'
     ] | @tsv' > "$target"; then
     SUPERVISOR_SNAPSHOT=$target
@@ -332,27 +332,68 @@ clear_supervisor_snapshot() {
 }
 
 
+# Best-effort, explainable content classification for a queued Issue that
+# carries no category:* Label yet (see docs/operations/issue-queue.md「カテ
+# ゴリの修復とincident取扱い」). Keyword families are checked in the same
+# precedence order as queue_rank_jq, so the first family matched is the most
+# urgent one. Deliberately never returns an incident category:
+# confidentiality/integrity/availability-incident require verified real CIA
+# harm (docs/policies/postmortem.md「重大度は事実から導出」), which free-text
+# keyword matching cannot certify, so those stay a human or the postmortem
+# workflow's decision. Echoes "" when no family matches, so the caller falls
+# back to category:improvement exactly like it always did.
+triage_category_from_text() {
+  local text; text=$(tr '[:upper:]' '[:lower:]' <<< "$1")
+  if [[ $text =~ (supervisor|worker|キュー|queue|lease|claim|資源枯渇|有限資源|スケーラビリティ|モジュール分割|競合判定|ポストモーテム|postmortem|トレーサビリティ|traceability|ワークツリー|worktree) ]]; then
+    printf loop-continuity
+  elif [[ $text =~ (バグ|不具合|誤動作|regression|crash|直らない|動作しない|壊れ(る|た|ている|ます)) ]]; then
+    printf bug
+  elif [[ $text =~ (新機能|feature[[:space:]]request|を新規に追加|を実装する) ]]; then
+    printf feature
+  fi
+}
+
+
+# Title + body + comments for one Issue, the raw material triage_category_
+# from_text classifies. body is already decoded by the caller (it comes from
+# the shared open-Issue snapshot); only title and comments need a fresh call.
+triage_issue_content() {
+  local issue=$1 body=$2 title comments
+  title=$(repo_api "issues/$issue" --jq '.title' 2>/dev/null) || title=''
+  # workload-unbounded: one comment listing per queued Issue still missing a category, only while it stays uncategorized; bound=queued Issue count
+  comments=$(repo_api "issues/$issue/comments" --method GET -f per_page=100 --paginate --jq '[.[].body] | join("\n")' 2>/dev/null) || comments=''
+  printf '%s\n%s\n%s' "$title" "$body" "$comments"
+}
+
+
 reconcile_queued_categories() {
-  local issue categories category found name payload
-  while IFS=$'\t' read -r issue _ _ _ _ categories _; do
+  local issue categories category found name payload body_b64 body triaged
+  while IFS=$'\t' read -r issue _ _ _ body_b64 categories _; do
     [[ -n $issue ]] || continue
-    category=''; found=0
+    category=''; found=0; triaged=''
     for name in "${CATEGORY_LABELS[@]}"; do
       if [[ ,$categories, == *,category:$name,* ]]; then
         found=$((found + 1)); [[ -n $category ]] || category=$name
       fi
     done
     (( found == 1 )) && continue
-    [[ -n $category ]] || category=improvement
+    if (( found == 0 )); then
+      body=''
+      [[ -n $body_b64 && $body_b64 != - ]] && body=$(base64 -d <<< "$body_b64" 2>/dev/null || true)
+      triaged=$(triage_category_from_text "$(triage_issue_content "$issue" "$body")")
+      if [[ -n $triaged ]]; then category=$triaged; else category=improvement; fi
+    fi
     payload=$(repo_api "issues/$issue" --jq '[.labels[].name | select(startswith("category:") | not)] + ["category:'"$category"'"]') || continue
     printf '%s\n' "$payload" | repo_api "issues/$issue/labels" --method PUT --input - >/dev/null
     project_sync_category "$issue" "$category"
-    if (( found == 0 )); then
+    if (( found == 0 )) && [[ -n $triaged ]]; then
+      comment_issue "$issue" "<!-- agentic-loop:category-reconciled reason=content selected=$category -->\nタイトル・本文・commentの内容から \`category:$category\` を自動判定しました。confidentiality/integrity/availability-incidentは実害の確認が必要なため自動判定の対象外です。誤りがあれば、queued中にカテゴリLabelを1つだけ残して再トリアージしてください。"
+    elif (( found == 0 )); then
       comment_issue "$issue" '<!-- agentic-loop:category-reconciled reason=missing -->\nカテゴリが未設定だったため、安全な既定値 `category:improvement` を付与しました。要求の実態が別カテゴリに該当する場合は、queued中にカテゴリLabelを1つだけ残して再トリアージしてください。incidentの詳細や秘密情報はLabel、Issue本文、Projectへ転記しないでください。'
     else
       comment_issue "$issue" "<!-- agentic-loop:category-reconciled reason=multiple selected=$category -->\n複数のカテゴリを検出したため、定義済みの最上位カテゴリ \`category:$category\` だけを残しました。必要ならqueued中にカテゴリLabelを1つだけ残して再トリアージしてください。"
     fi
-  done < <(snapshot_state_rows queued || repo_api issues --method GET -f state=open -f labels="$(state_label queued)" -f per_page=100 --paginate --jq '.[] | select(.pull_request == null) | [.number, "queued", "", "", "", ([.labels[].name | select(startswith("category:"))] | join(","))] | @tsv' 2>/dev/null || true)
+  done < <(snapshot_state_rows queued || repo_api issues --method GET -f state=open -f labels="$(state_label queued)" -f per_page=100 --paginate --jq '.[] | select(.pull_request == null) | [.number, "queued", "", "", (if (.body // "") == "" then "-" else ((.body // "") | @base64) end), ([.labels[].name | select(startswith("category:"))] | join(","))] | @tsv' 2>/dev/null || true)
 }
 
 

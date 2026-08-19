@@ -2,7 +2,7 @@
 
 ## セットアップ
 
-`install.sh` は変更前に `git`、`gh`、設定 `agent.provider`（環境変数 `AGENT_PROVIDER` と git管理外 `.agentic-loop.local.toml` による上書きを含む）から解決したAI CLI（`codex`／`claude`／`opencode`、既定は `codex`）、GitHubログイン、origin、リポジトリ参照、Projects API権限を検査する。provider=opencodeならCodex CLIが存在しなくてもinstallは成立する。既存ファイルとの競合もコピー前に検査する。検査後、14個の状態Label、6個の `category:*` Labelと `Agentic Loop - OWNER/REPOSITORY` Projectを冪等に用意し、既定ではSupervisorを起動する。`priority:*` Labelは作成せず、既存の open Issue と label 定義があれば本文markerへ移行して削除する（[ADR 0015](../decisions/0015-numeric-priority-marker.md)）。Projectには同じ6選択肢の `Category` fieldを作成する。再installは保存済みのProject identityを再利用し、高コストなProject drift走査とqueued Issueの同期修復を行わない。明示的な `bin/agentic-loop setup` はProjectのrepository link・field・viewを収束させるが、既存Issue/PRの一括backfillは行わない。Issue受付とworkerが扱ったPRは、必要になった時点で個別にProjectへ登録する。
+`install.sh` は変更前に `git`、`gh`、設定 `agent.provider`（環境変数 `AGENT_PROVIDER` と git管理外 `.agentic-loop.local.toml` による上書きを含む）から解決したAI CLI（`codex`／`claude`／`opencode`、既定は `codex`）、GitHubログイン、origin、リポジトリ参照、Projects API権限を検査する。provider=opencodeならCodex CLIが存在しなくてもinstallは成立する。既存ファイルとの競合もコピー前に検査する。検査後、14個の状態Label、7個の `category:*` Labelと `Agentic Loop - OWNER/REPOSITORY` Projectを冪等に用意し、既定ではSupervisorを起動する。`priority:*` Labelは作成せず、既存の open Issue と label 定義があれば本文markerへ移行して削除する（[ADR 0015](../decisions/0015-numeric-priority-marker.md)）。Projectには同じ7選択肢の `Category` fieldを作成する。再installは保存済みのProject identityを再利用し、高コストなProject drift走査とqueued Issueの同期修復を行わない。明示的な `bin/agentic-loop setup` はProjectのrepository link・field・viewを収束させるが、既存Issue/PRの一括backfillは行わない。Issue受付とworkerが扱ったPRは、必要になった時点で個別にProjectへ登録する。
 
 GitHub tokenには対象リポジトリのIssue/PR操作権限と `project`、`read:project` scopeが必要である。不足時は `gh auth refresh -s project,read:project` など、利用中のGitHub認証方式に合う方法で追加する。Projectはuser/org所有のため、対象リポジトリとProjectの閲覧者が一致することを管理者が確認する。privateリポジトリの内容や秘密情報をProjectフィールドへ転記しない。
 
@@ -138,7 +138,7 @@ bin/agentic-loop capabilities --format json
 
 `bin/agentic-loop upgrade`（[運用ドキュメント](upgrade.md)、[ADR 0009](../decisions/0009-foundation-upgrade.md)）は、既定では書き込みを一切行わないdry-runで、追加・更新・利用者編集との競合・削除候補・設定migrationを日本語で表示する。`--apply`で実際に適用し、破壊的・不可逆・追加費用・権限変更を伴う項目は`--approve`なしでは適用しない。適用前後で`doctor`と完全検証を実行し、失敗時は適用状態を保持したまま`--rollback`または再実行を案内する。Supervisorが稼働中の`--apply`と、明示的なrevision指定を欠く実行はいずれも拒否する（`main`への暗黙追従はしない）。
 
-利用者は要求をIssueとして登録し、6個の `category:*` のうち1つと `agent:queued` を付ける。取得順は本文markerの数値priority（0-100・降順、[ADR 0015](../decisions/0015-numeric-priority-marker.md)）、category、作成日時、Issue番号の順とする。priorityが未設定（markerなし）のIssueは0扱いで最下位となり、以降はcategory→作成日時→Issue番号の従来順で並ぶ。category順は `loop-continuity`、`confidentiality-incident`、`integrity-incident`、`availability-incident`、`feature`、`improvement` で固定する。複数のpriority markerがあるIssueは最も大きい有効値を使う。priorityの設定・更新は `bin/agentic-loop priority ISSUE N`（0-100）で行う。依存関係は後述の「Issue間の依存関係」に従ってGitHub標準機能またはIssue本文に明記する。変更が及ぶpathやexternal環境が分かる場合は、後述の「変更競合の予防」に従って本文へ `agentic-loop:scope` markerを1行記載する。不明な場合は記載を省略してよく、安全な既定動作（`unknown_scope`）にフォールバックする。回答は `agent:needs-input` のIssueへコメントする。
+利用者は要求をIssueとして登録し、7個の `category:*` のうち1つと `agent:queued` を付ける。取得順は本文markerの数値priority（0-100・降順、[ADR 0015](../decisions/0015-numeric-priority-marker.md)）、category、作成日時、Issue番号の順とする。priorityが未設定（markerなし）のIssueは0扱いで最下位となり、以降はcategory→作成日時→Issue番号の従来順で並ぶ。category順は `loop-continuity`、`confidentiality-incident`、`integrity-incident`、`availability-incident`、`bug`、`feature`、`improvement` で固定する。`bug` は既存動作の不具合修正を表し、実害を伴うincident（confidentiality/integrity/availability）とは区別する。複数のpriority markerがあるIssueは最も大きい有効値を使う。priorityの設定・更新は `bin/agentic-loop priority ISSUE N`（0-100）で行う。依存関係は後述の「Issue間の依存関係」に従ってGitHub標準機能またはIssue本文に明記する。変更が及ぶpathやexternal環境が分かる場合は、後述の「変更競合の予防」に従って本文へ `agentic-loop:scope` markerを1行記載する。不明な場合は記載を省略してよく、安全な既定動作（`unknown_scope`）にフォールバックする。回答は `agent:needs-input` のIssueへコメントする。
 
 ### priority: 数値priorityの設定・更新
 
@@ -160,16 +160,16 @@ bin/agentic-loop capabilities --format json
    - 利用者が「Issueを作って」のように新規Issue作成を明示した場合は、open Issue一覧・候補本文・コメントの重複検索を呼ばず、新規作成する。ただし同じ指示に「既存Issueがあれば再利用」「重複確認して」も含まれる場合は検索する。
    - 通常の自然言語build・変更要求を自動的にキューへ送る場合は、`agent:*` 状態Labelを持つopen Issueだけをactive Issueとして確認する。titleとbodyを検索し、目的と対象範囲が近い候補だけcommentsを確認して、同じ利用者結果なら再利用する。
    - コード診断・定期監査は従来どおりopen・closed Issueを検索し、同じ所見を重複作成しない。
-4. 要求を `loop-continuity`、`confidentiality-incident`、`integrity-incident`、`availability-incident`、`feature`、`improvement` の順に評価し、該当する最上位の `category:*` を1個選ぶ。incidentはCIAへの実害で分類し、単なる重要度では選ばない。分類不能時は `category:improvement` を安全な既定値として使い、queued中に再トリアージする旨を記録する。
+4. 要求を `loop-continuity`、`confidentiality-incident`、`integrity-incident`、`availability-incident`、`bug`、`feature`、`improvement` の順に評価し、該当する最上位の `category:*` を1個選ぶ。incidentはCIAへの実害で分類し、単なる重要度では選ばない。既存動作の不具合修正はincidentではなく `bug` とする。分類不能時は `category:improvement` を安全な既定値として使い、queued中に再トリアージする旨を記録する。
 5. 重複Issueが `agent:running` ならURLと状態を報告して終了し、`agent:queued` なら選択カテゴリが1個だけになるよう確認して再利用する。それ以外は他の `agent:*` 状態Labelを外し、カテゴリ1個と `agent:queued` を付ける。重複がなければ要求・制約・完了条件を本文にしたIssueを作り、カテゴリと `agent:queued` を同時に付ける。
 6. 新規作成、再キュー、または再分類の直後に `bin/agentic-loop sync-issue ISSUE_NUMBER` を実行する。Supervisorのclaimを待たずProjectへ追加し、一時障害時は再試行queueへ永続化する。Project障害はIssue受付を停止しない。
 7. Issueを再取得し、open、カテゴリが1個、かつ `agent:queued` または `agent:running` であることを確認する。URL、カテゴリ、状態を報告し、直接実装せず終了する。手順2でSupervisorが停止中だった場合は、Issueを登録済みであること、Supervisorが停止中であること、処理開始にはSupervisorの起動が必要であることも報告する。
 
 Supervisorがclaimした `agent:running` Issueのworkerは受付を再実行しない。元Issueとコメントを要求として、専用branch/worktree、全検証、secret guard、commit、push、PR、required checks、review対応、merge、default branch確認、branch/worktree cleanupまで進め、再帰的な代替Issueを作らない。
 
-### カテゴリの修復とincident取扱い
+### カテゴリの修復とincident取扱い（[ADR 0028](../decisions/0028-content-based-category-triage-and-bug-category.md)）
 
-Supervisorはclaim前、`setup`、およびProject同期の再処理時にqueued Issueを検査する。カテゴリなしには監査コメント付きで `category:improvement` を補い、複数カテゴリには上記順位の最上位だけを残す。どちらもqueued中にLabelを1個だけ残せば再分類でき、次のreconcileでProjectの `Category` と一致する。たとえばqueue停止やworker復旧障害は `loop-continuity`、認証情報の露出は `confidentiality-incident`、artifact改変は `integrity-incident`、利用機能の停止は `availability-incident`、新機能は `feature`、文書整理は `improvement` とする。loop自体が停止した可用性障害は `loop-continuity` を優先する。
+Supervisorはclaim前、`setup`、およびProject同期の再処理時にqueued Issueを検査する。カテゴリが複数のIssueは上記順位の最上位だけを残す。カテゴリなしのIssueは、タイトル・本文・commentをキーワードで判別し、`loop-continuity`（例: supervisor/worker/queue/lease/claim/資源枯渇/スケーラビリティ/ポストモーテム/トレーサビリティなどloop自身の運用に関する語）・`bug`（例: バグ/不具合/誤動作/regression/crashなど既存動作の破綻を表す語）・`feature`（例: 新機能/を実装する、など新規capabilityを表す語）のいずれにも該当しなければ、安全な既定値 `category:improvement` を補う。この自動判定はconfidentiality/integrity/availability-incidentを対象にしない（実害の確認が必要なため）。人手で付与済みの単一カテゴリは上書きしない。どちらの補正もqueued中にLabelを1個だけ残せば再分類でき、次のreconcileでProjectの `Category` と一致する。たとえばqueue停止やworker復旧障害は `loop-continuity`、認証情報の露出は `confidentiality-incident`、artifact改変は `integrity-incident`、利用機能の停止は `availability-incident`、既存機能の不具合修正は `bug`、新機能は `feature`、文書整理は `improvement` とする。loop自体が停止した可用性障害は `loop-continuity` を優先する。
 
 incident Issueには、秘密の値、攻撃手順、不要な個人情報を本文・コメント・Label・Projectへ転記しない。LabelとProjectにはカテゴリ名だけを保存し、詳細証跡は承認された秘密保管境界で管理する。
 
@@ -240,7 +240,7 @@ GraphQL枯渇時もREST APIのquotaは別に確認できる。`gh api rate_limit
 
 Project同期はProject全itemを走査しない。対象Issue/PRのcontentから `projectItems(first:20)` を直接照会し、pageInfoに従って必要な場合だけcursorを進める。Project IDとfield/option IDだけをプロセス内metadata cacheに置き、item IDとfield値はreconcileごとに再読込する。desired valueと現在値が一致するfieldは更新せず、driftがあるfieldだけを更新する。一時障害の再試行は1 pollあたり10件に制限し、各Projects操作の前には通常reserveに加えて25 pointの操作余裕を要求する。
 
-Projectはbest-effortな投影先であり、唯一の正本はGitHub IssueのLabelである。`Agent status` は唯一の `agent:*` Label（`queued`→Queued、`running`→Running、`needs-input`→Needs input、`in-review`→In review、`completed`→Done、その他の終端・保留状態も同名の選択肢）から、`Category` は唯一の `category:*` Label（`loop-continuity`→Loop continuity、各incident→対応するincident、`feature`→Feature、`improvement`→Improvement）から導出する。`Blocked by` は最新のnative dependency/bodyの `Blocked by:` と現在のscope競合から導出する。Labelが欠落・複数、またはIssue REST取得に失敗した場合はProjectを書き換えない。
+Projectはbest-effortな投影先であり、唯一の正本はGitHub IssueのLabelである。`Agent status` は唯一の `agent:*` Label（`queued`→Queued、`running`→Running、`needs-input`→Needs input、`in-review`→In review、`completed`→Done、その他の終端・保留状態も同名の選択肢）から、`Category` は唯一の `category:*` Label（`loop-continuity`→Loop continuity、各incident→対応するincident、`bug`→Bug、`feature`→Feature、`improvement`→Improvement）から導出する。`Blocked by` は最新のnative dependency/bodyの `Blocked by:` と現在のscope競合から導出する。Labelが欠落・複数、またはIssue REST取得に失敗した場合はProjectを書き換えない。
 
 `project-pending` はIssue番号だけを保存する再試行ヒントであり、過去の状態・カテゴリ・noteを保存しない。Supervisor起動時にはopen/closedを含むIssue snapshotからヒントを再構築するため、ファイルの消失、host間の重複、強制終了は正しさに影響しない。各番号は、最新Labelの取得、対象itemの取得、必要なmutation、mutation後のfield再読込、Issue `updated_at` の再確認に成功した場合だけackする。途中終了、reserve不足、REST/GraphQL失敗はentryを残す。
 
