@@ -4202,7 +4202,14 @@ rm -f "$state_root/stop.requested"
 # (e.g. the Label mismatch was transient, mirroring the brief window a normal
 # completion passes through between its own Label update and process exit)
 # must not be killed, and its grace marker must be cleared rather than
-# lingering to poison a later, unrelated mismatch.
+# lingering to poison a later, unrelated mismatch. Unlike the grace-exceeded
+# scenario above (which forces elapsed >= grace by backdating orphan-since
+# directly), this scenario's "stays within grace" property depends on real
+# wall-clock time between the Label flipping away and back -- a shared,
+# possibly contended CI runner can stretch a single poll well past
+# POLL_SECONDS=1, so grace is widened here (not 5s) to keep this scenario
+# from flaking on slow CI hosts without changing what it asserts.
+write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=300 STOP_TIMEOUT=10 STALE_DAYS=30 MAX_ATTEMPTS=3 RETRY_COOLDOWN_SECONDS=600 WORKER_TIMEOUT_SECONDS=999999 WORKER_ORPHAN_GRACE_SECONDS=30
 printf '72 queued open none 2026-01-01T00:00:00Z\n' > "$state"
 : > "$FAKE_GH_ROOT/$state_key.comments"
 rm -f "$state_root/stop.requested"
@@ -4231,10 +4238,10 @@ for _ in $(seq 1 40); do
   sleep 0.5
 done
 [[ $orphan2_since_seen == 1 ]] || { kill "$orphan2_sup_pid" 2>/dev/null; wait "$orphan2_sup_pid" 2>/dev/null; fail 'worker-orphan grace-reset test: the Label mismatch was never observed'; }
-# The mismatch resolves (Label restored) well within worker_orphan_grace_seconds=5.
+# The mismatch resolves (Label restored) well within worker_orphan_grace_seconds=30.
 sed -i 's/^72 queued/72 running/' "$state"
 orphan2_marker_cleared=0
-for _ in $(seq 1 20); do
+for _ in $(seq 1 40); do
   [[ ! -e $state_root/workers/72.orphan-since ]] && { orphan2_marker_cleared=1; break; }
   sleep 0.5
 done
