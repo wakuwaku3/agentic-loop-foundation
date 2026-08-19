@@ -239,6 +239,29 @@ lease_heartbeat() {
 }
 
 
+# Self-heal the Issue's agent status while this host's worker is genuinely
+# working it. A foreign supervisor (a stale, provider-exhausted, or clock-
+# skewed instance on another host whose recover_expired misjudges the lease --
+# see docs/decisions and the loop-continuity Issues) can revert
+# agent:running -> agent:queued out from under a live worker, so `status`
+# reports "Running Issues: none" and Project state desyncs even though the work
+# is progressing. Re-assert agent:running when -- and only when -- the Issue is
+# sitting at exactly agent:queued while we hold it and no stop was requested.
+# Restricted to the queued signature so legitimate operator transitions
+# (paused / needs-input / blocked) and terminal states are never overridden;
+# quiet (no comment) so it does not amplify the foreign supervisor's
+# recovered-comment churn. Best-effort: never fatal to the heartbeat loop, and
+# a no-op on the common healthy path where the label is already running.
+worker_reassert_running() {
+  local issue=$1 labels
+  worker_stop_requested "$issue" && return 0
+  labels=$(repo_api "issues/$issue" --jq '[.labels[].name | select(startswith("agent:"))] | join(",")' 2>/dev/null) || return 0
+  [[ $labels == "$(state_label queued)" ]] || return 0
+  set_issue_state "$issue" running 2>/dev/null || return 0
+  project_sync_state "$issue" running 2>/dev/null || true
+}
+
+
 # Local-only lease read for `status`: id, expiry epoch and last-heartbeat
 # epoch. Tolerates the pre-Issue-#42 single-line (id only) format, in which
 # case expires/heartbeat are left empty rather than failing.

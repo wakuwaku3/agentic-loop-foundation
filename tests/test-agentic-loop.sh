@@ -6284,7 +6284,9 @@ GHFAKE
 chmod +x "$retry_ceiling_dir/bin/gh"
 (
   export PATH="$retry_ceiling_dir/bin:$TEST_HOST_PATH"
+  # shellcheck disable=SC2030 # intentionally subshell-local: read by the api.sh sourced just below, within this same subshell
   export STATE_ROOT="$retry_ceiling_dir/state"
+  # shellcheck disable=SC2030 # intentionally subshell-local (see above)
   export PROGRAM_NAME=retry-ceiling-test
   export API_RETRY_ATTEMPTS=3
   export API_RETRY_BASE_SECONDS=0
@@ -6346,6 +6348,60 @@ fixture_w2() {
 FIXTURE
 "$workload_scan_fixture/bin/agentic-loop" workload > "$TEST_ROOT/workload-scan-annotated.txt" 2>&1 || fail 'workload static scan still failed after annotating every violation'
 rm -rf "$workload_scan_fixture"
+
+# --- worker_reassert_running: self-heal agent:running when a foreign supervisor
+# (a stale / provider-exhausted / clock-skewed instance on another host) reverts
+# a live worker's Issue to agent:queued out from under it (loop-continuity).
+# Directly exercises the heartbeat guard with stubbed collaborators, mirroring
+# the flaky-report unit test's source-and-stub style. ------------------------
+reassert_state="$TEST_ROOT/reassert-state"
+mkdir -p "$reassert_state"
+reassert_run() {
+  # REASSERT_LABELS / REASSERT_STOP are deliberately NOT named `labels`/etc.:
+  # worker_reassert_running declares a `local labels`, and bash dynamic scoping
+  # would let that empty local shadow a same-named stub variable when repo_api
+  # runs. worker_stop_requested is stubbed (its own file-based behavior is
+  # covered elsewhere) so this unit needs no shared STATE_ROOT, which keeps it
+  # from coupling with other subshells' STATE_ROOT under shellcheck SC2030/31.
+  local REASSERT_LABELS=$1 REASSERT_STOP=${2:-}
+  (
+    # Not following these sources (SC1091 suppressed locally): following
+    # worker_state.sh would couple its STATE_ROOT reads with other subshells'
+    # STATE_ROOT under SC2030/SC2031. The functions under test are still real
+    # (this is a live source at runtime), only shellcheck's static follow is off.
+    # shellcheck disable=SC1091
+    source "$PROJECT_ROOT/bin/lib/agentic-loop/common.sh"
+    # shellcheck disable=SC1091
+    source "$PROJECT_ROOT/bin/lib/agentic-loop/worker_state.sh"
+    repo_api() { printf '%s\n' "$REASSERT_LABELS"; }
+    set_issue_state() { printf 'set %s %s\n' "$1" "$2" >> "$reassert_state/calls"; }
+    project_sync_state() { printf 'sync %s %s\n' "$1" "$2" >> "$reassert_state/calls"; return 0; }
+    worker_stop_requested() { [[ $REASSERT_STOP == stop ]]; }
+    worker_reassert_running 77
+  )
+}
+
+# 1. reverted to exactly agent:queued while working, no stop -> re-assert running
+: > "$reassert_state/calls"
+reassert_run 'agent:queued'
+assert_contains "$reassert_state/calls" 'set 77 running' 'worker_reassert_running did not re-assert agent:running after a foreign revert to agent:queued'
+assert_contains "$reassert_state/calls" 'sync 77 running' 'worker_reassert_running did not sync Project state to running after self-heal'
+
+# 2. a pending stop request must suppress self-heal (the operator owns the outcome)
+: > "$reassert_state/calls"
+reassert_run 'agent:queued' stop
+if grep -Fq 'set 77 running' "$reassert_state/calls"; then fail 'worker_reassert_running fought an operator stop request'; fi
+
+# 3. a legitimate non-queued transition (paused) must never be overridden
+: > "$reassert_state/calls"
+reassert_run 'agent:paused'
+if grep -Fq 'set 77 running' "$reassert_state/calls"; then fail 'worker_reassert_running overrode a non-queued agent state'; fi
+
+# 4. already running -> no-op (no redundant writes on the healthy path)
+: > "$reassert_state/calls"
+reassert_run 'agent:running'
+if grep -Fq 'set 77 running' "$reassert_state/calls"; then fail 'worker_reassert_running wrote redundantly while already agent:running'; fi
+rm -rf "$reassert_state"
 
 fi
 
