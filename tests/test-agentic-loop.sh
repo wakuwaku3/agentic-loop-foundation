@@ -4117,6 +4117,343 @@ grep -Fq '[警告] 設定値: WORKER_TIMEOUT_SECONDS' <<< "$doctor_small_timeout
 if grep -Fq '[失敗] 設定値: WORKER_TIMEOUT_SECONDS' <<< "$doctor_small_timeout"; then fail 'an unsafely small worker_timeout_seconds was misclassified as a failure'; fi
 mv "$target/.agentic-loop.toml.valid" "$target/.agentic-loop.toml"
 
+# --- worker-orphan grace-based reap (Issue #193, ADR 0029) ---
+# A worker-orphan (this host's live pidfile whose Issue GitHub no longer
+# reports as agent:running, e.g. reverted to queued while the local provider
+# CLI process kept running -- the real Issue #132 scenario) falls into a gap:
+# recover_expired only touches agent:running Issues, and enforce_worker_timeout
+# only fires after worker_timeout_seconds (set enormous below to prove this
+# path is independent of it). reap_orphan_workers must instead kill it once
+# the Label mismatch has persisted for worker_orphan_grace_seconds, without
+# ever killing on the very first observation (that would misfire on the brief
+# window between a normal completion's Label update and process exit).
+write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=300 STOP_TIMEOUT=10 STALE_DAYS=30 MAX_ATTEMPTS=3 RETRY_COOLDOWN_SECONDS=600 WORKER_TIMEOUT_SECONDS=999999 WORKER_ORPHAN_GRACE_SECONDS=5
+printf '70 queued open none 2026-01-01T00:00:00Z\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+rm -f "$state_root/stop.requested"
+FAKE_CODEX_SLEEP=60 "$target/bin/agentic-loop" _supervise &
+orphan_sup_pid=$!
+orphan_worker_pid=''
+for _ in $(seq 1 40); do
+  if [[ -r $state_root/workers/70.pid ]]; then orphan_worker_pid=$(cat "$state_root/workers/70.pid"); break; fi
+  sleep 0.5
+done
+[[ -n $orphan_worker_pid ]] || { kill "$orphan_sup_pid" 2>/dev/null; wait "$orphan_sup_pid" 2>/dev/null; fail 'worker-orphan test: the worker was not claimed before the Label was reverted'; }
+grep -Eq '^70 running' "$state" || { kill "$orphan_sup_pid" 2>/dev/null; wait "$orphan_sup_pid" 2>/dev/null; fail 'worker-orphan test: claim did not set agent:running before the Label was reverted'; }
+# worker() re-confirms the running Label exactly once, at its very start
+# (worker_confirm_running_label), before doing anything else (including the
+# fake provider CLI, which sleeps FAKE_CODEX_SLEEP seconds on every stage, so
+# waiting for a specific later stage would block past this test's budget).
+# Flipping the Label before that one-time check has run would make the
+# worker see its own claim as already lost and exit silently and immediately
+# -- a false "reap", never reaching reap_orphan_workers at all. Wait for the
+# first progress marker (written right after that check passes) so the
+# still-live process under test is genuinely the one reap_orphan_workers must
+# catch, matching the real Issue #132 race where the Label diverges from an
+# already-running provider CLI process.
+orphan_claimed_seen=0
+for _ in $(seq 1 40); do
+  [[ -r $state_root/workers/70.progress ]] && { orphan_claimed_seen=1; break; }
+  sleep 0.5
+done
+[[ $orphan_claimed_seen == 1 ]] || { kill "$orphan_sup_pid" 2>/dev/null; wait "$orphan_sup_pid" 2>/dev/null; fail 'worker-orphan test: the worker never passed its startup running-Label check before the Label was reverted'; }
+# Simulate the Issue #132 scenario: the Label diverges from the still-live
+# local worker (e.g. reverted to failed through another path -- failed rather
+# than queued so claim_next's MAX_WORKERS=1 slot, freed the instant this
+# worker is reaped, can never reclaim Issue 70 out from under this scenario:
+# retry_failed only re-queues a failed Issue after RETRY_COOLDOWN_SECONDS
+# (600s here), far past this test's budget).
+sed -i 's/^70 running/70 failed/' "$state"
+orphan_since_seen=0
+for _ in $(seq 1 40); do
+  [[ -r $state_root/workers/70.orphan-since ]] && { orphan_since_seen=1; break; }
+  sleep 0.5
+done
+[[ $orphan_since_seen == 1 ]] || { kill "$orphan_sup_pid" 2>/dev/null; wait "$orphan_sup_pid" 2>/dev/null; fail 'worker-orphan test: the Label mismatch was never observed (orphan-since marker missing)'; }
+kill -0 "$orphan_worker_pid" 2>/dev/null || { kill "$orphan_sup_pid" 2>/dev/null; wait "$orphan_sup_pid" 2>/dev/null; fail 'worker-orphan test: the worker was killed on the very first observation instead of waiting out the grace period'; }
+# Drive the grace boundary through its persisted clock input instead of
+# waiting worker_orphan_grace_seconds wall-clock seconds (mirrors the
+# per-worker hang timeout test's use of workers/<issue>.started above).
+printf '%s\n' "$(($(date +%s) - 6))" > "$state_root/workers/70.orphan-since"
+# kill -0 also succeeds against a not-yet-reaped zombie, so poll briefly
+# instead of asserting on a single sample right after the state flip. The
+# original pid dying (not "the pidfile is now empty") is the right completion
+# signal.
+orphan_reaped=0
+for _ in $(seq 1 40); do
+  kill -0 "$orphan_worker_pid" 2>/dev/null || { orphan_reaped=1; break; }
+  sleep 0.5
+done
+[[ $orphan_reaped == 1 ]] || { kill "$orphan_sup_pid" 2>/dev/null; wait "$orphan_sup_pid" 2>/dev/null; fail 'a worker-orphan persisting past worker_orphan_grace_seconds was not reaped'; }
+orphan_pidfile_cleared=0
+for _ in $(seq 1 20); do
+  [[ ! -e $state_root/workers/70.pid ]] && { orphan_pidfile_cleared=1; break; }
+  sleep 0.5
+done
+[[ $orphan_pidfile_cleared == 1 ]] || fail 'clear_worker_local did not remove the reaped pidfile'
+[[ ! -e $state_root/workers/70.orphan-since ]] || fail 'clear_worker_local did not remove the orphan-since marker'
+[[ ! -e $state_root/workers/70.lease ]] || fail 'clear_worker_local did not remove the lease file'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:worker-orphan-reaped' 'the worker-orphan reap was not audited on the Issue'
+kill -TERM "$orphan_sup_pid" 2>/dev/null || true
+wait "$orphan_sup_pid" 2>/dev/null || true
+rm -f "$state_root/stop.requested"
+
+# A worker-orphan observation that resolves before the grace period elapses
+# (e.g. the Label mismatch was transient, mirroring the brief window a normal
+# completion passes through between its own Label update and process exit)
+# must not be killed, and its grace marker must be cleared rather than
+# lingering to poison a later, unrelated mismatch.
+printf '72 queued open none 2026-01-01T00:00:00Z\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+rm -f "$state_root/stop.requested"
+FAKE_CODEX_SLEEP=60 "$target/bin/agentic-loop" _supervise &
+orphan2_sup_pid=$!
+orphan2_worker_pid=''
+for _ in $(seq 1 40); do
+  if [[ -r $state_root/workers/72.pid ]]; then orphan2_worker_pid=$(cat "$state_root/workers/72.pid"); break; fi
+  sleep 0.5
+done
+[[ -n $orphan2_worker_pid ]] || { kill "$orphan2_sup_pid" 2>/dev/null; wait "$orphan2_sup_pid" 2>/dev/null; fail 'worker-orphan grace-reset test: the worker was not claimed'; }
+# See the matching wait above: the Label must not flip until the worker's
+# one-time startup confirm-running-label check has already passed, or the
+# worker exits on its own (silently, no reap) instead of exercising the
+# grace-reset path under test.
+orphan2_claimed_seen=0
+for _ in $(seq 1 40); do
+  [[ -r $state_root/workers/72.progress ]] && { orphan2_claimed_seen=1; break; }
+  sleep 0.5
+done
+[[ $orphan2_claimed_seen == 1 ]] || { kill "$orphan2_sup_pid" 2>/dev/null; wait "$orphan2_sup_pid" 2>/dev/null; fail 'worker-orphan grace-reset test: the worker never passed its startup running-Label check before the Label was reverted'; }
+sed -i 's/^72 running/72 queued/' "$state"
+orphan2_since_seen=0
+for _ in $(seq 1 40); do
+  [[ -r $state_root/workers/72.orphan-since ]] && { orphan2_since_seen=1; break; }
+  sleep 0.5
+done
+[[ $orphan2_since_seen == 1 ]] || { kill "$orphan2_sup_pid" 2>/dev/null; wait "$orphan2_sup_pid" 2>/dev/null; fail 'worker-orphan grace-reset test: the Label mismatch was never observed'; }
+# The mismatch resolves (Label restored) well within worker_orphan_grace_seconds=5.
+sed -i 's/^72 queued/72 running/' "$state"
+orphan2_marker_cleared=0
+for _ in $(seq 1 20); do
+  [[ ! -e $state_root/workers/72.orphan-since ]] && { orphan2_marker_cleared=1; break; }
+  sleep 0.5
+done
+[[ $orphan2_marker_cleared == 1 ]] || { kill "$orphan2_sup_pid" 2>/dev/null; wait "$orphan2_sup_pid" 2>/dev/null; fail 'worker-orphan grace-reset test: the orphan-since marker was not cleared once the Label mismatch resolved'; }
+kill -0 "$orphan2_worker_pid" 2>/dev/null || { kill "$orphan2_sup_pid" 2>/dev/null; wait "$orphan2_sup_pid" 2>/dev/null; fail 'worker-orphan grace-reset test: a transient Label mismatch killed the worker before its grace period elapsed'; }
+if grep -Fq 'agentic-loop:worker-orphan-reaped' "$FAKE_GH_ROOT/$state_key.comments"; then fail 'worker-orphan grace-reset test: a transient Label mismatch was falsely reaped'; fi
+kill -TERM "$orphan2_sup_pid" 2>/dev/null || true
+wait "$orphan2_sup_pid" 2>/dev/null || true
+rm -f "$state_root/stop.requested"
+
+# --- worker-orphan: other-host Issues are structurally untouched, and the
+# running-Issue list is fetched at most once per poll (Issue #193 hardening) ---
+# reap_orphan_workers iterates this host's own workers/*.pid glob, never an
+# Issue's state row, so an Issue GitHub reports as agent:running (another
+# host's genuinely running worker) or as some other non-running state
+# (another host's queued/needs-input Issue) must never grow an orphan-since
+# marker or an audit comment when this host has no pidfile for it. The
+# running-Issue list itself (running_issue_numbers, worker_state.sh) is now a
+# poll-scoped memo shared with recover_expired (see docs/decisions/
+# 0029-worker-orphan-reap.md and project.sh's clear_supervisor_snapshot): one
+# _supervise pass must fetch it at most once (the unavoidable startup call
+# made before the first snapshot exists), never twice for recover_expired and
+# reap_orphan_workers separately.
+write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=300 STOP_TIMEOUT=10 STALE_DAYS=30 MAX_ATTEMPTS=3 RETRY_COOLDOWN_SECONDS=600 WORKER_TIMEOUT_SECONDS=999999 WORKER_ORPHAN_GRACE_SECONDS=5
+now=$(date +%s)
+printf '83 running open none 2026-01-01T00:00:00Z\n84 needs-input open none 2026-01-01T00:00:00Z\n' > "$state"
+# A valid, unexpired lease comment makes Issue 83 look like another host's
+# genuinely still-running worker to recover_expired (see ADR 0003); without
+# one, recover_expired would (correctly, but irrelevantly to this scenario)
+# reclaim it as an abandoned remote claim before reap_orphan_workers ever
+# gets a chance to run against it.
+printf '83 <!-- agentic-loop:lease worker=other-host heartbeat=%s expires=%s -->\n' "$now" "$((now + 300))" > "$FAKE_GH_ROOT/$state_key.comments"
+rm -f "$state_root/stop.requested"
+rm -rf "$state_root/workers"
+mkdir -p "$state_root/workers"
+otherhost_calls_before=$(wc -l < "$FAKE_GH_ROOT/calls")
+AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _supervise
+grep -Eq '^83 running' "$state" || fail 'another host'"'"'s genuinely running Issue (valid lease, no local pidfile) was reclaimed by recover_expired'
+[[ ! -e $state_root/workers/83.orphan-since ]] || fail 'a local pidfile-less running Issue on another host grew an orphan-since marker'
+[[ ! -e $state_root/workers/84.orphan-since ]] || fail 'a local pidfile-less non-running Issue on another host grew an orphan-since marker'
+if grep -Fq 'agentic-loop:worker-orphan-reaped' "$FAKE_GH_ROOT/$state_key.comments"; then fail 'a pidfile-less Issue on another host was audited as a worker-orphan reap'; fi
+# running_issue_numbers (worker_state.sh) is the memo shared by recover_expired
+# and reap_orphan_workers specifically; anchor on its distinctive jq tail
+# (bare `.number`, no tsv/body columns) so rebuild_scope_cache's unrelated
+# `agent:running` list call (a different jq shape, kept separate on purpose)
+# is not miscounted as a second fetch of the same list.
+otherhost_running_list_calls=$(tail -n "+$((otherhost_calls_before + 1))" "$FAKE_GH_ROOT/calls" | grep -cE -- '-f labels=agent:running .*\.number$' || true)
+(( otherhost_running_list_calls <= 1 )) || { tail -n "+$((otherhost_calls_before + 1))" "$FAKE_GH_ROOT/calls" >&2; fail "the running-Issue list was fetched $otherhost_running_list_calls times in one poll with no local pidfile (expected at most 1)"; }
+rm -rf "$state_root/workers"
+
+# --- worker-orphan guard: an active critical section is never reaped ---
+# worker.sh's worker_critical_begin/_end bracket the completed-state Label
+# write through the Issue close (cleanup_completed_worker) and the equivalent
+# resume-completion path. GitHub's Label can already read completed/closed
+# there while this host's process is still finishing that write sequence,
+# which looks exactly like an orphan to reap_orphan_workers. Killing
+# mid-critical-section would interrupt exactly the write sequence the marker
+# exists to protect, so the guard must hold even once grace has already
+# elapsed, without clearing the orphan-since marker, and release once the
+# section ends.
+write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=300 STOP_TIMEOUT=10 STALE_DAYS=30 MAX_ATTEMPTS=3 RETRY_COOLDOWN_SECONDS=600 WORKER_TIMEOUT_SECONDS=999999 WORKER_ORPHAN_GRACE_SECONDS=5
+printf '85 needs-input open none 2026-01-01T00:00:00Z\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+rm -f "$state_root/stop.requested"
+rm -rf "$state_root/workers"
+mkdir -p "$state_root/workers"
+setsid sleep 60 &
+critguard_pid=$!
+printf '%s\n' "$critguard_pid" > "$state_root/workers/85.pid"
+printf '%s\n' "$(($(date +%s) - 300))" > "$state_root/workers/85.started"
+printf '%s\n' "$(($(date +%s) - 10))" > "$state_root/workers/85.orphan-since"
+: > "$state_root/workers/85.critical"
+# _supervise's own RUN_ONCE exit condition waits for worker_count (any live
+# workers/*.pid) to reach 0, which this decoy pidfile always satisfies as
+# "still running" -- so a guarded (never-killed) decoy would make RUN_ONCE
+# block for the full 60s sleep instead of returning once a poll has run.
+# Poll a real backgrounded supervisor instead (mirrors the disabled-timeout
+# hang-timeout scenario above), driven by the poll-interval marker it writes
+# once per completed poll.
+rm -f "$state_root/poll-interval"
+"$target/bin/agentic-loop" _supervise &
+critguard_sup_pid=$!
+critguard_poll_seen=0
+for _ in $(seq 1 50); do [[ -r $state_root/poll-interval ]] && { critguard_poll_seen=1; break; }; sleep 0.1; done
+[[ $critguard_poll_seen == 1 ]] || { kill -TERM "$critguard_sup_pid" 2>/dev/null; wait "$critguard_sup_pid" 2>/dev/null; kill -TERM "-$critguard_pid" 2>/dev/null; fail 'critical-section guard test: the supervisor did not complete a poll'; }
+kill -0 "$critguard_pid" 2>/dev/null || { kill -TERM "$critguard_sup_pid" 2>/dev/null; wait "$critguard_sup_pid" 2>/dev/null; fail 'reap_orphan_workers killed a worker with an active critical section despite grace already having elapsed'; }
+[[ -e $state_root/workers/85.orphan-since ]] || { kill -TERM "$critguard_sup_pid" 2>/dev/null; wait "$critguard_sup_pid" 2>/dev/null; kill -TERM "-$critguard_pid" 2>/dev/null; fail 'the orphan-since marker was cleared while the critical-section guard was active'; }
+if grep -Fq 'agentic-loop:worker-orphan-reaped' "$FAKE_GH_ROOT/$state_key.comments"; then kill -TERM "$critguard_sup_pid" 2>/dev/null; wait "$critguard_sup_pid" 2>/dev/null; kill -TERM "-$critguard_pid" 2>/dev/null; fail 'a worker-orphan reap was audited despite an active critical section'; fi
+rm -f "$state_root/workers/85.critical"
+critguard_reaped=0
+for _ in $(seq 1 40); do kill -0 "$critguard_pid" 2>/dev/null || { critguard_reaped=1; break; }; sleep 0.5; done
+# The process dying (kill -0 failing) only proves reap_orphan_workers reached
+# its kill; clear_worker_local/comment_issue still run afterward in the same
+# function body. Give the still-live supervisor a brief window to finish that
+# tail before it is terminated, or the audit-comment assertion below races
+# against its own cleanup.
+if [[ $critguard_reaped == 1 ]]; then
+  for _ in $(seq 1 20); do grep -Fq 'agentic-loop:worker-orphan-reaped' "$FAKE_GH_ROOT/$state_key.comments" 2>/dev/null && break; sleep 0.5; done
+fi
+kill -TERM "$critguard_sup_pid" 2>/dev/null || true
+wait "$critguard_sup_pid" 2>/dev/null || true
+rm -f "$state_root/stop.requested"
+if [[ $critguard_reaped != 1 ]]; then kill -TERM "-$critguard_pid" 2>/dev/null || true; fail 'reap_orphan_workers never reaped once the critical-section guard cleared'; fi
+[[ ! -e $state_root/workers/85.orphan-since ]] || fail 'clear_worker_local did not remove the orphan-since marker after the guarded reap'
+[[ $(grep -Fc 'agentic-loop:worker-orphan-reaped' "$FAKE_GH_ROOT/$state_key.comments" 2>/dev/null || true) -eq 1 ]] || fail 'the guarded reap did not audit exactly one comment'
+rm -rf "$state_root/workers"
+
+# --- worker-orphan guard: a pending stop-request (pause/abort drain) is
+# never reaped ---
+# control.sh's control_drain_local_worker (pause/abort) writes workers/
+# <issue>.stop-requested before waiting out any critical section and only
+# then writing control_checkpoint, the durable record resume depends on to
+# restore the pre-pause state. Reaping mid-drain would kill the process
+# before that checkpoint is written, exactly like the critical-section guard
+# above but for the cooperative-stop path instead of normal completion.
+write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=300 STOP_TIMEOUT=10 STALE_DAYS=30 MAX_ATTEMPTS=3 RETRY_COOLDOWN_SECONDS=600 WORKER_TIMEOUT_SECONDS=999999 WORKER_ORPHAN_GRACE_SECONDS=5
+printf '86 needs-input open none 2026-01-01T00:00:00Z\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+rm -f "$state_root/stop.requested"
+rm -rf "$state_root/workers"
+mkdir -p "$state_root/workers"
+setsid sleep 60 &
+stopguard_pid=$!
+printf '%s\n' "$stopguard_pid" > "$state_root/workers/86.pid"
+printf '%s\n' "$(($(date +%s) - 300))" > "$state_root/workers/86.started"
+printf '%s\n' "$(($(date +%s) - 10))" > "$state_root/workers/86.orphan-since"
+: > "$state_root/workers/86.stop-requested"
+rm -f "$state_root/poll-interval"
+"$target/bin/agentic-loop" _supervise &
+stopguard_sup_pid=$!
+stopguard_poll_seen=0
+for _ in $(seq 1 50); do [[ -r $state_root/poll-interval ]] && { stopguard_poll_seen=1; break; }; sleep 0.1; done
+[[ $stopguard_poll_seen == 1 ]] || { kill -TERM "$stopguard_sup_pid" 2>/dev/null; wait "$stopguard_sup_pid" 2>/dev/null; kill -TERM "-$stopguard_pid" 2>/dev/null; fail 'stop-request guard test: the supervisor did not complete a poll'; }
+kill -0 "$stopguard_pid" 2>/dev/null || { kill -TERM "$stopguard_sup_pid" 2>/dev/null; wait "$stopguard_sup_pid" 2>/dev/null; fail 'reap_orphan_workers killed a worker with a pending stop-request despite grace already having elapsed'; }
+[[ -e $state_root/workers/86.orphan-since ]] || { kill -TERM "$stopguard_sup_pid" 2>/dev/null; wait "$stopguard_sup_pid" 2>/dev/null; kill -TERM "-$stopguard_pid" 2>/dev/null; fail 'the orphan-since marker was cleared while the stop-request guard was active'; }
+if grep -Fq 'agentic-loop:worker-orphan-reaped' "$FAKE_GH_ROOT/$state_key.comments"; then kill -TERM "$stopguard_sup_pid" 2>/dev/null; wait "$stopguard_sup_pid" 2>/dev/null; kill -TERM "-$stopguard_pid" 2>/dev/null; fail 'a worker-orphan reap was audited despite a pending stop-request'; fi
+rm -f "$state_root/workers/86.stop-requested"
+stopguard_reaped=0
+for _ in $(seq 1 40); do kill -0 "$stopguard_pid" 2>/dev/null || { stopguard_reaped=1; break; }; sleep 0.5; done
+if [[ $stopguard_reaped == 1 ]]; then
+  for _ in $(seq 1 20); do grep -Fq 'agentic-loop:worker-orphan-reaped' "$FAKE_GH_ROOT/$state_key.comments" 2>/dev/null && break; sleep 0.5; done
+fi
+kill -TERM "$stopguard_sup_pid" 2>/dev/null || true
+wait "$stopguard_sup_pid" 2>/dev/null || true
+rm -f "$state_root/stop.requested"
+if [[ $stopguard_reaped != 1 ]]; then kill -TERM "-$stopguard_pid" 2>/dev/null || true; fail 'reap_orphan_workers never reaped once the stop-request guard cleared'; fi
+[[ ! -e $state_root/workers/86.orphan-since ]] || fail 'clear_worker_local did not remove the orphan-since marker after the guarded reap'
+rm -rf "$state_root/workers"
+
+# --- worker-orphan guard: a stale orphan-since marker left by a prior worker
+# on the same Issue restarts grace instead of firing instantly ---
+# workers/<issue>.orphan-since can outlive clear_worker_local when the prior
+# worker crashed. If the same Issue is reclaimed immediately, the new
+# worker's very first observation would otherwise inherit the old epoch and
+# be killed with none of its own grace ever having elapsed. A marker older
+# than workers/<issue>.started (this worker's own start) must be treated as
+# absent and rewritten, restarting the count from the current worker's
+# perspective.
+write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=300 STOP_TIMEOUT=10 STALE_DAYS=30 MAX_ATTEMPTS=3 RETRY_COOLDOWN_SECONDS=600 WORKER_TIMEOUT_SECONDS=999999 WORKER_ORPHAN_GRACE_SECONDS=5
+printf '87 needs-input open none 2026-01-01T00:00:00Z\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+rm -f "$state_root/stop.requested"
+rm -rf "$state_root/workers"
+mkdir -p "$state_root/workers"
+setsid sleep 60 &
+stale_pid=$!
+printf '%s\n' "$stale_pid" > "$state_root/workers/87.pid"
+printf '%s\n' "$(date +%s)" > "$state_root/workers/87.started"
+printf '%s\n' "$(($(date +%s) - 100))" > "$state_root/workers/87.orphan-since"
+# See the critical-section guard test above: this decoy pidfile always counts
+# as a live worker, so RUN_ONCE (which waits for worker_count==0) would block
+# for the decoy's full sleep instead of returning after one poll. Poll a
+# backgrounded supervisor's poll-interval marker instead.
+rm -f "$state_root/poll-interval"
+"$target/bin/agentic-loop" _supervise &
+stale_sup_pid=$!
+stale_poll_seen=0
+for _ in $(seq 1 50); do [[ -r $state_root/poll-interval ]] && { stale_poll_seen=1; break; }; sleep 0.1; done
+[[ $stale_poll_seen == 1 ]] || { kill -TERM "$stale_sup_pid" 2>/dev/null; wait "$stale_sup_pid" 2>/dev/null; kill -TERM "-$stale_pid" 2>/dev/null; fail 'stale-marker test: the supervisor did not complete a poll'; }
+kill -0 "$stale_pid" 2>/dev/null || { kill -TERM "$stale_sup_pid" 2>/dev/null; wait "$stale_sup_pid" 2>/dev/null; fail 'a stale orphan-since marker predating the current worker triggered an immediate kill'; }
+stale_since_after=''
+read -r stale_since_after < "$state_root/workers/87.orphan-since" || true
+[[ $stale_since_after =~ ^[0-9]+$ ]] || { kill -TERM "$stale_sup_pid" 2>/dev/null; wait "$stale_sup_pid" 2>/dev/null; kill -TERM "-$stale_pid" 2>/dev/null; fail 'a stale orphan-since marker was not rewritten with a numeric epoch'; }
+if (( $(date +%s) - stale_since_after >= 5 )); then kill -TERM "$stale_sup_pid" 2>/dev/null; wait "$stale_sup_pid" 2>/dev/null; kill -TERM "-$stale_pid" 2>/dev/null; fail 'a stale orphan-since marker predating the current worker was not reset to the current time'; fi
+if grep -Fq 'agentic-loop:worker-orphan-reaped' "$FAKE_GH_ROOT/$state_key.comments"; then kill -TERM "$stale_sup_pid" 2>/dev/null; wait "$stale_sup_pid" 2>/dev/null; kill -TERM "-$stale_pid" 2>/dev/null; fail 'a stale orphan-since marker was falsely reaped instead of restarting grace'; fi
+# Grace is now genuinely counted from the reset marker: backdating it past
+# worker_orphan_grace_seconds must reap normally, proving the reset restarts
+# (rather than permanently disables) the grace countdown.
+printf '%s\n' "$(($(date +%s) - 6))" > "$state_root/workers/87.orphan-since"
+stale_reaped=0
+for _ in $(seq 1 40); do kill -0 "$stale_pid" 2>/dev/null || { stale_reaped=1; break; }; sleep 0.5; done
+if [[ $stale_reaped == 1 ]]; then
+  for _ in $(seq 1 20); do grep -Fq 'agentic-loop:worker-orphan-reaped' "$FAKE_GH_ROOT/$state_key.comments" 2>/dev/null && break; sleep 0.5; done
+fi
+kill -TERM "$stale_sup_pid" 2>/dev/null || true
+wait "$stale_sup_pid" 2>/dev/null || true
+rm -f "$state_root/stop.requested"
+if [[ $stale_reaped != 1 ]]; then kill -TERM "-$stale_pid" 2>/dev/null || true; fail 'grace was never recomputed after a stale marker was reset'; fi
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:worker-orphan-reaped' 'the reap following a recomputed grace period was not audited'
+rm -rf "$state_root/workers"
+
+# --- status: worker-orphan warning shows the remaining grace, and grace=0
+# reports the safety net as disabled ---
+write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=300 STOP_TIMEOUT=10 STALE_DAYS=30 WORKER_ORPHAN_GRACE_SECONDS=120
+printf '90 needs-input open none 2026-01-01T00:00:00Z\n' > "$state"
+rm -rf "$state_root/workers"
+mkdir -p "$state_root/workers"
+printf '%s\n' "$$" > "$state_root/workers/90.pid"
+printf '%s\n' "$(($(date +%s) - 30))" > "$state_root/workers/90.orphan-since"
+statusgrace_output=$("$target/bin/agentic-loop" status)
+grep -Fq '#90' <<< "$statusgrace_output" || fail 'status did not list the worker-orphan Issue'
+grep -Fq 'worker-orphan' <<< "$statusgrace_output" || fail 'status did not report a worker-orphan anomaly'
+grep -Fq 'grace 120秒' <<< "$statusgrace_output" || fail 'status did not show the configured grace period'
+grep -Eq '観測 [0-9]+秒' <<< "$statusgrace_output" || fail 'status did not show the elapsed observation time'
+write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=300 STOP_TIMEOUT=10 STALE_DAYS=30 WORKER_ORPHAN_GRACE_SECONDS=0
+statusgrace_disabled_output=$("$target/bin/agentic-loop" status)
+grep -Fq '自動停止は無効です' <<< "$statusgrace_disabled_output" || fail 'status did not report worker_orphan_grace_seconds=0 as disabling the automatic stop'
+rm -rf "$state_root/workers"
+
 # --- Requirement traceability gate (Issue #53, ADR 0017) ---
 # These scenarios exercise trace_gate through the ordinary (non-resume)
 # completion path: a fresh "running" Issue with no worktree yet, so worker()

@@ -248,6 +248,24 @@ grep -Fq 'supervisor_graceful_shutdown' "${AGENTIC_LOOP_SOURCES[@]}" || { printf
 grep -Fq 'setsid "$0" _worker' "${AGENTIC_LOOP_SOURCES[@]}" || { printf 'Workers are not started in their own process group.\n' >&2; exit 1; }
 grep -Fq 'worker_alive "$issue" && continue' "${AGENTIC_LOOP_SOURCES[@]}" || { printf 'Restart recovery lacks the local worker fast path.\n' >&2; exit 1; }
 grep -Fq 'issues/comments/$1" --method PATCH' "${AGENTIC_LOOP_SOURCES[@]}" || { printf 'Lease heartbeat does not update a single comment in place.\n' >&2; exit 1; }
+
+# ADR 0029 (Issue #193): worker-orphan reap must run on every Supervisor poll,
+# and must never itself move an Issue's agent:* Label -- that responsibility
+# stays with the existing recovery paths it is deliberately kept separate
+# from (see the ADR's rejected "integrate into worker_timeout" alternative).
+grep -Fq 'reap_orphan_workers || true' bin/lib/agentic-loop/supervisor.sh || {
+  printf 'reap_orphan_workers is not wired into the Supervisor poll loop.\n' >&2
+  exit 1
+}
+reap_orphan_workers_body=$(awk '
+  $0 ~ "^reap_orphan_workers\\(\\) \\{" { capture=1; next }
+  capture && /^}/ { capture=0 }
+  capture { print }
+' bin/lib/agentic-loop/worker_state.sh)
+if grep -Fq 'set_issue_state' <<< "$reap_orphan_workers_body"; then
+  printf 'reap_orphan_workers must not change an Issue Label; it only stops the local process and clears local state (see docs/decisions/0029-worker-orphan-reap.md).\n' >&2
+  exit 1
+fi
 grep -Fq 'comment_patch "$id" "$(lease_body' "${AGENTIC_LOOP_SOURCES[@]}" || { printf 'Lease heartbeat does not update a single comment in place.\n' >&2; exit 1; }
 grep -Fq 'core_budget_note_pause' "${AGENTIC_LOOP_SOURCES[@]}" || { printf 'REST(core) budget governor is missing from the claim gate.\n' >&2; exit 1; }
 grep -Fq 'next_poll_interval' "${AGENTIC_LOOP_SOURCES[@]}" || { printf 'Adaptive idle poll backoff is missing.\n' >&2; exit 1; }

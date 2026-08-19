@@ -105,6 +105,15 @@ retry_cooldown_seconds = 600
 # this and fail its Issue so the bounded retry above resumes it. Zero
 # disables it. Tune from each Issue's agentic-loop:usage comment (所要=Ns).
 worker_timeout_seconds = 14400
+# worker-orphan safety net (Issue #193): a live local worker (this host's
+# pidfile) whose Issue GitHub no longer reports as agent:running (fell back to
+# queued/failed while the local provider CLI process kept running) is stopped
+# process-group-wide and its local state cleared without waiting for
+# worker_timeout_seconds. A single poll observing the mismatch never kills --
+# only after it persists for this many seconds (grace against the brief
+# window between a normal completion's Label update and process exit) is the
+# worker actually reaped. Zero disables it.
+worker_orphan_grace_seconds = 120
 # Change-scope conflict avoidance: an Issue may declare the paths/environments
 # it touches with an `agentic-loop:scope` marker (see docs/operations/issue-queue.md).
 # Only hard conflicts serialize: structural changes (rename/move, declared with
