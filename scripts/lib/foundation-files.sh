@@ -20,6 +20,7 @@ readonly SHARED_FILES=(
   .claude/skills/submit-requirement/SKILL.md
   .claude/skills/diagnose-codebase/SKILL.md
   .claude/skills/postmortem/SKILL.md
+  .claude/skills/direct-edit/SKILL.md
   .agentic-loop/guard-secrets.sh .agentic-loop/gitleaks.toml .agentic-loop/update-main.sh .agentic-loop/diagnose-codebase.sh .agentic-loop.toml
   .githooks/pre-commit .githooks/pre-push bin/agentic-loop bin/agentic-loop-diagnose
   bin/lib/agentic-loop/common.sh bin/lib/agentic-loop/config.sh bin/lib/agentic-loop/api.sh bin/lib/agentic-loop/agent.sh
