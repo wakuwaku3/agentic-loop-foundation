@@ -79,6 +79,33 @@ status_stale_fetch() {
 }
 
 
+# Human label for a pool's recovery basis (agent_pool_basis_get): what grounds
+# the resume time shown next to it, so an operator can tell "the provider told
+# us exactly when" from "no signal is available and this is a backing-off
+# guess" (Issue #158 completion criterion: show which provider/resource is
+# paused and the basis for its expected recovery).
+status_pool_basis_label() {
+  case $1 in
+    reset) printf 'provider提示のreset時刻' ;;
+    probe) printf '使用率再probeの実測' ;;
+    *) printf '実測不能のため指数backoff' ;;
+  esac
+}
+
+# One pool's pause line with its resume ETA and basis, or a bare exhaustion
+# notice when the marker exists but its epoch cannot be parsed.
+status_pool_pause_detail() {
+  local pool=$1 resume='' basis when
+  read -r resume < "$(agent_pool_marker "$pool")" 2>/dev/null || true
+  if [[ $resume =~ ^[0-9]+$ ]]; then
+    basis=$(agent_pool_basis_get "$pool")
+    when=$(date -d "@$resume" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || printf '%s' "$resume")
+    printf 'pool=%s 枯渇（回復予定=%s, 根拠=%s）' "$pool" "$when" "$(status_pool_basis_label "$basis")"
+  else
+    printf 'pool=%s 枯渇（回復待ち）' "$pool"
+  fi
+}
+
 # Human-readable (Japanese) reason claiming is currently paused, or empty if
 # it is not. Purely local: reads the same marker files the supervisor's own
 # poll loop checks (see docs/decisions/0003), so `status` never queries
@@ -95,7 +122,7 @@ status_claim_pause_reasons() {
   [[ -e $STATE_ROOT/all-pools-paused ]] && reasons+=('全プール利用不可')
   local pool
   for pool in $(agent_all_pools); do
-    if agent_pool_marker_active "$pool"; then reasons+=("pool=$pool 枯渇（回復待ち）"); fi
+    if agent_pool_marker_active "$pool"; then reasons+=("$(status_pool_pause_detail "$pool")"); fi
   done
   [[ -e $STATE_ROOT/stop.requested ]] && reasons+=('stop要求によるdrain中')
   (( ${#reasons[@]} == 0 )) && return 0
@@ -556,6 +583,23 @@ status_render_json() {
     sep=','
   done
   printf '},'
+
+  printf '"pools":['
+  sep=''
+  local pool resume='' basis
+  for pool in $(agent_all_pools); do
+    if agent_pool_marker_active "$pool"; then
+      resume=''; read -r resume < "$(agent_pool_marker "$pool")" 2>/dev/null || true
+      [[ $resume =~ ^[0-9]+$ ]] || resume=''
+      basis=$(agent_pool_basis_get "$pool")
+      printf '%s{"pool":"%s","exhausted":true,"resume_at":%s,"basis":"%s"}' \
+        "$sep" "$(json_escape "$pool")" "${resume:-null}" "$(json_escape "$basis")"
+    else
+      printf '%s{"pool":"%s","exhausted":false,"resume_at":null,"basis":null}' "$sep" "$(json_escape "$pool")"
+    fi
+    sep=','
+  done
+  printf '],'
 
   printf '"workers":['
   sep=''

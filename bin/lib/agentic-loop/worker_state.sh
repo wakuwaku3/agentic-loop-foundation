@@ -302,19 +302,34 @@ recover_expired() {
     fi
     scope_cache_clear "$issue"
     clear_conflict_wait "$issue"
-    # A worker that keeps dying before finishing (lease expiry / crash, never an
-    # explicit AGENTIC_LOOP_RESULT=failed) would otherwise be requeued forever:
-    # claim_next records an attempt per claim, but only retry_failed's
-    # MAX_ATTEMPTS bound consults it, and that path only sees agent:failed. Once
-    # the recorded attempts reach the limit, escalate to agent:failed so
-    # retry_failed closes it as unresolvable instead of spinning the queue.
-    count=$(attempt_count "$issue")
-    if (( count >= MAX_ATTEMPTS )); then
-      set_issue_state "$issue" failed
-      comment_issue "$issue" "<!-- agentic-loop:recover-exhausted attempts=$count -->\n担当workerが完了前に繰り返し停止したため（試行 $count/$MAX_ATTEMPTS）、キューへ戻さず \`agent:failed\` へ移します。以降はcloseせず \`agent:parked\`（人間トリアージ待ち）へ移します。再開が必要なら内容を確認のうえ \`bin/agentic-loop resume $issue\` を実行してください。"
-    else
+    # A crash/lease-expiry that coincides with an active pool-exhaustion marker
+    # is very likely the provider stalling/erroring under its own rate/usage
+    # limit, not this Issue's task looping -- charging its retry budget for
+    # that would cascade exhaustion into agent:parked the same way an
+    # undetected exhausted-result misclassification would (Issue #158 root
+    # cause: "crash / timeout は枯渇保護を通らない"). Clear the attempt
+    # unconditionally in that case, the same way an in-worker exhaustion
+    # detection already does (see worker.sh's `elif (( exhausted ))` branch).
+    if agent_any_pool_marker_active; then
+      clear_attempts "$issue"
       set_issue_state "$issue" queued
-      comment_issue "$issue" '<!-- agentic-loop:recovered -->\n担当workerの終了、またはリース期限切れを検出したため、Issueを安全にキューへ戻しました。'
+      comment_issue "$issue" '<!-- agentic-loop:recovered pool-exhaustion=1 -->\n担当workerの終了、またはリース期限切れを検出しました。provider poolが枯渇中のため環境要因の可能性が高いと判断し、試行回数を消費せずIssueを安全にキューへ戻しました。'
+    else
+      # A worker that keeps dying before finishing (lease expiry / crash, never
+      # an explicit AGENTIC_LOOP_RESULT=failed) would otherwise be requeued
+      # forever: claim_next records an attempt per claim, but only
+      # retry_failed's MAX_ATTEMPTS bound consults it, and that path only sees
+      # agent:failed. Once the recorded attempts reach the limit, escalate to
+      # agent:failed so retry_failed closes it as unresolvable instead of
+      # spinning the queue.
+      count=$(attempt_count "$issue")
+      if (( count >= MAX_ATTEMPTS )); then
+        set_issue_state "$issue" failed
+        comment_issue "$issue" "<!-- agentic-loop:recover-exhausted attempts=$count -->\n担当workerが完了前に繰り返し停止したため（試行 $count/$MAX_ATTEMPTS）、キューへ戻さず \`agent:failed\` へ移します。以降はcloseせず \`agent:parked\`（人間トリアージ待ち）へ移します。再開が必要なら内容を確認のうえ \`bin/agentic-loop resume $issue\` を実行してください。"
+      else
+        set_issue_state "$issue" queued
+        comment_issue "$issue" '<!-- agentic-loop:recovered -->\n担当workerの終了、またはリース期限切れを検出したため、Issueを安全にキューへ戻しました。'
+      fi
     fi
     event_append "$issue" recover -
   done < <(snapshot_state_rows running | cut -f1 || repo_api issues --method GET -f state=open -f labels="$(state_label running)" -f per_page=100 --paginate --jq '.[] | select(.pull_request == null) | .number' 2>/dev/null || true)
@@ -352,9 +367,25 @@ enforce_worker_timeout() {
     clear_worker_local "$issue"
     scope_cache_clear "$issue"
     clear_conflict_wait "$issue"
-    comment_issue "$issue" "<!-- agentic-loop:worker-timeout issue=$issue elapsed=${elapsed}s limit=${WORKER_TIMEOUT_SECONDS}s -->\nこのIssueのworkerはlease heartbeatが有効なまま実行時間上限（${WORKER_TIMEOUT_SECONDS}秒）を超えたため、ハングしたと判断してプロセスグループごと停止しました（経過 ${elapsed}秒）。自動的な再試行キューへ戻します。誤検知が疑われる場合は \`.agentic-loop.toml\` の \`queue.worker_timeout_seconds\` を見直してください。" || true
-    set_issue_state "$issue" failed || true
-    project_sync_state "$issue" failed || true
+    # A hang that coincides with an active pool-exhaustion marker is very
+    # likely the provider stalling under its own rate/usage limit -- e.g. a
+    # blocked long-poll that never returns to hit the ordinary post-hoc
+    # exhaustion classification -- not this Issue's task looping. Charging its
+    # retry budget for that would cascade exhaustion into agent:parked the
+    # same way an undetected exhausted-result misclassification would (Issue
+    # #158 root cause: "crash / timeout は枯渇保護を通らない"). Requeue
+    # directly without burning attempts, the same way an in-worker exhaustion
+    # detection already does (see worker.sh's `elif (( exhausted ))` branch).
+    if agent_any_pool_marker_active; then
+      clear_attempts "$issue"
+      comment_issue "$issue" "<!-- agentic-loop:worker-timeout issue=$issue elapsed=${elapsed}s limit=${WORKER_TIMEOUT_SECONDS}s pool-exhaustion=1 -->\nこのIssueのworkerはlease heartbeatが有効なまま実行時間上限（${WORKER_TIMEOUT_SECONDS}秒）を超えたため、ハングしたと判断してプロセスグループごと停止しました（経過 ${elapsed}秒）。provider poolが枯渇中のため環境要因の可能性が高いと判断し、試行回数を消費せずキューへ戻します。誤検知が疑われる場合は \`.agentic-loop.toml\` の \`queue.worker_timeout_seconds\` を見直してください。" || true
+      set_issue_state "$issue" queued || true
+      project_sync_state "$issue" queued || true
+    else
+      comment_issue "$issue" "<!-- agentic-loop:worker-timeout issue=$issue elapsed=${elapsed}s limit=${WORKER_TIMEOUT_SECONDS}s -->\nこのIssueのworkerはlease heartbeatが有効なまま実行時間上限（${WORKER_TIMEOUT_SECONDS}秒）を超えたため、ハングしたと判断してプロセスグループごと停止しました（経過 ${elapsed}秒）。自動的な再試行キューへ戻します。誤検知が疑われる場合は \`.agentic-loop.toml\` の \`queue.worker_timeout_seconds\` を見直してください。" || true
+      set_issue_state "$issue" failed || true
+      project_sync_state "$issue" failed || true
+    fi
     event_append "$issue" timeout -
   done
   shopt -u nullglob

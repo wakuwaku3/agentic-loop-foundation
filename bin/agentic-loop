@@ -53,6 +53,11 @@ readonly SUPERVISOR_LOCK_GRACE_SECONDS=10
 # How long the supervisor pauses claiming after a worker hits a token/rate limit,
 # before it re-checks whether the provider budget has recovered.
 readonly EXHAUSTION_PAUSE_SECONDS=1800
+# Ceiling for the exponential backoff a pool grows into when neither a
+# provider-stated reset nor a usage probe can confirm real recovery (see
+# agent_mark_pool_exhausted, Issue #158): 6 hours keeps the safe side (a long
+# pause) without ever fully giving up on retrying.
+readonly EXHAUSTION_BACKOFF_MAX_SECONDS=21600
 # Consecutive dependency-check API failures tolerated before an Issue is
 # actually moved to agent:blocked, so a single poll's transient blip does not
 # flap the label; claiming is still withheld from the first failure onward.
