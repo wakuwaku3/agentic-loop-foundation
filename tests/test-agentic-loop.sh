@@ -3765,6 +3765,64 @@ git -C "$target" worktree remove --force "$target-worktrees/issue-5002" 2>/dev/n
 git -C "$target" branch -D agent/issue-5002 >/dev/null 2>&1 || true
 git -C "$target" push --quiet origin --delete agent/issue-5002
 
+# Resuming an Issue whose local branch is gone (a different host progressed
+# it, or a local cleanup removed it) but whose remote agent branch still
+# carries push-completed work must resume from that remote tip, not silently
+# discard the pushed work and start over from the default branch (Issue
+# #210). The materialized local branch feeds the same observed-phase
+# machinery as every other resume case, so the handoff/prompt report
+# `pushed-no-pr` (no PR exists yet) rather than `fresh`.
+printf '5004 running open\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+: > "$FAKE_GH_ROOT/codex-calls"
+git -C "$target" worktree add --quiet -b agent/issue-5004 "$target-worktrees/issue-5004" origin/main
+git -C "$target-worktrees/issue-5004" commit --quiet --allow-empty -m 'remote-only prior work'
+remote_only_head=$(git -C "$target-worktrees/issue-5004" rev-parse HEAD)
+git -C "$target-worktrees/issue-5004" push --quiet origin agent/issue-5004
+git -C "$target" worktree remove --force "$target-worktrees/issue-5004"
+git -C "$target" branch -D agent/issue-5004 >/dev/null
+! git -C "$target" show-ref --verify --quiet refs/heads/agent/issue-5004 \
+  || fail 'the local branch fixture setup for the remote-only resume test did not remove the local branch'
+# needs-input keeps the worktree/branch untouched (unlike the default
+# completed-and-cleaned-up path) so the created worktree can be inspected below.
+FAKE_CODEX_RESULT=AGENTIC_LOOP_RESULT=needs-input "$target/bin/agentic-loop" _worker 5004 resume-remote-only-worker
+[[ -e $target-worktrees/issue-5004 ]] || fail 'a local-branch-missing resume with a remote agent branch did not create a worktree'
+worktree_head=$(git -C "$target-worktrees/issue-5004" rev-parse HEAD)
+[[ $worktree_head == "$remote_only_head" ]] \
+  || fail "a local-branch-missing resume with a remote agent branch did not reuse the remote branch tip (got $worktree_head, want $remote_only_head)"
+default_head=$(git -C "$target" rev-parse origin/main)
+[[ $worktree_head != "$default_head" ]] \
+  || fail 'a local-branch-missing resume with a remote agent branch fell back to the default branch instead'
+assert_contains "$FAKE_GH_ROOT/codex-calls" 'phase: pushed-no-pr' 'a remote-only resume did not inject the observed phase into the provider prompt'
+# shellcheck disable=SC2016 # Backticks are literal Markdown in the expected provider prompt.
+assert_contains "$FAKE_GH_ROOT/codex-calls" '既存のbranch `agent/issue-5004` を再利用してください（新規branchは作成しないでください）' 'a remote-only resume did not instruct the provider to reuse the materialized branch'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'phase=pushed-no-pr' 'a remote-only resume phase was not recorded in the handoff'
+git -C "$target" worktree remove --force "$target-worktrees/issue-5004" 2>/dev/null || true
+git -C "$target" branch -D agent/issue-5004 >/dev/null 2>&1 || true
+git -C "$target" push --quiet origin --delete agent/issue-5004
+
+# When neither the local branch nor a remote agent branch exists, resume
+# stays a true fresh start: the best-effort remote fetch finds nothing and
+# the worktree/branch is created from the default branch exactly as before
+# (Issue #210 acceptance criterion 2 -- no regression to the ordinary fresh
+# path).
+printf '5005 running open\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+: > "$FAKE_GH_ROOT/codex-calls"
+! git -C "$target" show-ref --verify --quiet refs/heads/agent/issue-5005 \
+  || fail 'the branch fixture precondition for the true-fresh resume test was not met'
+! git -C "$target" ls-remote --exit-code --heads origin refs/heads/agent/issue-5005 >/dev/null 2>&1 \
+  || fail 'the remote branch fixture precondition for the true-fresh resume test was not met'
+FAKE_CODEX_RESULT=AGENTIC_LOOP_RESULT=needs-input "$target/bin/agentic-loop" _worker 5005 resume-true-fresh-worker
+[[ -e $target-worktrees/issue-5005 ]] || fail 'a true-fresh resume did not create a worktree'
+fresh_head=$(git -C "$target-worktrees/issue-5005" rev-parse HEAD)
+default_head=$(git -C "$target" rev-parse origin/main)
+[[ $fresh_head == "$default_head" ]] \
+  || fail "a true-fresh resume (no local or remote branch) did not create the worktree from the default branch (got $fresh_head, want $default_head)"
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'phase=fresh' 'a true-fresh resume phase was not recorded in the handoff'
+git -C "$target" worktree remove --force "$target-worktrees/issue-5005" 2>/dev/null || true
+git -C "$target" branch -D agent/issue-5005 >/dev/null 2>&1 || true
+
 # A worktree path that exists but is not a registered Git worktree at all
 # (corrupted metadata, e.g. a plain directory left over from a filesystem
 # restore) is not misclassified by resume_probe as a foreign-artifact
