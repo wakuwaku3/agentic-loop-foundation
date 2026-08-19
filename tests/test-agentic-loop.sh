@@ -241,6 +241,7 @@ encode_comment_body() {
 closes="$FAKE_GH_ROOT/$key.closes"
 views="$FAKE_GH_ROOT/$key.views"
 labels="$FAKE_GH_ROOT/$key.labels"
+titles="$FAKE_GH_ROOT/$key.titles"
 diagnosis_issues="$FAKE_GH_ROOT/$key.diagnosis-issues"
 metrics_issues="$FAKE_GH_ROOT/$key.metrics-issues"
 metrics_events="$FAKE_GH_ROOT/$key.metrics-events"
@@ -369,7 +370,7 @@ case "${1:-} ${2:-}" in
         return max
       }
       $3 != "closed" {
-        category=5; if ($7 ~ /(^|,)loop-continuity(,|$)/) category=0; else if ($7 ~ /(^|,)confidentiality-incident(,|$)/) category=1; else if ($7 ~ /(^|,)integrity-incident(,|$)/) category=2; else if ($7 ~ /(^|,)availability-incident(,|$)/) category=3; else if ($7 ~ /(^|,)feature(,|$)/) category=4
+        category=6; if ($7 ~ /(^|,)loop-continuity(,|$)/) category=0; else if ($7 ~ /(^|,)confidentiality-incident(,|$)/) category=1; else if ($7 ~ /(^|,)integrity-incident(,|$)/) category=2; else if ($7 ~ /(^|,)availability-incident(,|$)/) category=3; else if ($7 ~ /(^|,)bug(,|$)/) category=4; else if ($7 ~ /(^|,)feature(,|$)/) category=5
         priority=prio($8)
         created=($5 == "" ? $1 : $5); updated=($6 == "" ? "-" : $6)
         body=($8 == "" ? "-" : $8); categories=$7; gsub(/,/, ",category:", categories); categories=(categories == "" || categories == "none" ? "-" : "category:" categories)
@@ -397,7 +398,7 @@ case "${1:-} ${2:-}" in
         return max
       }
       $3 != "closed" {
-        category=5; if ($7 ~ /(^|,)loop-continuity(,|$)/) category=0; else if ($7 ~ /(^|,)confidentiality-incident(,|$)/) category=1; else if ($7 ~ /(^|,)integrity-incident(,|$)/) category=2; else if ($7 ~ /(^|,)availability-incident(,|$)/) category=3; else if ($7 ~ /(^|,)feature(,|$)/) category=4
+        category=6; if ($7 ~ /(^|,)loop-continuity(,|$)/) category=0; else if ($7 ~ /(^|,)confidentiality-incident(,|$)/) category=1; else if ($7 ~ /(^|,)integrity-incident(,|$)/) category=2; else if ($7 ~ /(^|,)availability-incident(,|$)/) category=3; else if ($7 ~ /(^|,)bug(,|$)/) category=4; else if ($7 ~ /(^|,)feature(,|$)/) category=5
         priority=prio($8)
         created=($5 == "" ? $1 : $5)
         state="other"
@@ -434,7 +435,7 @@ case "${1:-} ${2:-}" in
               return max
             }
             $2 == "queued" && $3 != "closed" {
-              category=5; if ($7 ~ /(^|,)loop-continuity(,|$)/) category=0; else if ($7 ~ /(^|,)confidentiality-incident(,|$)/) category=1; else if ($7 ~ /(^|,)integrity-incident(,|$)/) category=2; else if ($7 ~ /(^|,)availability-incident(,|$)/) category=3; else if ($7 ~ /(^|,)feature(,|$)/) category=4
+              category=6; if ($7 ~ /(^|,)loop-continuity(,|$)/) category=0; else if ($7 ~ /(^|,)confidentiality-incident(,|$)/) category=1; else if ($7 ~ /(^|,)integrity-incident(,|$)/) category=2; else if ($7 ~ /(^|,)availability-incident(,|$)/) category=3; else if ($7 ~ /(^|,)bug(,|$)/) category=4; else if ($7 ~ /(^|,)feature(,|$)/) category=5
               priority=prio($8)
               created=($5 == "" ? $1 : $5); print priority "\t" category "\t" created "\t" $1 "\t" $8
             }' "$state"
@@ -514,6 +515,12 @@ case "${1:-} ${2:-}" in
         awk -v n="$issue" '$1 == n && index($0, "agentic-loop:claim") {body=$0; sub(/^[^ ]+ /, "", body); printf "%s\t%s", NR, body | "base64 -w0"; close("base64 -w0"); printf "\n"}' "$comments" 2>/dev/null || true
       elif [[ $* == *needs-input* ]]; then
         if tail -n 1 "$comments" 2>/dev/null | grep -Fq USER_REPLY; then printf 'true\n'; else printf 'false\n'; fi
+      elif [[ $method == GET && $* == *'[.[].body]'* ]]; then
+        # triage_issue_content (Issue #167): every existing comment body for
+        # this Issue, oldest first, the same content-classification input the
+        # real `[.[].body] | join("\n")` jq would produce. Distinct from the
+        # single-latest-comment `else` fallback below, which other callers rely on.
+        awk -v n="$issue" '$1 == n {sub(/^[^ ]+ /, ""); print}' "$comments" 2>/dev/null || true
       else tail -n 1 "$comments" 2>/dev/null || true; fi
     elif [[ $endpoint =~ ^issues/([0-9]+)/dependencies/blocked_by$ && $method == GET ]]; then
       issue=${BASH_REMATCH[1]}
@@ -565,6 +572,17 @@ case "${1:-} ${2:-}" in
           printf 'HTTP 404: Not Found\n' >&2; exit 1
         fi
         awk -v n="$issue" '$1 == n {print $8}' "$state" | base64 -d 2>/dev/null || true
+      elif [[ $* == *'.title'* ]]; then
+        # triage_issue_content (Issue #167): the state fixture has no title
+        # column, so this defaults to a fixed, keyword-free placeholder
+        # ("agent:$2"-style text would spuriously contain "queue" and skew
+        # content-based category triage). A test that needs title-driven
+        # classification overrides one Issue via $titles (number<TAB>title).
+        if grep -Fq "$issue"$'\t' "$titles" 2>/dev/null; then
+          awk -F '\t' -v n="$issue" '$1 == n {print $2}' "$titles"
+        else
+          awk -v n="$issue" '$1 == n {print "Fake issue " n}' "$state"
+        fi
       elif [[ $* == *'join(",")'* ]]; then
         awk -v n="$issue" '$1 == n {split($7,c,","); out=""; for(i in c) if(c[i] != "" && c[i] != "none") out=out (out=="" ? "" : ",") "category:" c[i]; print out}' "$state"
       elif [[ $* == *'startswith("category:") | not'* ]]; then
@@ -1647,22 +1665,82 @@ if [[ $TEST_GROUP == all || $TEST_GROUP == queue ]]; then
 # beat every priority-0 feature. unknown_scope=open disables change-scope
 # conflict avoidance here: this fixture declares no scope for any Issue and
 # exercises only the ordering, which the scope filter must never reorder.
-write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=11 LEASE_SECONDS=30 STOP_TIMEOUT=10 STALE_DAYS=30
+write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=12 LEASE_SECONDS=30 STOP_TIMEOUT=10 STALE_DAYS=30
 printf 'unknown_scope = "open"\n' >> "$target/.agentic-loop.toml"
 prio90=$(printf '<!-- agentic-loop:priority 90 -->' | base64 -w0)
-printf '101 queued open none 2026-01-01T00:00:00Z none loop-continuity %s\n102 queued open none 2026-01-01T00:00:00Z none confidentiality-incident %s\n103 queued open none 2026-01-01T00:00:00Z none integrity-incident\n104 queued open none 2026-01-01T00:00:00Z none availability-incident\n105 queued open none 2026-01-01T00:00:00Z none feature\n106 queued open none 2026-01-01T00:00:00Z none improvement %s\n107 queued open none 2026-01-02T00:00:00Z none improvement %s\n108 queued open none 2025-01-01T00:00:00Z none improvement\n109 queued open none 2026-01-02T00:00:00Z none improvement %s\n110 queued open none 2026-01-03T00:00:00Z none none\n111 queued open none 2026-01-01T00:00:00Z none feature,availability-incident\n' "$prio90" "$prio90" "$prio90" "$prio90" "$prio90" > "$state"
+printf '101 queued open none 2026-01-01T00:00:00Z none loop-continuity %s\n102 queued open none 2026-01-01T00:00:00Z none confidentiality-incident %s\n103 queued open none 2026-01-01T00:00:00Z none integrity-incident\n104 queued open none 2026-01-01T00:00:00Z none availability-incident\n105 queued open none 2026-01-01T00:00:00Z none feature\n106 queued open none 2026-01-01T00:00:00Z none improvement %s\n107 queued open none 2026-01-02T00:00:00Z none improvement %s\n108 queued open none 2025-01-01T00:00:00Z none improvement\n109 queued open none 2026-01-02T00:00:00Z none improvement %s\n110 queued open none 2026-01-03T00:00:00Z none none\n111 queued open none 2026-01-01T00:00:00Z none feature,availability-incident\n112 queued open none 2026-01-01T00:00:00Z none bug\n' "$prio90" "$prio90" "$prio90" "$prio90" "$prio90" > "$state"
 : > "$FAKE_GH_ROOT/$state_key.comments"
 AGENTIC_LOOP_RUN_ONCE=1 FAKE_CODEX_SLEEP=1 "$target/bin/agentic-loop" _supervise
 claim_order=$(sed -n 's/^\([0-9][0-9]*\) .*agentic-loop:lease.*/\1/p' "$FAKE_GH_ROOT/$state_key.comments" | awk '!seen[$0]++' | paste -sd, -)
-[[ $claim_order == 101,102,106,107,109,103,104,111,105,108,110 ]] || fail "queue order was incorrect (priority first, then category/created/number): $claim_order"
+[[ $claim_order == 101,102,106,107,109,103,104,111,112,105,108,110 ]] || fail "queue order was incorrect (priority first, then category/created/number): $claim_order"
 grep -Eq '^110 completed closed .* improvement$' "$state" || fail 'missing category was not repaired to improvement'
 grep -Eq '^111 completed closed .* availability-incident$' "$state" || fail 'multiple categories did not retain only the highest-ranked category'
+grep -Eq '^112 completed closed .* bug$' "$state" || fail 'a manually assigned bug category was not preserved'
+[[ $(awk '$1 == 112' "$FAKE_GH_ROOT/$state_key.comments" | grep -c 'category-reconciled' || true) -eq 0 ]] || fail 'reconcile touched an Issue that already had exactly one category'
 assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'category-reconciled reason=missing' 'missing category repair was not audited'
 assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'category-reconciled reason=multiple selected=availability-incident' 'multiple category repair was not audited'
 # comment_issue's plain double-quoted-string call sites (Issue #110): the
 # marker must be followed by a real newline, encoded here as the 2-char `\n`.
 assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'reason=missing -->\nカテゴリが未設定' 'comment_issue (single-quoted call site) did not render a real newline after its marker'
 assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'selected=availability-incident -->\n複数のカテゴリ' 'comment_issue (double-quoted call site) did not render a real newline after its marker'
+
+# reconcile_queued_categories' content-based triage (Issue #167): a queued
+# Issue with no category:* Label is classified from its body before falling
+# back to category:improvement. bug/loop-continuity keywords take priority
+# over the generic default; a body with none of the known keyword families
+# still falls back to reason=missing exactly as before.
+bug_body=$(printf 'ログイン画面が誤った日付を表示するバグを修正してほしい。' | base64 -w0)
+loop_body=$(printf 'Supervisorのclaimがqueueで詰まって進まない問題を直したい。' | base64 -w0)
+feature_body=$(printf 'ダッシュボードに新機能としてグラフ表示を追加したい。' | base64 -w0)
+plain_body=$(printf '既存の文書の誤字を整理したい。' | base64 -w0)
+printf '201 queued open none 2026-02-01T00:00:00Z none none %s\n202 queued open none 2026-02-01T00:00:00Z none none %s\n203 queued open none 2026-02-01T00:00:00Z none none %s\n204 queued open none 2026-02-01T00:00:00Z none none %s\n' \
+  "$bug_body" "$loop_body" "$feature_body" "$plain_body" > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+AGENTIC_LOOP_RUN_ONCE=1 FAKE_CODEX_SLEEP=1 "$target/bin/agentic-loop" _supervise
+# awk (not `grep '...$'`): these fixture rows carry a body (column 8), so the
+# category (column 7) never lands at the end of the line.
+[[ $(awk '$1 == 201 {print $2, $7}' "$state") == 'completed bug' ]] || fail 'a body mentioning バグ/不具合 was not content-classified as category:bug'
+[[ $(awk '$1 == 202 {print $2, $7}' "$state") == 'completed loop-continuity' ]] || fail 'a body mentioning Supervisor/queue/claim was not content-classified as category:loop-continuity'
+[[ $(awk '$1 == 203 {print $2, $7}' "$state") == 'completed feature' ]] || fail 'a body mentioning 新機能 was not content-classified as category:feature'
+[[ $(awk '$1 == 204 {print $2, $7}' "$state") == 'completed improvement' ]] || fail 'a body with no known keyword family did not fall back to category:improvement'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'category-reconciled reason=content selected=bug' 'content-based bug classification was not audited'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'category-reconciled reason=content selected=loop-continuity' 'content-based loop-continuity classification was not audited'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'category-reconciled reason=content selected=feature' 'content-based feature classification was not audited'
+[[ $(awk '$1 == 204' "$FAKE_GH_ROOT/$state_key.comments" | grep -c 'reason=missing' || true) -ge 1 ]] || fail 'an unclassifiable body did not fall back to the reason=missing comment'
+
+# triage_category_from_text unit coverage (Issue #167): a pure function, so
+# an incident-shaped free-text body is proven to never auto-classify as an
+# incident (that stays a human/postmortem-workflow decision) without needing
+# the fake-gh harness. source=/dev/null: project.sh's snapshot_state_rows/
+# refresh_supervisor_snapshot declare `local state=`/`local target=`, and
+# following the real source into this subshell makes the static analyzer
+# conflate those with this outer script's own (genuinely different) top-level
+# $state/$target, misreporting every later read of either as "modified in a
+# subshell" for the rest of the file.
+(
+  set -euo pipefail
+  # shellcheck source=/dev/null
+  . "$PROJECT_ROOT/bin/lib/agentic-loop/project.sh"
+
+  [[ $(triage_category_from_text 'Supervisorのclaimがqueueで詰まって進まない') == loop-continuity ]] || fail 'triage did not classify a Supervisor/queue/claim Issue as loop-continuity'
+  [[ $(triage_category_from_text 'ログイン画面で誤った日付を表示するバグを修正する') == bug ]] || fail 'triage did not classify a バグ Issue as bug'
+  [[ $(triage_category_from_text 'a regression crashes the login flow') == bug ]] || fail 'triage did not classify a regression/crash Issue as bug'
+  [[ $(triage_category_from_text 'ダッシュボードに新機能としてグラフ表示を追加する') == feature ]] || fail 'triage did not classify a 新機能 Issue as feature'
+  [[ $(triage_category_from_text '既存の文書の誤字を整理する') == '' ]] || fail 'triage guessed a category for text with no keyword family'
+  [[ $(triage_category_from_text '個人情報が漏洩した疑いがある') == '' ]] || fail 'triage guessed an incident category from free text (incidents require verified harm, never a keyword guess)'
+)
+
+# triage_issue_content end-to-end via the real fake-gh harness (title, body,
+# and empty comments all feed the same classifier): Issue 205's body has no
+# keyword family at all, so only a custom fixture title (an escape hatch the
+# main fake gh has no other caller for) can drive its classification.
+printf '205 queued open none 2026-02-01T00:00:00Z none none %s\n' "$plain_body" > "$state"
+printf '205\tSupervisorのworktree cleanupが終わらない\n' > "$FAKE_GH_ROOT/$state_key.titles"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+AGENTIC_LOOP_RUN_ONCE=1 FAKE_CODEX_SLEEP=1 "$target/bin/agentic-loop" _supervise
+rm -f "$FAKE_GH_ROOT/$state_key.titles"
+[[ $(awk '$1 == 205 {print $2, $7}' "$state") == 'completed loop-continuity' ]] || fail 'an Issue title mentioning Supervisor/worktree was not content-classified as category:loop-continuity'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'category-reconciled reason=content selected=loop-continuity' 'title-driven loop-continuity classification was not audited'
 
 # Numeric priority semantics: descending order, unset=0, multiple markers take
 # the maximum, and out-of-range/non-numeric markers are ignored. All Issues
@@ -3156,7 +3234,7 @@ if grep -Fq $'label create priority:critical' "$FAKE_GH_ROOT/calls" || grep -Fq 
 grep -Fq $'label create agent:stale' "$FAKE_GH_ROOT/calls" || fail 'setup did not create the stale state label'
 grep -Fq $'label create agent:parked' "$FAKE_GH_ROOT/calls" || fail 'setup did not create the parked state label'
 grep -Fq $'label create agent:paused' "$FAKE_GH_ROOT/calls" || fail 'setup did not create the paused state label'
-for category in loop-continuity confidentiality-incident integrity-incident availability-incident feature improvement; do
+for category in loop-continuity confidentiality-incident integrity-incident availability-incident bug feature improvement; do
   grep -Fq "label create category:$category" "$FAKE_GH_ROOT/calls" || fail "setup did not create category:$category"
 done
 assert_contains "$FAKE_GH_ROOT/calls" 'project field-create 7 --owner acme --name Category --data-type SINGLE_SELECT' 'setup did not create the Project Category field'

@@ -82,7 +82,7 @@ Actions（CI run）、GraphQL、Projects APIは読まない。理由は[ADR 0007
   "counters": {"attempts": 0, "retry": 0, "...": "..."},
   "failures": {},
   "utilization": {"max_workers": 4, "window_seconds": 2592000, "busy_seconds": 0, "ratio": 0},
-  "by_category": {"loop-continuity": 0, "confidentiality-incident": 0, "integrity-incident": 0, "availability-incident": 0, "feature": 0, "improvement": 0},
+  "by_category": {"loop-continuity": 0, "confidentiality-incident": 0, "integrity-incident": 0, "availability-incident": 0, "bug": 0, "feature": 0, "improvement": 0},
   "by_priority": {"25": 2, "50": 1, "75": 3},
   "warnings": []
 }

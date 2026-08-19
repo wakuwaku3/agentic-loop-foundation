@@ -44,7 +44,7 @@ readonly DISPOSITION_LABELS=(cancelled superseded duplicate merged)
 # ordering reads the numeric body marker directly; priority labels are never
 # created and their numeric value is never re-read from labels.
 readonly -A PRIORITY_LEGACY_VALUES=([critical]=90 [high]=75 [medium]=50 [low]=25)
-readonly CATEGORY_LABELS=(loop-continuity confidentiality-incident integrity-incident availability-incident feature improvement)
+readonly CATEGORY_LABELS=(loop-continuity confidentiality-incident integrity-incident availability-incident bug feature improvement)
 readonly DIAGNOSIS_LABEL=diagnosis
 readonly POSTMORTEM_LABEL=postmortem
 # Grace before a lock without a published pid is treated as stale, so two

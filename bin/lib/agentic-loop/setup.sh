@@ -35,6 +35,7 @@ setup_labels() {
       confidentiality-incident) color=B60205; description='Confidentiality incident' ;;
       integrity-incident) color=D93F0B; description='Integrity incident' ;;
       availability-incident) color=FBCA04; description='Availability incident' ;;
+      bug) color=D93F0B; description='Existing behavior is broken (not a verified CIA incident)' ;;
       feature) color=1D76DB; description='New user-facing value or capability' ;;
       improvement) color=0E8A16; description='Quality, performance, maintenance, documentation, or operations improvement' ;;
     esac
@@ -117,7 +118,7 @@ setup_project() {
   fi
   if ! grep -Fxq 'Category' <<< "$fields"; then
     gh project field-create "$number" --owner "$owner" --name 'Category' --data-type SINGLE_SELECT \
-      --single-select-options 'Loop continuity,Confidentiality incident,Integrity incident,Availability incident,Feature,Improvement' >/dev/null 2>&1 || true
+      --single-select-options 'Loop continuity,Confidentiality incident,Integrity incident,Availability incident,Bug,Feature,Improvement' >/dev/null 2>&1 || true
   fi
   if ! grep -Fxq 'Blocked by' <<< "$fields"; then
     gh project field-create "$number" --owner "$owner" --name 'Blocked by' --data-type TEXT >/dev/null 2>&1 || true
@@ -126,53 +127,73 @@ setup_project() {
     gh project field-create "$number" --owner "$owner" --name 'Integration progress' --data-type TEXT >/dev/null 2>&1 || true
   fi
   setup_project_migrate_status_options "$number" "$owner"
+  setup_project_migrate_category_options "$number" "$owner"
   setup_project_views "$number" "$owner"
 }
 
 
-# field-create fails silently (via || true above) once "Agent status" already
-# exists, so a Project created before the Blocked option was introduced never
+# field-create fails silently (via || true above) once a single-select field
+# already exists, so a Project created before an option was introduced never
 # gains it. Append the option in place through GraphQL, preserving every
 # existing option's name/color/description exactly as read back, so re-running
 # `setup` heals older Projects without losing item placements. Best-effort: a
 # schema surprise or missing scope just leaves the prior drift warning in
 # `doctor`, since Issue Labels remain the source of truth for queue state.
-setup_project_migrate_status_options() {
-  local number=$1 owner=$2 project_id field_id options_tsv mutation_options id name color description
+# required_specs entries are "Name|COLOR|description" for options not present yet.
+setup_project_migrate_single_select_options() {
+  local number=$1 owner=$2 field_name=$3; shift 3
+  local -a required_specs=("$@")
+  local project_id field_id options_tsv mutation_options id name color description spec req_name req_color req_description missing=''
   project_id=$(gh project view "$number" --owner "$owner" --format json --jq .id 2>/dev/null) || return 0
-  field_id=$(gh project field-list "$number" --owner "$owner" --format json --jq '.fields[] | select(.name == "Agent status") | .id' 2>/dev/null | head -n 1) || return 0
+  field_id=$(gh project field-list "$number" --owner "$owner" --format json --jq '.fields[] | select(.name == "'"$field_name"'") | .id' 2>/dev/null | head -n 1) || return 0
   [[ -n $project_id && -n $field_id ]] || return 0
   # workload-boundary: best-effort Projects (GraphQL) field introspection, not a REST core operation
   options_tsv=$(gh api graphql -f query='query($field: ID!) {
     node(id: $field) { ... on ProjectV2SingleSelectField { options { id name color description } } }
   }' -F field="$field_id" --jq '.data.node.options[] | [.id, .name, .color, .description] | @tsv' 2>/dev/null) || return 0
   [[ -n $options_tsv ]] || return 0
-  local required_statuses=(Stopping Blocked Paused Parked Cancelled Superseded Duplicate Merged) required missing=''
-  for required in "${required_statuses[@]}"; do grep -Fq $'\t'"${required}"$'\t' <<< "$options_tsv" || missing+=" $required"; done
+  for spec in "${required_specs[@]}"; do
+    req_name=${spec%%|*}
+    grep -Fq $'\t'"${req_name}"$'\t' <<< "$options_tsv" || missing+=" $req_name"
+  done
   [[ -z $missing ]] && return 0
   mutation_options=''
   while IFS=$'\t' read -r id name color description; do
     [[ -n $name ]] || continue
     mutation_options+="{id: \"$id\", name: \"$name\", color: $color, description: \"$description\"}, "
   done <<< "$options_tsv"
-  for required in "${required_statuses[@]}"; do
-    grep -Fq $'\t'"${required}"$'\t' <<< "$options_tsv" && continue
-    case $required in
-      Stopping) mutation_options+='{name: "Stopping", color: YELLOW, description: "Authorized disposal is draining an active worker"}, ' ;;
-      Blocked) mutation_options+='{name: "Blocked", color: GRAY, description: "Waiting on unresolved Issue dependencies"}, ' ;;
-      Paused) mutation_options+='{name: "Paused", color: BLUE, description: "Execution paused by an authorized operator"}, ' ;;
-      Parked) mutation_options+='{name: "Parked", color: RED, description: "Retry budget exhausted; waiting for human triage"}, ' ;;
-      Cancelled) mutation_options+='{name: "Cancelled", color: GRAY, description: "Requirement was withdrawn"}, ' ;;
-      Superseded) mutation_options+='{name: "Superseded", color: PURPLE, description: "Continued by a successor Issue"}, ' ;;
-      Duplicate) mutation_options+='{name: "Duplicate", color: BLUE, description: "Duplicates another Issue"}, ' ;;
-      Merged) mutation_options+='{name: "Merged", color: GREEN, description: "Consolidated into another Issue"}' ;;
-    esac
+  for spec in "${required_specs[@]}"; do
+    req_name=${spec%%|*}
+    grep -Fq $'\t'"${req_name}"$'\t' <<< "$options_tsv" && continue
+    IFS='|' read -r req_name req_color req_description <<< "$spec"
+    mutation_options+="{name: \"$req_name\", color: $req_color, description: \"$req_description\"}, "
   done
   mutation_options=${mutation_options%, }
   # workload-boundary: best-effort Projects (GraphQL) field mutation, not a REST core operation
   gh api graphql -f query="mutation(\$field: ID!) {
     updateProjectV2Field(input: {fieldId: \$field, singleSelectOptions: [$mutation_options]}) { projectV2Field { id } }
   }" -F field="$field_id" >/dev/null 2>&1 || true
+}
+
+
+setup_project_migrate_status_options() {
+  setup_project_migrate_single_select_options "$1" "$2" 'Agent status' \
+    'Stopping|YELLOW|Authorized disposal is draining an active worker' \
+    'Blocked|GRAY|Waiting on unresolved Issue dependencies' \
+    'Paused|BLUE|Execution paused by an authorized operator' \
+    'Parked|RED|Retry budget exhausted; waiting for human triage' \
+    'Cancelled|GRAY|Requirement was withdrawn' \
+    'Superseded|PURPLE|Continued by a successor Issue' \
+    'Duplicate|BLUE|Duplicates another Issue' \
+    'Merged|GREEN|Consolidated into another Issue'
+}
+
+
+# Issue #167: a Project created before category:bug was introduced never gains
+# the Bug option through field-create's create-only path above.
+setup_project_migrate_category_options() {
+  setup_project_migrate_single_select_options "$1" "$2" 'Category' \
+    'Bug|D93F0B|Bug fix (not a verified CIA incident)'
 }
 
 
