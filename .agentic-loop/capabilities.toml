@@ -74,11 +74,6 @@ path = ".agentic-loop"
 purpose = "配布物であるguard/update-main/diagnose/capabilities宣言そのもの"
 
 [[protected]]
-path = "devbox.lock"
-reason = "意図しないlock更新を禁止する(開発環境ポリシー)"
-change_requires = "approval"
-
-[[protected]]
 path = ".agentic-loop/manifest.json"
 reason = "install/upgradeが生成する機械記録。手編集しない"
 change_requires = "tooling"
