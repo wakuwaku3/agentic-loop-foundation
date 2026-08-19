@@ -4202,21 +4202,26 @@ rm -f "$state_root/stop.requested"
 # (e.g. the Label mismatch was transient, mirroring the brief window a normal
 # completion passes through between its own Label update and process exit)
 # must not be killed, and its grace marker must be cleared rather than
-# lingering to poison a later, unrelated mismatch. This scenario's "stays
-# within grace" property is made deterministic the same way the
-# grace-exceeded scenario above forces elapsed >= grace -- by writing
-# orphan-since directly -- rather than racing real wall-clock time between the
-# Label flipping away and back: on a shared, possibly contended CI runner, a
-# single poll can stretch well past POLL_SECONDS=1, so detecting the mismatch
-# could itself burn an unpredictable share of any fixed grace value. The
-# marker is refreshed to "now" right before the Label is restored (see below)
-# so elapsed stays near zero for the poll that observes the restore,
-# independent of how long detection took.
-write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=300 STOP_TIMEOUT=10 STALE_DAYS=30 MAX_ATTEMPTS=3 RETRY_COOLDOWN_SECONDS=600 WORKER_TIMEOUT_SECONDS=999999 WORKER_ORPHAN_GRACE_SECONDS=30
+# lingering to poison a later, unrelated mismatch. This scenario refreshes
+# orphan-since to "now" right before the Label is restored (see below) so the
+# elapsed time the *next* poll computes does not include however long
+# detecting the mismatch took. That alone is not sufficient on a shared,
+# possibly contended CI runner: a poll already in flight when the refresh
+# happens can have read the old (much older) orphan-since value into a shell
+# variable moments earlier and act on that stale reading regardless of the
+# refresh, and a single poll's own recover_expired / enforce_worker_timeout /
+# reap_orphan_workers / snapshot-refresh work can itself stretch tens of
+# seconds under contention (observed in CI). Grace is set far above that
+# worst case (240s, not the file's usual small test values) purely to make
+# this scenario's assertion robust to CI scheduling noise; it is not a claim
+# about a useful production grace value. FAKE_CODEX_SLEEP is set well beyond
+# every wait budget below combined so the worker cannot finish its stage and
+# exit on its own before the assertions run.
+write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=300 STOP_TIMEOUT=10 STALE_DAYS=30 MAX_ATTEMPTS=3 RETRY_COOLDOWN_SECONDS=600 WORKER_TIMEOUT_SECONDS=999999 WORKER_ORPHAN_GRACE_SECONDS=240
 printf '72 queued open none 2026-01-01T00:00:00Z\n' > "$state"
 : > "$FAKE_GH_ROOT/$state_key.comments"
 rm -f "$state_root/stop.requested"
-FAKE_CODEX_SLEEP=60 "$target/bin/agentic-loop" _supervise &
+FAKE_CODEX_SLEEP=600 "$target/bin/agentic-loop" _supervise &
 orphan2_sup_pid=$!
 orphan2_worker_pid=''
 for _ in $(seq 1 40); do
@@ -4245,10 +4250,10 @@ done
 # from here on reflects this test's own transition, not however long the poll
 # above took to first notice the mismatch under CI load (see comment above).
 printf '%s\n' "$(date +%s)" > "$state_root/workers/72.orphan-since"
-# The mismatch resolves (Label restored) well within worker_orphan_grace_seconds=30.
+# The mismatch resolves (Label restored) well within worker_orphan_grace_seconds=240.
 sed -i 's/^72 queued/72 running/' "$state"
 orphan2_marker_cleared=0
-for _ in $(seq 1 100); do
+for _ in $(seq 1 200); do
   [[ ! -e $state_root/workers/72.orphan-since ]] && { orphan2_marker_cleared=1; break; }
   sleep 0.5
 done
