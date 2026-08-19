@@ -397,6 +397,66 @@ reconcile_queued_categories() {
 }
 
 
+# Read-only diagnosis of GitHub Projects sync health, shared by doctor and
+# status so both surface the same cause-specific remediation. Sets
+# PROJECT_SYNC_STATUS to one of:
+#   ok    - repository link, Agent status field, and Views match the desired
+#           configuration.
+#   unset - bin/agentic-loop setup has never recorded a local Project identity
+#           for this repository.
+#   scope - the observed CLI/GraphQL error names a missing OAuth scope; the
+#           token needs the project/read:project scopes.
+#   drift - project.env exists but the configuration does not match, or the
+#           failure's cause could not be attributed to a scope error; this is
+#           the safe default and its remedy (bin/agentic-loop setup) is
+#           idempotent regardless of the actual cause.
+PROJECT_SYNC_STATUS=''
+
+project_sync_scope_signature() {
+  local text; text=$(tr '[:upper:]' '[:lower:]' <<< "$1")
+  [[ $text == *scope* && $text == *project* ]]
+}
+
+project_sync_diagnose() {
+  PROJECT_SYNC_STATUS='unset'
+  [[ -r $STATE_ROOT/project.env ]] || return 0
+  local key value project_owner='' project_number=''
+  while IFS='=' read -r key value; do case $key in PROJECT_OWNER) project_owner=$value ;; PROJECT_NUMBER) project_number=$value ;; esac; done < "$STATE_ROOT/project.env"
+  [[ -n $project_owner && $project_number =~ ^[0-9]+$ ]] || return 0
+  PROJECT_SYNC_STATUS=drift
+  local view_out view_rc=0 project_id repository owner name graphql_out
+  view_out=$(gh project view "$project_number" --owner "$project_owner" --format json --jq .id 2>&1) || view_rc=$?
+  if (( view_rc != 0 )); then
+    project_sync_scope_signature "$view_out" && PROJECT_SYNC_STATUS=scope
+    return 0
+  fi
+  project_id=$view_out
+  repository=$(repo_name 2>/dev/null || true); owner=${repository%%/*}; name=${repository#*/}
+  [[ -n $project_id && $owner != "$repository" && -n $name ]] || return 0
+  # workload-boundary: best-effort Projects (GraphQL) health introspection for doctor/status, not a REST core operation
+  graphql_out=$(gh api graphql -f query='query($project: ID!, $owner: String!, $name: String!) {
+    node(id: $project) { ... on ProjectV2 {
+      fields(first: 100) { nodes { ... on ProjectV2SingleSelectField { name options { name } } } }
+      views(first: 100) { nodes { name filter } }
+    } }
+    repository(owner: $owner, name: $name) { projectsV2(first: 100) { nodes { id } } }
+  }' -F project="$project_id" -f owner="$owner" -f name="$name" --jq '
+    .data.node.id as $id |
+    (.data.repository.projectsV2.nodes | any(.id == $id)) and
+    (.data.node.fields.nodes | any(.name == "Agent status" and (([.options[].name] | sort) == (["Inbox","Queued","Running","Needs input","In review","Stopping","Done","Failed","Parked","Stale","Blocked","Paused","Cancelled","Superseded","Duplicate","Merged"] | sort)))) and
+    (.data.node.views.nodes | any(.name == "All open issues" and .filter == "is:issue is:open")) and
+    (.data.node.views.nodes | any(.name == "All closed issues" and .filter == "is:issue is:closed")) and
+    (.data.node.views.nodes | any(.name == "Open PRs" and .filter == "is:pr is:open")) and
+    (.data.node.views.nodes | any(.name == "Closed PRs" and .filter == "is:pr is:closed"))
+  ' 2>&1) || true
+  if [[ $graphql_out == true ]]; then
+    PROJECT_SYNC_STATUS=ok
+  else
+    project_sync_scope_signature "$graphql_out" && PROJECT_SYNC_STATUS=scope
+  fi
+}
+
+
 cmd_sync_issue() {
   [[ ${1:-} =~ ^[1-9][0-9]*$ ]] || fail 'sync-issue requires a positive Issue number'
   project_sync_state "$1" queued
