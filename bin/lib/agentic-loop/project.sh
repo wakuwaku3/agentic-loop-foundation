@@ -18,16 +18,23 @@ queue_project_sync() {
   # This file is deliberately only a wake-up hint.  Desired Project values are
   # never persisted locally: they are derived from a fresh GitHub Issue read
   # immediately before a mutation.
-  local hint=$1 issue
+  local hint=$1 issue occurrences
   if [[ $hint =~ ^([a-z-]+[[:space:]]+)?([1-9][0-9]*) ]]; then issue=${BASH_REMATCH[2]};
   elif [[ $hint =~ /issues/([1-9][0-9]*)$ ]]; then issue=${BASH_REMATCH[1]};
   else return 0; fi
   mkdir -p "$STATE_ROOT"
   ( flock 9
+    occurrences=$(grep -Fxc -- "$issue" "$STATE_ROOT/project-pending" 2>/dev/null || true); occurrences=${occurrences:-0}
     # An entry being reconciled remains in project-pending.  A second enqueue
-    # for it is deliberately retained, so an event that arrives between the
-    # read and the ack cannot be mistaken for the entry we are acknowledging.
-    if grep -Fxq -- "$issue" "$STATE_ROOT/project-pending.inflight" 2>/dev/null || ! grep -Fxq -- "$issue" "$STATE_ROOT/project-pending" 2>/dev/null; then
+    # for it is deliberately retained (but capped at one extra copy, not
+    # unboundedly repeated), so an event that arrives between the read and the
+    # ack cannot be mistaken for the entry we are acknowledging while a
+    # permanently failing Issue cannot make this file grow without bound.
+    if grep -Fxq -- "$issue" "$STATE_ROOT/project-pending.inflight" 2>/dev/null; then
+      if (( occurrences < 2 )); then
+        printf '%s\n' "$issue" >> "$STATE_ROOT/project-pending"
+      fi
+    elif (( occurrences == 0 )); then
       printf '%s\n' "$issue" >> "$STATE_ROOT/project-pending"
     fi
   ) 9> "$STATE_ROOT/project-pending.lock"

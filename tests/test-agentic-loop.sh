@@ -670,7 +670,7 @@ case "${1:-} ${2:-}" in
     if [[ $* == *'projectItems(first:20'* ]]; then
       number=''; cursor=''
       for arg in "$@"; do [[ $arg == number=* ]] && number=${arg#number=}; [[ $arg == cursor=* ]] && cursor=${arg#cursor=}; done
-      if [[ ${FAKE_PROJECT_CONTENT_FAIL:-0} == 1 ]]; then
+      if [[ ${FAKE_PROJECT_CONTENT_FAIL:-0} == 1 || ( -n ${FAKE_PROJECT_CONTENT_FAIL_ISSUE:-} && $number == "$FAKE_PROJECT_CONTENT_FAIL_ISSUE" ) ]]; then
         printf '{"errors":[{"message":"forced GraphQL failure"}]}\n'
         exit 1
       fi
@@ -1570,6 +1570,34 @@ calls_before=$(wc -l < "$FAKE_GH_ROOT/calls")
 AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _supervise
 tail -n "+$((calls_before + 1))" "$FAKE_GH_ROOT/calls" > "$TEST_ROOT/hints-rebuild-calls.log"
 [[ $(grep -c $'\tproject item-edit ' "$TEST_ROOT/hints-rebuild-calls.log" || true) -ge 1 ]] || fail 'deleted hint was not rebuilt and reconverged'
+
+# Bounded degradation (issue #195): while one Issue's Projects reconciliation
+# fails permanently, project-pending must stay bounded (not grow every poll),
+# a permanently failing Issue must not block Project reconciliation of other
+# Issues in the same poll, and once the permanent failure clears the bounded
+# backlog must converge within very few polls (not one ack per historical
+# duplicate).
+rm -f "$(git -C "$target" rev-parse --absolute-git-dir)/agentic-loop/graphql-rate-limit" "$pending_project"
+printf '910 needs-input open none 2026-01-01T00:00:00Z none improvement\n911 needs-input open none 2026-01-01T00:00:00Z none improvement\n' > "$FAKE_GH_ROOT/$state_key.state"
+printf 'https://github.com/acme/installed-project/issues/910\nhttps://github.com/acme/installed-project/issues/911\n' >> "$FAKE_GH_ROOT/$state_key.project-items"
+printf '910\tNeeds input\tImprovement\t\n911\tQueued\tImprovement\t\n' >> "$FAKE_GH_ROOT/$state_key.project-values"
+poll=0
+while (( poll < 4 )); do
+  FAKE_PROJECT_CONTENT_FAIL_ISSUE=910 AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _supervise >/dev/null
+  poll=$((poll + 1))
+done
+occurrences_910=$(grep -Fxc -- '910' "$pending_project" 2>/dev/null); occurrences_910=${occurrences_910:-0}
+(( occurrences_910 <= 2 )) || fail "a permanently failing Issue made project-pending grow without bound (910 occurrences=$occurrences_910 after $poll polls)"
+last_911_status=$(awk -F '\t' -v n=911 '$1 == n { v = $2 } END { print v }' "$FAKE_GH_ROOT/$state_key.project-values")
+[[ $last_911_status == 'Needs input' ]] || fail 'a permanently failing Issue blocked Project reconciliation of another Issue in the same poll'
+rm -f "$(git -C "$target" rev-parse --absolute-git-dir)/agentic-loop/graphql-rate-limit"
+AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _supervise >/dev/null
+if [[ -e $pending_project ]] && grep -Fxq -- '910' "$pending_project"; then
+  cat "$pending_project" >&2
+  fail 'recovered Projects synchronization did not converge the bounded backlog within one poll'
+fi
+printf '97 needs-input open none 2026-01-01T00:00:00Z none improvement\n' > "$FAKE_GH_ROOT/$state_key.state"
+rm -f "$pending_project"
 
 # Projects APIの一時的または権限制約による失敗はIssueキューのsetupを停止しない。
 FAKE_PROJECT_VIEW_UPDATE_FAILURE=1 AGENTIC_LOOP_SKIP_START=1 "$target/bin/agentic-loop" setup >/dev/null
