@@ -43,7 +43,7 @@ progress_stage_valid() {
 event_append() {
   local subject=$1 code=$2 stage=${3:-}
   [[ $subject == supervisor || $subject =~ ^[0-9]+$ ]] || return 0
-  case $code in progress | claim | recover | timeout | orphan | stop | start) ;; *) return 0 ;; esac
+  case $code in progress | claim | recover | timeout | orphan | prune | stop | start) ;; *) return 0 ;; esac
   [[ -z $stage || $stage == - ]] || progress_stage_valid "$stage" || return 0
   mkdir -p "$STATE_ROOT"
   printf '%s\t%s\t%s\t%s\n' "$(date +%s)" "$subject" "$code" "${stage:--}" >> "$EVENTS_LOG" 2>/dev/null || true
@@ -545,6 +545,95 @@ reap_orphan_workers() {
     comment_issue "$issue" "<!-- agentic-loop:worker-orphan-reaped issue=$issue elapsed=${elapsed}s grace=${WORKER_ORPHAN_GRACE_SECONDS}s -->\nこのホストのlocal workerがGitHub上 \`agent:running\` ではない状態を ${elapsed}秒（grace ${WORKER_ORPHAN_GRACE_SECONDS}秒）観測したため、実行時間上限を待たずprocess groupごと安全に停止し、local stateを掃除しました。Issueの状態は変更していません。誤検知が疑われる場合は \`.agentic-loop.toml\` の \`queue.worker_orphan_grace_seconds\` を見直してください。" || true
     event_append "$issue" orphan -
   done
+}
+
+
+# --- Residual worktree/branch auto-prune (Issue #211) ---
+# A worker's own completion path already removes its own worktree/branch
+# (cleanup_completed_worker / cleanup_completed_branch_only in worker.sh).
+# This is the supervisor-side backstop for everything that path never
+# reaches: a crashed/killed worker, a worker that stopped tracking its own
+# Issue, or a worktree/branch left over from an Issue this host no longer has
+# a local worker for (including after a restart or on a re-attached host).
+# Multi-host safe: only this host's local worktree/branch is ever touched
+# (a remote branch is never deleted here), and only for an Issue with no live
+# local worker on this host (worker_pid_live). Every decision is derived from
+# a fresh Git/GitHub observation, never from a worker's self-report:
+#   - Issue closed: discard the local worktree + branch outright, even with
+#     unpushed commits (the work is done or abandoned; see docs/decisions/0016
+#     -- retry-budget exhaustion already parks rather than closes, so a
+#     closed Issue here genuinely means completed/disposed).
+#   - Issue open and the local branch has no commit that is not already on
+#     `origin/agent/issue-N` (and that remote branch exists): discard the
+#     local worktree + branch only, leaving the remote branch for another
+#     host or a future resume (Issue #210's remote-agent-branch resume).
+#   - Anything else (open with unpushed/unverifiable local state, no matching
+#     remote branch, or a GitHub read failure): leave it untouched and retry
+#     on a later poll. No comment, no anomaly -- an operator cannot act on
+#     unpushed local work they cannot see anyway.
+prune_target_issues() {
+  git -C "$REPO_ROOT" for-each-ref --format='%(refname:short)' refs/heads/agent/ 2>/dev/null |
+    sed -E 's#^agent/issue-##' | grep -E '^[0-9]+$' | sort -un
+}
+
+
+# Remove worktree_root (if present) and the local branch ref together, only
+# after re-verifying the worktree is actually registered to this exact branch
+# (mirrors cleanup_completed_worker's safety check in worker.sh) so a foreign/
+# unexpected worktree at the same path is never touched. force=1 discards
+# uncommitted/unpushed local state (the closed-Issue case); force=0 aborts the
+# whole removal if the worktree is dirty, so uncommitted work is never
+# silently lost even when the branch itself is fully pushed.
+prune_worktree_and_branch() {
+  local worktree_root=$1 branch=$2 force=$3 registered_branch local_oid
+  local branch_ref="refs/heads/$branch"
+  local_oid=$(git -C "$REPO_ROOT" rev-parse --verify -q "$branch_ref" 2>/dev/null) || return 1
+  if [[ -e $worktree_root ]]; then
+    [[ ! -L $worktree_root ]] || return 1
+    registered_branch=$(git -C "$REPO_ROOT" worktree list --porcelain 2>/dev/null | awk -v path="$worktree_root" '
+      $1 == "worktree" {matched=($2 == path)}
+      matched && $1 == "branch" {print $2; exit}
+    ')
+    [[ $registered_branch == "$branch_ref" ]] || return 1
+    if [[ $force == 1 ]]; then
+      git -C "$REPO_ROOT" worktree remove --force "$worktree_root" 2>/dev/null || return 1
+    else
+      [[ -z $(git -C "$worktree_root" status --porcelain 2>/dev/null) ]] || return 1
+      git -C "$REPO_ROOT" worktree remove "$worktree_root" 2>/dev/null || return 1
+    fi
+  fi
+  [[ ! -e $worktree_root ]] || return 1
+  git -C "$REPO_ROOT" update-ref -d "$branch_ref" "$local_oid" 2>/dev/null || return 1
+  ! git -C "$REPO_ROOT" show-ref --verify --quiet "$branch_ref"
+}
+
+
+prune_residual_worktrees() {
+  local issue branch worktree_root current state ahead
+  while IFS= read -r issue; do
+    [[ -n $issue ]] || continue
+    worker_pid_live "$issue" && continue
+    branch="agent/issue-$issue"
+    worktree_root="$WORKTREE_ROOT/issue-$issue"
+    # workload-unbounded: one per-Issue state lookup per residual worktree/
+    # branch candidate lacking a live local worker; bound=residual worktree/
+    # branch count on this host
+    current=$(repo_api "issues/$issue" --jq '[.state, ([.labels[].name] | join(","))] | @tsv' 2>/dev/null) || continue
+    state=${current%%$'\t'*}
+    if [[ $state == closed ]]; then
+      prune_worktree_and_branch "$worktree_root" "$branch" 1 || continue
+      comment_issue "$issue" "<!-- agentic-loop:pruned reason=closed -->\nこのIssueはcloseされていますが、このホストに残存する専用worktreeとlocal branch \`$branch\`（未pushの変更を含む可能性があります）を検出したため、保守処理として削除しました。" || true
+      event_append "$issue" prune -
+    elif [[ $state == open ]]; then
+      git -C "$REPO_ROOT" rev-parse --verify -q "refs/remotes/origin/$branch" >/dev/null 2>&1 || continue
+      ahead=$(git -C "$REPO_ROOT" rev-list --count "refs/remotes/origin/$branch..refs/heads/$branch" 2>/dev/null) || continue
+      [[ $ahead =~ ^[0-9]+$ ]] || continue
+      (( ahead == 0 )) || continue
+      prune_worktree_and_branch "$worktree_root" "$branch" 0 || continue
+      comment_issue "$issue" "<!-- agentic-loop:pruned reason=pushed -->\nこのホストに残存する専用worktreeとlocal branch \`$branch\` は \`origin/$branch\` へ変更が全て反映済みであることを確認したため、local分のみ保守処理として削除しました。remote branchは再開のためこのホストからは削除していません。" || true
+      event_append "$issue" prune -
+    fi
+  done < <(prune_target_issues)
 }
 
 
