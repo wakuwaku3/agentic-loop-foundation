@@ -77,7 +77,19 @@ doctor_collect() {
     if [[ $PREFLIGHT == require || $PREFLIGHT == warn || $PREFLIGHT == off ]]; then
       doctor_add success '変更影響とリスクのpreflight gate' "現在のmodeは $PREFLIGHT です（require=非自律verdictをblock、warn=リスクの高いverdictのみblock、off=無効）。" '対応は不要です。'
     fi
+    doctor_enum_config WORKLOAD "$WORKLOAD" require warn off
+    if [[ $WORKLOAD == require || $WORKLOAD == warn || $WORKLOAD == off ]]; then
+      doctor_add success '有限資源とスケーラビリティのworkload gate' "現在のmodeは $WORKLOAD です（require=missing/invalidをblock、warn=助言のみ、off=無効）。" '対応は不要です。'
+    fi
     (( DOCTOR_FAILURES == 0 )) && doctor_add success '設定ファイル' '設定値を安全に解釈できます。' '対応は不要です。'
+  fi
+
+  local workload_violations
+  workload_violations=$(workload_scan "$REPO_ROOT" 2>/dev/null | wc -l | tr -d ' ')
+  if [[ ${workload_violations:-0} -gt 0 ]]; then
+    doctor_add warning '有限資源とスケーラビリティの静的検査' "注釈の無い違反が ${workload_violations} 件あります。" 'bin/agentic-loop workload を実行し、docs/operations/workload-budget.md の注釈文法に従って解消してください。'
+  else
+    doctor_add success '有限資源とスケーラビリティの静的検査' '注釈の無い違反はありません。' '対応は不要です。'
   fi
 
   if command -v git >/dev/null 2>&1 && git -C "$REPO_ROOT" rev-parse --git-dir >/dev/null 2>&1; then
@@ -89,7 +101,7 @@ doctor_collect() {
 
   if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
     doctor_add success 'GitHub認証' 'GitHub CLIの認証を確認しました（token本体は表示しません）。' '対応は不要です。'
-    if [[ $(gh api "repos/$(repo_name)" --jq '.permissions.push // false' 2>/dev/null) == true ]]; then
+    if [[ $(repo_api "" --jq '.permissions.push // false' 2>/dev/null) == true ]]; then
       doctor_add success 'repository権限' '対象repositoryのREST APIをread/writeできます。' '対応は不要です。'
     else doctor_add failure 'repository権限' 'Issue、PR、Labelを更新できません。' 'gh auth refresh で対象repositoryのread/write権限を付与してください。'; fi
   else doctor_add failure 'GitHub認証' 'IssueキューとPR lifecycleを利用できません。' 'gh auth login を実行し、対象repositoryのread/write権限を付与してください。'; fi
@@ -222,6 +234,7 @@ doctor_collect() {
     project_id=$(gh project view "$project_number" --owner "$project_owner" --format json --jq .id 2>/dev/null || true)
     repository=$(repo_name 2>/dev/null || true); owner=${repository%%/*}; name=${repository#*/}
     if [[ -n $project_id && $owner != "$repository" && -n $name ]]; then
+      # workload-boundary: best-effort Projects (GraphQL) introspection, not a REST core operation; repo_api targets REST repos/OWNER/REPO only
       project_ok=$(gh api graphql -f query='query($project: ID!, $owner: String!, $name: String!) {
         node(id: $project) { ... on ProjectV2 {
           fields(first: 100) { nodes { ... on ProjectV2SingleSelectField { name options { name } } } }

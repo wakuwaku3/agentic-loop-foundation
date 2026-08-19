@@ -143,6 +143,17 @@ traceability = "warn"
 # so its own queue does not self-lock on introduction; switch to "require"
 # once the plan-stage record convention is consistently followed.
 preflight = "warn"
+# Finite-resource/scalability workload budget gate (see
+# docs/decisions/0025-resource-scalability-budget.md, docs/operations/
+# workload-budget.md): the plan stage may self-declare a processing-volume
+# model (call counts per unit, growth rate against input size, stop
+# conditions, reuse) whenever it adds or changes external I/O. "require"
+# gates a missing/invalid record into agent:needs-input before exec runs;
+# "warn" posts an audit/advisory comment and continues either way; "off"
+# disables evaluation entirely. This repository ships "warn" so its own queue
+# does not self-lock on introduction; switch to "require" once the plan-stage
+# record convention is consistently followed.
+workload = "warn"
 
 [foundation]
 # Foundationの配布元repository。`agentic-loop upgrade` はここを基準に新しいrevisionを取得する。

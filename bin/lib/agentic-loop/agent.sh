@@ -146,8 +146,10 @@ opencode_go_usage_percent() {
   [[ -n $key ]] || return 1
   command -v gh >/dev/null 2>&1 || return 1
   if command -v timeout >/dev/null 2>&1; then
+    # workload-boundary: non-GitHub host (opencode usage API) riding `gh api` as an HTTPS client; repo_api targets GitHub REST only
     response=$(timeout 20 gh api "https://opencode.ai/zen/go/v1/usage" -H "Authorization: Bearer $key" 2>/dev/null) || return 1
   else
+    # workload-boundary: non-GitHub host (opencode usage API) riding `gh api` as an HTTPS client; repo_api targets GitHub REST only
     response=$(gh api "https://opencode.ai/zen/go/v1/usage" -H "Authorization: Bearer $key" 2>/dev/null) || return 1
   fi
   percent=$(printf '%s\n' "$response" | yq -p json -o tsv '[.usage.rolling.percent // 0, .usage.weekly.percent // 0, .usage.monthly.percent // 0] | max' - 2>/dev/null)

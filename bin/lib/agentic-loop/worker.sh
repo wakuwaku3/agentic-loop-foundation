@@ -30,6 +30,7 @@ Issueとそのコメントを要求として扱い、この専用worktreeとリ�
 計画本文の最後の行に、変更が触れる見込みのpathとexternal環境を示すmarkerを1行だけ出力してください: \`<!-- agentic-loop:scope paths=path1,path2 env=name1,name2 -->\`。repository全体に及ぶ場合は \`paths=*\` としてください。fileのrename/moveやdirectory再編など構造的変更を含む計画では \`structural=1\` も付け加えてください（構造的変更はpathが重なる他Issueと直列化されます）。見積もれない場合はこの行を省略してください（安全な既定動作にフォールバックします）。このmarkerはSupervisorが並列worker間の変更scope競合を避けるための機械可読情報であり、実装の一部ではありません。
 一つのworkerで安全に完遂できない要求だけは、scopeが独立し個別にmerge・rollback・検証できる直接の子が2〜6件である場合に限り、計画の末尾（scope markerの前）へ JSON の \`agentic-loop:decomposition\` code blockを置けます。schema=1、mode=children、integration_acceptance_criteria、children（key/title/purpose/acceptance_criteria/scope/depends_on）を含めてください。keyは英小文字・数字・\`-\`のみで一意、scopeは既存scope markerと同じ \`paths=... env=...\` 形式、depends_onは同じmanifestのkeyだけです。循環、共有変更、上限超過、統合条件を定義できない場合はmanifestを出さず、通常の単一PRとして計画してください。
 計画本文の中（scope markerより前）に、JSON の \`agentic-loop:preflight\` code blockを1つ出力してください。schema=1、issue=$issue、risks（security/confidentiality/integrity/availability/data_migration/external_environment/cost/compatibility/release_deploy/rollbackの10軸すべてを1回ずつ、各軸に level=low|medium|high|unknown。lowでなければreason必須、200文字以内・改行/backtick禁止。unknownなら追加でmissingに不足情報を200文字以内で明記し、低リスク扱いにしないこと）、change（scope/tests/external_operations/rollbackの短い説明、いずれも200文字以内・改行/backtick禁止）、approval（required真偽値、triggersはdestructive/irreversible/cost/security/permission/external-deploy/data-migration/rollback-blockedのうち該当するものの配列）を含めてください。破壊的・不可逆・重大costまたはsecurity上のリスクがあるなら、必ず該当軸をhighにするか対応するtriggerを含め、approval.required=trueとしてください。秘密情報や攻撃に利用できる詳細は書かないこと。
+計画本文の中（scope markerより前）に、JSON の \`agentic-loop:workload\` code blockを1つ出力してください。外部I/O・pagination・探索・retry・並列処理を追加/変更しない計画では \`{"schema": 1, "issue": $issue, "external_io": "none"}\` の1行で済ませてよいです。追加/変更する場合は schema=1、issue=$issue、external_io（added または changed）、units（各要素にoperation/per_unit/growth/stop_condition/reuseを200文字以内・改行/backtick禁止で1〜10件）、verification（呼び出し回数上限または規模別testの名前を1〜10件）を含めてください。任意でamplification（idle/failure/multi_hostの非増幅根拠）とexceptions（site/reason/任意のtrack=#N）を含められます。有限資源とスケーラビリティのポリシー（docs/policies/resource-scalability.md）に従い、処理量・増加率・停止条件・再取得回避を自己申告し、安全弁の存在だけを根拠に効率的な設計を省略しないこと。
 EOF
   if [[ -n $failure_context ]]; then
     cat <<EOF
@@ -48,6 +49,10 @@ exec_prompt() {
   if [[ -n ${PREFLIGHT_VERDICT:-} && ${PREFLIGHT:-off} != off ]]; then
     printf '変更影響とリスクのpreflight判定: %s（detail=%s）%s。実装中に、宣言した変更scope・外部操作・リスク水準を超える破壊的・不可逆・重大costまたはsecurity上のリスクを新たに発見した場合は、実装や変更を進めず、最終応答を AGENTIC_LOOP_RESULT=needs-input で終えてください。\n' \
       "$PREFLIGHT_VERDICT" "${PREFLIGHT_DETAIL:-}" "${PREFLIGHT_APPROVAL_TOKEN:+ (承認済みenvelope token=$PREFLIGHT_APPROVAL_TOKEN)}"
+  fi
+  if [[ -n ${WORKLOAD_VERDICT:-} && ${WORKLOAD:-off} != off ]]; then
+    printf '有限資源とスケーラビリティのworkload判定: %s（detail=%s）。実装中に、宣言した処理量モデル・停止条件を超える外部呼び出しが必要になった場合は、宣言なしに全件取得・無制限pagination・無制限retryを追加せず、実装や変更を進めず、最終応答を AGENTIC_LOOP_RESULT=needs-input で終えてください。\n' \
+      "$WORKLOAD_VERDICT" "${WORKLOAD_DETAIL:-}"
   fi
   cat <<'EOF'
 PR本文に、各受け入れ条件と実装変更・検証結果を対応付ける `agentic-loop:traceability` code blockを含めてください（`.github/PULL_REQUEST_TEMPLATE.md` の雛形と `docs/operations/traceability.md` を参照）。schema=1、issue番号、criteria配列（各要素はid=`ac-`+条件文正規化のsha256先頭8桁、source、status、verification、必要に応じてchanges/checks/reason/superseded_by）を持つJSONです。行番号やcommit SHAではなくidとpathで対象を示し、秘密やlog全文は含めないでください。この記録はGitHubの観測結果（checks結論、変更path）と照合されるため、実際に行った変更・実行した検証とだけ一致させてください。
@@ -692,6 +697,12 @@ worker() {
     worker_refine_scope_from_plan "$issue" "$plan_file"
     progress_touch "$issue" preflight
     if ! preflight_gate "$issue" "$plan_file"; then
+      kill "$heartbeat_pid" 2>/dev/null || true; wait "$heartbeat_pid" 2>/dev/null || true
+      lease_release "$issue" "$worker"
+      clear_worker_local "$issue"
+      return 0
+    fi
+    if ! workload_gate "$issue" "$plan_file"; then
       kill "$heartbeat_pid" 2>/dev/null || true; wait "$heartbeat_pid" 2>/dev/null || true
       lease_release "$issue" "$worker"
       clear_worker_local "$issue"

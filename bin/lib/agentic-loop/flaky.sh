@@ -241,12 +241,14 @@ cmd_flaky() {
 flaky_report_one() {
   local unit=$1 fingerprint=$2 verdict=$3 marker existing_open existing_closed title body new_issue
   marker="agentic-loop:flaky unit=$unit fingerprint=$fingerprint"
+  # workload-unbounded: walks every open Issue every call, growth proportional to cumulative Issue count; bound=open Issue count; track=#198
   existing_open=$(repo_api issues --method GET -f state=open -f per_page=100 --paginate --jq '.[] | select((.body // "") | contains("'"$marker"'")) | .number' 2>/dev/null | head -n1 || true)
   if [[ $existing_open =~ ^[1-9][0-9]*$ ]]; then
     comment_issue "$existing_open" "<!-- agentic-loop:flaky-recurred unit=$unit fingerprint=$fingerprint -->\\nflaky testの再発を検出しました（unit: \`$unit\`、fingerprint: \`$fingerprint\`、verdict: \`$verdict\`）。" || true
     say "既存のflaky修復Issue #$existing_open を再利用しました（unit=$unit）。"
     return 0
   fi
+  # workload-unbounded: walks every closed Issue every call, monotonically growing over time; bound=closed Issue count; track=#198
   existing_closed=$(repo_api issues --method GET -f state=closed -f per_page=100 --paginate --jq '.[] | select((.body // "") | contains("'"$marker"'")) | .number' 2>/dev/null | head -n1 || true)
   title="flaky testを修復する: $unit ($fingerprint)"
   body="## 目的\\n\\nE2E検証単位 \`$unit\` がverdict=\`$verdict\`（fingerprint: \`$fingerprint\`）としてflaky判定されました。原因を特定し、隔離に依存せず決定的に成功するよう修復します。\\n\\n## 完了条件\\n\\n同一fingerprintの隔離entryが無くても該当unitが安定して成功する。\\n\\n"

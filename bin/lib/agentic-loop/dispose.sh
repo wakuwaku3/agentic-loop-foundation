@@ -9,9 +9,10 @@
 # write-or-better permission may close, replace, or consolidate a requirement.
 authorized_operator() {
   local login permission
+  # workload-boundary: gh api user reads the caller's own identity, not a repository resource; repo_api only targets repos/OWNER/REPO
   login=$(gh api user --jq .login 2>/dev/null | tr -d '[:space:]') || return 1
   [[ -n $login ]] || return 1
-  permission=$(gh api "repos/$(repo_name)/collaborators/$login/permission" --jq .permission 2>/dev/null | tr -d '[:space:]') || return 1
+  permission=$(repo_api "collaborators/$login/permission" --jq .permission 2>/dev/null | tr -d '[:space:]') || return 1
   case $permission in write|maintain|admin) printf '%s\n' "$login" ;; *) return 1 ;; esac
 }
 
@@ -54,12 +55,14 @@ dispose_transfer_dependencies() {
   [[ -n $target ]] || return 0
   # GitHub's issue-dependencies REST API returns the Issues blocking source.
   # An unavailable endpoint/scope is not treated as an empty list.
+  # workload-unbounded: manually-curated per-Issue dependency lists stay small by construction; bound=blocked_by count
   dependencies=$(repo_api "issues/$source/dependencies/blocked_by" --method GET -f per_page=100 --paginate --jq '.[].number' 2>/dev/null) || return 1
   while IFS= read -r dependency; do
     [[ -z $dependency ]] && continue
     [[ $dependency =~ ^[1-9][0-9]*$ && $dependency != "$target" ]] || return 1
     repo_api "issues/$target/dependencies/blocked_by" --method POST -f issue_id="$dependency" >/dev/null 2>&1 || return 1
   done <<< "$dependencies"
+  # workload-unbounded: same as above, bound=blocked_by count
   target_dependencies=$(repo_api "issues/$target/dependencies/blocked_by" --method GET -f per_page=100 --paginate --jq '.[].number' 2>/dev/null) || return 1
   while IFS= read -r dependency; do
     [[ -z $dependency ]] && continue

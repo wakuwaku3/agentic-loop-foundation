@@ -6,6 +6,7 @@
 
 setup_labels() {
   local name color description current
+  # workload-unbounded: repository label definitions are a small, fixed set by design (not a growth vector); bound=repository label count
   current=$(repo_api labels --method GET -f per_page=100 --paginate \
     --jq '.[] | [.name, .color, (.description // "")] | @tsv' 2>/dev/null || true)
   for name in "${LABELS[@]}"; do
@@ -65,6 +66,7 @@ setup_label() {
 # label; the repository-level delete stops new assignments).
 migrate_priority_labels() {
   local rows issue body_b64 body legacy value existing new_body labels_json name
+  # workload-unbounded: one-time migration walks every open Issue once, runs only during setup/reinstall; bound=open Issue count
   rows=$(repo_api issues --method GET -f state=open -f per_page=100 --paginate --jq '
     .[] | select(.pull_request == null) | select(any(.labels[]; .name | startswith("priority:"))) |
     [.number, ((.body // "") | @base64), ([.labels[].name | select(startswith("priority:"))] | join(","))] | @tsv' 2>/dev/null) || return 0
@@ -104,6 +106,7 @@ setup_project() {
   [[ -n $number ]] || fail 'could not create or identify the repository Project'
   printf 'PROJECT_OWNER=%q\nPROJECT_NUMBER=%q\n' "$owner" "$number" > "$STATE_ROOT/project.env"
   project_id=$(gh project view "$number" --owner "$owner" --format json --jq .id 2>/dev/null || true)
+  # workload-boundary: best-effort Projects (GraphQL) linkage check, not a REST core operation
   linked=$(gh api graphql -f query='query($project:ID!){node(id:$project){... on ProjectV2{repositories(first:100){nodes{nameWithOwner}}}}}' -F project="$project_id" --jq '.data.node.repositories.nodes[].nameWithOwner' 2>/dev/null || true)
   grep -Fxq "$repository" <<< "$linked" || gh project link "$number" --owner "$owner" --repo "$repository" >/dev/null 2>&1 || true
   fields=$(gh project field-list "$number" --owner "$owner" --format json --jq '.fields[].name' 2>/dev/null || true)
@@ -138,6 +141,7 @@ setup_project_migrate_status_options() {
   project_id=$(gh project view "$number" --owner "$owner" --format json --jq .id 2>/dev/null) || return 0
   field_id=$(gh project field-list "$number" --owner "$owner" --format json --jq '.fields[] | select(.name == "Agent status") | .id' 2>/dev/null | head -n 1) || return 0
   [[ -n $project_id && -n $field_id ]] || return 0
+  # workload-boundary: best-effort Projects (GraphQL) field introspection, not a REST core operation
   options_tsv=$(gh api graphql -f query='query($field: ID!) {
     node(id: $field) { ... on ProjectV2SingleSelectField { options { name color description } } }
   }' -F field="$field_id" --jq '.data.node.options[] | [.name, .color, .description] | @tsv' 2>/dev/null) || return 0
@@ -164,6 +168,7 @@ setup_project_migrate_status_options() {
     esac
   done
   mutation_options=${mutation_options%, }
+  # workload-boundary: best-effort Projects (GraphQL) field mutation, not a REST core operation
   gh api graphql -f query="mutation(\$field: ID!) {
     updateProjectV2SingleSelectField(input: {fieldId: \$field, options: [$mutation_options]}) { projectV2SingleSelectField { id } }
   }" -F field="$field_id" >/dev/null 2>&1 || true
@@ -181,6 +186,7 @@ setup_project_view() {
         projectV2View { id }
       }
     }'
+    # workload-boundary: best-effort Projects (GraphQL) view creation, not a REST core operation
     view_id=$(gh api graphql -f query="$create_mutation" -F projectId="$project_id" -f name="$name" \
       --jq '.data.createProjectV2View.projectV2View.id' 2>/dev/null || true)
     current_filter=''
@@ -193,6 +199,7 @@ setup_project_view() {
   local update_mutation='mutation($viewId: ID!, $filter: String!) {
     updateProjectV2View(input: {viewId: $viewId, filter: $filter}) { projectV2View { id } }
   }'
+  # workload-boundary: best-effort Projects (GraphQL) view filter update, not a REST core operation
   gh api graphql -f query="$update_mutation" -F viewId="$view_id" -f filter="$filter" >/dev/null 2>&1 ||
     say "Project viewのfilterを修復できませんでした（best-effort）: $name" >&2
 }
@@ -202,6 +209,7 @@ setup_project_views() {
   local number=$1 owner=$2 project_id views_tsv
   project_id=$(gh project view "$number" --owner "$owner" --format json --jq .id)
   [[ -n $project_id ]] || fail 'could not identify the repository Project ID'
+  # workload-boundary: best-effort Projects (GraphQL) view listing, not a REST core operation
   views_tsv=$(gh api graphql -f query='query($projectId: ID!) {
     node(id: $projectId) {
       ... on ProjectV2 { views(first: 100) { nodes { id name filter } } }

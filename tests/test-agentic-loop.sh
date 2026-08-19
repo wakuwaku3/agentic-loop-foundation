@@ -152,6 +152,24 @@ preflight_token_for() { ( source "$PROJECT_ROOT/bin/lib/agentic-loop/common.sh";
 # record-absent signal-derived envelope (see preflight.sh's preflight_signal_token).
 preflight_signal_token_for() { ( source "$PROJECT_ROOT/bin/lib/agentic-loop/common.sh"; source "$PROJECT_ROOT/bin/lib/agentic-loop/preflight.sh"; preflight_signal_token "$1" "$2" ); }
 
+# workload_unit_json OPERATION PER_UNIT GROWTH STOP_CONDITION REUSE -> one
+# "units[]" element of an agentic-loop:workload record (see
+# docs/decisions/0025-resource-scalability-budget.md).
+workload_unit_json() { printf '{"operation":"%s","per_unit":"%s","growth":"%s","stop_condition":"%s","reuse":"%s"}' "$1" "$2" "$3" "$4" "$5"; }
+
+# workload_record_json ISSUE EXTERNAL_IO [UNITS_JSON] [VERIFICATION_JSON] ->
+# the full agentic-loop:workload record object (schema=1).
+workload_record_json() {
+  local issue=$1 external_io=$2 units=${3:-[]} verification=${4:-[]}
+  printf '{"schema":1,"issue":%s,"external_io":"%s","units":%s,"verification":%s,"exceptions":[]}' "$issue" "$external_io" "$units" "$verification"
+}
+
+# workload_plan_body RECORD_JSON -> a plan-stage output (FAKE_CODEX_RESULT)
+# embedding RECORD_JSON in the fenced code block workload_manifest_from_plan
+# parses, mirroring preflight_plan_body's conventions (see there).
+# shellcheck disable=SC2016 # Backticks are literal Markdown fencing in the fabricated plan body.
+workload_plan_body() { printf '## 計画\n\n```agentic-loop:workload\n%s\n```\n\n<!-- agentic-loop:scope paths=README.md -->\nAGENTIC_LOOP_RESULT=completed\n' "$1"; }
+
 mkdir -p "$FAKE_BIN" "$FAKE_GH_ROOT"
 
 # Disable git auto-maintenance globally for the whole harness: commit, push,
@@ -2856,6 +2874,40 @@ assert_contains "$FAKE_GH_ROOT/$state_key.comments" '.agents directoryを安全�
 git -C "$target" worktree remove --force "$target-worktrees/issue-12"
 git -C "$target" branch -D agent/issue-12 >/dev/null
 
+# --- Workload scaling invariant (Issue #130, ADR 0025 T1/T2) ---------------
+# One poll fetches the open-Issue snapshot at most twice (once at the top of
+# the loop, once more before claiming so that queued transitions made by
+# maintenance earlier in the same poll stay same-poll observable; see the
+# refresh_supervisor_snapshot call sites in supervisor.sh), and that call
+# count does not grow with the number of queued Issues
+# (refresh_supervisor_snapshot aggregates every state-maintenance path into
+# one list per fetch; see docs/operations/workload-budget.md). unknown_scope
+# =open and a large enough MAX_WORKERS let every fixture Issue be claimed in
+# a single run-once poll, so comparing the snapshot-fetch call count isolates
+# the aggregation invariant from the (expected, unrelated) growth of
+# per-claimed-Issue writes.
+workload_scale_list_calls() {
+  local n=$1 i
+  : > "$state"
+  for ((i = 1; i <= n; i++)); do
+    printf '%d queued open none 2026-01-01T00:00:00Z\n' $((7300 + i)) >> "$state"
+  done
+  write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=8 LEASE_SECONDS=30 STOP_TIMEOUT=10 STALE_DAYS=30
+  printf 'unknown_scope = "open"\n' >> "$target/.agentic-loop.toml"
+  : > "$FAKE_GH_ROOT/$state_key.comments"
+  local calls_before delta
+  calls_before=$(wc -l < "$FAKE_GH_ROOT/calls")
+  AGENTIC_LOOP_RUN_ONCE=1 FAKE_CODEX_SLEEP=1 "$target/bin/agentic-loop" _supervise
+  delta=$(tail -n +"$((calls_before + 1))" "$FAKE_GH_ROOT/calls")
+  [[ $(awk '$2 == "completed" {count++} END {print count+0}' "$state") -eq $n ]] || fail "workload scaling fixture (n=$n) did not claim and complete every queued Issue"
+  grep -Fc -- '-f state=open -f per_page=100 --paginate' <<< "$delta"
+}
+list_calls_n2=$(workload_scale_list_calls 2)
+list_calls_n8=$(workload_scale_list_calls 8)
+[[ $list_calls_n2 -le 2 ]] || fail "1 poll issued $list_calls_n2 open-Issue list calls for N=2 (expected at most 2)"
+[[ $list_calls_n8 -le 2 ]] || fail "1 poll issued $list_calls_n8 open-Issue list calls for N=8 (expected at most 2)"
+[[ $list_calls_n2 -eq $list_calls_n8 ]] || fail "open-Issue list call count grew with input size (N=2: $list_calls_n2, N=8: $list_calls_n8)"
+
 fi
 
 if [[ $TEST_GROUP == all || $TEST_GROUP == lifecycle ]]; then
@@ -3886,6 +3938,103 @@ cp "$target/.agentic-loop.toml" "$target/.agentic-loop.toml.valid"
 printf '[queue]\npreflight = "loose"\n' > "$target/.agentic-loop.toml"
 if "$target/bin/agentic-loop" doctor > "$TEST_ROOT/preflight-doctor-output.txt"; then fail 'doctor accepted an invalid preflight value'; fi
 grep -Fq '[失敗] 設定値: PREFLIGHT' "$TEST_ROOT/preflight-doctor-output.txt" || fail 'doctor did not classify the invalid preflight value'
+mv "$target/.agentic-loop.toml.valid" "$target/.agentic-loop.toml"
+
+# --- Resource scalability workload budget gate (Issue #130, ADR 0025) ------
+# These scenarios exercise workload_gate through the same "fresh running
+# Issue" completion path the preflight scenarios above use. PREFLIGHT=off
+# throughout so only the workload verdict/mode drives the outcome.
+
+# 1) external_io="none": exec runs, completes, and posts no workload comment
+# at all (a "not-applicable" verdict is not itself audit-worthy).
+write_queue_config "$target/.agentic-loop.toml" WORKLOAD=warn PREFLIGHT=off TRACEABILITY=off
+wl_record=$(workload_record_json 7200 none)
+printf '7200 running open\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+: > "$FAKE_GH_ROOT/codex-calls"
+FAKE_CODEX_RESULT="$(workload_plan_body "$wl_record")" "$target/bin/agentic-loop" _worker 7200 workload-none-worker
+grep -Eq '^7200 completed closed' "$state" || fail 'external_io=none blocked completion'
+assert_contains "$FAKE_GH_ROOT/codex-calls" '--sandbox workspace-write' 'external_io=none did not let exec run'
+! grep -Fq 'agentic-loop:workload' "$FAKE_GH_ROOT/$state_key.comments" || fail 'external_io=none (not-applicable) unexpectedly posted an audit comment'
+
+# 2) external_io="added" with a complete unit: verdict=declared, exec runs,
+# and an audit comment records the declaration.
+write_queue_config "$target/.agentic-loop.toml" WORKLOAD=warn PREFLIGHT=off TRACEABILITY=off
+wl_unit=$(workload_unit_json 'supervisor 1 poll' 'REST list 1回' 'O(1) in N(queued件数)' 'per_page=100 + --paginate' 'snapshotを共有')
+wl_record=$(workload_record_json 7201 added "[$wl_unit]" '["queue group T1"]')
+printf '7201 running open\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+: > "$FAKE_GH_ROOT/codex-calls"
+FAKE_CODEX_RESULT="$(workload_plan_body "$wl_record")" "$target/bin/agentic-loop" _worker 7201 workload-declared-worker
+grep -Eq '^7201 completed closed' "$state" || fail 'a complete workload record blocked completion'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:workload schema=1 issue=7201 verdict=declared' 'a declared workload verdict was not recorded as an audit comment'
+assert_contains "$FAKE_GH_ROOT/codex-calls" '--sandbox workspace-write' 'a declared workload verdict did not let exec run'
+
+# 3) missing record: warn posts an advisory comment and continues; require
+# blocks completion instead (mirrors the preflight missing-record scenarios).
+write_queue_config "$target/.agentic-loop.toml" WORKLOAD=warn PREFLIGHT=off TRACEABILITY=off
+printf '7202 running open\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+"$target/bin/agentic-loop" _worker 7202 workload-missing-warn-worker
+grep -Eq '^7202 completed closed' "$state" || fail 'warn mode blocked completion for a missing workload record'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:workload schema=1 issue=7202 verdict=missing' 'warn mode did not post an advisory verdict for a missing workload record'
+
+write_queue_config "$target/.agentic-loop.toml" WORKLOAD=require PREFLIGHT=off TRACEABILITY=off
+printf '7203 running open\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+: > "$FAKE_GH_ROOT/codex-calls"
+"$target/bin/agentic-loop" _worker 7203 workload-missing-require-worker
+grep -Eq '^7203 needs-input open' "$state" || fail 'require mode completed an Issue despite a missing workload record'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'reason=workload-missing' 'require mode did not record reason=workload-missing'
+! grep -Fq -- '--sandbox workspace-write' "$FAKE_GH_ROOT/codex-calls" || fail 'require mode let exec run despite a missing workload record'
+
+# 4) invalid record (external_io="added" but no units -> schema-invalid):
+# warn posts an advisory comment and continues; require blocks completion.
+write_queue_config "$target/.agentic-loop.toml" WORKLOAD=warn PREFLIGHT=off TRACEABILITY=off
+wl_record=$(workload_record_json 7204 added '[]' '[]')
+printf '7204 running open\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+FAKE_CODEX_RESULT="$(workload_plan_body "$wl_record")" "$target/bin/agentic-loop" _worker 7204 workload-invalid-warn-worker
+grep -Eq '^7204 completed closed' "$state" || fail 'warn mode blocked completion for an invalid (unit-less) workload record'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'verdict=invalid detail=schema-invalid' 'warn mode did not post an advisory verdict for an invalid workload record'
+
+wl_record2=$(workload_record_json 7205 added '[]' '[]')
+write_queue_config "$target/.agentic-loop.toml" WORKLOAD=require PREFLIGHT=off TRACEABILITY=off
+printf '7205 running open\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+: > "$FAKE_GH_ROOT/codex-calls"
+FAKE_CODEX_RESULT="$(workload_plan_body "$wl_record2")" "$target/bin/agentic-loop" _worker 7205 workload-invalid-require-worker
+grep -Eq '^7205 needs-input open' "$state" || fail 'require mode did not block completion for an invalid (unit-less) workload record'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'reason=workload-invalid' 'require mode did not record reason=workload-invalid'
+! grep -Fq -- '--sandbox workspace-write' "$FAKE_GH_ROOT/codex-calls" || fail 'require mode let exec run despite an invalid workload record'
+
+# 5) A credential-like value anywhere in the record is rejected before it is
+# ever trusted, and the raw secret text never reaches a posted comment.
+wl_secret="ghp_$(printf '%s%s' 'abcdefghijklmnopqrst' 'uvwxyz0123456789')"
+wl_unit=$(workload_unit_json "leaks $wl_secret" x x x x)
+wl_record=$(workload_record_json 7206 added "[$wl_unit]" '["x"]')
+write_queue_config "$target/.agentic-loop.toml" WORKLOAD=require PREFLIGHT=off TRACEABILITY=off
+printf '7206 running open\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+FAKE_CODEX_RESULT="$(workload_plan_body "$wl_record")" "$target/bin/agentic-loop" _worker 7206 workload-secret-worker
+grep -Eq '^7206 needs-input open' "$state" || fail 'a credential-like workload record was not blocked'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'reason=workload-invalid' 'a credential-like workload record was not classified via reason=workload-invalid'
+! grep -Fq "$wl_secret" "$FAKE_GH_ROOT/$state_key.comments" || fail 'a credential-like workload record leaked its secret text into a posted comment'
+
+# 6) off: no evaluation and no comment at all, even for a record that would
+# otherwise gate -- and completion still proceeds.
+write_queue_config "$target/.agentic-loop.toml" WORKLOAD=off PREFLIGHT=off TRACEABILITY=off
+printf '7207 running open\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+"$target/bin/agentic-loop" _worker 7207 workload-off-worker
+grep -Eq '^7207 completed closed' "$state" || fail 'workload off mode blocked completion despite an otherwise-gating (missing) record'
+! grep -Fq 'agentic-loop:workload' "$FAKE_GH_ROOT/$state_key.comments" || fail 'workload off mode evaluated and commented despite being disabled'
+
+# doctor rejects an invalid workload value.
+cp "$target/.agentic-loop.toml" "$target/.agentic-loop.toml.valid"
+printf '[queue]\nworkload = "loose"\n' > "$target/.agentic-loop.toml"
+if "$target/bin/agentic-loop" doctor > "$TEST_ROOT/workload-doctor-output.txt"; then fail 'doctor accepted an invalid workload value'; fi
+grep -Fq '[失敗] 設定値: WORKLOAD' "$TEST_ROOT/workload-doctor-output.txt" || fail 'doctor did not classify the invalid workload value'
 mv "$target/.agentic-loop.toml.valid" "$target/.agentic-loop.toml"
 
 # --- status observability (Issue #42) ---
@@ -5390,6 +5539,7 @@ flaky_report_out=$(
       */labels) : ;;
     esac
   }
+  # shellcheck disable=SC2030 # deliberately scoped to this subshell only
   REPO_ROOT=''
   source "$PROJECT_ROOT/bin/lib/agentic-loop/flaky.sh"
   cmd_flaky_report --record "$flaky_report_record"
@@ -5411,6 +5561,87 @@ grep -Fq 'agentic-loop:flaky unit=e2e:upgrade fingerprint=dddddddddddd' "$flaky_
 # exactly one /labels endpoint call, for the newly created Issue only, is
 # what this fixture can observe.
 grep -c '/labels' "$call_log" | grep -Fxq 1 || fail 'flaky report did not attach labels to exactly the newly created Issue'
+
+# --- Retry attempt ceiling (Issue #130, ADR 0025 T4) -----------------------
+# repo_api's REST retry loop stops at API_RETRY_ATTEMPTS regardless of how
+# many times the underlying call keeps failing: retry never amplifies a
+# single logical operation into unbounded GitHub calls.
+retry_ceiling_dir="$TEST_ROOT/retry-ceiling"
+retry_ceiling_calls_log="$TEST_ROOT/retry-ceiling-calls.log"
+mkdir -p "$retry_ceiling_dir/bin" "$retry_ceiling_dir/state"
+: > "$retry_ceiling_calls_log"
+printf 'acme/example\n' > "$retry_ceiling_dir/state/repository"
+cat > "$retry_ceiling_dir/bin/gh" <<GHFAKE
+#!/usr/bin/env bash
+printf '1\n' >> "$retry_ceiling_calls_log"
+printf 'HTTP 503: Service Unavailable\n' >&2
+exit 1
+GHFAKE
+chmod +x "$retry_ceiling_dir/bin/gh"
+(
+  export PATH="$retry_ceiling_dir/bin:$TEST_HOST_PATH"
+  export STATE_ROOT="$retry_ceiling_dir/state"
+  export PROGRAM_NAME=retry-ceiling-test
+  export API_RETRY_ATTEMPTS=3
+  export API_RETRY_BASE_SECONDS=0
+  # shellcheck source=bin/lib/agentic-loop/common.sh
+  source "$PROJECT_ROOT/bin/lib/agentic-loop/common.sh"
+  # shellcheck source=bin/lib/agentic-loop/api.sh
+  source "$PROJECT_ROOT/bin/lib/agentic-loop/api.sh"
+  repo_api issues --method GET >/dev/null 2>&1
+) || true
+retry_ceiling_calls=$(wc -l < "$retry_ceiling_calls_log")
+[[ $retry_ceiling_calls -eq 3 ]] || fail "repo_api made $retry_ceiling_calls underlying calls for API_RETRY_ATTEMPTS=3 against a persistently failing endpoint (expected exactly 3, no unbounded retry amplification)"
+
+# --- bin/agentic-loop workload static scan (Issue #130, ADR 0025 T7) -------
+# The scanner itself is local-only (zero GitHub calls) and detects each of
+# W1 (bypassed common boundary), W2 (unbounded pagination), and W3
+# (loop-nested listing) independently, clearing once annotated.
+workload_scan_fixture="$TEST_ROOT/workload-scan-fixture"
+rm -rf "$workload_scan_fixture"
+mkdir -p "$workload_scan_fixture/bin/lib/agentic-loop"
+cp "$target/bin/agentic-loop" "$workload_scan_fixture/bin/agentic-loop"
+cp "$target"/bin/lib/agentic-loop/*.sh "$workload_scan_fixture/bin/lib/agentic-loop/"
+cat > "$workload_scan_fixture/bin/lib/agentic-loop/zzz-fixture.sh" <<'FIXTURE'
+# shellcheck shell=bash
+fixture_w1() {
+  local x
+  x=$(gh api "repos/example/example" --jq .id 2>/dev/null)
+}
+fixture_w2() {
+  repo_api issues --method GET -f state=open -f per_page=100 --paginate --jq '.[].number'
+}
+fixture_w3() {
+  while IFS= read -r x; do
+    repo_api issues --method GET -f state=open -f per_page=100 --paginate --jq '.[].number'
+  done < <(printf '1\n2\n')
+}
+FIXTURE
+workload_calls_before=$(wc -l < "$FAKE_GH_ROOT/calls")
+if "$workload_scan_fixture/bin/agentic-loop" workload > "$TEST_ROOT/workload-scan-unannotated.txt" 2>&1; then
+  fail 'workload static scan did not detect unannotated violations'
+fi
+[[ $(wc -l < "$FAKE_GH_ROOT/calls") -eq $workload_calls_before ]] || fail 'workload static scan made a GitHub API call'
+grep -Fq 'bin/lib/agentic-loop/zzz-fixture.sh' "$TEST_ROOT/workload-scan-unannotated.txt" || fail 'workload static scan did not report the fixture violations'
+workload_json=$("$workload_scan_fixture/bin/agentic-loop" workload --format json || true)
+yq -p json '.' <<< "$workload_json" >/dev/null 2>&1 || fail 'workload --format json did not produce valid JSON'
+[[ $(yq -p json -r '[.violations[] | select(.type == "boundary")] | length' <<< "$workload_json") -ge 1 ]] || fail 'workload static scan (json) did not report a W1 boundary violation'
+[[ $(yq -p json -r '[.violations[] | select(.type == "unbounded")] | length' <<< "$workload_json") -ge 1 ]] || fail 'workload static scan (json) did not report a W2 unbounded-pagination violation'
+[[ $(yq -p json -r '[.violations[] | select(.type == "aggregation")] | length' <<< "$workload_json") -ge 1 ]] || fail 'workload static scan (json) did not report a W3 loop-nested listing violation'
+cat > "$workload_scan_fixture/bin/lib/agentic-loop/zzz-fixture.sh" <<'FIXTURE'
+# shellcheck shell=bash
+fixture_w1() {
+  local x
+  # workload-boundary: fixture annotation
+  x=$(gh api "repos/example/example" --jq .id 2>/dev/null)
+}
+fixture_w2() {
+  # workload-unbounded: fixture annotation bound=fixture
+  repo_api issues --method GET -f state=open -f per_page=100 --paginate --jq '.[].number'
+}
+FIXTURE
+"$workload_scan_fixture/bin/agentic-loop" workload > "$TEST_ROOT/workload-scan-annotated.txt" 2>&1 || fail 'workload static scan still failed after annotating every violation'
+rm -rf "$workload_scan_fixture"
 
 fi
 
@@ -5617,7 +5848,7 @@ grep -Fq '[foundation]' "$migration_target/.agentic-loop.toml" || fail 'migratio
 resolved_revision=$(git -C "$PROJECT_ROOT" rev-parse HEAD)
 assert_contains "$migration_target/.agentic-loop.toml" "revision = \"$resolved_revision\"" 'migration apply did not pin the applied revision'
 [[ $(yq -p json -o yaml '.source.revision' "$migration_target/.agentic-loop/manifest.json") == "$resolved_revision" ]] || fail 'upgrade manifest did not record the applied revision'
-[[ $(yq -p json -o yaml '.migration_level' "$migration_target/.agentic-loop/manifest.json") -eq 5 ]] || fail 'manifest migration_level was not bumped after applying the migration'
+[[ $(yq -p json -o yaml '.migration_level' "$migration_target/.agentic-loop/manifest.json") -eq 6 ]] || fail 'manifest migration_level was not bumped after applying the migration'
 migration_rerun=$("$migration_target/bin/agentic-loop" upgrade --source "$PROJECT_ROOT")
 [[ $migration_rerun == *'変更はありません'* ]] || fail 'rerunning upgrade after a completed migration was not a no-op'
 
@@ -5643,6 +5874,36 @@ cap_migration_json=$("$cap_migration_target/bin/agentic-loop" capabilities --for
 [[ $(yq -p json -r '.data.validation.secret_guard' <<< "$cap_migration_json") == '.agentic-loop/guard-secrets.sh' ]] || fail 'migration-generated capability manifest did not detect the secret guard entry point'
 cap_migration_rerun=$("$cap_migration_target/bin/agentic-loop" upgrade --source "$PROJECT_ROOT")
 [[ $cap_migration_rerun == *'変更はありません'* ]] || fail 'rerunning upgrade after the capability-manifest migration was not a no-op'
+
+# Migration 0006 (Issue #130, ADR 0025): an install predating the workload
+# budget gate (simulated by removing the `workload = "warn"` line from an old
+# Foundation source's own .agentic-loop.toml) has no queue.workload key;
+# upgrade detects it as pending, applies it idempotently, and a rerun (both
+# of the migration script directly and of upgrade as a whole) is a no-op.
+workload_old_source="$TEST_ROOT/foundation-pre-workload"
+cp -a "$PROJECT_ROOT" "$workload_old_source"
+sed -i '/^workload = "warn"$/d' "$workload_old_source/.agentic-loop.toml"
+if grep -Fq 'workload = "warn"' "$workload_old_source/.agentic-loop.toml"; then fail 'pre-upgrade fixture unexpectedly already has queue.workload'; fi
+workload_migration_target=$(new_repository workload-migration-target)
+AGENTIC_LOOP_SOURCE="$workload_old_source" AGENTIC_LOOP_TARGET="$workload_migration_target" AGENTIC_LOOP_SKIP_START=1 "$PROJECT_ROOT/install.sh" >/dev/null
+if grep -Fq 'workload = "warn"' "$workload_migration_target/.agentic-loop.toml"; then fail 'pre-upgrade install unexpectedly already has queue.workload'; fi
+git -C "$workload_migration_target" add -A && git -C "$workload_migration_target" commit --quiet -m 'pre-workload install' && git -C "$workload_migration_target" push --quiet
+workload_migration_out=$("$workload_migration_target/bin/agentic-loop" upgrade --source "$PROJECT_ROOT")
+[[ $workload_migration_out == *'[migration] 0006-workload-config'* ]] || fail 'dry-run did not report the pending workload-config migration'
+"$workload_migration_target/bin/agentic-loop" upgrade --source "$PROJECT_ROOT" --apply --skip-verify >/dev/null || fail 'apply of the pending workload-config migration failed'
+grep -Eq '^workload = "warn"$' "$workload_migration_target/.agentic-loop.toml" || fail 'migration did not add workload = "warn"'
+workload_migration_rerun=$("$workload_migration_target/bin/agentic-loop" upgrade --source "$PROJECT_ROOT")
+[[ $workload_migration_rerun == *'変更はありません'* ]] || fail 'rerunning upgrade after the workload-config migration was not a no-op'
+# Direct check/apply/apply idempotency of the migration script itself.
+workload_migration_direct="$TEST_ROOT/workload-migration-direct"
+mkdir -p "$workload_migration_direct"
+printf '[queue]\npoll_seconds = 30\n' > "$workload_migration_direct/.agentic-loop.toml"
+if "$PROJECT_ROOT/scripts/upgrade/migrations/0006-workload-config.sh" "$workload_migration_direct" check; then fail 'migration 0006 check reported already-applied for a config missing workload'; fi
+"$PROJECT_ROOT/scripts/upgrade/migrations/0006-workload-config.sh" "$workload_migration_direct" apply || fail 'migration 0006 direct apply failed'
+"$PROJECT_ROOT/scripts/upgrade/migrations/0006-workload-config.sh" "$workload_migration_direct" check || fail 'migration 0006 check did not report already-applied after apply'
+workload_direct_config_after_first="$(cat "$workload_migration_direct/.agentic-loop.toml")"
+"$PROJECT_ROOT/scripts/upgrade/migrations/0006-workload-config.sh" "$workload_migration_direct" apply || fail 'migration 0006 direct re-apply (idempotent no-op) failed'
+[[ "$(cat "$workload_migration_direct/.agentic-loop.toml")" == "$workload_direct_config_after_first" ]] || fail 'migration 0006 direct re-apply was not idempotent (duplicated the workload line)'
 
 # Approval gate: a breaking/irreversible migration blocks --apply until --approve.
 approval_source="$TEST_ROOT/foundation-breaking"
