@@ -3890,6 +3890,11 @@ if grep -Eq '^54 failed' "$state"; then fail 'a hang correlated with pool exhaus
 # agentic-loop:recovered path may be the one that actually observes the
 # correlation first; both record pool-exhaustion=1 and neither burns attempts,
 # which is the guarantee under test here -- not which internal path wins.
+echo "=== DEBUG STATE ==="; cat "$state"
+echo "=== DEBUG COMMENTS ==="; cat "$FAKE_GH_ROOT/$state_key.comments"
+echo "=== DEBUG POOLS ==="; find "$state_root/pools" -type f -print -exec cat {} \; 2>&1
+echo "=== DEBUG ATTEMPTS ==="; find "$state_root/attempts" -type f 2>&1
+echo "=== DEBUG CONFIG ==="; cat "$target/.agentic-loop.toml"
 assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'pool-exhaustion=1' 'pool-exhaustion-correlated timeout was not recorded as environment-caused'
 [[ ! -e $state_root/attempts/issue-54 ]] || fail 'attempts counter was not cleared for a pool-exhaustion-correlated hang'
 rm -rf "$state_root/pools"
