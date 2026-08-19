@@ -4242,7 +4242,15 @@ done
 # still-running worker).
 kill -KILL "$orphan2_sup_pid" 2>/dev/null || true
 wait "$orphan2_sup_pid" 2>/dev/null || true
-sed -i 's/^72 running/72 queued/' "$state"
+# The mismatch is simulated as agent:failed, not agent:queued: the still-live
+# worker's own heartbeat loop (see worker_reassert_running, Issue #208's
+# self-heal for a foreign supervisor's queued-revert) would otherwise silently
+# flip an exactly-agent:queued Issue back to agent:running on its own ~20s
+# tick, racing this deterministic reap sequence. worker_reassert_running is
+# restricted to that exact queued signature, so agent:failed is untouched by
+# it while still being (correctly) absent from the running-Issue list reap_
+# orphan_workers checks against.
+sed -i 's/^72 running/72 failed/' "$state"
 "$target/bin/agentic-loop" _reap-orphans
 [[ -r $state_root/workers/72.orphan-since ]] || fail 'worker-orphan grace-reset test: the Label mismatch was not observed on the first reap pass'
 kill -0 "$orphan2_worker_pid" 2>/dev/null || fail 'worker-orphan grace-reset test: the worker was killed on the very first observation instead of waiting out the grace period'
@@ -4250,7 +4258,7 @@ kill -0 "$orphan2_worker_pid" 2>/dev/null || fail 'worker-orphan grace-reset tes
 # has elapsed; the very next reap pass must clear the marker without killing
 # anything (reap_orphan_workers matches the running-Issue list before ever
 # consulting elapsed/grace).
-sed -i 's/^72 queued/72 running/' "$state"
+sed -i 's/^72 failed/72 running/' "$state"
 "$target/bin/agentic-loop" _reap-orphans
 [[ ! -e $state_root/workers/72.orphan-since ]] || fail 'worker-orphan grace-reset test: the orphan-since marker was not cleared once the Label mismatch resolved'
 kill -0 "$orphan2_worker_pid" 2>/dev/null || fail 'worker-orphan grace-reset test: a transient Label mismatch killed the worker before its grace period elapsed'
