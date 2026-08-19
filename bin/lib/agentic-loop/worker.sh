@@ -658,8 +658,23 @@ worker() {
     clear_worker_local "$issue"
     return 0
   fi
+  # Two duties on one background pid (a single kill site keeps every teardown
+  # path correct): renew the lease every LEASE_SECONDS/3, and -- on a tighter
+  # tick -- self-heal the agent:running label if a foreign supervisor reverted
+  # it while we are still working (see worker_reassert_running). The label
+  # guard is a cheap read that only writes when a revert is observed, so it
+  # keeps `status` and Project state honest without meaningfully adding API
+  # load on the healthy path.
   (
-    while :; do sleep $((LEASE_SECONDS / 3 + 1)); lease_heartbeat "$issue" "$worker" || true; done
+    hb_interval=$((LEASE_SECONDS / 3 + 1)); guard_interval=20
+    (( guard_interval > hb_interval )) && guard_interval=$hb_interval
+    since_hb=0
+    while :; do
+      sleep "$guard_interval"
+      worker_reassert_running "$issue" || true
+      since_hb=$((since_hb + guard_interval))
+      if (( since_hb >= hb_interval )); then lease_heartbeat "$issue" "$worker" || true; since_hb=0; fi
+    done
   ) & heartbeat_pid=$!
   local plan_usage="$STATE_ROOT/issue-$issue-plan-usage.txt" exec_usage="$STATE_ROOT/issue-$issue-usage.txt"
   local plan_file="$STATE_ROOT/issue-$issue-plan.txt" attempt=0 protocol_retry=0 max_retries started failure_context='' exhausted=0 exec_rc plan_rc
