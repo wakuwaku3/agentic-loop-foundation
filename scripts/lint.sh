@@ -14,7 +14,9 @@ required=(AGENTS.md README.md Makefile .editorconfig .gitignore .codex/config.to
   docs/policies/documentation.md docs/decisions/0023-documentation-readership-boundaries.md docs/development.md
   docs/decisions/0024-secret-scanning.md docs/operations/secret-scanning.md .agentic-loop/gitleaks.toml
   docs/policies/resource-scalability.md docs/decisions/0025-resource-scalability-budget.md docs/operations/workload-budget.md
-  bin/lib/agentic-loop/workload.sh scripts/upgrade/migrations/0006-workload-config.sh)
+  bin/lib/agentic-loop/workload.sh scripts/upgrade/migrations/0006-workload-config.sh
+  docs/policies/postmortem.md docs/decisions/0026-postmortem-closed-loop.md bin/lib/agentic-loop/postmortem.sh docs/operations/postmortem.md
+  scripts/upgrade/migrations/0007-postmortem-config.sh .agents/skills/postmortem/SKILL.md .agents/skills/postmortem/agents/openai.yaml .claude/skills/postmortem/SKILL.md)
 for file in "${required[@]}"; do
   [[ -f $file ]] || { printf 'Missing required file: %s\n' "$file" >&2; exit 1; }
 done
@@ -203,18 +205,19 @@ fi
 
 # Retry-budget exhaustion is never allowed to close an Issue (docs/decisions/
 # 0016): every `issues/$issue" --method PATCH -f state=closed` call site must
-# be one of the 4 allowlisted dispositions (worker.sh completed x2,
-# worker_state.sh stale x1, dispose.sh x1). A 5th call site, or one appearing
-# inside retry_failed/recover_expired, means a failure path started closing
-# Issues again.
+# be one of the 5 allowlisted dispositions (worker.sh completed x2, worker.sh
+# postmortem-complete x1 (Issue #132, gated by postmortem_complete_gate, never
+# by retry exhaustion), worker_state.sh stale x1, dispose.sh x1). A 6th call
+# site, or one appearing inside retry_failed/recover_expired, means a failure
+# path started closing Issues again.
 close_pattern='issues/$issue" --method PATCH -f state=closed'
 close_total=0
 for src in "${AGENTIC_LOOP_SOURCES[@]}"; do
   count=$(grep -Fc -- "$close_pattern" "$src" 2>/dev/null || true)
   close_total=$((close_total + count))
 done
-if (( close_total != 4 )); then
-  printf 'Issue-close call sites changed: expected exactly 4 (worker.sh completed x2, worker_state.sh stale x1, dispose.sh x1), found %s.\n' "$close_total" >&2
+if (( close_total != 5 )); then
+  printf 'Issue-close call sites changed: expected exactly 5 (worker.sh completed x2, worker.sh postmortem-complete x1, worker_state.sh stale x1, dispose.sh x1), found %s.\n' "$close_total" >&2
   exit 1
 fi
 for guarded_fn in retry_failed recover_expired; do
@@ -613,6 +616,49 @@ if [[ -e .gitleaksignore ]]; then
   exit 1
 fi
 ./.agentic-loop/guard-secrets.sh --audit
+
+# --- Closed-loop postmortem learning (Issue #132, ADR 0026) ---
+grep -Fq '[ポストモーテムポリシー](docs/policies/postmortem.md)' AGENTS.md || {
+  printf 'Missing postmortem policy invariant in AGENTS.md.\n' >&2
+  exit 1
+}
+for requirement in '非難' '起動基準' '重大度' '分析項目' 'action item' '完了条件' 'max_auto_created_per_day'; do
+  grep -Fq "$requirement" docs/policies/postmortem.md || {
+    printf 'Postmortem policy lacks requirement: %s\n' "$requirement" >&2
+    exit 1
+  }
+done
+grep -Fq '追加費用ゼロ' docs/decisions/0026-postmortem-closed-loop.md || {
+  printf 'Postmortem cost-neutrality is not documented.\n' >&2
+  exit 1
+}
+grep -Fq 'postmortem) cmd_postmortem' "${AGENTIC_LOOP_SOURCES[@]}" || { printf 'Postmortem command is not distributed through the queue CLI.\n' >&2; exit 1; }
+grep -Fq 'POSTMORTEM_LABEL' bin/lib/agentic-loop/setup.sh || { printf 'postmortem label is not created by setup.\n' >&2; exit 1; }
+grep -Fq 'postmortem_consider_trigger' bin/lib/agentic-loop/worker_state.sh || { printf 'Repeated-failure postmortem auto-trigger is missing from park_issue.\n' >&2; exit 1; }
+grep -Fq 'postmortem_consider_trigger' bin/lib/agentic-loop/agent.sh || { printf 'Resource-exhaustion postmortem auto-trigger is missing from exhaustion_note_pause.\n' >&2; exit 1; }
+grep -Fq 'postmortem_link' bin/lib/agentic-loop/postmortem.sh || { printf 'Action-item closed-loop linking is missing.\n' >&2; exit 1; }
+grep -Fq 'postmortem_complete_gate' bin/lib/agentic-loop/postmortem.sh || { printf 'The postmortem complete mechanical completion gate is missing.\n' >&2; exit 1; }
+grep -Fq 'dependency_satisfied' bin/lib/agentic-loop/postmortem.sh || { printf 'The postmortem complete gate does not reuse dependency_satisfied.\n' >&2; exit 1; }
+grep -Fq 'postmortem_turn_marker_read' bin/lib/agentic-loop/worker.sh || { printf "worker.sh's terminal branch is missing the postmortem link/complete marker check.\n" >&2; exit 1; }
+grep -Fq 'submit-requirement' .agents/skills/postmortem/SKILL.md || { printf 'The postmortem skill does not route action items through submit-requirement queue-first intake.\n' >&2; exit 1; }
+grep -Fq '`AGENTS.md`、`docs/policies/`、skill、worker prompt、共通検証入口（`devbox run --pure check`）' docs/policies/postmortem.md || {
+  printf 'Postmortem policy does not name all four generalization-reflection targets.\n' >&2
+  exit 1
+}
+for cli_detail in 'postmortem create' 'postmortem link' 'postmortem status' 'postmortem complete' 'auto_detect' 'max_auto_created_per_day'; do
+  grep -Fq "$cli_detail" docs/operations/postmortem.md || {
+    printf 'Postmortem operations doc is missing CLI/config detail: %s\n' "$cli_detail" >&2
+    exit 1
+  }
+done
+cmp -s .agents/skills/postmortem/SKILL.md .claude/skills/postmortem/SKILL.md || { printf 'Codex and Claude postmortem skills diverged.\n' >&2; exit 1; }
+for shared_doc in docs/policies/postmortem.md docs/decisions/0026-postmortem-closed-loop.md docs/operations/postmortem.md bin/lib/agentic-loop/postmortem.sh .agents/skills/postmortem/SKILL.md .claude/skills/postmortem/SKILL.md; do
+  grep -Fq "$shared_doc" scripts/lib/foundation-files.sh || {
+    printf '%s is not distributed.\n' "$shared_doc" >&2
+    exit 1
+  }
+done
+
 ./.agentic-loop/guard-secrets.sh --all
 
 # --- resource scalability and workload budget (Issue #130, ADR 0025) --------

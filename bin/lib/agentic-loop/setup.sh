@@ -42,6 +42,7 @@ setup_labels() {
   done
   setup_label "$DIAGNOSIS_LABEL" D4C5F9 'Actionable finding from periodic codebase diagnosis' "$current"
   setup_label "flaky" FEF2C0 'E2E test flagged flaky by tests/run-e2e.sh (see tests/flaky-registry.toml)' "$current"
+  setup_label "$POSTMORTEM_LABEL" 5319E7 'Closed-loop postmortem: blameless analysis with tracked action items' "$current"
 }
 
 

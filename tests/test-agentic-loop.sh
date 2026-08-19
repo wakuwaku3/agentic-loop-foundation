@@ -202,8 +202,16 @@ unfold_body_plain=$(source "$PROJECT_ROOT/bin/lib/agentic-loop/common.sh"; unfol
 cat > "$FAKE_BIN/gh" <<'FAKE_GH'
 #!/usr/bin/env bash
 set -euo pipefail
-slug="acme/$(basename "$PWD")"
-key=$(printf '%s' "$PWD" | tr '/' '_')
+# Identify "the repo" by the main worktree's root (git-common-dir's parent),
+# not by $PWD: a postmortem `link`/`complete` turn (Issue #132) invokes this
+# fake gh from inside a dedicated worktree's own root (bin/agentic-loop cds
+# to its own --show-toplevel), which is a DIFFERENT directory than $target
+# even though it is the same logical repo. Real `gh api` targets an explicit
+# repos/OWNER/REPO endpoint and does not care about local cwd at all; this
+# resolves the same way so every worktree of one repo shares one fake state.
+repo_root=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null) && repo_root=${repo_root%/.git} || repo_root=$PWD
+slug="acme/$(basename "$repo_root")"
+key=$(printf '%s' "$repo_root" | tr '/' '_')
 state="$FAKE_GH_ROOT/$key.state"
 project="$FAKE_GH_ROOT/$key.project"
 project_items="$FAKE_GH_ROOT/$key.project-items"
@@ -283,6 +291,21 @@ case "${1:-} ${2:-}" in
     done
     if [[ $endpoint == labels && $method == GET ]]; then
       cat "$labels" 2>/dev/null || true
+    elif [[ $endpoint == issues && $method == POST ]]; then
+      # bin/agentic-loop postmortem create (Issue #132, ADR 0026): a bare
+      # POST to issues creates a new fixture row (state=queued open) and
+      # returns its number for `--jq .number`, exactly like a real Issue
+      # create. body= is stored base64-encoded in column 8, same as every
+      # other row, so a later GET .body // "" round-trips it.
+      new_body_b64=''
+      for arg in "$@"; do
+        [[ $arg == body=* ]] && new_body_b64=$(printf '%s' "${arg#body=}" | base64 -w0)
+      done
+      ( flock 9
+        next=$(( $(awk '{n=$1+0; if (n>max) max=n} END{print (max=="" ? 8999 : max)}' "$state" 2>/dev/null || printf 8999) + 1 ))
+        printf '%s queued open none 2026-01-01T00:00:00Z none none %s\n' "$next" "$new_body_b64" >> "$state"
+        printf '%s\n' "$next"
+      ) 9> "$state.lock"
     elif [[ $endpoint == issues && $method == GET && $* == *fromdateiso8601* ]]; then
       # bin/agentic-loop metrics collection A: hand-authored fixture rows are
       # returned verbatim (the fake gh never runs real jq), keyed off the
@@ -427,6 +450,22 @@ case "${1:-} ${2:-}" in
         agent:failed) awk '$2 == "failed" && $3 != "closed" {print $1}' "$state" ;;
         agent:parked) awk '$2 == "parked" && $3 != "closed" {print $1}' "$state" ;;
         agent:blocked) awk '$2 == "blocked" && $3 != "closed" {print $1 "\t" $8}' "$state" ;;
+        postmortem)
+          # bin/agentic-loop postmortem create's dedup search
+          # (postmortem_find_open, Issue #132): an open Issue whose body
+          # (column 8, base64) contains the requested fingerprint marker.
+          fp=$(grep -oE 'fingerprint=[0-9a-f]{8}' <<< "$*" | head -n1 | cut -d= -f2)
+          if [[ -n $fp ]]; then
+            awk -v fp="$fp" '$3 != "closed" {
+              body=""
+              if ($8 != "" && $8 != "none") {
+                cmd = "printf %s \"" $8 "\" | base64 -d 2>/dev/null"
+                while ((cmd | getline line) > 0) body = body line "\n"
+                close(cmd)
+              }
+              if (index(body, "fingerprint=" fp) > 0) print $1
+            }' "$state"
+          fi ;;
       esac
     elif [[ $endpoint =~ ^issues/([0-9]+)/labels$ && $method == PUT ]]; then
       issue=${BASH_REMATCH[1]}; payload=$(if [[ -n $input_file && $input_file != - ]]; then cat "$input_file"; else cat; fi); target=$(sed -n 's/.*"agent:\([^"]*\)".*/\1/p' <<< "$payload"); category=$(grep -o 'category:[a-z-]*' <<< "$payload" | head -n 1 | cut -d: -f2 || true); priority_labels=$(grep -o 'priority:[a-z-]*' <<< "$payload" | sed 's/priority://' | sort -u | paste -sd, - || true)
@@ -880,6 +919,18 @@ if (( workspace_write )); then
   exec_count=$(($(cat "$exec_count_file" 2>/dev/null || printf 0) + 1))
   printf '%s\n' "$exec_count" > "$exec_count_file"
   result_var="FAKE_CODEX_EXEC_RESULT_$exec_count"
+fi
+# Runs only on the exec (workspace-write) call, never the plan call, so it
+# fires exactly once per worker() run regardless of retries (Issue #132's
+# postmortem worker.sh terminal-branch fixtures): the exec turn "does" the
+# postmortem link/complete the way a real provider would from inside its own
+# sandboxed shell, then reports completion the same way it always does.
+if (( workspace_write )) && [[ ${FAKE_CODEX_POSTMORTEM_LINK:-0} == 1 ]]; then
+  # shellcheck disable=SC2086 # intentional word-splitting: "ISSUE ACTION..."
+  "$worktree/bin/agentic-loop" postmortem link $FAKE_CODEX_POSTMORTEM_LINK_ARGS >/dev/null
+fi
+if (( workspace_write )) && [[ ${FAKE_CODEX_POSTMORTEM_COMPLETE:-0} == 1 ]]; then
+  "$worktree/bin/agentic-loop" postmortem complete "$FAKE_CODEX_POSTMORTEM_COMPLETE_ISSUE" >/dev/null
 fi
 if [[ -v $result_var ]]; then result=${!result_var}; else result=${FAKE_CODEX_RESULT:-AGENTIC_LOOP_RESULT=completed}; fi
 # Realistic Codex usage-limit path: the CLI exits non-zero and writes the
@@ -1820,6 +1871,30 @@ rm -f "$state_root/pools/codex/exhausted"
 AGENTIC_LOOP_RUN_ONCE=1 FAKE_CODEX_SLEEP=1 "$target/bin/agentic-loop" _supervise
 grep -Eq '^60 completed closed' "$state" || fail 'claiming did not resume after exhaustion cleared'
 
+# Postmortem auto-trigger on resource exhaustion (Issue #132, ADR 0026): the
+# same all-pools-paused transition synthesized above creates a dedup-checked
+# postmortem candidate once [postmortem].auto_detect = "on" (code default:
+# off, see config.sh); a further steady-state paused poll never duplicates it.
+printf '\n[postmortem]\nauto_detect = "on"\nmax_auto_created_per_day = 5\n' >> "$target/.agentic-loop.toml"
+rm -rf "$state_root/postmortem"
+rm -f "$state_root/agent-exhausted" "$state_root/pools/codex/exhausted" "$state_root/all-pools-paused" "$FAKE_GH_ROOT/codex-exec-count"
+printf '61 queued open none 2026-01-01T00:00:00Z\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+AGENTIC_LOOP_RUN_ONCE=1 FAKE_CODEX_EXIT=1 FAKE_CODEX_STDERR='rate limit reached' "$target/bin/agentic-loop" _supervise
+AGENTIC_LOOP_RUN_ONCE=1 FAKE_CODEX_SLEEP=1 "$target/bin/agentic-loop" _supervise
+[[ -e $state_root/all-pools-paused ]] || fail 'postmortem exhaustion fixture setup did not reach all-pools-paused'
+pm_issue=$(awk '$2 == "queued" && $1 != 61 {print $1}' "$state" | tail -n1)
+[[ $pm_issue =~ ^[0-9]+$ ]] || fail 'resource-exhaustion transition did not auto-create a postmortem candidate Issue'
+pm_body=$(awk -v n="$pm_issue" '$1 == n {print $8}' "$state" | base64 -d)
+grep -Fq 'kind=resource-exhaustion' <<< "$pm_body" || fail 'auto-created postmortem Issue does not record kind=resource-exhaustion'
+created_before=$(awk '$2 == "queued" && $1 != 61' "$state" | wc -l)
+AGENTIC_LOOP_RUN_ONCE=1 FAKE_CODEX_SLEEP=1 "$target/bin/agentic-loop" _supervise
+created_after=$(awk '$2 == "queued" && $1 != 61' "$state" | wc -l)
+[[ $created_before -eq $created_after ]] || fail 'a steady-state paused poll created a duplicate postmortem candidate'
+rm -f "$state_root/pools/codex/exhausted"
+AGENTIC_LOOP_RUN_ONCE=1 FAKE_CODEX_SLEEP=1 "$target/bin/agentic-loop" _supervise
+rm -rf "$state_root/postmortem"
+
 # Regression (Issue #158/#130): a SUCCESSFUL Claude plan whose output legitimately
 # discusses rate limits / quota / 429 -- e.g. a scalability or finite-resource
 # Issue -- must NOT be misread as pool exhaustion. Claude reports a real limit
@@ -2728,6 +2803,192 @@ grep -Fq '#500' <<< "$status_output" || fail 'status did not name the dependency
 grep -Fq 'incomplete' <<< "$status_output" || fail 'status did not show the dependency-block reason code'
 rm -f "$state_root/dependency/blocked-500"
 rm -f "$FAKE_GH_ROOT/$state_key.dep-links"
+
+# --- Closed-loop postmortem learning (Issue #132, ADR 0026, docs/policies/postmortem.md) ---
+
+# auto_detect defaults to off (code-level fallback, see config.sh) until an
+# Issue's own [postmortem] section turns it on: a parked (repeated-failure)
+# Issue creates no candidate.
+write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=3 STOP_TIMEOUT=10 STALE_DAYS=30 MAX_ATTEMPTS=1 RETRY_COOLDOWN_SECONDS=0
+printf 'unknown_scope = "open"\n' >> "$target/.agentic-loop.toml"
+rm -rf "$state_root/postmortem"
+printf '900 failed open none 2026-01-01T00:00:00Z\n' > "$state"
+mkdir -p "$state_root/attempts"; printf '1\t0\n' > "$state_root/attempts/issue-900"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _supervise
+grep -Eq '^900 parked open' "$state" || fail 'postmortem off-by-default fixture setup did not park Issue 900'
+[[ $(awk '$2 == "queued"' "$state" | wc -l) -eq 0 ]] || fail 'postmortem auto_detect=off (code default) unexpectedly created a candidate Issue'
+
+# auto_detect=on: a parked (repeated-failure) Issue auto-creates a dedup-
+# checked postmortem candidate, labeled category:loop-continuity + agent:queued,
+# carrying a fingerprint marker and its trigger kind.
+printf '\n[postmortem]\nauto_detect = "on"\nmax_auto_created_per_day = 5\n' >> "$target/.agentic-loop.toml"
+printf '901 failed open none 2026-01-01T00:00:00Z\n' > "$state"
+mkdir -p "$state_root/attempts"; printf '1\t0\n' > "$state_root/attempts/issue-901"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _supervise
+grep -Eq '^901 parked open' "$state" || fail 'Issue 901 was not parked'
+# Unlike the resource-exhaustion fixture above, the provider pool here stays
+# healthy, so this same single-worker run-once pass also claims and (via the
+# default fake provider) completes the newly created candidate before this
+# assertion runs. Match on Issue number, not on it still being "queued".
+pm_issue=$(awk '$1 != 901 {print $1}' "$state" | tail -n1)
+[[ $pm_issue =~ ^[0-9]+$ ]] || fail 'repeated-failure park did not auto-create a postmortem candidate Issue'
+[[ $(awk -v n="$pm_issue" '$1 == n {print $7}' "$state") == loop-continuity ]] || fail 'auto-created postmortem Issue is missing category:loop-continuity'
+pm_body=$(awk -v n="$pm_issue" '$1 == n {print $8}' "$state" | base64 -d)
+grep -Fq 'agentic-loop:postmortem fingerprint=' <<< "$pm_body" || fail 'auto-created postmortem Issue is missing its fingerprint marker'
+grep -Fq 'kind=repeated-failure' <<< "$pm_body" || fail 'auto-created postmortem Issue does not record its trigger kind'
+rm -rf "$state_root/postmortem"
+
+# Non-activation: even with auto_detect=on, a single failure that still has
+# retry budget left is requeued (not parked) and creates no candidate --
+# "not every single failure demands a heavyweight postmortem".
+write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=3 STOP_TIMEOUT=10 STALE_DAYS=30 MAX_ATTEMPTS=2 RETRY_COOLDOWN_SECONDS=0
+printf 'unknown_scope = "open"\n\n[postmortem]\nauto_detect = "on"\nmax_auto_created_per_day = 5\n' >> "$target/.agentic-loop.toml"
+printf '907 failed open none 2026-01-01T00:00:00Z\n' > "$state"
+mkdir -p "$state_root/attempts"; printf '1\t0\n' > "$state_root/attempts/issue-907"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _supervise
+# The healthy single-worker pool claims and (via the default fake provider)
+# completes the requeued Issue within this same run-once pass -- what matters
+# here is that retry budget remaining meant it was requeued rather than
+# parked, and that no candidate Issue was created alongside it.
+grep -Eq '^907 parked' "$state" && fail 'a single failure with retry budget remaining was unexpectedly parked'
+[[ $(awk '$1 != 907' "$state" | wc -l) -eq 0 ]] || fail 'a single failure with retry budget remaining (auto_detect=on) unexpectedly created a postmortem candidate'
+rm -rf "$state_root/postmortem" "$state_root/attempts"
+
+# Explicit request (bin/agentic-loop postmortem create) works independent of
+# auto_detect, dedups an in-flight (open) event by kind+subject fingerprint
+# (a second explicit request for the same event reuses the same Issue instead
+# of creating a duplicate), and never writes secret-like evidence into the
+# Issue body (fail-closed: evidence is omitted, not partially redacted).
+pm1=$("$target/bin/agentic-loop" postmortem create --kind manual --subject dedup-test-event --title 'テスト事象A' --summary '概要')
+[[ $pm1 =~ ^[0-9]+$ ]] || fail 'explicit postmortem create did not print a new Issue number'
+assert_contains "$FAKE_GH_ROOT/calls" 'title=ポストモーテム: テスト事象A' 'created postmortem Issue title is missing the ポストモーテム: prefix (queue-list readability)'
+pm2=$("$target/bin/agentic-loop" postmortem create --kind manual --subject dedup-test-event --title 'テスト事象A(再)' --summary '概要2')
+[[ $pm1 == "$pm2" ]] || fail 'a second explicit request for the same kind+subject did not dedup to the existing open Issue'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:postmortem-recurrence' 'dedup reuse was not recorded as a recurrence comment'
+
+# near-miss: an explicit --kind near-miss request is filed under
+# category:loop-continuity (no confidentiality/integrity/availability harm
+# actually occurred, only a near miss).
+pm_nearmiss=$("$target/bin/agentic-loop" postmortem create --kind near-miss --subject near-miss-test-event --title 'near miss事象')
+[[ $pm_nearmiss =~ ^[0-9]+$ ]] || fail 'explicit near-miss postmortem create did not print a new Issue number'
+[[ $(awk -v n="$pm_nearmiss" '$1 == n {print $7}' "$state") == loop-continuity ]] || fail 'near-miss postmortem Issue is missing category:loop-continuity'
+nearmiss_body=$(awk -v n="$pm_nearmiss" '$1 == n {print $8}' "$state" | base64 -d)
+grep -Fq 'kind=near-miss' <<< "$nearmiss_body" || fail 'near-miss postmortem Issue does not record its trigger kind'
+
+# Built by concatenation (never a contiguous literal in this source file, see
+# the flaky_secret_msg note above): this file is scanned whole by the
+# repository's own secret guard.
+postmortem_secret_literal=$(printf '%s%s' 'AKIA' 'ABCDEFGHIJKLMNOP')
+secret_file="$TEST_ROOT/postmortem-secret-evidence.txt"
+printf '%s\n' "$postmortem_secret_literal" > "$secret_file"
+pm3=$("$target/bin/agentic-loop" postmortem create --kind manual --subject secret-test-event --title 'シークレットテスト' --evidence-file "$secret_file")
+[[ $pm3 =~ ^[0-9]+$ ]] || fail 'postmortem create with secret-like evidence did not still create the Issue'
+pm3_body=$(awk -v n="$pm3" '$1 == n {print $8}' "$state" | base64 -d)
+grep -Fq "$postmortem_secret_literal" <<< "$pm3_body" && fail 'secret-like evidence was written into the postmortem Issue body'
+grep -Fq '省略' <<< "$pm3_body" || fail 'postmortem body did not note evidence omission'
+
+# max_auto_created_per_day (bounded, configurable) caps only the AUTOMATIC
+# path: once reached, a further auto-detect candidate is skipped without
+# stopping the supervisor poll, but an explicit request (user or worker) is
+# never blocked by it -- it only counts toward the same daily counter.
+rm -rf "$state_root/postmortem" "$state_root/attempts"
+write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=3 STOP_TIMEOUT=10 STALE_DAYS=30 MAX_ATTEMPTS=1 RETRY_COOLDOWN_SECONDS=0
+printf 'unknown_scope = "open"\n' >> "$target/.agentic-loop.toml"
+printf '\n[postmortem]\nauto_detect = "on"\nmax_auto_created_per_day = 1\n' >> "$target/.agentic-loop.toml"
+printf '905 failed open none 2026-01-01T00:00:00Z\n' > "$state"
+mkdir -p "$state_root/attempts"; printf '1\t0\n' > "$state_root/attempts/issue-905"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _supervise
+grep -Eq '^905 parked open' "$state" || fail 'daily-cap fixture setup did not park Issue 905'
+[[ $(awk '$1 != 905' "$state" | wc -l) -eq 1 ]] || fail 'the first auto-create under the daily cap did not create exactly one candidate Issue'
+rm -rf "$state_root/attempts"
+
+printf '906 failed open none 2026-01-01T00:00:00Z\n' > "$state"
+mkdir -p "$state_root/attempts"; printf '1\t0\n' > "$state_root/attempts/issue-906"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+cap_run_rc=0
+AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _supervise || cap_run_rc=$?
+(( cap_run_rc == 0 )) || fail 'reaching the daily auto-create cap unexpectedly stopped the supervisor poll'
+grep -Eq '^906 parked open' "$state" || fail 'Issue 906 was not parked'
+[[ $(awk '$1 != 906 && $2 == "queued"' "$state" | wc -l) -eq 0 ]] || fail 'auto-create beyond the daily cap unexpectedly created a second candidate Issue'
+
+pm_explicit=$("$target/bin/agentic-loop" postmortem create --kind manual --subject cap-test-explicit --title '明示要求') || fail 'an explicit postmortem create was blocked by the daily auto-create cap'
+[[ $pm_explicit =~ ^[0-9]+$ ]] || fail 'explicit postmortem create beyond the daily cap did not print a new Issue number'
+rm -rf "$state_root/postmortem" "$state_root/attempts"
+rm -rf "$state_root/postmortem"
+
+# postmortem link: an action item Issue is linked as a native sub-issue +
+# dependency, and the postmortem Issue moves to agent:blocked (releasing any
+# lease/scope/conflict state) instead of being left agent:running.
+printf '90 running open\n91 queued open\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+calls_before=$(wc -l < "$FAKE_GH_ROOT/calls")
+mkdir -p "$state_root/workers"
+printf '1\t%s\t%s\n' "$(($(date +%s) + 3600))" "$(date +%s)" > "$state_root/workers/90.lease"
+printf '90 <!-- agentic-loop:claim worker=postmortem-link-fixture created=%s expires=%s -->\n' "$(date +%s)" "$(($(date +%s) + 3600))" > "$FAKE_GH_ROOT/$state_key.comments"
+"$target/bin/agentic-loop" postmortem link 90 91
+tail -n "+$((calls_before + 1))" "$FAKE_GH_ROOT/calls" > "$TEST_ROOT/postmortem-link-calls.log"
+grep -Eq '^90 blocked open' "$state" || fail 'postmortem link did not move the postmortem Issue to agent:blocked'
+assert_contains "$TEST_ROOT/postmortem-link-calls.log" 'issues/90/sub_issues' 'postmortem link did not register the action item as a native sub-issue'
+assert_contains "$TEST_ROOT/postmortem-link-calls.log" 'issues/90/dependencies/blocked_by' 'postmortem link did not register the native blocked_by dependency'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:postmortem-link action_items=91' 'postmortem link did not record its audit marker'
+[[ ! -r "$state_root/workers/90.lease" ]] || fail 'postmortem link did not release the postmortem Issue lease'
+
+# Closed loop: once every linked action item Issue closes and verifies
+# (agent:completed), the EXISTING dependency.sh requeue mechanism (no new
+# gating code) automatically returns the postmortem Issue to agent:queued --
+# this is ADR 0026's central claim, that action-item tracking reuses
+# dependency.sh rather than a new bespoke waiting mechanism.
+blocked_body=$(printf 'Blocked by: #91' | base64 -w0)
+printf '90 blocked open none 2026-01-02T00:00:00Z none none %s\n91 running open\n' "$blocked_body" > "$state"
+AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _supervise
+grep -Eq '^90 blocked open' "$state" || fail 'a postmortem Issue with an incomplete action item was requeued too early'
+printf '90 blocked open none 2026-01-02T00:00:00Z none none %s\n91 completed closed\n' "$blocked_body" > "$state"
+AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _supervise
+# The healthy single-worker pool may claim and (via the default fake
+# provider) complete Issue 90 within this same run-once pass once it is
+# requeued; what matters here is that it left agent:blocked, not that it is
+# still literally "queued" by the time this assertion runs.
+grep -Eq '^90 blocked open' "$state" && fail 'a postmortem Issue was not automatically requeued once its action item completed'
+
+# postmortem status reports each linked action item's completion state.
+status_body=$(printf 'Blocked by: #91' | base64 -w0)
+printf '92 queued open none 2026-01-01T00:00:00Z none none %s\n91 completed closed\n' "$status_body" > "$state"
+pm_status=$("$target/bin/agentic-loop" postmortem status 92)
+grep -Fq '#91: 完了・検証済み' <<< "$pm_status" || fail 'postmortem status did not report a completed, verified action item'
+
+# postmortem complete: the machine-checked gate for "postmortem本文だけを
+# closeしてaction itemを未追跡にしない". It never closes the Issue itself
+# (that is worker.sh's job once the marker it writes is observed); it only
+# fails closed -- non-zero exit, Japanese reason, no marker written -- when
+# any of its three checks does not hold.
+gate_body_incomplete=$(printf 'Blocked by: #91\n\n## 残余リスク\n\nなし。' | base64 -w0)
+printf '93 queued open none 2026-01-01T00:00:00Z none none %s\n91 running open\n' "$gate_body_incomplete" > "$state"
+gate_err=$("$target/bin/agentic-loop" postmortem complete 93 2>&1) && fail 'postmortem complete succeeded with an unverified action item'
+grep -Fq '未完了' <<< "$gate_err" || fail 'postmortem complete did not explain the unresolved action item in Japanese'
+[[ ! -e "$state_root/postmortem/turn-93" ]] || fail 'postmortem complete wrote the completion marker despite an unresolved action item'
+
+gate_body_placeholder=$(printf 'Blocked by: #91\n\n## 残余リスク\n\n（記入してください）' | base64 -w0)
+printf '93 queued open none 2026-01-01T00:00:00Z none none %s\n91 completed closed\n' "$gate_body_placeholder" > "$state"
+gate_err=$("$target/bin/agentic-loop" postmortem complete 93 2>&1) && fail 'postmortem complete succeeded with an unfilled template placeholder'
+grep -Fq 'プレースホルダ' <<< "$gate_err" || fail 'postmortem complete did not explain the unfilled placeholder in Japanese'
+
+gate_body_empty_risk=$(printf 'Blocked by: #91\n\n## 残余リスク\n\n' | base64 -w0)
+printf '93 queued open none 2026-01-01T00:00:00Z none none %s\n91 completed closed\n' "$gate_body_empty_risk" > "$state"
+gate_err=$("$target/bin/agentic-loop" postmortem complete 93 2>&1) && fail 'postmortem complete succeeded with an empty residual-risk section'
+grep -Fq '残余リスク' <<< "$gate_err" || fail 'postmortem complete did not explain the empty residual-risk section in Japanese'
+
+gate_body_ready=$(printf 'Blocked by: #91\n\n## 残余リスク\n\n実施しない項目はない。' | base64 -w0)
+printf '93 queued open none 2026-01-01T00:00:00Z none none %s\n91 completed closed\n' "$gate_body_ready" > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+"$target/bin/agentic-loop" postmortem complete 93 || fail 'postmortem complete failed despite all gate conditions being satisfied'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:postmortem-verified' 'postmortem complete did not record its verification comment'
+[[ $(cat "$state_root/postmortem/turn-93" 2>/dev/null) == complete ]] || fail 'postmortem complete did not write the complete turn marker consumed by worker.sh'
+
+rm -rf "$state_root/postmortem" "$state_root/attempts" "$state_root/workers/90.lease"
 write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=2 LEASE_SECONDS=3 STOP_TIMEOUT=10 STALE_DAYS=30
 
 # Setup creates no priority:* label (numeric priority lives in the body marker
@@ -2834,6 +3095,54 @@ FAKE_PR_HEAD_OID=0000000000000000000000000000000000000000 "$target/bin/agentic-l
 grep -Eq '^8 failed open$' "$state" || fail 'unexpected merged PR ref was accepted'
 [[ -e $target-worktrees/issue-8 ]] || fail 'unexpected ref worker worktree was removed'
 git -C "$target" show-ref --verify --quiet refs/heads/agent/issue-8 || fail 'unexpected ref local branch was removed'
+
+# Closed-loop postmortem worker.sh terminal branch (Issue #132, ADR 0026): a
+# `postmortem link` turn, executed from inside the exec turn's own sandboxed
+# shell (exactly as a real provider would run it), must leave the postmortem
+# Issue at agent:blocked -- worker.sh must NOT re-evaluate this exec turn's
+# own AGENTIC_LOOP_RESULT=completed marker against the ordinary merged-PR
+# completion path (there is no PR for a link turn) and overwrite the
+# already-made agent:blocked with agent:failed.
+printf '150 running open\n151 queued open\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+FAKE_CODEX_POSTMORTEM_LINK=1 FAKE_CODEX_POSTMORTEM_LINK_ARGS='150 151' "$target/bin/agentic-loop" _worker 150 postmortem-link-worker
+grep -Eq '^150 blocked open' "$state" || fail 'a postmortem link turn was not left at agent:blocked'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:postmortem-link' 'a postmortem link turn did not record its link comment'
+if grep -Fq 'agentic-loop:failed' "$FAKE_GH_ROOT/$state_key.comments"; then fail 'a postmortem link turn was overwritten by the ordinary merged-PR-required completion path'; fi
+[[ -e $target-worktrees/issue-150 ]] || fail 'a postmortem link turn unexpectedly removed its worktree'
+git -C "$target" show-ref --verify --quiet refs/heads/agent/issue-150 || fail 'a postmortem link turn unexpectedly removed its local branch'
+[[ ! -e "$state_root/postmortem/turn-150" ]] || fail 'the link turn marker was not consumed by worker.sh'
+
+# Closed-loop postmortem worker.sh terminal branch, completion half: once
+# `postmortem complete`'s gate has verified every action item and the body,
+# it writes the `complete` marker instead of closing the Issue itself.
+# worker.sh's terminal branch, observing that this turn made no commit (the
+# branch never advanced past the fetched default branch tip), completes and
+# closes the Issue and removes the worktree/branch WITHOUT requiring a merged
+# PR -- there is none for this turn, unlike the ordinary completion path.
+gate_ready_body=$(printf 'Blocked by: #161\n\n## 残余リスク\n\n実施しない項目はない。' | base64 -w0)
+printf '160 running open none 2026-01-01T00:00:00Z none none %s\n161 completed closed\n' "$gate_ready_body" > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+FAKE_CODEX_POSTMORTEM_COMPLETE=1 FAKE_CODEX_POSTMORTEM_COMPLETE_ISSUE=160 "$target/bin/agentic-loop" _worker 160 postmortem-complete-worker
+grep -Eq '^160 completed closed' "$state" || fail 'a postmortem complete turn (no leftover commit) was not closed as completed'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:completed postmortem=1' 'a postmortem complete turn did not record its completion comment'
+[[ ! -e $target-worktrees/issue-160 ]] || fail 'a postmortem complete turn did not remove its worktree'
+! git -C "$target" show-ref --verify --quiet refs/heads/agent/issue-160 || fail 'a postmortem complete turn did not remove its local branch'
+[[ ! -e "$state_root/postmortem/turn-160" ]] || fail 'the complete turn marker was not consumed by worker.sh'
+
+# If the branch DID advance during this turn (a real commit happened, not
+# just GitHub API calls), the complete-marker fast path's oid-match safety
+# check fails closed and this falls through to the ordinary merged-PR-
+# required completion path instead of silently completing/closing unmerged
+# work -- with no merged PR simulated here, that fallback correctly reports
+# failed and preserves the worktree/branch for investigation.
+printf '162 running open none 2026-01-01T00:00:00Z none none %s\n161 completed closed\n' "$gate_ready_body" > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+FAKE_CODEX_POSTMORTEM_COMPLETE=1 FAKE_CODEX_POSTMORTEM_COMPLETE_ISSUE=162 FAKE_CODEX_COMMIT_ALL=1 FAKE_PR_MERGED=0 "$target/bin/agentic-loop" _worker 162 postmortem-leftover-worker
+grep -Eq '^162 failed open' "$state" || fail 'a postmortem complete turn with a leftover commit was not routed to the ordinary merged-PR completion path'
+[[ -e $target-worktrees/issue-162 ]] || fail 'a postmortem complete turn with a leftover commit had its worktree destroyed without a merged PR'
+git -C "$target" show-ref --verify --quiet refs/heads/agent/issue-162 || fail 'a postmortem complete turn with a leftover commit had its branch destroyed without a merged PR'
+rm -rf "$state_root/postmortem"
 
 # A branch already checked out by another worktree is retained without replacing that worktree.
 printf '10 running open\n' > "$state"
@@ -5848,7 +6157,7 @@ grep -Fq '[foundation]' "$migration_target/.agentic-loop.toml" || fail 'migratio
 resolved_revision=$(git -C "$PROJECT_ROOT" rev-parse HEAD)
 assert_contains "$migration_target/.agentic-loop.toml" "revision = \"$resolved_revision\"" 'migration apply did not pin the applied revision'
 [[ $(yq -p json -o yaml '.source.revision' "$migration_target/.agentic-loop/manifest.json") == "$resolved_revision" ]] || fail 'upgrade manifest did not record the applied revision'
-[[ $(yq -p json -o yaml '.migration_level' "$migration_target/.agentic-loop/manifest.json") -eq 6 ]] || fail 'manifest migration_level was not bumped after applying the migration'
+[[ $(yq -p json -o yaml '.migration_level' "$migration_target/.agentic-loop/manifest.json") -eq 7 ]] || fail 'manifest migration_level was not bumped after applying the migration'
 migration_rerun=$("$migration_target/bin/agentic-loop" upgrade --source "$PROJECT_ROOT")
 [[ $migration_rerun == *'変更はありません'* ]] || fail 'rerunning upgrade after a completed migration was not a no-op'
 

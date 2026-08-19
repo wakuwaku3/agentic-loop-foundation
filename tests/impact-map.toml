@@ -70,6 +70,11 @@ units = ["e2e:queue", "e2e:auxiliary", "e2e:upgrade"]
 reason = "呼び出し回数・増加率のfixtureはqueue群、record検証・静的検査はauxiliary群、migrationの冪等性はupgrade群が覆う"
 
 [[rule]]
+path = "bin/lib/agentic-loop/postmortem.sh"
+units = ["e2e:queue", "e2e:lifecycle"]
+reason = "起動判定・重複抑止・上限・秘密境界はqueue群、worker終端のlink/complete分岐はlifecycle群が覆う"
+
+[[rule]]
 path = "bin/lib/agentic-loop/capability.sh"
 units = ["e2e:lifecycle", "e2e:auxiliary", "e2e:upgrade"]
 reason = "capability manifestの検証はlifecycle/auxiliary/upgrade群にまたがる"

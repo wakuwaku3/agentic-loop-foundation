@@ -799,6 +799,17 @@ worker() {
   # another host instead of waiting for the last heartbeat to expire. While
   # the Label is still running, new contenders still fail their queued check.
   lease_release "$issue" "$worker"
+  # A postmortem `link` turn (see bin/lib/agentic-loop/postmortem.sh) already
+  # made its own complete, intentional Label transition (agent:blocked) and
+  # released its own lease/scope/conflict state from inside the exec turn's
+  # provider call. It has no PR to look for -- the ordinary completion path
+  # below assumes one exists -- so honor that already-made decision instead of
+  # re-evaluating this exec turn's own result marker (see ADR 0024).
+  if [[ $(postmortem_turn_marker_read "$issue") == link ]]; then
+    postmortem_turn_marker_clear "$issue"
+    clear_worker_local "$issue"
+    return 0
+  fi
   project_add_pull_requests "$branch"
   if [[ $exit_code -eq 0 ]] && agent_result_is "$result" completed; then
     # Cleanup + the final Label/close transition is unsafe to interrupt
@@ -806,40 +817,65 @@ worker() {
     # this marker (bounded by pause_grace_seconds) before signaling.
     worker_critical_begin "$issue"
     progress_touch "$issue" merge
-    local merged_number='' merged_base='' merged_commit=''
-    IFS=$'\t' read -r merged_pr merged_oid merged_number merged_base merged_commit < <(repo_api pulls --method GET -f state=closed -f head="${repository%%/*}:$branch" -f per_page=100 --jq 'map(select(.merged_at != null and .head.ref == "'"$branch"'")) | first | [.html_url, .head.sha, (.number|tostring), .base.ref, (.merge_commit_sha // .head.sha)] | @tsv' 2>/dev/null || true) || true
-    progress_touch "$issue" cleanup
-    if [[ -n $merged_pr && $merged_oid =~ ^[0-9a-fA-F]{40}$ ]]; then
-      if ! preflight_reevaluate_diff "$issue" "$merged_oid" "$default_branch"; then
-        :
-      elif trace_gate "$issue" "$merged_number" "$merged_oid" "$merged_commit" "$merged_base"; then
-        if cleanup_completed_worker "$worktree" "$branch" "$merged_oid"; then
-          clear_attempts "$issue"
-          progress_touch "$issue" 'done'
-          set_issue_state "$issue" completed
-          project_sync_state "$issue" completed
-          comment_issue "$issue" "<!-- agentic-loop:completed pr=$merged_pr -->\nWorker \`$worker\` の完了報告と対応PRのmergeをGitHubで確認し、専用worktreeとlocal branch \`$branch\` を削除しました: $merged_pr\nremote branchは復旧とGitHubのPR設定との責務分離のため、Supervisorからは削除しません。"
-          repo_api "issues/$issue" --method PATCH -f state=closed >/dev/null
+    # A postmortem `complete` turn (see bin/lib/agentic-loop/postmortem.sh)
+    # already gate-checked that every linked action item is verified and the
+    # body's analysis is filled in, then wrote this marker instead of closing
+    # the Issue itself. It made no commit for this Issue (only GitHub API
+    # calls), so completion here means "the branch never advanced past the
+    # default branch" rather than "a PR merged" -- reuse cleanup_completed_
+    # worker's existing oid-match safety check with the default branch tip in
+    # place of a merged commit. If the branch DID advance (real work happened
+    # in this turn), the check below fails closed and this falls through to
+    # the ordinary merged-PR completion path, so unmerged work is never
+    # silently discarded.
+    local postmortem_marker='' postmortem_default_tip=''
+    postmortem_marker=$(postmortem_turn_marker_read "$issue")
+    [[ $postmortem_marker == complete ]] && postmortem_default_tip=$(git -C "$REPO_ROOT" rev-parse --verify -q "refs/remotes/origin/$default_branch" 2>/dev/null || true)
+    if [[ $postmortem_marker == complete && -n $postmortem_default_tip ]] && cleanup_completed_worker "$worktree" "$branch" "$postmortem_default_tip"; then
+      postmortem_turn_marker_clear "$issue"
+      clear_attempts "$issue"
+      progress_touch "$issue" 'done'
+      set_issue_state "$issue" completed
+      project_sync_state "$issue" completed
+      comment_issue "$issue" "<!-- agentic-loop:completed postmortem=1 -->\nWorker \`$worker\` の完了報告と \`postmortem complete\` によるaction item検証済みの確認により、専用worktreeとlocal branch \`$branch\` を削除しました（このturnにcommitはありません）。"
+      repo_api "issues/$issue" --method PATCH -f state=closed >/dev/null
+    else
+      [[ $postmortem_marker == complete ]] && postmortem_turn_marker_clear "$issue"
+      local merged_number='' merged_base='' merged_commit=''
+      IFS=$'\t' read -r merged_pr merged_oid merged_number merged_base merged_commit < <(repo_api pulls --method GET -f state=closed -f head="${repository%%/*}:$branch" -f per_page=100 --jq 'map(select(.merged_at != null and .head.ref == "'"$branch"'")) | first | [.html_url, .head.sha, (.number|tostring), .base.ref, (.merge_commit_sha // .head.sha)] | @tsv' 2>/dev/null || true) || true
+      progress_touch "$issue" cleanup
+      if [[ -n $merged_pr && $merged_oid =~ ^[0-9a-fA-F]{40}$ ]]; then
+        if ! preflight_reevaluate_diff "$issue" "$merged_oid" "$default_branch"; then
+          :
+        elif trace_gate "$issue" "$merged_number" "$merged_oid" "$merged_commit" "$merged_base"; then
+          if cleanup_completed_worker "$worktree" "$branch" "$merged_oid"; then
+            clear_attempts "$issue"
+            progress_touch "$issue" 'done'
+            set_issue_state "$issue" completed
+            project_sync_state "$issue" completed
+            comment_issue "$issue" "<!-- agentic-loop:completed pr=$merged_pr -->\nWorker \`$worker\` の完了報告と対応PRのmergeをGitHubで確認し、専用worktreeとlocal branch \`$branch\` を削除しました: $merged_pr\nremote branchは復旧とGitHubのPR設定との責務分離のため、Supervisorからは削除しません。"
+            repo_api "issues/$issue" --method PATCH -f state=closed >/dev/null
+          else
+            exit_code=1
+            progress_touch "$issue" failed
+            set_issue_state "$issue" failed
+            project_sync_state "$issue" failed
+            comment_issue "$issue" "<!-- agentic-loop:failed worker=$worker reason=merge-or-cleanup -->\nWorkerは完了を報告しましたが、branch \`$branch\` のmerge済みPRと一致するcommitを確認できないか、安全なcleanupを完了できませんでした。Issueはcloseせず、残っているworktreeまたはbranch dataを保持します。原因確認後に再試行するには \`agent:queued\` を再度付与してください。"
+          fi
         else
           exit_code=1
           progress_touch "$issue" failed
           set_issue_state "$issue" failed
           project_sync_state "$issue" failed
-          comment_issue "$issue" "<!-- agentic-loop:failed worker=$worker reason=merge-or-cleanup -->\nWorkerは完了を報告しましたが、branch \`$branch\` のmerge済みPRと一致するcommitを確認できないか、安全なcleanupを完了できませんでした。Issueはcloseせず、残っているworktreeまたはbranch dataを保持します。原因確認後に再試行するには \`agent:queued\` を再度付与してください。"
+          comment_issue "$issue" "<!-- agentic-loop:failed worker=$worker reason=traceability-invalid detail=$TRACE_INVALID_REASON -->\nWorkerは完了を報告しmergeを確認しましたが、トレーサビリティ記録の検証に失敗したため完了処理を保留しました（detail=$TRACE_INVALID_REASON）。Issueはcloseせず、既存のworktree/branchを保持します。PR本文の \`agentic-loop:traceability\` code blockを確認し、修正後に \`agent:queued\` を再度付与してください。"
         fi
       else
         exit_code=1
         progress_touch "$issue" failed
         set_issue_state "$issue" failed
         project_sync_state "$issue" failed
-        comment_issue "$issue" "<!-- agentic-loop:failed worker=$worker reason=traceability-invalid detail=$TRACE_INVALID_REASON -->\nWorkerは完了を報告しmergeを確認しましたが、トレーサビリティ記録の検証に失敗したため完了処理を保留しました（detail=$TRACE_INVALID_REASON）。Issueはcloseせず、既存のworktree/branchを保持します。PR本文の \`agentic-loop:traceability\` code blockを確認し、修正後に \`agent:queued\` を再度付与してください。"
+        comment_issue "$issue" "<!-- agentic-loop:failed worker=$worker reason=merge-or-cleanup -->\nWorkerは完了を報告しましたが、branch \`$branch\` のmerge済みPRと一致するcommitを確認できないか、安全なcleanupを完了できませんでした。Issueはcloseせず、残っているworktreeまたはbranch dataを保持します。原因確認後に再試行するには \`agent:queued\` を再度付与してください。"
       fi
-    else
-      exit_code=1
-      progress_touch "$issue" failed
-      set_issue_state "$issue" failed
-      project_sync_state "$issue" failed
-      comment_issue "$issue" "<!-- agentic-loop:failed worker=$worker reason=merge-or-cleanup -->\nWorkerは完了を報告しましたが、branch \`$branch\` のmerge済みPRと一致するcommitを確認できないか、安全なcleanupを完了できませんでした。Issueはcloseせず、残っているworktreeまたはbranch dataを保持します。原因確認後に再試行するには \`agent:queued\` を再度付与してください。"
     fi
     worker_critical_end "$issue"
   elif [[ $exit_code -eq 0 ]] && agent_result_is "$result" needs-input; then
