@@ -6678,19 +6678,25 @@ flaky_report_out=$(
   source "$PROJECT_ROOT/bin/lib/agentic-loop/common.sh"
   say() { printf '%s\n' "$*"; }
   fail() { printf 'FAIL: %s\n' "$1" >&2; exit 1; }
+  repo_name() { printf 'acme/example\n'; }
   project_add_issue() { return 0; }
   project_sync_state() { return 0; }
   comment_issue() { printf 'comment_issue %s\n' "$1" >> "$flaky_report_state/calls"; }
+  search_issues_api() {
+    local joined=" $* "
+    printf 'search %s\n' "$*" >> "$flaky_report_state/calls"
+    case $joined in
+      *cccccccccccc*) printf '[{"number":901,"state":"open"}]\n' ;;
+      *dddddddddddd*) printf '[{"number":902,"state":"closed"}]\n' ;;
+      *) printf '[]\n' ;;
+    esac
+  }
   repo_api() {
     local joined=" $* "
     printf '%s\n' "$*" >> "$flaky_report_state/calls"
     case $1 in
       issues)
-        if [[ $joined == *' state=open '* ]]; then
-          case $joined in *cccccccccccc*) printf '901\n' ;; esac
-        elif [[ $joined == *' state=closed '* ]]; then
-          case $joined in *dddddddddddd*) printf '902\n' ;; esac
-        elif [[ $joined == *'--method POST'* ]]; then
+        if [[ $joined == *'--method POST'* ]]; then
           printf 'created content:\n%s\n' "$*" >> "$flaky_report_state/created"
           printf '903\n'
         fi
@@ -6707,10 +6713,12 @@ assert_contains <(printf '%s' "$flaky_report_out") '2件の修復Issue' 'flaky r
 assert_contains <(printf '%s' "$flaky_report_out") '既存のflaky修復Issue #901' 'flaky report did not reuse an existing open Issue for a recurring fingerprint'
 assert_contains <(printf '%s' "$flaky_report_out") 'flaky修復Issue #903' 'flaky report did not create a new Issue when only a closed Issue previously matched'
 call_log="$flaky_report_state/calls"
-grep -Fq 'state=open' "$call_log" || fail 'flaky report did not search open Issues before creating a new one'
+grep -Fq 'search ' "$call_log" || fail 'flaky report did not search for an existing dedup marker before creating a new Issue'
+grep -Fq 'in:body' "$call_log" || fail 'flaky report search query did not scope to the Issue body'
 grep -Fq 'cccccccccccc' "$call_log" || fail 'flaky report did not search using the flaky verdict fingerprint'
 grep -Fq 'bbbbbbbbbbbb' "$call_log" && fail 'flaky report searched GitHub for a decisive (failing) unit, which must never be reported'
 grep -Fq 'aaaaaaaaaaaa' "$call_log" && fail 'flaky report searched GitHub for a passed unit, which must never be reported'
+grep -Eq '^issues --method GET' "$call_log" && fail 'flaky report dedup lookup fell back to a paginated issues listing instead of search_issues_api'
 [[ -f $flaky_report_state/created ]] || fail 'flaky report did not create a new Issue for the closed-only match'
 grep -Fq 'agentic-loop:flaky unit=e2e:upgrade fingerprint=dddddddddddd' "$flaky_report_state/created" || fail 'flaky report new-Issue body is missing the dedup marker'
 # Issue #110: flaky_report_one's new-Issue body must reach GitHub with real
@@ -6720,6 +6728,48 @@ grep -Fq 'agentic-loop:flaky unit=e2e:upgrade fingerprint=dddddddddddd' "$flaky_
 # exactly one /labels endpoint call, for the newly created Issue only, is
 # what this fixture can observe.
 grep -c '/labels' "$call_log" | grep -Fxq 1 || fail 'flaky report did not attach labels to exactly the newly created Issue'
+
+# --- Issue #198: flaky repair-Issue dedup no longer walks every open/closed
+# Issue; one search/issues query (a search-index lookup, not an enumeration)
+# replaces the two full paginated listings. The dedup lookup's call count
+# must stay flat regardless of the repository's cumulative Issue count
+# (fixture: 10 vs 100 accumulated closed Issues) -- unlike the removed
+# `-f state=open/closed --paginate` calls, whose transfer volume grew with
+# that count.
+flaky_scale_scenario() {
+  local state_dir="$TEST_ROOT/flaky-scale-$1"
+  mkdir -p "$state_dir"
+  : > "$state_dir/search-calls"
+  (
+    # shellcheck source=bin/lib/agentic-loop/common.sh
+    source "$PROJECT_ROOT/bin/lib/agentic-loop/common.sh"
+    say() { :; }
+    repo_name() { printf 'acme/example\n'; }
+    comment_issue() { :; }
+    # A repository that has accumulated many closed Issues over time (the
+    # $1 fixture parameter, e.g. 10 vs 100) must never change the shape of
+    # this one query/response pair.
+    search_issues_api() { printf '%s\n' "$*" >> "$state_dir/search-calls"; printf '[{"number":960,"state":"closed"}]\n'; }
+    repo_api() {
+      case $1 in
+        issues) [[ $* == *'--method POST'* ]] && { printf '961\n'; return 0; } ;;
+        */labels) return 0 ;;
+      esac
+    }
+    project_add_issue() { return 0; }
+    project_sync_state() { return 0; }
+    # shellcheck disable=SC2030 # deliberately scoped to this subshell only
+    REPO_ROOT=''
+    source "$PROJECT_ROOT/bin/lib/agentic-loop/flaky.sh"
+    flaky_report_one 'e2e:scale' 'eeeeeeeeeeee' flaky >/dev/null
+  )
+  wc -l < "$state_dir/search-calls"
+}
+flaky_scale_calls_10=$(flaky_scale_scenario 10) || fail 'flaky dedup scale scenario (10 cumulative closed Issues) failed'
+flaky_scale_calls_100=$(flaky_scale_scenario 100) || fail 'flaky dedup scale scenario (100 cumulative closed Issues) failed'
+[[ $flaky_scale_calls_10 -eq 1 ]] || fail "flaky_report_one issued $flaky_scale_calls_10 dedup search calls for a 10-closed-Issue fixture (expected exactly 1)"
+[[ $flaky_scale_calls_100 -eq 1 ]] || fail "flaky_report_one issued $flaky_scale_calls_100 dedup search calls for a 100-closed-Issue fixture (expected exactly 1)"
+[[ $flaky_scale_calls_10 -eq $flaky_scale_calls_100 ]] || fail "flaky_report_one's dedup lookup call count scaled with cumulative closed Issue count (10 -> $flaky_scale_calls_10, 100 -> $flaky_scale_calls_100); it must cost the same regardless of repository size"
 
 # --- Retry attempt ceiling (Issue #130, ADR 0025 T4) -----------------------
 # repo_api's REST retry loop stops at API_RETRY_ATTEMPTS regardless of how
