@@ -693,7 +693,9 @@ case "${1:-} ${2:-}" in
     elif [[ $* == *'repositories(first:100)'* ]]; then
       [[ -e $project_link ]] && cat "$project_link"
     elif [[ $* == *'fields(first: 100)'* ]]; then
-      [[ ${FAKE_PROJECT_FAIL:-0} == 0 ]] && printf 'true\n'
+      if [[ ${FAKE_PROJECT_FAIL:-0} == 0 && $* == *'"All open issues"'* && $* == *'"All closed issues"'* ]]; then
+        printf 'true\n'
+      fi
     elif [[ $* == *createProjectV2View* ]]; then
       name=''
       for ((i=1; i<=$#; i++)); do [[ ${!i} == name=* ]] && name=${!i#name=}; done
@@ -781,7 +783,12 @@ case "${1:-} ${2:-}" in
       printf '%s\t\t\t\n' "$item_number" >> "$project_values"
     fi
     [[ $* == *'--jq .id'* ]] && printf 'PVTI_%s\n' "${url##*/}" ;;
-  'project view') [[ ${FAKE_PROJECT_FAIL:-0} == 0 ]] && printf 'PVT_fake\n' ;;
+  'project view')
+    if [[ ${FAKE_PROJECT_SCOPE_MISSING:-0} == 1 ]]; then
+      printf 'GraphQL: Your token has not been granted the required scopes to execute this query. The %s scope is required. (viewer)\n' "'read:project'" >&2
+      exit 1
+    fi
+    [[ ${FAKE_PROJECT_FAIL:-0} == 0 ]] && printf 'PVT_fake\n' ;;
   'project field-list')
     if [[ $* == *'.fields[].name'* ]]; then
       cat "$project_fields" 2>/dev/null || true
@@ -1587,6 +1594,7 @@ before_doctor=$(git -C "$target" status --porcelain)
 doctor_output=$("$target/bin/agentic-loop" doctor)
 grep -Fq '[成功] GitHub認証' <<< "$doctor_output" || fail 'doctor did not report healthy GitHub authentication'
 grep -Fq '失敗=0' <<< "$doctor_output" || fail 'doctor did not report the healthy state'
+grep -Fq '[成功] GitHub Project同期' <<< "$doctor_output" || fail 'doctor false-warned about Project sync on a healthy (superset option, real view names) configuration'
 doctor_json=$("$target/bin/agentic-loop" doctor --format json)
 [[ $doctor_json == '{"schema_version":1,"summary":{"success":'*'"failure":0},"checks":['*']}' ]] || fail 'doctor JSON is not machine-readable'
 [[ $(git -C "$target" status --porcelain) == "$before_doctor" ]] || fail 'doctor modified the repository'
@@ -1597,7 +1605,23 @@ rm -f /tmp/agentic-loop-doctor-auth.$$
 
 FAKE_PROJECT_FAIL=1 "$target/bin/agentic-loop" doctor > /tmp/agentic-loop-doctor-project.$$ || fail 'optional Project drift failed doctor'
 grep -Fq '[警告] GitHub Project同期' /tmp/agentic-loop-doctor-project.$$ || fail 'doctor did not warn about Project drift'
+grep -Fq 'bin/agentic-loop setup' /tmp/agentic-loop-doctor-project.$$ || fail 'doctor did not recommend setup for Project drift'
+grep -Fq 'gh auth refresh' /tmp/agentic-loop-doctor-project.$$ && fail 'doctor recommended a reauth command for a non-scope Project drift'
 rm -f /tmp/agentic-loop-doctor-project.$$
+
+# Field/View drift and a missing Projects scope are distinguishable causes
+# (issue #194): only the scope case names the exact interactive command.
+FAKE_PROJECT_SCOPE_MISSING=1 "$target/bin/agentic-loop" doctor > /tmp/agentic-loop-doctor-scope.$$ || fail 'missing Projects scope failed doctor'
+grep -Fq '[警告] GitHub Project同期' /tmp/agentic-loop-doctor-scope.$$ || fail 'doctor did not warn about the missing Projects scope'
+grep -Fq 'gh auth refresh -s project,read:project --hostname github.com' /tmp/agentic-loop-doctor-scope.$$ || fail 'doctor did not name the exact interactive reauth command'
+grep -Fq '非対話' /tmp/agentic-loop-doctor-scope.$$ || fail 'doctor did not note that the reauth command needs an interactive terminal'
+grep -Fq 'bin/agentic-loop setup' /tmp/agentic-loop-doctor-scope.$$ || fail 'doctor did not follow the reauth command with the setup step'
+rm -f /tmp/agentic-loop-doctor-scope.$$
+
+# `status` deliberately stays a cheap, pure-read command (see the idle/
+# progress status scenarios below: at most 2 REST(core) reads, no GraphQL/
+# Projects/rate_limit calls even when idle), so the cause-specific Project
+# sync remediation lives in `doctor` only, not `status`.
 
 mv "$diagnosis_timer" "$diagnosis_timer.missing"
 "$target/bin/agentic-loop" doctor > /tmp/agentic-loop-doctor-timer.$$ || fail 'optional missing timer failed doctor'

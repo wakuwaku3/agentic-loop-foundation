@@ -4,7 +4,7 @@
 
 `install.sh` は変更前に `git`、`gh`、設定 `agent.provider`（環境変数 `AGENT_PROVIDER` と git管理外 `.agentic-loop.local.toml` による上書きを含む）から解決したAI CLI（`codex`／`claude`／`opencode`、既定は `codex`）、GitHubログイン、origin、リポジトリ参照、Projects API権限を検査する。provider=opencodeならCodex CLIが存在しなくてもinstallは成立する。既存ファイルとの競合もコピー前に検査する。検査後、14個の状態Label、7個の `category:*` Labelと `Agentic Loop - OWNER/REPOSITORY` Projectを冪等に用意し、既定ではSupervisorを起動する。`priority:*` Labelは作成せず、既存の open Issue と label 定義があれば本文markerへ移行して削除する（[ADR 0015](../decisions/0015-numeric-priority-marker.md)）。Projectには同じ7選択肢の `Category` fieldを作成する。再installは保存済みのProject identityを再利用し、高コストなProject drift走査とqueued Issueの同期修復を行わない。明示的な `bin/agentic-loop setup` はProjectのrepository link・field・viewを収束させるが、既存Issue/PRの一括backfillは行わない。Issue受付とworkerが扱ったPRは、必要になった時点で個別にProjectへ登録する。
 
-GitHub tokenには対象リポジトリのIssue/PR操作権限と `project`、`read:project` scopeが必要である。不足時は `gh auth refresh -s project,read:project` など、利用中のGitHub認証方式に合う方法で追加する。Projectはuser/org所有のため、対象リポジトリとProjectの閲覧者が一致することを管理者が確認する。privateリポジトリの内容や秘密情報をProjectフィールドへ転記しない。
+GitHub tokenには対象リポジトリのIssue/PR操作権限と `project`、`read:project` scopeが必要である。不足時は対話端末で `gh auth refresh -s project,read:project --hostname github.com` を実行する（device flow/ブラウザ確認を伴うため、Agentic Loop workerの非対話コンテキストや `!` シェルからは実行できない）。完了後に `bin/agentic-loop setup` を実行するとfield・view構成を復旧する。`doctor`／`status` はこのscope不足と、認証はあるがfield・view構成がずれているだけのケース（`setup` の再実行だけで自動復旧する）を区別して警告する（#194）。Projectはuser/org所有のため、対象リポジトリとProjectの閲覧者が一致することを管理者が確認する。privateリポジトリの内容や秘密情報をProjectフィールドへ転記しない。
 
 Project APIでlink、`Agent status` single-select、Issue item追加に加え、次のtable viewをdesired stateとして設定する。`install.sh` または `bin/agentic-loop setup` の再実行はview一覧を1回だけ取得して同名viewを再利用し、filterにdriftがあるものだけを修復して、既存のOpen PRをProjectへ追加する。workerが作成したPRも処理終了時に追加する。
 

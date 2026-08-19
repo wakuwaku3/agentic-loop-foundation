@@ -54,7 +54,7 @@ doctor_residual_belongs_to_running() {
 
 
 doctor_collect() {
-  local origin='' default_branch='' hooks='' project_owner='' project_number='' project_id='' project_ok='' repository='' owner='' name='' unit_dir unit issue_worktrees='' agent_branches='' log_files=''
+  local origin='' default_branch='' hooks='' unit_dir unit issue_worktrees='' agent_branches='' log_files=''
   if [[ -n $CONFIG_ERROR ]]; then
     doctor_add failure '設定ファイル' '設定を解釈できないためSupervisorを安全に起動できません。' '.agentic-loop.toml（および任意の .agentic-loop.local.toml）を有効なTOMLに修正し、yqを導入してください。'
   else
@@ -228,33 +228,13 @@ doctor_collect() {
     if compgen -G "$unit_dir/agentic-loop-diagnosis-*.timer" >/dev/null; then doctor_add success '定期診断timer' 'コードベースの定期診断が設定されています。' '対応は不要です。'; else doctor_add warning '定期診断timer' '定期的なdrift診断が実行されません。' 'install.shを再実行してください。'; fi
   else doctor_add warning 'systemd user manager' '自動起動とtimerを利用できませんが、手動CLIは利用できます。' 'systemd user sessionを有効化するか、bin/agentic-loop startを手動実行してください。'; fi
 
-  if [[ -r $STATE_ROOT/project.env ]]; then
-    while IFS='=' read -r unit project_number; do case $unit in PROJECT_OWNER) project_owner=$project_number ;; PROJECT_NUMBER) : ;; esac; done < "$STATE_ROOT/project.env"
-    project_number=$(sed -n 's/^PROJECT_NUMBER=//p' "$STATE_ROOT/project.env" | head -n 1)
-    project_id=$(gh project view "$project_number" --owner "$project_owner" --format json --jq .id 2>/dev/null || true)
-    repository=$(repo_name 2>/dev/null || true); owner=${repository%%/*}; name=${repository#*/}
-    if [[ -n $project_id && $owner != "$repository" && -n $name ]]; then
-      # workload-boundary: best-effort Projects (GraphQL) introspection, not a REST core operation; repo_api targets REST repos/OWNER/REPO only
-      project_ok=$(gh api graphql -f query='query($project: ID!, $owner: String!, $name: String!) {
-        node(id: $project) { ... on ProjectV2 {
-          fields(first: 100) { nodes { ... on ProjectV2SingleSelectField { name options { name } } } }
-          views(first: 100) { nodes { name filter } }
-        } }
-        repository(owner: $owner, name: $name) { projectsV2(first: 100) { nodes { id } } }
-      }' -F project="$project_id" -f owner="$owner" -f name="$name" --jq '
-        .data.node.id as $id |
-        (.data.repository.projectsV2.nodes | any(.id == $id)) and
-        (.data.node.fields.nodes | any(.name == "Agent status" and (([.options[].name] | sort) == (["Inbox","Queued","Running","Needs input","In review","Stopping","Done","Failed","Parked","Stale","Blocked","Paused","Cancelled","Superseded","Duplicate","Merged"] | sort)))) and
-        (.data.node.views.nodes | any(.name == "Open Issues" and .filter == "is:issue is:open")) and
-        (.data.node.views.nodes | any(.name == "Closed Issues" and .filter == "is:issue is:closed")) and
-        (.data.node.views.nodes | any(.name == "Open PRs" and .filter == "is:pr is:open")) and
-        (.data.node.views.nodes | any(.name == "Closed PRs" and .filter == "is:pr is:closed"))
-      ' 2>/dev/null || true)
-    fi
-    if [[ $project_ok == true ]]; then
-      doctor_add success 'GitHub Project同期' 'repository link、Agent status field、4つのView filterが同期しています。' '対応は不要です。'
-    else doctor_add warning 'GitHub Project同期' '任意の可視化層を参照できません。Issue Labelキューは継続できます。' 'gh auth refresh -s project,read:project の後に bin/agentic-loop setup を実行してください。'; fi
-  else doctor_add warning 'GitHub Project同期' '任意のProject設定がありません。Issue Labelキューは継続できます。' 'bin/agentic-loop setup を実行してください。'; fi
+  project_sync_diagnose
+  case $PROJECT_SYNC_STATUS in
+    ok) doctor_add success 'GitHub Project同期' 'repository link、Agent status field、4つのView filterが同期しています。' '対応は不要です。' ;;
+    unset) doctor_add warning 'GitHub Project同期' '任意のProject設定がありません。Issue Labelキューは継続できます。' 'bin/agentic-loop setup を実行してください。' ;;
+    scope) doctor_add warning 'GitHub Project同期' 'GitHub tokenにProjects用のscopeが不足しており可視化層を参照できません。Issue Labelキューは継続できます。' '対話端末で `gh auth refresh -s project,read:project --hostname github.com` を実行してください（非対話環境やloop内の `!` シェルからは実行できません）。完了後に bin/agentic-loop setup を実行してください。' ;;
+    *) doctor_add warning 'GitHub Project同期' '任意の可視化層を参照できません。Issue Labelキューは継続できます。' 'bin/agentic-loop setup を実行してください（field・View構成のずれを自動的に復旧します）。' ;;
+  esac
 
   issue_worktrees=$(git -C "$REPO_ROOT" worktree list --porcelain 2>/dev/null | awk -v root="$WORKTREE_ROOT/issue-" '$1 == "worktree" && index($2, root) == 1 {print $2}' | head -n 3)
   agent_branches=$(git -C "$REPO_ROOT" for-each-ref --format='%(refname:short)' refs/heads/agent/ 2>/dev/null | head -n 3)
