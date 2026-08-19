@@ -138,25 +138,25 @@ setup_project() {
 # schema surprise or missing scope just leaves the prior drift warning in
 # `doctor`, since Issue Labels remain the source of truth for queue state.
 setup_project_migrate_status_options() {
-  local number=$1 owner=$2 project_id field_id options_tsv mutation_options name color description
+  local number=$1 owner=$2 project_id field_id options_tsv mutation_options id name color description
   project_id=$(gh project view "$number" --owner "$owner" --format json --jq .id 2>/dev/null) || return 0
   field_id=$(gh project field-list "$number" --owner "$owner" --format json --jq '.fields[] | select(.name == "Agent status") | .id' 2>/dev/null | head -n 1) || return 0
   [[ -n $project_id && -n $field_id ]] || return 0
   # workload-boundary: best-effort Projects (GraphQL) field introspection, not a REST core operation
   options_tsv=$(gh api graphql -f query='query($field: ID!) {
-    node(id: $field) { ... on ProjectV2SingleSelectField { options { name color description } } }
-  }' -F field="$field_id" --jq '.data.node.options[] | [.name, .color, .description] | @tsv' 2>/dev/null) || return 0
+    node(id: $field) { ... on ProjectV2SingleSelectField { options { id name color description } } }
+  }' -F field="$field_id" --jq '.data.node.options[] | [.id, .name, .color, .description] | @tsv' 2>/dev/null) || return 0
   [[ -n $options_tsv ]] || return 0
   local required_statuses=(Stopping Blocked Paused Parked Cancelled Superseded Duplicate Merged) required missing=''
-  for required in "${required_statuses[@]}"; do grep -Fq "${required}"$'\t' <<< "$options_tsv" || missing+=" $required"; done
+  for required in "${required_statuses[@]}"; do grep -Fq $'\t'"${required}"$'\t' <<< "$options_tsv" || missing+=" $required"; done
   [[ -z $missing ]] && return 0
   mutation_options=''
-  while IFS=$'\t' read -r name color description; do
+  while IFS=$'\t' read -r id name color description; do
     [[ -n $name ]] || continue
-    mutation_options+="{name: \"$name\", color: $color, description: \"$description\"}, "
+    mutation_options+="{id: \"$id\", name: \"$name\", color: $color, description: \"$description\"}, "
   done <<< "$options_tsv"
   for required in "${required_statuses[@]}"; do
-    grep -Fq "${required}"$'\t' <<< "$options_tsv" && continue
+    grep -Fq $'\t'"${required}"$'\t' <<< "$options_tsv" && continue
     case $required in
       Stopping) mutation_options+='{name: "Stopping", color: YELLOW, description: "Authorized disposal is draining an active worker"}, ' ;;
       Blocked) mutation_options+='{name: "Blocked", color: GRAY, description: "Waiting on unresolved Issue dependencies"}, ' ;;
@@ -171,7 +171,7 @@ setup_project_migrate_status_options() {
   mutation_options=${mutation_options%, }
   # workload-boundary: best-effort Projects (GraphQL) field mutation, not a REST core operation
   gh api graphql -f query="mutation(\$field: ID!) {
-    updateProjectV2SingleSelectField(input: {fieldId: \$field, options: [$mutation_options]}) { projectV2SingleSelectField { id } }
+    updateProjectV2Field(input: {fieldId: \$field, singleSelectOptions: [$mutation_options]}) { projectV2Field { id } }
   }" -F field="$field_id" >/dev/null 2>&1 || true
 }
 

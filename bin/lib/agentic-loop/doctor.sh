@@ -244,7 +244,7 @@ doctor_collect() {
       }' -F project="$project_id" -f owner="$owner" -f name="$name" --jq '
         .data.node.id as $id |
         (.data.repository.projectsV2.nodes | any(.id == $id)) and
-        (.data.node.fields.nodes | any(.name == "Agent status" and (([.options[].name] | sort) == (["Inbox","Queued","Running","Needs input","In review","Done","Failed","Stale","Blocked"] | sort)))) and
+        (.data.node.fields.nodes | any(.name == "Agent status" and (([.options[].name] | sort) == (["Inbox","Queued","Running","Needs input","In review","Stopping","Done","Failed","Parked","Stale","Blocked","Paused","Cancelled","Superseded","Duplicate","Merged"] | sort)))) and
         (.data.node.views.nodes | any(.name == "Open Issues" and .filter == "is:issue is:open")) and
         (.data.node.views.nodes | any(.name == "Closed Issues" and .filter == "is:issue is:closed")) and
         (.data.node.views.nodes | any(.name == "Open PRs" and .filter == "is:pr is:open")) and

@@ -1323,6 +1323,85 @@ tail -n "+$((calls_before + 1))" "$FAKE_GH_ROOT/calls" > "$TEST_ROOT/converged-s
 [[ $(grep -c $'\tproject item-list ' "$TEST_ROOT/converged-setup-calls.log" || true) -eq 0 ]] || fail 'converged setup scanned every Project item'
 [[ $(grep -Ec $'\tproject (link|field-create|item-add|item-edit)' "$TEST_ROOT/converged-setup-calls.log" || true) -eq 0 ]] || fail 'converged setup performed a Project mutation'
 
+# setup_project_migrate_status_options (Issue #153): the migration must call
+# the GraphQL mutation that actually exists (updateProjectV2Field with a
+# singleSelectOptions list), not the nonexistent updateProjectV2SingleSelectField,
+# and it must resubmit every pre-existing option's id so the rewrite does not
+# reset item field values. This isolates the function with its own fake `gh`
+# (shadowing the FAKE_GH_ROOT harness for the duration of the subshell only)
+# since neither the option-identity payload nor a legacy pre-migration option
+# set is exercised by the install.sh-driven scenarios above.
+(
+  set -euo pipefail
+  # shellcheck source=bin/lib/agentic-loop/setup.sh
+  . "$PROJECT_ROOT/bin/lib/agentic-loop/setup.sh"
+
+  migrate_calls=$(mktemp)
+  current_options=''
+  # shellcheck disable=SC2317
+  gh() {
+    printf '%s\n' "$*" >> "$migrate_calls"
+    case "$1 $2" in
+      'project view') printf 'PVT_test\n' ;;
+      'project field-list') printf 'PVTF_status\n' ;;
+      'api graphql')
+        if [[ $* == *updateProjectV2Field* ]]; then :
+        elif [[ $* == *'options { id name color description }'* ]]; then printf '%s\n' "$current_options"; fi ;;
+    esac
+  }
+
+  # Legacy Project: only the original 9 options exist (Blocked already healed,
+  # the other 7 required statuses missing), mirroring the drift Issue #153
+  # reports.
+  current_options=$(printf '%s\n' \
+    'PVTFO_1	Inbox	GRAY	' \
+    'PVTFO_2	Queued	GRAY	' \
+    'PVTFO_3	Running	GRAY	' \
+    'PVTFO_4	Needs input	GRAY	' \
+    'PVTFO_5	In review	GRAY	' \
+    'PVTFO_6	Done	GRAY	' \
+    'PVTFO_7	Failed	GRAY	' \
+    'PVTFO_8	Stale	GRAY	' \
+    'PVTFO_9	Blocked	GRAY	Waiting on unresolved Issue dependencies')
+  : > "$migrate_calls"
+  setup_project_migrate_status_options 42 acme
+
+  grep -Fq 'updateProjectV2SingleSelectField' "$migrate_calls" && fail 'status option migration still calls the nonexistent updateProjectV2SingleSelectField mutation'
+  mutation_call=$(grep -F 'updateProjectV2Field(input:' "$migrate_calls") || fail 'status option migration did not call updateProjectV2Field for a Project missing required options'
+  grep -Fq 'singleSelectOptions:' <<< "$mutation_call" || fail 'status option migration mutation did not use the singleSelectOptions input field'
+  for existing_id in PVTFO_1 PVTFO_2 PVTFO_3 PVTFO_4 PVTFO_5 PVTFO_6 PVTFO_7 PVTFO_8 PVTFO_9; do
+    grep -Fq "id: \"$existing_id\"" <<< "$mutation_call" || fail "status option migration dropped the existing option id $existing_id (would reset item field values)"
+  done
+  for required in Stopping Blocked Paused Parked Cancelled Superseded Duplicate Merged; do
+    grep -Fq "name: \"$required\"" <<< "$mutation_call" || fail "status option migration mutation is missing the required option $required"
+  done
+
+  # Converged Project: already has the full 16-option set setup_project
+  # creates, so a repeat run must not attempt any mutation (idempotent).
+  current_options=$(printf '%s\n' \
+    'PVTFO_1	Inbox	GRAY	' \
+    'PVTFO_2	Queued	GRAY	' \
+    'PVTFO_3	Running	GRAY	' \
+    'PVTFO_4	Needs input	GRAY	' \
+    'PVTFO_5	In review	GRAY	' \
+    'PVTFO_6	Stopping	YELLOW	Authorized disposal is draining an active worker' \
+    'PVTFO_7	Done	GRAY	' \
+    'PVTFO_8	Failed	GRAY	' \
+    'PVTFO_9	Parked	RED	Retry budget exhausted; waiting for human triage' \
+    'PVTFO_10	Stale	GRAY	' \
+    'PVTFO_11	Blocked	GRAY	Waiting on unresolved Issue dependencies' \
+    'PVTFO_12	Paused	BLUE	Execution paused by an authorized operator' \
+    'PVTFO_13	Cancelled	GRAY	Requirement was withdrawn' \
+    'PVTFO_14	Superseded	PURPLE	Continued by a successor Issue' \
+    'PVTFO_15	Duplicate	BLUE	Duplicates another Issue' \
+    'PVTFO_16	Merged	GREEN	Consolidated into another Issue')
+  : > "$migrate_calls"
+  setup_project_migrate_status_options 42 acme
+  grep -Fq 'updateProjectV2Field' "$migrate_calls" && fail 'status option migration mutated an already-converged 16-option Project'
+  rm -f "$migrate_calls"
+  true
+)
+
 # An active Project member is reread on an idle supervisor poll so external
 # field drift can be repaired. A converged member still performs no mutation.
 printf '92 needs-input open none 2026-01-01T00:00:00Z none improvement\n' > "$FAKE_GH_ROOT/$state_key.state"
