@@ -3861,16 +3861,23 @@ grep -Eq '^50 failed' "$state" || fail 'the hung Issue was reclaimed before its 
 write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=300 STOP_TIMEOUT=10 STALE_DAYS=30 MAX_ATTEMPTS=3 RETRY_COOLDOWN_SECONDS=600 WORKER_TIMEOUT_SECONDS=8
 printf '54 queued open none 2026-01-01T00:00:00Z\n' > "$state"
 : > "$FAKE_GH_ROOT/$state_key.comments"
+: > "$FAKE_GH_ROOT/codex-calls"
 rm -f "$state_root/stop.requested"
 rm -rf "$state_root/pools"
 FAKE_CODEX_SLEEP=60 "$target/bin/agentic-loop" _supervise &
 pool_timeout_sup_pid=$!
-pool_timeout_worker_pid=''
-for _ in $(seq 1 40); do
-  if [[ -r $state_root/workers/54.pid ]]; then pool_timeout_worker_pid=$(cat "$state_root/workers/54.pid"); break; fi
+# Wait until the plan stage's codex call has actually started (logged before
+# its sleep, see the fake codex harness) -- not merely until the worker's
+# pidfile exists -- so the pool is guaranteed unmarked at candidate-pick time
+# on any runner speed. Writing the marker earlier would race worktree/branch
+# setup and let the plan stage's OWN (already-correct, Issue #155) pool-pick
+# see it first, never actually exercising the crash/timeout path under test.
+pool_timeout_call_seen=0
+for _ in $(seq 1 60); do
+  grep -Fq -- '--sandbox read-only' "$FAKE_GH_ROOT/codex-calls" 2>/dev/null && { pool_timeout_call_seen=1; break; }
   sleep 0.5
 done
-[[ -n $pool_timeout_worker_pid ]] || { kill "$pool_timeout_sup_pid" 2>/dev/null; wait "$pool_timeout_sup_pid" 2>/dev/null; fail 'worker was not claimed before the pool-exhaustion timeout test'; }
+[[ $pool_timeout_call_seen == 1 ]] || { kill "$pool_timeout_sup_pid" 2>/dev/null; wait "$pool_timeout_sup_pid" 2>/dev/null; fail 'the plan stage never reached its (now sleeping) provider call before the pool-exhaustion timeout test'; }
 mkdir -p "$state_root/pools/codex"
 printf '%s\n' "$(( $(date +%s) + 1800 ))" > "$state_root/pools/codex/exhausted"
 printf '%s\n' "$(($(date +%s) - 9))" > "$state_root/workers/54.started"
@@ -3890,11 +3897,6 @@ if grep -Eq '^54 failed' "$state"; then fail 'a hang correlated with pool exhaus
 # agentic-loop:recovered path may be the one that actually observes the
 # correlation first; both record pool-exhaustion=1 and neither burns attempts,
 # which is the guarantee under test here -- not which internal path wins.
-echo "=== DEBUG STATE ==="; cat "$state"
-echo "=== DEBUG COMMENTS ==="; cat "$FAKE_GH_ROOT/$state_key.comments"
-echo "=== DEBUG POOLS ==="; find "$state_root/pools" -type f -print -exec cat {} \; 2>&1
-echo "=== DEBUG ATTEMPTS ==="; find "$state_root/attempts" -type f 2>&1
-echo "=== DEBUG CONFIG ==="; cat "$target/.agentic-loop.toml"
 assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'pool-exhaustion=1' 'pool-exhaustion-correlated timeout was not recorded as environment-caused'
 [[ ! -e $state_root/attempts/issue-54 ]] || fail 'attempts counter was not cleared for a pool-exhaustion-correlated hang'
 rm -rf "$state_root/pools"
