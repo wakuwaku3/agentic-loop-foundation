@@ -219,6 +219,55 @@ agent_provider_usage_state() {
 
 agent_pool_marker() { printf '%s/pools/%s/exhausted' "$STATE_ROOT" "$(agent_pool_sanitize "$1")"; }
 
+# Human-facing recovery basis for the current marker: reset (provider-stated
+# instant honored as-is), probe (usage measurement is available and still says
+# exhausted, so the flat re-check cadence is a real re-probe, not a guess), or
+# backoff (neither is available, so the pause grows -- see agent_pool_streak_*
+# below). status reads this to show *why* a resume time is what it is
+# (Issue #158 completion criterion: show recovery ETA/basis).
+agent_pool_basis_file() { printf '%s/pools/%s/basis' "$STATE_ROOT" "$(agent_pool_sanitize "$1")"; }
+
+agent_pool_basis_get() {
+  local file basis; file=$(agent_pool_basis_file "$1")
+  [[ -r $file ]] && read -r basis < "$file"
+  printf '%s' "${basis:-backoff}"
+}
+
+agent_pool_basis_set() {
+  local pool=$1 basis=$2 file; file=$(agent_pool_basis_file "$pool")
+  mkdir -p "$(dirname "$file")"
+  printf '%s\n' "$basis" > "$file"
+}
+
+# Consecutive same-pool re-exhaustion count (Git-ignored, numeric only), used
+# solely to grow the pause when a fresh mark has neither a provider-stated
+# reset nor a usage measurement to confirm real recovery (Issue #158): a
+# provider with no agent_provider_usage_percent case (e.g. claude today) would
+# otherwise repeat the flat EXHAUSTION_PAUSE_SECONDS forever -- mark, one
+# blind retry, still exhausted, remark, forever -- instead of backing off.
+# Cleared on a provider-stated reset, a measured recovery, or a genuine
+# successful stage run on the pool; never cleared by the blind retry itself,
+# so a retry that fails again keeps growing the pause.
+agent_pool_streak_file() { printf '%s/pools/%s/streak' "$STATE_ROOT" "$(agent_pool_sanitize "$1")"; }
+
+agent_pool_streak_get() {
+  local file n; file=$(agent_pool_streak_file "$1")
+  [[ -r $file ]] && read -r n < "$file"
+  [[ $n =~ ^[0-9]+$ ]] && printf '%s' "$n" || printf '0'
+}
+
+agent_pool_streak_clear() { rm -f "$(agent_pool_streak_file "$1")"; }
+
+agent_pool_streak_bump() {
+  local pool=$1 n file
+  n=$(agent_pool_streak_get "$pool")
+  n=$((n + 1))
+  file=$(agent_pool_streak_file "$pool")
+  mkdir -p "$(dirname "$file")"
+  printf '%s\n' "$n" > "$file"
+  printf '%s' "$n"
+}
+
 # Best-effort parse of a provider-stated reset instant into epoch seconds.
 # Accepts ISO-8601 (…Z) and Codex-style "try again at Aug 20th, 2026 9:27 PM".
 # Returns non-zero when nothing parseable is found.
@@ -274,6 +323,21 @@ agent_pool_marker_active() {
 }
 
 
+# Whether ANY declared pool is currently marked exhausted -- a weaker signal
+# than exhaustion_note_pause's "every candidate pool is unavailable" (which
+# gates new claims), but enough to treat a correlated worker crash/hang/lease
+# expiry as environment-caused rather than a genuine task failure, so it does
+# not burn the Issue's retry budget (Issue #158 root cause: "crash / timeout
+# は枯渇保護を通らない"). Never touches the usage API (pure marker reads).
+agent_any_pool_marker_active() {
+  local pool
+  for pool in $(agent_all_pools); do
+    agent_pool_marker_active "$pool" && return 0
+  done
+  return 1
+}
+
+
 # Usage-based recovery probe: true when at least one provider of the pool is
 # measurably recovered and none is measurably exhausted. Unmeasurable providers
 # do not count as recovered (fail closed while a marker is held).
@@ -304,7 +368,10 @@ agent_pool_usage_still_exhausted() {
 # always binding (provider-stated multi-day resets must not be cut short by a
 # stale session-log "recovered" reading). After resume_epoch: clear on measured
 # recovery or unreadable usage (retry); if usage is still exhausted, extend the
-# marker by EXHAUSTION_PAUSE_SECONDS and stay exhausted. Returns 0 when exhausted.
+# marker by EXHAUSTION_PAUSE_SECONDS and stay exhausted. A real usage probe
+# (still-exhausted or recovered) is never a blind guess, so it also clears the
+# backoff streak: growth is reserved for pools no provider can measure
+# (Issue #158). Returns 0 when exhausted.
 agent_pool_exhausted() {
   local pool=$1 marker resume now
   marker=$(agent_pool_marker "$pool")
@@ -316,14 +383,20 @@ agent_pool_exhausted() {
   fi
   if agent_pool_usage_still_exhausted "$pool"; then
     printf '%s\n' "$(( now + EXHAUSTION_PAUSE_SECONDS ))" > "$marker"
+    agent_pool_basis_set "$pool" probe
+    agent_pool_streak_clear "$pool"
     return 0
   fi
   if agent_pool_usage_recovered "$pool"; then
-    rm -f "$marker"
+    rm -f "$marker" "$(agent_pool_basis_file "$pool")"
+    agent_pool_streak_clear "$pool"
     return 1
   fi
   # resume_epoch reached and usage unreadable: allow a single retry attempt.
-  rm -f "$marker"
+  # The streak (if any) is left untouched -- it is only cleared by a genuine
+  # success or a real usage probe above, so a retry that fails again still
+  # grows the next pause (see agent_mark_pool_exhausted).
+  rm -f "$marker" "$(agent_pool_basis_file "$pool")"
   return 1
 }
 
@@ -331,14 +404,19 @@ agent_pool_exhausted() {
 # Record that a pool's quota is spent so the picker skips it and the supervisor
 # pauses claiming only when every pool becomes unavailable. Optional second
 # argument is a result file path or free-form diagnostic text; when it names a
-# concrete reset instant, that epoch is preferred over the short default pause.
-# An existing later resume_epoch is never shortened.
+# concrete reset instant, that epoch is preferred and honored as-is (no
+# backoff -- the provider already told us when). Otherwise back off
+# exponentially from EXHAUSTION_PAUSE_SECONDS by the pool's consecutive
+# re-exhaustion streak, capped at EXHAUSTION_BACKOFF_MAX_SECONDS, so a pool no
+# provider can measure (e.g. claude has no agent_provider_usage_percent case)
+# does not repeat the same short pause forever after every blind retry fails
+# again (Issue #158; see docs/decisions/0012, 0027). An existing later
+# resume_epoch is never shortened.
 agent_mark_pool_exhausted() {
-  local pool=$1 source=${2:-} marker resume now parsed='' existing='' text=''
+  local pool=$1 source=${2:-} marker resume now parsed='' existing='' text='' basis streak shift
   marker=$(agent_pool_marker "$pool")
   mkdir -p "$(dirname "$marker")"
   now=$(date +%s)
-  resume=$((now + EXHAUSTION_PAUSE_SECONDS))
   if [[ -n $source ]]; then
     if [[ -f $source && -r $source ]]; then
       text=$(cat "$source" 2>/dev/null || true)
@@ -346,9 +424,17 @@ agent_mark_pool_exhausted() {
       text=$source
     fi
     parsed=$(agent_parse_reset_epoch "$text" 2>/dev/null || true)
-    if [[ $parsed =~ ^[0-9]+$ ]] && (( parsed > resume )); then
-      resume=$parsed
-    fi
+  fi
+  if [[ $parsed =~ ^[0-9]+$ ]]; then
+    resume=$parsed
+    basis=reset
+    agent_pool_streak_clear "$pool"
+  else
+    streak=$(agent_pool_streak_bump "$pool")
+    shift=$(( streak - 1 )); (( shift > 10 )) && shift=10
+    resume=$(( now + EXHAUSTION_PAUSE_SECONDS * (1 << shift) ))
+    (( resume > now + EXHAUSTION_BACKOFF_MAX_SECONDS )) && resume=$(( now + EXHAUSTION_BACKOFF_MAX_SECONDS ))
+    basis=backoff
   fi
   if [[ -r $marker ]]; then
     read -r existing < "$marker" || true
@@ -357,6 +443,7 @@ agent_mark_pool_exhausted() {
     fi
   fi
   printf '%s\n' "$resume" > "$marker"
+  agent_pool_basis_set "$pool" "$basis"
 }
 
 
@@ -792,6 +879,10 @@ run_stage_candidates() {
       STAGE_RC=3
       return 3
     fi
+    # A genuine success is real, positive evidence the pool works right now --
+    # reset its backoff streak so a later, unrelated exhaustion starts from the
+    # short default pause again instead of continuing to grow (Issue #158).
+    agent_pool_streak_clear "$CAND_POOL"
     return 0
   done
 }

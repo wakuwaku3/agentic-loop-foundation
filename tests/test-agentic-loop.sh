@@ -2528,6 +2528,86 @@ unset CODEX_HOME
 rm -rf "$state_root/pools" "$codex_home_reset"
 rm -f "$state_root/agent-exhausted" "$state_root/all-pools-paused"
 
+# --- Exponential backoff for a pool no provider can measure (Issue #158) ---
+# claude has no agent_provider_usage_percent case, so its pool can never
+# confirm real recovery via a usage probe after resume_epoch: a repeated
+# re-exhaustion must grow the pause (not repeat the flat
+# EXHAUSTION_PAUSE_SECONDS forever), capped, and reset by a genuine success.
+write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=3 STOP_TIMEOUT=10 STALE_DAYS=30
+rm -rf "$state_root/pools"
+rm -f "$state_root/all-pools-paused" "$state_root/agent-exhausted" "$FAKE_GH_ROOT/claude-json-count"
+printf '330 queued open none 2026-01-01T00:00:00Z\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+AGENT_PROVIDER=claude AGENTIC_LOOP_RUN_ONCE=1 FAKE_CLAUDE_SLEEP=1 \
+  FAKE_CLAUDE_IS_ERROR=1 FAKE_CLAUDE_API_ERROR_STATUS=429 \
+  FAKE_CLAUDE_RESULT='Claude AI usage limit reached' \
+  "$target/bin/agentic-loop" _supervise
+[[ -r $state_root/pools/claude/exhausted ]] || fail 'first claude exhaustion did not mark the pool'
+first_resume=$(cat "$state_root/pools/claude/exhausted")
+now1=$(date +%s)
+(( first_resume >= now1 + 1800 - 5 && first_resume <= now1 + 1800 + 30 )) \
+  || fail "first claude exhaustion should use the flat default pause (got $first_resume, now $now1)"
+[[ -r $state_root/pools/claude/basis && $(cat "$state_root/pools/claude/basis") == backoff ]] \
+  || fail 'first claude exhaustion did not record basis=backoff'
+# Rewind the marker so resume_epoch is already past, then re-exhaust: the
+# streak must grow the NEXT pause instead of repeating the flat 1800s.
+printf '%s\n' "$(( $(date +%s) - 10 ))" > "$state_root/pools/claude/exhausted"
+printf '331 queued open none 2026-01-01T00:00:00Z\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+AGENT_PROVIDER=claude AGENTIC_LOOP_RUN_ONCE=1 FAKE_CLAUDE_SLEEP=1 \
+  FAKE_CLAUDE_IS_ERROR=1 FAKE_CLAUDE_API_ERROR_STATUS=429 \
+  FAKE_CLAUDE_RESULT='Claude AI usage limit reached' \
+  "$target/bin/agentic-loop" _supervise
+[[ -r $state_root/pools/claude/streak && $(cat "$state_root/pools/claude/streak") == 2 ]] \
+  || fail 'consecutive claude re-exhaustion did not grow the streak to 2'
+second_resume=$(cat "$state_root/pools/claude/exhausted")
+now2=$(date +%s)
+(( second_resume >= now2 + 3600 - 5 )) \
+  || fail "second consecutive claude exhaustion did not back off beyond the flat pause (got $second_resume, now $now2)"
+# A large existing streak must never push the pause past the configured cap.
+printf '20\n' > "$state_root/pools/claude/streak"
+printf '%s\n' "$(( $(date +%s) - 10 ))" > "$state_root/pools/claude/exhausted"
+printf '332 queued open none 2026-01-01T00:00:00Z\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+AGENT_PROVIDER=claude AGENTIC_LOOP_RUN_ONCE=1 FAKE_CLAUDE_SLEEP=1 \
+  FAKE_CLAUDE_IS_ERROR=1 FAKE_CLAUDE_API_ERROR_STATUS=429 \
+  FAKE_CLAUDE_RESULT='Claude AI usage limit reached' \
+  "$target/bin/agentic-loop" _supervise
+capped_resume=$(cat "$state_root/pools/claude/exhausted")
+now3=$(date +%s)
+(( capped_resume <= now3 + 21600 + 30 )) \
+  || fail "claude backoff exceeded the configured ceiling (got $capped_resume, now $now3)"
+# A genuine success on the pool is real evidence it works, so it resets the
+# streak -- an unrelated later exhaustion must start from the short default
+# pause again, not continue growing from where a past, unrelated streak left
+# off.
+rm -f "$state_root/pools/claude/exhausted"
+printf '333 queued open none 2026-01-01T00:00:00Z\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+AGENT_PROVIDER=claude AGENTIC_LOOP_RUN_ONCE=1 FAKE_CLAUDE_SLEEP=1 \
+  FAKE_CLAUDE_RESULT='AGENTIC_LOOP_RESULT=completed' \
+  "$target/bin/agentic-loop" _supervise
+grep -Eq '^333 completed closed' "$state" || fail 'claude success did not complete'
+[[ ! -r $state_root/pools/claude/streak ]] || fail 'a genuine success did not clear the backoff streak'
+rm -rf "$state_root/pools"
+rm -f "$state_root/all-pools-paused" "$state_root/agent-exhausted" "$FAKE_GH_ROOT/claude-json-count"
+
+# --- status shows pool recovery ETA and basis (Issue #158) ---
+write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=30 STOP_TIMEOUT=10 STALE_DAYS=30
+rm -rf "$state_root/pools"
+mkdir -p "$state_root/pools/codex"
+status_resume_at=$(( $(date +%s) + 5400 ))
+printf '%s\n' "$status_resume_at" > "$state_root/pools/codex/exhausted"
+printf 'backoff\n' > "$state_root/pools/codex/basis"
+status_pool_text=$("$target/bin/agentic-loop" status)
+status_resume_human=$(date -d "@$status_resume_at" '+%Y-%m-%d %H:%M:%S')
+grep -Fq "pool=codex 枯渇（回復予定=$status_resume_human, 根拠=実測不能のため指数backoff）" <<< "$status_pool_text" \
+  || fail 'status text did not show the pool recovery ETA and basis'
+status_pool_json=$("$target/bin/agentic-loop" status --format json)
+grep -Fq "{\"pool\":\"codex\",\"exhausted\":true,\"resume_at\":$status_resume_at,\"basis\":\"backoff\"}" <<< "$status_pool_json" \
+  || fail 'status --format json did not report the pool recovery ETA and basis'
+rm -rf "$state_root/pools"
+
 # --- Change-scope conflict avoidance (Issue #44) ---
 
 write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=3 LEASE_SECONDS=3 STOP_TIMEOUT=10 STALE_DAYS=30
@@ -3603,6 +3683,27 @@ grep -Eq '^92 queued open$' "$state" || fail 'a crashed worker under the attempt
 assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:recovered' 'under-limit recovery was not recorded as a normal requeue'
 rm -f "$state_root/attempts/issue-91" "$state_root/attempts/issue-92"
 
+# A lease-death that coincides with an active pool-exhaustion marker is
+# treated as environment-caused (provider stalling/erroring under its own
+# rate/usage limit), never as proof the task itself is unresolvable: attempts
+# are cleared and the Issue is requeued even past MAX_ATTEMPTS, instead of
+# being escalated to agent:failed -> agent:parked (Issue #158 root cause:
+# "crash / timeout は枯渇保護を通らない").
+write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=3 STOP_TIMEOUT=10 STALE_DAYS=30 MAX_ATTEMPTS=2 RETRY_COOLDOWN_SECONDS=0
+printf '93 running open\n' > "$state"
+printf '93 <!-- agentic-loop:lease worker=dead heartbeat=1 expires=1 -->\n' > "$FAKE_GH_ROOT/$state_key.comments"
+mkdir -p "$state_root/attempts"; printf '2\t0\n' > "$state_root/attempts/issue-93"
+mkdir -p "$state_root/pools/codex"
+printf '%s\n' "$(( $(date +%s) + 1800 ))" > "$state_root/pools/codex/exhausted"
+rm -f "$state_root/stop.requested"
+rm -f "$closes"
+AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _supervise
+grep -Eq '^93 queued open' "$state" || fail 'a lease-death correlated with pool exhaustion was parked instead of requeued'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:recovered pool-exhaustion=1' 'pool-exhaustion-correlated recovery was not recorded distinctly'
+[[ ! -e $state_root/attempts/issue-93 ]] || fail 'attempts counter was not cleared for a pool-exhaustion-correlated lease death'
+[[ ! -r "$closes" ]] || ! grep -Fq $'^93\t' "$closes" || fail 'a pool-exhaustion-correlated lease death must never be closed'
+rm -rf "$state_root/pools"
+
 # Recovery also runs inside the poll loop, not only at startup: a running Issue
 # whose worker died (expired lease) is recovered and processed while the
 # supervisor keeps running, instead of remaining stuck at agent:running forever.
@@ -3748,6 +3849,45 @@ wait "$hang_sup_pid" 2>/dev/null || true
 rm -f "$state_root/stop.requested"
 [[ $hang_queue_progressed == 1 ]] || fail 'a hung worker under max_workers=1 blocked the rest of the queue instead of freeing the slot'
 grep -Eq '^50 failed' "$state" || fail 'the hung Issue was reclaimed before its retry cooldown elapsed'
+
+# A hang that coincides with an active pool-exhaustion marker is treated as
+# environment-caused (the provider likely stalling under its own rate/usage
+# limit, e.g. a blocked long-poll that never returns to hit the ordinary
+# post-hoc exhaustion classification), not as proof this Issue's task itself
+# hung: it is requeued directly without burning attempts, instead of being
+# failed (Issue #158 root cause: "crash / timeout は枯渇保護を通らない"). The
+# pool marker is written only after the worker is claimed, so the claim itself
+# is unaffected by the exhaustion pause gate.
+write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=300 STOP_TIMEOUT=10 STALE_DAYS=30 MAX_ATTEMPTS=3 RETRY_COOLDOWN_SECONDS=600 WORKER_TIMEOUT_SECONDS=8
+printf '54 queued open none 2026-01-01T00:00:00Z\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+rm -f "$state_root/stop.requested"
+rm -rf "$state_root/pools"
+FAKE_CODEX_SLEEP=60 "$target/bin/agentic-loop" _supervise &
+pool_timeout_sup_pid=$!
+pool_timeout_worker_pid=''
+for _ in $(seq 1 40); do
+  if [[ -r $state_root/workers/54.pid ]]; then pool_timeout_worker_pid=$(cat "$state_root/workers/54.pid"); break; fi
+  sleep 0.5
+done
+[[ -n $pool_timeout_worker_pid ]] || { kill "$pool_timeout_sup_pid" 2>/dev/null; wait "$pool_timeout_sup_pid" 2>/dev/null; fail 'worker was not claimed before the pool-exhaustion timeout test'; }
+mkdir -p "$state_root/pools/codex"
+printf '%s\n' "$(( $(date +%s) + 1800 ))" > "$state_root/pools/codex/exhausted"
+printf '%s\n' "$(($(date +%s) - 9))" > "$state_root/workers/54.started"
+pool_timeout_requeued=0
+for _ in $(seq 1 40); do
+  grep -Eq '^54 queued open' "$state" && { pool_timeout_requeued=1; break; }
+  sleep 0.5
+done
+kill -TERM "$pool_timeout_sup_pid" 2>/dev/null || true
+wait "$pool_timeout_sup_pid" 2>/dev/null || true
+rm -f "$state_root/stop.requested"
+[[ $pool_timeout_requeued == 1 ]] || fail 'a hang correlated with pool exhaustion was not requeued directly'
+if grep -Eq '^54 failed' "$state"; then fail 'a hang correlated with pool exhaustion must not fail the Issue'; fi
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:worker-timeout' 'pool-exhaustion-correlated timeout was not audited on the Issue'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'pool-exhaustion=1' 'pool-exhaustion-correlated timeout comment did not record the correlation'
+[[ ! -e $state_root/attempts/issue-54 ]] || fail 'attempts counter was not cleared for a pool-exhaustion-correlated hang'
+rm -rf "$state_root/pools"
 
 # A worker that legitimately completes within the timeout is never flagged or
 # killed: a large default must not misfire on ordinary work.
