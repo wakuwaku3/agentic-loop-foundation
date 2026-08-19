@@ -507,10 +507,39 @@ case "${1:-} ${2:-}" in
         # is missing or stale (Issue #53).
         awk -v n="$issue" '$1 == n && index($0, "agentic-loop:traceability schema=1") {id=NR} END{if (id) print id}' "$comments" 2>/dev/null || true
       elif [[ $method == GET && $* == *'agentic-loop:preflight-approved'* ]]; then
-        # preflight.sh's preflight_approved (Issue #58): count comments that
-        # carry both the approval marker and this exact envelope token.
-        token_pattern=$(grep -oE 'token=[0-9a-f]{12}' <<< "$*" | tail -n 1)
-        awk -v n="$issue" -v t="$token_pattern" '$1 == n && index($0, "agentic-loop:preflight-approved") && index($0, t) {c++} END{print c+0}' "$comments" 2>/dev/null
+        # preflight.sh's preflight_approved (Issue #197): emulate the real
+        # `since`-bounded scan. Each comment's mock `updated_at` is a real
+        # ISO-8601 timestamp derived from its 1-based line number in
+        # $comments, one minute apart, so lexical string comparison sorts
+        # the same as chronological order -- exactly like the production
+        # `-f since=` filter, which also compares ISO-8601 strings. Rows
+        # at/after the passed `since` cursor are included (inclusive, the
+        # safe-side choice regardless of whether the real GitHub API treats
+        # `since` as inclusive or exclusive), so a warm cache (a `since`
+        # from an earlier call) only ever re-scans genuinely new comments,
+        # not the Issue's full history.
+        since_arg=''
+        for arg in "$@"; do [[ $arg == since=* ]] && since_arg=${arg#since=}; done
+        [[ $since_arg =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] || since_arg='1970-01-01T00:00:00Z'
+        pf_rows=$(awk -v n="$issue" -v since="$since_arg" '
+          $1 == n {
+            ts = sprintf("1970-01-01T%02d:%02d:00Z", int(NR / 60), NR % 60)
+            if (ts < since) next
+            body = $0
+            sub(/^[^ ]+ /, "", body)
+            print "u\t" ts
+            if (index(body, "agentic-loop:preflight-approved") > 0 && match(body, /token=[0-9a-f]{12}/)) {
+              print "t\t" substr(body, RSTART + 6, 12)
+            }
+          }
+        ' "$comments" 2>/dev/null)
+        # Test-only observability (Issue #197): one line per call recording
+        # how many comment rows this scan actually processed, the direct
+        # proxy for the transferred data volume a real GitHub response would
+        # carry for the same `since` boundary.
+        if [[ -z $pf_rows ]]; then pf_row_count=0; else pf_row_count=$(wc -l <<< "$pf_rows"); fi
+        printf '%s\n' "$pf_row_count" >> "$FAKE_GH_ROOT/preflight-approved-rows.log"
+        [[ -z $pf_rows ]] || printf '%s\n' "$pf_rows"
       elif [[ $* == *agentic-loop:claim* ]]; then
         awk -v n="$issue" '$1 == n && index($0, "agentic-loop:claim") {body=$0; sub(/^[^ ]+ /, "", body); printf "%s\t%s", NR, body | "base64 -w0"; close("base64 -w0"); printf "\n"}' "$comments" 2>/dev/null || true
       elif [[ $* == *needs-input* ]]; then
@@ -5024,6 +5053,44 @@ grep -Eq '^7118 completed closed' "$state" || fail 'an approved escalation signa
 ! git -C "$target" show-ref --verify --quiet refs/heads/agent/issue-7118 || fail 'an approved escalation did not remove its branch'
 
 cp "$capability_orig" "$target/.agentic-loop/capabilities.toml"
+
+# 14) preflight_approved's comment scan does not grow with the Issue's
+# lifetime comment count (Issue #197): a re-check after approval only ever
+# re-scans comments posted since the last check, not the whole history.
+# `preflight-approved-rows.log` (populated by the fake gh's mock, one line per
+# `issues/N/comments` GET this endpoint handles) reports how many comment rows
+# each call actually processed -- the direct proxy for transferred data volume
+# a real paginated GitHub response would carry.
+pf_scan_scaling_scenario() {
+  local issue=$1 filler_count=$2 i
+  local rows_log="$FAKE_GH_ROOT/preflight-approved-rows.log"
+  pf_risks=$(preflight_risks_json security "$(preflight_risk_json security high 'scan境界test')")
+  pf_record=$(preflight_record_json "$issue" "$pf_risks" '{"scope":"","tests":[],"external_operations":[],"rollback":""}' '{"required":true,"triggers":["security"]}')
+  pf_token=$(preflight_token_for "$issue" "$pf_record")
+  write_queue_config "$target/.agentic-loop.toml" PREFLIGHT=warn TRACEABILITY=off
+  printf '%s running open\n' "$issue" > "$state"
+  : > "$FAKE_GH_ROOT/$state_key.comments"
+  for ((i = 1; i <= filler_count; i++)); do
+    printf '%s filler comment %s of a long Issue history\n' "$issue" "$i" >> "$FAKE_GH_ROOT/$state_key.comments"
+  done
+  : > "$rows_log"
+  FAKE_CODEX_RESULT="$(preflight_plan_body "$pf_record")" "$target/bin/agentic-loop" _worker "$issue" "preflight-scan-scaling-worker-$issue" >/dev/null 2>&1
+  grep -Eq "^$issue needs-input open" "$state" || fail "scan-scaling setup: the initial gate for issue $issue ($filler_count filler comments) did not fire"
+  cold_rows=$(cat "$rows_log") || fail "scan-scaling setup: no preflight_approved scan was recorded for issue $issue's initial gate"
+  [[ $cold_rows -ge $filler_count ]] || fail "scan-scaling setup: the initial (cache-cold) scan for issue $issue processed fewer rows ($cold_rows) than its $filler_count filler comments"
+  "$target/bin/agentic-loop" preflight "$issue" --approve --token "$pf_token" >/dev/null 2>&1 || fail "scan-scaling setup: preflight --approve failed for issue $issue"
+  printf '%s running open\n' "$issue" > "$state"
+  : > "$rows_log"
+  FAKE_CODEX_RESULT="$(preflight_plan_body "$pf_record")" "$target/bin/agentic-loop" _worker "$issue" "preflight-scan-scaling-approved-worker-$issue" >/dev/null 2>&1
+  grep -Eq "^$issue completed closed" "$state" || fail "an approved envelope did not complete for issue $issue after $filler_count filler comments"
+  warm_rows=$(cat "$rows_log") || fail "scan-scaling: no preflight_approved scan was recorded for issue $issue's post-approval re-check"
+  printf '%s\n' "$warm_rows"
+}
+pf_cold_and_warm_10=$(pf_scan_scaling_scenario 7120 10) || fail 'preflight_approved scan-scaling scenario (10 filler comments) failed'
+pf_cold_and_warm_100=$(pf_scan_scaling_scenario 7121 100) || fail 'preflight_approved scan-scaling scenario (100 filler comments) failed'
+[[ $pf_cold_and_warm_10 -le 10 ]] || fail "preflight_approved's post-approval re-check processed $pf_cold_and_warm_10 rows for only 10 filler comments -- it re-scanned more than the Issue's small delta"
+[[ $pf_cold_and_warm_100 -le 10 ]] || fail "preflight_approved's post-approval re-check processed $pf_cold_and_warm_100 rows for 100 filler comments -- it re-scanned close to the full Issue history instead of only the delta since its last check"
+[[ $pf_cold_and_warm_10 -eq $pf_cold_and_warm_100 ]] || fail "preflight_approved's post-approval re-check scaled with the Issue's comment count (10 filler comments -> $pf_cold_and_warm_10 rows, 100 filler comments -> $pf_cold_and_warm_100 rows); it should cost the same regardless of history size"
 
 # doctor rejects an invalid preflight value.
 cp "$target/.agentic-loop.toml" "$target/.agentic-loop.toml.valid"

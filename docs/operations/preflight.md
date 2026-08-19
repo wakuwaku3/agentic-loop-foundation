@@ -108,4 +108,4 @@ execは1 turnで実装からPRのmergeまでを完遂するため（[worker resu
 
 ## 費用・秘密
 
-`preflight_signal_class`はローカルファイルだけを読み、追加のGitHub API呼び出しはゼロ。gateが発火した場合のみ、承認marker検索（REST(core) 1回、paginated）とcomment投稿（1回）が発生する。GraphQLは使わない。recordは秘密走査・サイズ上限・改行/backtick禁止のreason/missingを通過したものだけがcommentに転記され、invalidなrecordの本体は一切転記しない。
+`preflight_signal_class`はローカルファイルだけを読み、追加のGitHub API呼び出しはゼロ。gateが発火した場合のみ、承認marker検索とcomment投稿（1回）が発生する。承認marker検索は`$STATE_ROOT/preflight-approvals/issue-<N>`のローカルcache（発見済みtokenの集合と、これまでに観測した最大`updated_at`を示す`since`カーソル）を介す。同一tokenをcache済みなら追加のGitHub API呼び出しはゼロ（cache hit）。cache missの場合はREST(core)を`since`で境界を切って`--paginate`し、前回チェック以降のcommentだけを転送する。ただし境界の取りこぼしを避けるため問い合わせには`since`カーソルから60秒引いた値を使う（GitHubの`since`が排他だった場合の同秒レース対策）。host×Issueの組ごとに最初の1回だけは`since`が既定値（epoch）のため全件走査になる（[ADR 0020](../decisions/0020-change-risk-preflight.md)の「tokenは失効しない」を守るため必須）。以降はcache hitかcache missの差分走査へ落ちるため、Issueのcomment件数が増えても定常状態のコストは増えない（[Issue #197](https://github.com/wakuwaku3/agentic-loop-foundation/issues/197)）。cache fileの削除は常に安全で、次回の走査が全件走査へ戻るだけである。GraphQLは使わない。recordは秘密走査・サイズ上限・改行/backtick禁止のreason/missingを通過したものだけがcommentに転記され、invalidなrecordの本体は一切転記しない。

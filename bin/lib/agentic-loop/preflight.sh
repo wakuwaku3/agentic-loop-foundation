@@ -258,15 +258,84 @@ preflight_compute_token() {
 
 
 # Whether an authorized operator has posted `bin/agentic-loop preflight
-# --approve` for this exact envelope token (see cmd_preflight). One REST(core)
-# read, paginated across every comment (the token, not recency, decides
-# validity -- an approval never expires on its own).
+# --approve` for this exact envelope token (see cmd_preflight). The token,
+# not recency, decides validity -- an approval never expires on its own --
+# but re-scanning the Issue's full comment history on every check grows with
+# the Issue's lifetime comment count (Issue #197). A local cache
+# (preflight_approval_cache_*) remembers every envelope token already found
+# approved (a cache hit costs zero API calls) plus a `since` cursor derived
+# from the newest `updated_at` observed so far, so a cache miss only ever
+# re-scans comments posted after the last check, not the whole Issue. The
+# cache never prunes tokens or rewinds the cursor on its own -- doing so
+# could silently un-approve an envelope, breaking ADR 0020's "a token never
+# expires" guarantee. Deleting the cache file is always safe: it just falls
+# back to a fresh full-history scan on the next check.
+preflight_approval_cache_file() { printf '%s/preflight-approvals/issue-%s' "$STATE_ROOT" "$1"; }
+
+
+preflight_approval_cache_read() {
+  local file=$1
+  local -g PREFLIGHT_CACHE_SINCE PREFLIGHT_CACHE_TOKENS
+  PREFLIGHT_CACHE_SINCE='1970-01-01T00:00:00Z'
+  PREFLIGHT_CACHE_TOKENS=''
+  [[ -r $file ]] || return 0
+  local kind value
+  while IFS=$'\t' read -r kind value; do
+    case $kind in
+      since) [[ -n $value ]] && PREFLIGHT_CACHE_SINCE=$value ;;
+      token) PREFLIGHT_CACHE_TOKENS+="$value"$'\n' ;;
+    esac
+  done < "$file"
+  return 0
+}
+
+
+# GitHub's `since` filter is exclusive of the exact instant supplied; storing
+# the raw max `updated_at` as the cursor but querying with it verbatim could
+# permanently miss an approval comment posted the same second as the cursor.
+# Query 60s behind the stored cursor (never below the epoch default) so a
+# handful of comments are safely re-scanned instead of an approval going
+# missing forever (ADR 0020: a token never expires on its own).
+preflight_approval_query_since() {
+  local cursor=$1
+  [[ $cursor == '1970-01-01T00:00:00Z' ]] && { printf '%s' "$cursor"; return 0; }
+  date -u -d "$cursor - 60 seconds" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || printf '%s' "$cursor"
+}
+
+
+preflight_approval_cache_write() {
+  local file=$1 since=$2 tokens=$3 tmp
+  mkdir -p "$(dirname "$file")"
+  tmp="$file.$$"
+  {
+    printf 'since\t%s\n' "$since"
+    sed '/^$/d' <<< "$tokens" | sort -u | sed 's/^/token\t/'
+  } > "$tmp"
+  mv "$tmp" "$file"
+}
+
+
 preflight_approved() {
-  local issue=$1 token=$2 found
+  local issue=$1 token=$2
   [[ $token =~ ^[0-9a-f]{12}$ ]] || return 1
-  # workload-unbounded: walks every comment on this Issue every time, growth proportional to its comment count; bound=comment count on this Issue; track=#197
-  found=$(repo_api "issues/$issue/comments" --method GET -f per_page=100 --paginate --jq '[.[] | select((.body | contains("agentic-loop:preflight-approved")) and (.body | contains("token='"$token"'")))] | length' 2>/dev/null || printf 0)
-  [[ $found =~ ^[1-9][0-9]*$ ]]
+  local cache_file since query_since tokens rows kind value new_since='' new_tokens=''
+  cache_file=$(preflight_approval_cache_file "$issue")
+  preflight_approval_cache_read "$cache_file"
+  since=$PREFLIGHT_CACHE_SINCE
+  tokens=$PREFLIGHT_CACHE_TOKENS
+  grep -Fxq "$token" <<< "$tokens" && return 0
+  query_since=$(preflight_approval_query_since "$since")
+  rows=$(repo_api "issues/$issue/comments" --method GET -f per_page=100 -f since="$query_since" --paginate --jq '.[] | ("u\t" + (.updated_at // "")), (select(.body // "" | contains("agentic-loop:preflight-approved")) | (.body | scan("token=[0-9a-f]{12}")) | "t\t" + .[6:])' 2>/dev/null) || return 1
+  while IFS=$'\t' read -r kind value; do
+    case $kind in
+      u) [[ -n $value && ( -z $new_since || $value > $new_since ) ]] && new_since=$value ;;
+      t) new_tokens+="$value"$'\n' ;;
+    esac
+  done <<< "$rows"
+  [[ -n $new_since ]] || new_since=$since
+  tokens=$(printf '%s\n%s' "$tokens" "$new_tokens" | sed '/^$/d' | sort -u)
+  preflight_approval_cache_write "$cache_file" "$new_since" "$tokens"
+  grep -Fxq "$token" <<< "$tokens"
 }
 
 
