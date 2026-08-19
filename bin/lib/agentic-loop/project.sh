@@ -329,6 +329,7 @@ snapshot_issue_has_state() {
 clear_supervisor_snapshot() {
   [[ -z $SUPERVISOR_SNAPSHOT ]] || rm -f "$SUPERVISOR_SNAPSHOT"
   SUPERVISOR_SNAPSHOT=''
+  clear_running_issue_numbers_cache
 }
 
 

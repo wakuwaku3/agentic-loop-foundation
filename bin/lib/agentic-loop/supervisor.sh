@@ -145,6 +145,7 @@ supervise() {
   # set -e.
   recover_expired || true
   enforce_worker_timeout || true
+  reap_orphan_workers || true
   rebuild_scope_cache || true
   rebuild_project_hints || true
   while :; do
@@ -164,6 +165,7 @@ supervise() {
     requeue_dependency_ready || true
     if [[ -e $STATE_ROOT/stop.requested ]]; then
       enforce_worker_timeout || true
+      reap_orphan_workers || true
       [[ $(worker_count) -eq 0 ]] && break
       sleep "$POLL_SECONDS"
       continue
@@ -171,6 +173,7 @@ supervise() {
       recover_expired || true
       drain_paused_workers || true
       enforce_worker_timeout || true
+      reap_orphan_workers || true
       reconcile_pending_project || true
       reconcile_queued_categories || true
       triage_stale_queued || true

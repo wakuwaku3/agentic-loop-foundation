@@ -68,6 +68,7 @@ doctor_collect() {
     if (( WORKER_TIMEOUT_SECONDS > 0 && WORKER_TIMEOUT_SECONDS < WORKER_TIMEOUT_MIN_SAFE_SECONDS )); then
       doctor_add warning '設定値: WORKER_TIMEOUT_SECONDS' '正常に進行中のworkerを誤って停止する恐れがあります。' "docs/operations/issue-queue.md を確認し、worker_timeout_seconds を ${WORKER_TIMEOUT_MIN_SAFE_SECONDS}秒以上、または実測の所要時間に基づく値へ見直してください。"
     fi
+    doctor_non_negative_config WORKER_ORPHAN_GRACE_SECONDS "$WORKER_ORPHAN_GRACE_SECONDS"
     doctor_enum_config UNKNOWN_SCOPE "$UNKNOWN_SCOPE" isolated exclusive open
     doctor_enum_config TRACEABILITY "$TRACEABILITY" require warn off
     if [[ $TRACEABILITY == require || $TRACEABILITY == warn || $TRACEABILITY == off ]]; then

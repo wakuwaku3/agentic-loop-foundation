@@ -331,11 +331,23 @@ status_collect_anomalies() {
   done
 
   shopt -s nullglob
-  local pidfile
+  local pidfile orphan_since orphan_elapsed orphan_detail
   for pidfile in "$STATE_ROOT"/workers/*.pid; do
     issue=$(basename "$pidfile" .pid)
     if worker_pid_live "$issue" && [[ $running_csv != *",$issue,"* ]]; then
-      anomaly_add warning worker-orphan "#$issue" 'local workerは生存していますが、GitHub上ではagent:runningではありません。'
+      orphan_since='' orphan_elapsed=''
+      if [[ -r $(worker_orphan_since_file "$issue") ]]; then
+        read -r orphan_since < "$(worker_orphan_since_file "$issue")" || orphan_since=''
+        [[ $orphan_since =~ ^[0-9]+$ ]] && orphan_elapsed=$(( $(date +%s) - orphan_since ))
+      fi
+      if (( WORKER_ORPHAN_GRACE_SECONDS == 0 )); then
+        orphan_detail='local workerは生存していますが、GitHub上ではagent:runningではありません（worker_orphan_grace_seconds=0のため自動停止は無効です）。'
+      elif [[ $orphan_elapsed =~ ^[0-9]+$ ]]; then
+        orphan_detail="local workerは生存していますが、GitHub上ではagent:runningではありません（観測 ${orphan_elapsed}秒/grace ${WORKER_ORPHAN_GRACE_SECONDS}秒。超過後の次回pollで自動停止します）。"
+      else
+        orphan_detail="local workerは生存していますが、GitHub上ではagent:runningではありません（次回pollからgrace ${WORKER_ORPHAN_GRACE_SECONDS}秒の観測を開始します）。"
+      fi
+      anomaly_add warning worker-orphan "#$issue" "$orphan_detail"
     fi
   done
   shopt -u nullglob

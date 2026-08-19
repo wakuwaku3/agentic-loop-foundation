@@ -43,7 +43,7 @@ progress_stage_valid() {
 event_append() {
   local subject=$1 code=$2 stage=${3:-}
   [[ $subject == supervisor || $subject =~ ^[0-9]+$ ]] || return 0
-  case $code in progress | claim | recover | timeout | stop | start) ;; *) return 0 ;; esac
+  case $code in progress | claim | recover | timeout | orphan | stop | start) ;; *) return 0 ;; esac
   [[ -z $stage || $stage == - ]] || progress_stage_valid "$stage" || return 0
   mkdir -p "$STATE_ROOT"
   printf '%s\t%s\t%s\t%s\n' "$(date +%s)" "$subject" "$code" "${stage:--}" >> "$EVENTS_LOG" 2>/dev/null || true
@@ -124,7 +124,7 @@ worker_elapsed_seconds() {
 # keeps updating the same durable comment instead of creating a new one (see
 # docs/decisions/0004).
 clear_worker_local() {
-  rm -f "$STATE_ROOT/workers/$1.pid" "$(lease_file "$1")" "$(worker_phase_file "$1")" "$(worker_started_file "$1")" "$(worker_resume_file "$1")" "$(worker_progress_file "$1")" "$(worker_stop_request_file "$1")" "$(worker_critical_file "$1")"
+  rm -f "$STATE_ROOT/workers/$1.pid" "$(lease_file "$1")" "$(worker_phase_file "$1")" "$(worker_started_file "$1")" "$(worker_resume_file "$1")" "$(worker_progress_file "$1")" "$(worker_stop_request_file "$1")" "$(worker_critical_file "$1")" "$(worker_orphan_since_file "$1")"
 }
 
 
@@ -150,6 +150,10 @@ worker_critical_end() { rm -f "$(worker_critical_file "$1")"; }
 worker_critical_active() { [[ -e $(worker_critical_file "$1") ]]; }
 
 worker_phase_file() { printf '%s/workers/%s.phase' "$STATE_ROOT" "$1"; }
+
+# First-observed epoch of this Issue's local worker looking orphaned (live
+# pidfile, GitHub no longer reports agent:running); see reap_orphan_workers.
+worker_orphan_since_file() { printf '%s/workers/%s.orphan-since' "$STATE_ROOT" "$1"; }
 
 
 # Create the single lease comment for this Issue and remember its id, expiry
@@ -301,6 +305,44 @@ worker_pid_live() {
 }
 
 
+# Poll-scoped memo of open agent:running Issue numbers, shared by
+# recover_expired and reap_orphan_workers so a poll issues at most one GitHub
+# list call for this set (or none when refresh_supervisor_snapshot's snapshot
+# already has it). Cleared alongside the snapshot by clear_supervisor_snapshot
+# (see project.sh) so a later poll re-fetches instead of reusing a stale list.
+# Returns failure (no output) only when a fresh fetch was required and failed
+# -- callers must not treat that the same as a genuinely empty running set.
+RUNNING_ISSUE_NUMBERS_STATE=0
+RUNNING_ISSUE_NUMBERS_VALUE=''
+
+running_issue_numbers() {
+  if (( RUNNING_ISSUE_NUMBERS_STATE == 0 )); then
+    if [[ -n $SUPERVISOR_SNAPSHOT && -r $SUPERVISOR_SNAPSHOT ]]; then
+      RUNNING_ISSUE_NUMBERS_VALUE=$(snapshot_state_rows running | cut -f1)
+      RUNNING_ISSUE_NUMBERS_STATE=1
+    elif RUNNING_ISSUE_NUMBERS_VALUE=$(
+      # workload-unbounded: one aggregate agent:running list call per poll,
+      # only when no snapshot is available yet (startup, or a prior refresh
+      # failure); bound=1 call per poll, shared by every caller via this memo.
+      repo_api issues --method GET -f state=open -f labels="$(state_label running)" -f per_page=100 --paginate --jq '.[] | select(.pull_request == null) | .number' 2>/dev/null
+    ); then
+      RUNNING_ISSUE_NUMBERS_STATE=1
+    else
+      RUNNING_ISSUE_NUMBERS_STATE=2
+      RUNNING_ISSUE_NUMBERS_VALUE=''
+    fi
+  fi
+  (( RUNNING_ISSUE_NUMBERS_STATE == 1 )) || return 1
+  [[ -n $RUNNING_ISSUE_NUMBERS_VALUE ]] && printf '%s\n' "$RUNNING_ISSUE_NUMBERS_VALUE"
+  return 0
+}
+
+clear_running_issue_numbers_cache() {
+  RUNNING_ISSUE_NUMBERS_STATE=0
+  RUNNING_ISSUE_NUMBERS_VALUE=''
+}
+
+
 # Return agent:running Issues whose worker is gone to the queue (see ADR 0003).
 # Local-first: a live local worker is adopted; a dead local worker's Issue is
 # recovered immediately without any GitHub call. When no local worker exists the
@@ -355,7 +397,7 @@ recover_expired() {
       fi
     fi
     event_append "$issue" recover -
-  done < <(snapshot_state_rows running | cut -f1 || repo_api issues --method GET -f state=open -f labels="$(state_label running)" -f per_page=100 --paginate --jq '.[] | select(.pull_request == null) | .number' 2>/dev/null || true)
+  done < <(running_issue_numbers || true)
 }
 
 
@@ -412,6 +454,97 @@ enforce_worker_timeout() {
     event_append "$issue" timeout -
   done
   shopt -u nullglob
+}
+
+
+# A worker-orphan (Issue #193) is this host's live pidfile whose Issue GitHub
+# no longer reports as agent:running (e.g. it fell back to agent:queued/failed
+# while the local provider CLI process kept running). Unlike
+# enforce_worker_timeout, GitHub's Label -- not elapsed runtime -- is the
+# signal, so this can reap an orphan long before WORKER_TIMEOUT_SECONDS (up to
+# 4h by default) would. A worker's own normal teardown (comment/Label update,
+# then process exit) makes it look orphaned for a brief window too, so a
+# single observation never kills: the first poll that sees an issue as
+# orphaned only records worker_orphan_since_file's epoch, and only a
+# WORKER_ORPHAN_GRACE_SECONDS-persistent observation across later polls
+# actually kills it (mirrors enforce_worker_timeout's process-group TERM then
+# KILL so no provider CLI child is left orphaned). A worker_critical section
+# (a completion/close write sequence the worker itself marked unsafe to
+# interrupt) or a pending stop-request (control.sh's cooperative pause/abort
+# drain) skip the kill for as long as they are active, without clearing the
+# marker, so the same brief teardown/drain window is protected even when it
+# outlasts the grace period; enforce_worker_timeout remains the backstop for a
+# guard that never clears. A marker older than the current worker's own
+# .started epoch is treated as a stale leftover from a prior worker on this
+# Issue and reset rather than honored, so grace is never skipped for a worker
+# that never had a chance to be observed. Only pidfile-owning workers are
+# touched, so a multi-host deployment never interferes with another host's
+# Issue. The running-Issue set (running_issue_numbers, shared with
+# recover_expired) must come from a successful read (the snapshot this poll
+# already fetched, or a fresh GitHub call): a failed read must never be
+# treated as "nothing is running", which would misclassify every genuinely
+# running worker as an orphan.
+reap_orphan_workers() {
+  (( WORKER_ORPHAN_GRACE_SECONDS > 0 )) || return 0
+  local pidfile issue now elapsed since started since_file pid waited running_list
+  shopt -s nullglob
+  local -a pidfiles=("$STATE_ROOT"/workers/*.pid)
+  shopt -u nullglob
+  (( ${#pidfiles[@]} > 0 )) || return 0
+  now=$(date +%s)
+  running_list=$(running_issue_numbers) || return 0
+  for pidfile in "${pidfiles[@]}"; do
+    issue=$(basename "$pidfile" .pid)
+    [[ $issue =~ ^[0-9]+$ ]] || continue
+    if ! worker_pid_live "$issue"; then
+      rm -f "$(worker_orphan_since_file "$issue")"
+      continue
+    fi
+    if grep -Fxq "$issue" <<< "$running_list"; then
+      rm -f "$(worker_orphan_since_file "$issue")"
+      continue
+    fi
+    since_file=$(worker_orphan_since_file "$issue")
+    since=''
+    [[ -r $since_file ]] && read -r since < "$since_file"
+    # A marker older than this worker's own .started epoch is a stale
+    # leftover from a prior worker on this Issue (crash before
+    # clear_worker_local ran) rather than a live observation of the current
+    # one; treat it as absent so grace restarts instead of firing instantly.
+    started=''
+    [[ -r $(worker_started_file "$issue") ]] && read -r started < "$(worker_started_file "$issue")"
+    if [[ ! $since =~ ^[0-9]+$ ]] || { [[ $started =~ ^[0-9]+$ ]] && (( since < started )); }; then
+      mkdir -p "$STATE_ROOT/workers"
+      printf '%s\n' "$now" > "$since_file"
+      continue
+    fi
+    elapsed=$((now - since))
+    (( elapsed >= WORKER_ORPHAN_GRACE_SECONDS )) || continue
+    # A worker's own normal teardown (critical section: Label/close update
+    # then process exit) or a cooperative pause/abort drain (control.sh's
+    # control_drain_local_worker, which itself waits out a critical section
+    # first) both make a healthy worker look orphaned for a while. Reaping
+    # mid-teardown would double-act on an already-settled Issue; reaping
+    # mid-drain would kill the checkpoint pause/resume depends on. Skip this
+    # poll without clearing the marker -- the guard is re-checked every poll,
+    # and enforce_worker_timeout remains the final backstop if a guard never
+    # clears.
+    if worker_critical_active "$issue" || worker_stop_requested "$issue"; then
+      continue
+    fi
+    read -r pid < "$pidfile" || continue
+    [[ $pid =~ ^[0-9]+$ ]] || continue
+    kill -TERM "-$pid" 2>/dev/null || true
+    waited=0
+    while (( waited < 5 )) && kill -0 "$pid" 2>/dev/null; do sleep 1; waited=$((waited + 1)); done
+    kill -0 "$pid" 2>/dev/null && kill -KILL "-$pid" 2>/dev/null || true
+    lease_release "$issue" orphan
+    clear_worker_local "$issue"
+    scope_cache_clear "$issue"
+    clear_conflict_wait "$issue"
+    comment_issue "$issue" "<!-- agentic-loop:worker-orphan-reaped issue=$issue elapsed=${elapsed}s grace=${WORKER_ORPHAN_GRACE_SECONDS}s -->\nこのホストのlocal workerがGitHub上 \`agent:running\` ではない状態を ${elapsed}秒（grace ${WORKER_ORPHAN_GRACE_SECONDS}秒）観測したため、実行時間上限を待たずprocess groupごと安全に停止し、local stateを掃除しました。Issueの状態は変更していません。誤検知が疑われる場合は \`.agentic-loop.toml\` の \`queue.worker_orphan_grace_seconds\` を見直してください。" || true
+    event_append "$issue" orphan -
+  done
 }
 
 
