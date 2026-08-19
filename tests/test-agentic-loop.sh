@@ -4233,15 +4233,18 @@ done
 [[ $orphan2_claimed_seen == 1 ]] || { kill "$orphan2_sup_pid" 2>/dev/null; wait "$orphan2_sup_pid" 2>/dev/null; fail 'worker-orphan grace-reset test: the worker never passed its startup running-Label check before the Label was reverted'; }
 sed -i 's/^72 running/72 queued/' "$state"
 orphan2_since_seen=0
-for _ in $(seq 1 40); do
+for _ in $(seq 1 100); do
   [[ -r $state_root/workers/72.orphan-since ]] && { orphan2_since_seen=1; break; }
   sleep 0.5
 done
 [[ $orphan2_since_seen == 1 ]] || { kill "$orphan2_sup_pid" 2>/dev/null; wait "$orphan2_sup_pid" 2>/dev/null; fail 'worker-orphan grace-reset test: the Label mismatch was never observed'; }
 # The mismatch resolves (Label restored) well within worker_orphan_grace_seconds=30.
+# Detecting the clear -- like the grace value above -- rides on the same
+# contended-runner poll cadence, so its wait budget is widened the same way
+# (100 x 0.5s = 50s) rather than the file's usual 40 x 0.5s = 20s default.
 sed -i 's/^72 queued/72 running/' "$state"
 orphan2_marker_cleared=0
-for _ in $(seq 1 40); do
+for _ in $(seq 1 100); do
   [[ ! -e $state_root/workers/72.orphan-since ]] && { orphan2_marker_cleared=1; break; }
   sleep 0.5
 done
