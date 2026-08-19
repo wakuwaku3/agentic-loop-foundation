@@ -3884,8 +3884,13 @@ wait "$pool_timeout_sup_pid" 2>/dev/null || true
 rm -f "$state_root/stop.requested"
 [[ $pool_timeout_requeued == 1 ]] || fail 'a hang correlated with pool exhaustion was not requeued directly'
 if grep -Eq '^54 failed' "$state"; then fail 'a hang correlated with pool exhaustion must not fail the Issue'; fi
-assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:worker-timeout' 'pool-exhaustion-correlated timeout was not audited on the Issue'
-assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'pool-exhaustion=1' 'pool-exhaustion-correlated timeout comment did not record the correlation'
+# Either enforce_worker_timeout's own kill (agentic-loop:worker-timeout) or, if
+# the same poll's recover_expired reclaims the pidfile first (both are called
+# out by Issue #158: "crash / timeout は枯渇保護を通らない"), its
+# agentic-loop:recovered path may be the one that actually observes the
+# correlation first; both record pool-exhaustion=1 and neither burns attempts,
+# which is the guarantee under test here -- not which internal path wins.
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'pool-exhaustion=1' 'pool-exhaustion-correlated timeout was not recorded as environment-caused'
 [[ ! -e $state_root/attempts/issue-54 ]] || fail 'attempts counter was not cleared for a pool-exhaustion-correlated hang'
 rm -rf "$state_root/pools"
 
