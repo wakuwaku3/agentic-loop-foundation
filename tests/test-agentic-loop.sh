@@ -1791,6 +1791,9 @@ assert_contains "$FAKE_GH_ROOT/codex-calls" "--add-dir $target-worktrees/issue-3
 assert_contains "$FAKE_GH_ROOT/codex-calls" "-C $target-worktrees/issue-3" 'worker did not use the repository-adjacent worktree root'
 assert_contains "$FAKE_GH_ROOT/codex-calls" 'approval_policy="never"' 'worker can block on approval'
 assert_contains "$FAKE_GH_ROOT/codex-calls" 'GitHubのIssue、PR' 'worker prompt did not require Japanese GitHub content'
+assert_contains "$FAKE_GH_ROOT/codex-calls" '実在しない承認コマンド・設定・権限フローを創作して停止してはいけません' 'worker prompt did not forbid fabricating nonexistent approval mechanisms (Issue #191)'
+assert_contains "$FAKE_GH_ROOT/codex-calls" 'devbox.lock' 'worker prompt did not clarify that toolchain lock changes need no worker pre-approval (Issue #191)'
+assert_contains "$FAKE_GH_ROOT/codex-calls" '変更の重大さについての自己判断だけを理由にaxisをhighにしたりapproval.required=trueにしないでください' 'plan prompt did not forbid self-invented approval requirements (Issue #191)'
 assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'のハートビートです' 'supervisor did not write its Issue comments in Japanese'
 if grep -Eq 'danger-full-access|OPENAI_API_KEY|--add-dir /($| )|--add-dir /home($| )' "$FAKE_GH_ROOT/codex-calls"; then fail 'worker used forbidden Codex configuration or a broad writable path'; fi
 [[ ! -e $state_root/worktrees ]] || fail 'worker worktrees were placed inside Git metadata'
@@ -4486,6 +4489,23 @@ pf_cli_out=$("$target/bin/agentic-loop" preflight 7115 --format json) || fail 'p
 grep -Fq '"signal":"none"' <<< "$pf_cli_out" || fail 'preflight read-only CLI did not report signal=none'
 yq -p json '.' <<< "$pf_cli_out" >/dev/null 2>&1 || fail 'preflight --format json did not produce valid JSON'
 [[ $(wc -l < "$FAKE_GH_ROOT/calls") -eq $before_calls ]] || fail 'preflight read-only CLI made a GitHub API call'
+
+# 10b) Regression (Issue #191): this repository's own real capability
+# manifest (not a test fixture) must not require approval for devbox.lock/
+# devbox.json toolchain changes -- normal PR review is enough (see
+# docs/policies/development-environment.md). A plan whose declared scope
+# only touches those files, with no preflight record at all, must complete
+# without a needs-input gate under the repository's own shipped PREFLIGHT=warn.
+write_queue_config "$target/.agentic-loop.toml" PREFLIGHT=warn TRACEABILITY=off
+printf '7119 running open\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+: > "$FAKE_GH_ROOT/codex-calls"
+FAKE_CODEX_RESULT='## 計画
+
+<!-- agentic-loop:scope paths=devbox.json,devbox.lock -->
+AGENTIC_LOOP_RESULT=completed' "$target/bin/agentic-loop" _worker 7119 devbox-lock-no-approval-worker
+grep -Eq '^7119 completed closed' "$state" || fail 'devbox.lock/devbox.json alone triggered an approval gate under the real repository capability manifest (Issue #191)'
+! grep -Fq 'agentic-loop:needs-input' "$FAKE_GH_ROOT/$state_key.comments" || fail 'devbox.lock/devbox.json changes were still treated as requiring approval (Issue #191)'
 
 # --- signal-mismatch and the escalation backstop (both need a capability
 # manifest declaring a protected, approval-requiring path) ---
