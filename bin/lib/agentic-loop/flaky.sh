@@ -5,7 +5,8 @@
 # and sha256sum, so scripts/flaky.sh and tests/test-agentic-loop.sh can
 # `source` them standalone, outside bin/agentic-loop's global state. Only
 # cmd_flaky/cmd_flaky_report and the *_render_* helpers rely on the wider
-# bin/agentic-loop context (REPO_ROOT, repo_api, common.sh's json_escape).
+# bin/agentic-loop context (REPO_ROOT, repo_api, search_issues_api, repo_name,
+# common.sh's json_escape).
 # See docs/decisions/0022-flaky-test-detection-and-quarantine.md and
 # docs/operations/flaky-tests.md.
 # shellcheck shell=bash
@@ -239,17 +240,21 @@ cmd_flaky() {
 # Deliberately separate from every test-execution path (make check never
 # calls this): only an explicit `flaky report` invocation touches GitHub.
 flaky_report_one() {
-  local unit=$1 fingerprint=$2 verdict=$3 marker existing_open existing_closed title body new_issue
+  local unit=$1 fingerprint=$2 verdict=$3 marker query search_json existing_open existing_closed title body new_issue
   marker="agentic-loop:flaky unit=$unit fingerprint=$fingerprint"
-  # workload-unbounded: walks every open Issue every call, growth proportional to cumulative Issue count; bound=open Issue count; track=#198
-  existing_open=$(repo_api issues --method GET -f state=open -f per_page=100 --paginate --jq '.[] | select((.body // "") | contains("'"$marker"'")) | .number' 2>/dev/null | head -n1 || true)
+  # One search-index lookup, not an enumeration of every open/closed Issue:
+  # its cost does not grow with the repository's cumulative Issue count
+  # (Issue #198). `in:body` only searches the Issue body, matching exactly
+  # where the marker is embedded below, never a comment.
+  query="repo:$(repo_name) \"$marker\" in:body"
+  search_json=$(search_issues_api --method GET -f q="$query" -f per_page=5 --jq '[.items[] | {number, state}]' 2>/dev/null) || search_json='[]'
+  existing_open=$(yq -p json -r '[.[] | select(.state == "open")][0].number // ""' <<< "$search_json" 2>/dev/null)
   if [[ $existing_open =~ ^[1-9][0-9]*$ ]]; then
     comment_issue "$existing_open" "<!-- agentic-loop:flaky-recurred unit=$unit fingerprint=$fingerprint -->\\nflaky testの再発を検出しました（unit: \`$unit\`、fingerprint: \`$fingerprint\`、verdict: \`$verdict\`）。" || true
     say "既存のflaky修復Issue #$existing_open を再利用しました（unit=$unit）。"
     return 0
   fi
-  # workload-unbounded: walks every closed Issue every call, monotonically growing over time; bound=closed Issue count; track=#198
-  existing_closed=$(repo_api issues --method GET -f state=closed -f per_page=100 --paginate --jq '.[] | select((.body // "") | contains("'"$marker"'")) | .number' 2>/dev/null | head -n1 || true)
+  existing_closed=$(yq -p json -r '[.[] | select(.state == "closed")][0].number // ""' <<< "$search_json" 2>/dev/null)
   title="flaky testを修復する: $unit ($fingerprint)"
   body="## 目的\\n\\nE2E検証単位 \`$unit\` がverdict=\`$verdict\`（fingerprint: \`$fingerprint\`）としてflaky判定されました。原因を特定し、隔離に依存せず決定的に成功するよう修復します。\\n\\n## 完了条件\\n\\n同一fingerprintの隔離entryが無くても該当unitが安定して成功する。\\n\\n"
   if [[ $existing_closed =~ ^[1-9][0-9]*$ ]]; then

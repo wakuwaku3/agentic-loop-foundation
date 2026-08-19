@@ -4,14 +4,18 @@
 
 
 
-repo_api() {
-  local endpoint=$1 attempt=0 delay=$API_RETRY_BASE_SECONDS rc output error input='' index api_endpoint
+# Shared GH REST(core) call: bounded retry (Issue #130, ADR 0025 T4) that
+# retries only transient failures (rate limit, 5xx, timeout) up to
+# API_RETRY_ATTEMPTS with exponential backoff, and never emits more than that
+# many underlying `gh api` calls for one logical operation. repo_api and
+# search_issues_api both fan into this so retry/output-file plumbing lives in
+# exactly one place.
+gh_api_call() {
+  local api_endpoint=$1 attempt=0 delay=$API_RETRY_BASE_SECONDS rc output error input='' index
   shift
   local -a args=("$@")
   mkdir -p "$STATE_ROOT"
   output="$STATE_ROOT/api-output.$$"; error="$STATE_ROOT/api-error.$$"
-  api_endpoint="repos/$(repo_name)"
-  [[ -z $endpoint ]] || api_endpoint+="/$endpoint"
   for ((index=0; index<${#args[@]}; index++)); do
     if [[ ${args[$index]} == --input && ${args[$((index + 1))]:-} == - ]]; then
       input="$STATE_ROOT/api-input.$$"; cat > "$input"; args[index + 1]=$input; break
@@ -32,6 +36,25 @@ repo_api() {
     delay=$((delay * 2))
   done
 }
+
+
+repo_api() {
+  local endpoint=$1 api_endpoint
+  shift
+  api_endpoint="repos/$(repo_name)"
+  [[ -z $endpoint ]] || api_endpoint+="/$endpoint"
+  gh_api_call "$api_endpoint" "$@"
+}
+
+
+# GitHub's search/issues endpoint is not nested under repos/<owner>/<repo> --
+# it takes a `repo:` qualifier inside the query string instead. A single
+# call here is a search-index lookup, not an enumeration: its cost does not
+# grow with the repository's cumulative Issue count the way listing every
+# open/closed Issue does (Issue #198). Callers must pass `--method GET`
+# explicitly: `gh api` defaults to POST once any `-f`/`-F` is present, which
+# this read-only endpoint rejects.
+search_issues_api() { gh_api_call 'search/issues' "$@"; }
 
 
 # The only two places an Issue/PR comment body reaches GitHub (Issue #110):
