@@ -6354,7 +6354,12 @@ if [[ $TEST_GROUP == all || $TEST_GROUP == upgrade ]]; then
 # --- Foundation upgrade (bin/agentic-loop upgrade, scripts/upgrade-target.sh) ---
 # See docs/operations/upgrade.md / docs/decisions/0009-foundation-upgrade.md.
 
-# --- Claude Code main-worktree edit confirmation hook ----------------------
+# --- Claude Code edit-guard hook (queue-first policy) ----------------------
+# A direct edit to a TRACKED file is gated by three things: who is editing
+# (autonomous loop vs human), which worktree the target lives in (primary/main
+# vs a linked worktree), and whether the target worktree's own gitdir holds the
+# escape-hatch flag `agentic-loop-allow-edit`. Untracked/scratch/outside files
+# always pass, and the hook never edits anything itself.
 hook_main="$TEST_ROOT/hook main"
 hook_worker="$TEST_ROOT/hook worker"
 hook_outside="$TEST_ROOT/hook outside"
@@ -6368,42 +6373,74 @@ git -C "$hook_main" commit --quiet -m tracked
 git -C "$hook_main" worktree add --quiet -b hook-worker "$hook_worker"
 ln -s "$hook_outside" "$hook_main/outside-link"
 ln -s "$hook_main" "$hook_outside/main-link"
+hook_main_flag="$(git -C "$hook_main" rev-parse --absolute-git-dir)/agentic-loop-allow-edit"
+hook_worker_flag="$(git -C "$hook_worker" rev-parse --absolute-git-dir)/agentic-loop-allow-edit"
 
-run_edit_hook() {
+run_edit_hook() { # [--agent] tool path cwd
+  local marker=env
+  [[ $1 == --agent ]] && { marker=agent; shift; }
   local tool=$1 path=$2 cwd=$3 field=file_path
   [[ $tool == NotebookEdit ]] && field=notebook_path
-  printf '{"tool_name":"%s","tool_input":{"%s":"%s"},"cwd":"%s"}' "$tool" "$field" "$path" "$cwd" |
-    "$PROJECT_ROOT/.claude/hooks/confirm-main-worktree-edit.sh"
+  local input; input=$(printf '{"tool_name":"%s","tool_input":{"%s":"%s"},"cwd":"%s"}' "$tool" "$field" "$path" "$cwd")
+  if [[ $marker == agent ]]; then
+    printf '%s' "$input" | env AGENTIC_LOOP_AGENT=1 "$PROJECT_ROOT/.claude/hooks/confirm-main-worktree-edit.sh"
+  else
+    printf '%s' "$input" | env -u AGENTIC_LOOP_AGENT "$PROJECT_ROOT/.claude/hooks/confirm-main-worktree-edit.sh"
+  fi
 }
 hook_before=$(git -C "$hook_main" status --porcelain)
+rm -f "$hook_main_flag" "$hook_worker_flag"
+# Human, no flag: both a main and a linked-worktree tracked edit are denied, and
+# each deny names the escape hatch as the sanctioned way forward.
 for edit_tool in Edit Write NotebookEdit; do
   hook_result=$(run_edit_hook "$edit_tool" "$hook_main/tracked file.txt" "$hook_main")
-  [[ $hook_result == *'"permissionDecision":"ask"'* ]] || fail "$edit_tool did not ask before a main-worktree tracked edit"
-  [[ $hook_result == *'Issue キュー'* ]] || fail "$edit_tool ask did not direct the user to the Issue queue"
-  [[ $hook_result != *'"permissionDecision":"deny"'* ]] || fail "$edit_tool hook denied rather than asked"
+  [[ $hook_result == *'"permissionDecision":"deny"'* ]] || fail "$edit_tool did not deny a human main-worktree tracked edit"
+  [[ $hook_result == *'原則禁止'* ]] || fail "$edit_tool main deny did not explain the primary-worktree rule"
+  [[ $hook_result == *'agentic-loop-allow-edit'* ]] || fail "$edit_tool main deny did not name the escape hatch"
 done
 [[ $(git -C "$hook_main" status --porcelain) == "$hook_before" ]] || fail 'edit hook changed a file itself'
-[[ -z $(run_edit_hook Edit "$hook_worker/tracked file.txt" "$hook_worker") ]] || fail 'linked worker worktree was unexpectedly gated'
+hook_result=$(run_edit_hook Edit "$hook_worker/tracked file.txt" "$hook_worker")
+[[ $hook_result == *'"permissionDecision":"deny"'* ]] || fail 'human linked-worktree tracked edit was not denied without a flag'
+[[ $hook_result == *'agentic-loop-allow-edit'* ]] || fail 'linked deny did not name the escape hatch'
+# Autonomous loop: a linked worktree is its job and passes; the primary worktree
+# is always blocked, flag or not.
+[[ -z $(run_edit_hook --agent Edit "$hook_worker/tracked file.txt" "$hook_worker") ]] || fail 'autonomous linked worktree edit was gated'
+hook_result=$(run_edit_hook --agent Edit "$hook_main/tracked file.txt" "$hook_main")
+[[ $hook_result == *'"permissionDecision":"deny"'* ]] || fail 'autonomous main-worktree edit was not denied'
+[[ $hook_result == *'自律エージェント'* ]] || fail 'autonomous main deny did not identify the loop'
+# Escape hatch: the flag opens exactly its own worktree, and only for a human.
+touch "$hook_main_flag"
+[[ -z $(run_edit_hook Edit "$hook_main/tracked file.txt" "$hook_main") ]] || fail 'primary flag did not permit a human main edit'
+[[ $(run_edit_hook --agent Edit "$hook_main/tracked file.txt" "$hook_main") == *'"deny"'* ]] || fail 'primary flag wrongly let an autonomous main edit through'
+rm -f "$hook_main_flag"
+touch "$hook_worker_flag"
+[[ -z $(run_edit_hook Edit "$hook_worker/tracked file.txt" "$hook_worker") ]] || fail 'worker flag did not permit a human linked edit'
+[[ $(run_edit_hook Edit "$hook_main/tracked file.txt" "$hook_main") == *'"deny"'* ]] || fail 'worker flag leaked to the primary worktree'
+rm -f "$hook_worker_flag"
+# Untracked / outside / non-edit targets always pass.
 printf 'scratch\n' > "$hook_main/scratchpad.txt"
 [[ -z $(run_edit_hook Edit "$hook_main/scratchpad.txt" "$hook_main") ]] || fail 'untracked main-worktree scratchpad was unexpectedly gated'
 [[ -z $(run_edit_hook Edit /tmp/agentic-loop-hook-scratch.txt "$hook_main") ]] || fail '/tmp edit was unexpectedly gated'
 [[ -z $(run_edit_hook Edit "$hook_outside/outside.txt" "$hook_main") ]] || fail 'outside edit was unexpectedly gated'
 [[ -z $(run_edit_hook Read "$hook_main/tracked file.txt" "$hook_main") ]] || fail 'read tool was unexpectedly gated'
+# Path traversal and symlinks must not smuggle a main-worktree edit past the gate.
 hook_result=$(run_edit_hook Edit "$hook_main/subdir/../tracked file.txt" "$hook_main")
-[[ $hook_result == *'"permissionDecision":"ask"'* ]] || fail 'path traversal bypassed the edit hook'
+[[ $hook_result == *'"permissionDecision":"deny"'* ]] || fail 'path traversal bypassed the edit hook'
 hook_result=$(run_edit_hook Edit "$hook_outside/main-link/tracked file.txt" "$hook_main")
-[[ $hook_result == *'"permissionDecision":"ask"'* ]] || fail 'symlink path bypassed the edit hook'
-hook_result=$(printf '{"tool_name":"Edit","tool_input":{},"cwd":"%s"}' "$hook_main" | "$PROJECT_ROOT/.claude/hooks/confirm-main-worktree-edit.sh")
-[[ $hook_result == *'"permissionDecision":"ask"'* ]] || fail 'malformed edit input did not fail safely'
+[[ $hook_result == *'"permissionDecision":"deny"'* ]] || fail 'symlink path bypassed the edit hook'
+hook_result=$(printf '{"tool_name":"Edit","tool_input":{},"cwd":"%s"}' "$hook_main" | env -u AGENTIC_LOOP_AGENT "$PROJECT_ROOT/.claude/hooks/confirm-main-worktree-edit.sh")
+[[ $hook_result == *'"permissionDecision":"deny"'* ]] || fail 'malformed edit input did not fail safely'
 
-# Regression (Issue #160): the hook must resolve its JSON parser (yq) even when
-# invoked with a PATH that omits the Nix-pinned bins -- Claude Code PreToolUse
-# and login shells are such contexts. It restores the recorded runtime.path
-# (which lives beside the installed repo's Git metadata) before parsing. Without
-# that, yq exits non-zero and the fail-closed guards gate *every* edit, including
-# linked worker worktrees that must pass through, so no edit proceeds without a
-# prompt. Build an installed-shaped repo whose runtime.path points at the pinned
-# toolchain, then invoke its hook with yq stripped from PATH.
+# Regression (Issue #160 + linked-worktree PATH restore): the hook must resolve
+# its JSON parser (yq) from the recorded runtime.path even when invoked with a
+# PATH that omits the Nix-pinned bins -- Claude Code PreToolUse and login shells
+# are such contexts. runtime.path lives beside the git COMMON dir. In a linked
+# worktree `.git` is a gitdir FILE, not a directory, so the resolver must follow
+# it to the common dir; without that the parse fail-closes and denies every
+# linked-worktree edit -- including the autonomous worker edits that must pass.
+# Build an installed-shaped repo whose runtime.path points at the pinned
+# toolchain, mirror the hook into every worktree (it is a tracked file in real
+# checkouts), then invoke each with yq stripped from PATH.
 hook_rt_main="$TEST_ROOT/hook runtime main"
 hook_rt_worker="$TEST_ROOT/hook runtime worker"
 mkdir -p "$hook_rt_main"
@@ -6414,21 +6451,31 @@ printf 'tracked\n' > "$hook_rt_main/tracked.txt"
 git -C "$hook_rt_main" add tracked.txt
 git -C "$hook_rt_main" commit --quiet -m tracked
 git -C "$hook_rt_main" worktree add --quiet -b hook-rt-worker "$hook_rt_worker"
-mkdir -p "$hook_rt_main/.claude/hooks" "$hook_rt_main/.git/agentic-loop"
-cp "$PROJECT_ROOT/.claude/hooks/confirm-main-worktree-edit.sh" "$hook_rt_main/.claude/hooks/confirm-main-worktree-edit.sh"
-chmod +x "$hook_rt_main/.claude/hooks/confirm-main-worktree-edit.sh"
+for rt_root in "$hook_rt_main" "$hook_rt_worker"; do
+  mkdir -p "$rt_root/.claude/hooks"
+  cp "$PROJECT_ROOT/.claude/hooks/confirm-main-worktree-edit.sh" "$rt_root/.claude/hooks/confirm-main-worktree-edit.sh"
+  chmod +x "$rt_root/.claude/hooks/confirm-main-worktree-edit.sh"
+done
 # runtime.path records the pinned toolchain directories (where git and yq really
-# live), mirroring what install writes.
+# live), mirroring what install writes. It lives beside the common Git metadata.
+mkdir -p "$hook_rt_main/.git/agentic-loop"
 printf '%s:%s\n' "$(dirname "$(command -v git)")" "$(dirname "$(command -v yq)")" > "$hook_rt_main/.git/agentic-loop/runtime.path"
-run_edit_hook_nopath() {
-  local tool=$1 path=$2 cwd=$3
-  printf '{"tool_name":"%s","tool_input":{"file_path":"%s"},"cwd":"%s"}' "$tool" "$path" "$cwd" |
-    PATH=/usr/bin:/bin "$hook_rt_main/.claude/hooks/confirm-main-worktree-edit.sh"
+run_edit_hook_nopath() { # script tool path cwd [--agent]
+  local script=$1 tool=$2 path=$3 cwd=$4 marker=${5:-}
+  local input; input=$(printf '{"tool_name":"%s","tool_input":{"file_path":"%s"},"cwd":"%s"}' "$tool" "$path" "$cwd")
+  if [[ $marker == --agent ]]; then
+    printf '%s' "$input" | env AGENTIC_LOOP_AGENT=1 PATH=/usr/bin:/bin "$script"
+  else
+    printf '%s' "$input" | env -u AGENTIC_LOOP_AGENT PATH=/usr/bin:/bin "$script"
+  fi
 }
-# yq is absent from PATH here; only runtime.path restoration lets the hook parse.
-hook_rt_result=$(run_edit_hook_nopath Edit "$hook_rt_main/tracked.txt" "$hook_rt_main")
-[[ $hook_rt_result == *'"permissionDecision":"ask"'* ]] || fail 'hook could not resolve yq from runtime.path for a main-worktree edit (Issue #160)'
-[[ -z $(run_edit_hook_nopath Edit "$hook_rt_worker/tracked.txt" "$hook_rt_worker") ]] || fail 'hook gated a linked worker worktree because yq was unresolved (Issue #160)'
+# Primary worktree: yq is absent from PATH; only runtime.path restoration lets
+# the hook parse and reach the human main-edit deny instead of fail-closing.
+hook_rt_result=$(run_edit_hook_nopath "$hook_rt_main/.claude/hooks/confirm-main-worktree-edit.sh" Edit "$hook_rt_main/tracked.txt" "$hook_rt_main")
+[[ $hook_rt_result == *'"permissionDecision":"deny"'* && $hook_rt_result == *'原則禁止'* ]] || fail 'hook could not resolve yq from runtime.path for a main-worktree edit (Issue #160)'
+# Linked worktree: `.git` is a file, so the resolver must follow it to the common
+# dir to find runtime.path; only then does an autonomous worker edit parse and pass.
+[[ -z $(run_edit_hook_nopath "$hook_rt_worker/.claude/hooks/confirm-main-worktree-edit.sh" Edit "$hook_rt_worker/tracked.txt" "$hook_rt_worker" --agent) ]] || fail 'hook gated an autonomous linked worktree because yq was unresolved in a gitdir-file worktree (Issue #160)'
 
 # The project settings and executable hook are Foundation-managed shared files.
 settings_conflict_target=$(new_repository settings-conflict-target)
