@@ -39,11 +39,17 @@ done
 yq -p json -o json '.' .claude/settings.json >/dev/null || { printf 'Invalid Claude settings JSON.\n' >&2; exit 1; }
 [[ $(yq -p json -r '.hooks.PreToolUse[0].matcher // ""' .claude/settings.json) == 'Edit|Write|NotebookEdit' ]] || { printf 'Claude edit hook matcher is invalid.\n' >&2; exit 1; }
 [[ $(yq -p json -r '.hooks.PreToolUse[0].hooks[0].command // ""' .claude/settings.json) == '${CLAUDE_PROJECT_DIR}/.claude/hooks/confirm-main-worktree-edit.sh' ]] || { printf 'Claude edit hook command is invalid.\n' >&2; exit 1; }
-grep -Fq 'permissionDecision":"ask"' .claude/hooks/confirm-main-worktree-edit.sh || { printf 'Claude edit hook must request confirmation.\n' >&2; exit 1; }
-if grep -Fq 'permissionDecision":"deny"' .claude/hooks/confirm-main-worktree-edit.sh; then
-  printf 'Claude edit hook must not deny edits.\n' >&2
+grep -Fq 'permissionDecision":"deny"' .claude/hooks/confirm-main-worktree-edit.sh || { printf 'Claude edit hook must gate edits with a deny decision.\n' >&2; exit 1; }
+# The hook must never use "ask": a PreToolUse ask is overridden by
+# bypassPermissions, so it cannot actually gate anything. The queue-first gate
+# denies (with guidance to the escape hatch) instead. See .claude/skills/direct-edit.
+if grep -Fq 'permissionDecision":"ask"' .claude/hooks/confirm-main-worktree-edit.sh; then
+  printf 'Claude edit hook must not use ask (bypassPermissions overrides it); deny instead.\n' >&2
   exit 1
 fi
+grep -Fq 'AGENTIC_LOOP_AGENT' .claude/hooks/confirm-main-worktree-edit.sh bin/lib/agentic-loop/agent.sh || { printf 'Edit guard cannot distinguish autonomous runs (AGENTIC_LOOP_AGENT marker missing).\n' >&2; exit 1; }
+grep -Fq 'agentic-loop-allow-edit' .claude/hooks/confirm-main-worktree-edit.sh .claude/skills/direct-edit/SKILL.md || { printf 'Edit guard escape hatch (agentic-loop-allow-edit) is not implemented or not documented.\n' >&2; exit 1; }
+grep -Fq '.claude/skills/direct-edit/SKILL.md' scripts/lib/foundation-files.sh || { printf 'direct-edit skill is not distributed as a shared file.\n' >&2; exit 1; }
 grep -Fq '.claude/settings.json' scripts/lib/foundation-files.sh || { printf 'Claude settings are not distributed as a shared file.\n' >&2; exit 1; }
 grep -Fq '.claude/hooks/confirm-main-worktree-edit.sh' scripts/lib/foundation-files.sh || { printf 'Claude edit hook is not distributed as a shared file.\n' >&2; exit 1; }
 grep -Fq 'confirm-main-worktree-edit.sh' scripts/install-target.sh || { printf 'Claude edit hook is not made executable on install.\n' >&2; exit 1; }

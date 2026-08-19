@@ -661,6 +661,12 @@ agent_run_stage() {
   printf 'provider=%s\nstage=%s\n' "$provider" "$stage" >> "$usage_file"
   [[ -n $pool ]] && printf 'pool=%s\n' "$pool" >> "$usage_file"
   [[ -n $model ]] && printf 'model=%s\n' "$model" >> "$usage_file"
+  # Mark every provider invocation as an autonomous-loop run.  The Claude Code
+  # edit-guard hook reads AGENTIC_LOOP_AGENT to distinguish this loop from an
+  # interactive human session: an autonomous run may edit its own linked
+  # worktree freely but is always blocked from touching the primary (main)
+  # worktree.  Set inline so the marker reaches only the provider process, not
+  # the rest of the worker.
   case $provider in
     claude)
       # --output-format json returns one object; the final message (plan text or
@@ -670,7 +676,7 @@ agent_run_stage() {
       # no OS sandbox, so the plan stage relies on the prompt to avoid writes.
       local -a claude_args=(--print --output-format json --dangerously-skip-permissions --add-dir "$git_common_dir" --add-dir "$agents_dir")
       [[ -n $model ]] && claude_args+=(--model "$model")
-      (cd "$worktree" && claude "${claude_args[@]}" "$prompt") > "$raw_result" 2>"$stderr_file" || provider_rc=$?
+      (cd "$worktree" && AGENTIC_LOOP_AGENT=1 claude "${claude_args[@]}" "$prompt") > "$raw_result" 2>"$stderr_file" || provider_rc=$?
       agent_usage_from_claude_json "$raw_result" >> "$usage_file" || true
       # Claude exits zero even on an API failure under --output-format json and
       # reports it through is_error/api_error_status in the envelope, so read that
@@ -702,7 +708,7 @@ agent_run_stage() {
       # substring, and step-finish parts carry token/cost telemetry.
       local -a opencode_args=(run --auto --format json --dir "$worktree")
       [[ -n $model ]] && opencode_args+=(--model "$model")
-      opencode "${opencode_args[@]}" "$prompt" > "$raw_result" 2>"$stderr_file" || provider_rc=$?
+      AGENTIC_LOOP_AGENT=1 opencode "${opencode_args[@]}" "$prompt" > "$raw_result" 2>"$stderr_file" || provider_rc=$?
       agent_usage_from_opencode_json "$raw_result" >> "$usage_file" || true
       # opencode streams several JSON events; only the last text part is the
       # final assistant response, while step-finish is telemetry.
@@ -727,7 +733,7 @@ agent_run_stage() {
       [[ -n $effort ]] && codex_args+=(-c "model_reasoning_effort=$effort")
       # Codex puts the assistant last message in --output-last-message; hard
       # failures such as usage limit go only to stderr with a non-zero exit.
-      codex "${codex_args[@]}" -C "$worktree" --output-last-message "$result_file" "$prompt" 2>"$stderr_file" || provider_rc=$?
+      AGENTIC_LOOP_AGENT=1 codex "${codex_args[@]}" -C "$worktree" --output-last-message "$result_file" "$prompt" 2>"$stderr_file" || provider_rc=$?
       agent_usage_from_codex_sessions "$worktree" >> "$usage_file" || true
       ;;
   esac
