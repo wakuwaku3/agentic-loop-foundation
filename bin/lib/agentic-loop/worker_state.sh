@@ -393,11 +393,23 @@ enforce_worker_timeout() {
 
 
 requeue_answered() {
-  local issue answered
+  local issue kind saw_marker answered
   while IFS= read -r issue; do
     [[ -n $issue ]] || continue
-    # shellcheck disable=SC2016 # This is a jq program, not a shell expression.
-    answered=$(repo_api "issues/$issue/comments" --method GET -f per_page=100 --jq '. as $comments | ([range(0; $comments | length) | select($comments[.].body | contains("agentic-loop:needs-input"))] | last) as $marker | if $marker == null then false else any($comments[$marker + 1:][]; (.body | contains("<!-- agentic-loop:") | not)) end' 2>/dev/null || true)
+    # `gh api --paginate --jq` runs the jq program once per page (verified
+    # against the real API), so a whole-array `last`/slice jq program cannot
+    # see across a page boundary. Classify each comment individually instead
+    # and fold the per-page-but-in-order output into "was there a reply after
+    # the last needs-input marker" in the shell, which stays correct no
+    # matter how many pages the comment history spans.
+    saw_marker=false answered=false
+    while IFS= read -r kind; do
+      case $kind in
+        MARKER) saw_marker=true; answered=false ;;
+        REPLY) [[ $saw_marker == true ]] && answered=true ;;
+      esac
+    # workload-unbounded: walks every comment on this Issue every poll while it stays needs-input, growth proportional to its comment count; bound=comment count on this Issue; track=#192
+    done < <(repo_api "issues/$issue/comments" --method GET -f per_page=100 --paginate --jq '.[] | if (.body | contains("agentic-loop:needs-input")) then "MARKER" elif (.body | contains("<!-- agentic-loop:") | not) then "REPLY" else "OTHER" end' 2>/dev/null || true)
     if [[ $answered == true ]]; then
       set_issue_state "$issue" queued
       comment_issue "$issue" '<!-- agentic-loop:answer-detected -->\n返信を検出したため、このIssueをキューへ戻しました。'

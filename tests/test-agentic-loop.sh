@@ -514,7 +514,23 @@ case "${1:-} ${2:-}" in
       elif [[ $* == *agentic-loop:claim* ]]; then
         awk -v n="$issue" '$1 == n && index($0, "agentic-loop:claim") {body=$0; sub(/^[^ ]+ /, "", body); printf "%s\t%s", NR, body | "base64 -w0"; close("base64 -w0"); printf "\n"}' "$comments" 2>/dev/null || true
       elif [[ $* == *needs-input* ]]; then
-        if tail -n 1 "$comments" 2>/dev/null | grep -Fq USER_REPLY; then printf 'true\n'; else printf 'false\n'; fi
+        # requeue_answered (Issue #192): classify each of this Issue's
+        # comments as MARKER/REPLY/OTHER, exactly like the real per-page jq
+        # program. Without --paginate, only the first per_page comments are
+        # visible (the pre-fix truncation bug); with --paginate, every
+        # comment across every page is, matching real `gh api --paginate`
+        # (verified: it re-runs --jq once per page, in page order, rather
+        # than on one concatenated array).
+        per_page=30
+        for arg in "$@"; do [[ $arg == per_page=* ]] && per_page=${arg#per_page=}; done
+        rows=$(awk -v n="$issue" '$1 == n {sub(/^[^ ]+ /, ""); print}' "$comments" 2>/dev/null)
+        [[ $* == *--paginate* ]] || rows=$(printf '%s\n' "$rows" | head -n "$per_page")
+        [[ -z $rows ]] || awk -v marker='agentic-loop:needs-input' -v ref='<!-- agentic-loop:' '
+          {
+            if (index($0, marker)) print "MARKER"
+            else if (index($0, ref) == 0) print "REPLY"
+            else print "OTHER"
+          }' <<< "$rows"
       elif [[ $method == GET && $* == *'[.[].body]'* ]]; then
         # triage_issue_content (Issue #167): every existing comment body for
         # this Issue, oldest first, the same content-classification input the
@@ -3726,6 +3742,32 @@ printf '4 USER_REPLY\n' >> "$FAKE_GH_ROOT/$state_key.comments"
 "$target/bin/agentic-loop" _supervise
 grep -Eq '^4 queued open$' "$state" || fail 'Issue reply did not requeue needs-input work'
 grep -Eq '^5 failed open$' "$state" || fail 'one Issue reply changed another failed Issue'
+
+# requeue_answered reads every page of comments, not just the first 100
+# (Issue #192): a needs-input Issue whose marker and human reply both live
+# past the 100th comment is still detected and requeued. The post-marker
+# filler comments carry the agentic-loop marker prefix too (like the
+# worker's own heartbeat/usage comments would), so only the final,
+# marker-free comment counts as a human reply.
+printf '6 needs-input open\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+for i in $(seq 1 90); do printf '6 filler comment %s\n' "$i" >> "$FAKE_GH_ROOT/$state_key.comments"; done
+printf '6 <!-- agentic-loop:needs-input worker=test-worker -->\\n人手の判断が必要です。\n' >> "$FAKE_GH_ROOT/$state_key.comments"
+for i in $(seq 92 105); do printf '6 <!-- agentic-loop:usage worker=test-worker seq=%s -->\n' "$i" >> "$FAKE_GH_ROOT/$state_key.comments"; done
+printf '6 USER_REPLY 対応しました\n' >> "$FAKE_GH_ROOT/$state_key.comments"
+[[ $(wc -l < "$FAKE_GH_ROOT/$state_key.comments") -gt 100 ]] || fail 'fixture did not exceed 100 comments'
+: > "$state_root/stop.requested"
+"$target/bin/agentic-loop" _supervise
+grep -Eq '^6 queued open$' "$state" || fail 'a reply past the 100th comment on a needs-input Issue was not detected'
+
+# The same Issue, still unanswered, stays in needs-input (100-or-fewer-comment
+# behavior is unchanged): the marker is present but nothing follows it.
+printf '7 needs-input open\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+printf '7 <!-- agentic-loop:needs-input worker=test-worker -->\\n人手の判断が必要です。\n' >> "$FAKE_GH_ROOT/$state_key.comments"
+: > "$state_root/stop.requested"
+"$target/bin/agentic-loop" _supervise
+grep -Eq '^7 needs-input open$' "$state" || fail 'an unanswered needs-input Issue was requeued'
 
 # A crashed worker's expired lease returns to the queue on the next supervisor start.
 printf '9 running open\n' > "$state"
