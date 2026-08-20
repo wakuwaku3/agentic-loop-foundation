@@ -371,7 +371,7 @@ status_file_elapsed() {
 # other files -- an mtime would just track "last written", not "since when".
 status_marker_content_elapsed() {
   local file=$1 since=''
-  read -r since < "$file" 2>/dev/null || true
+  [[ -r $file ]] && { read -r since < "$file" || true; }
   status_elapsed_since "$since"
 }
 
