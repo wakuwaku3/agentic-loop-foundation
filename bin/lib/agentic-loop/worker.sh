@@ -127,9 +127,12 @@ cleanup_completed_worker() {
   worktree_root=$(cd "$worktree" && pwd -P) || return 1
   [[ $worktree_root == "$WORKTREE_ROOT"/issue-[0-9]* && ! -L $worktree ]] || return 1
   branch_ref="refs/heads/$branch"
+  # See resume_probe's identical fix below for why this must not `exit` early
+  # (Issue #218): doing so risks SIGPIPE-killing the still-writing `git
+  # worktree list` under this script's `set -o pipefail`.
   registered_branch=$(git -C "$REPO_ROOT" worktree list --porcelain | awk -v path="$worktree_root" '
     $1 == "worktree" {matched=($2 == path)}
-    matched && $1 == "branch" {print $2; exit}
+    matched && $1 == "branch" && !found {print $2; found=1}
   ')
   [[ $registered_branch == "$branch_ref" ]] || return 1
   [[ $(git -C "$worktree_root" symbolic-ref -q HEAD) == "$branch_ref" ]] || return 1
@@ -322,9 +325,17 @@ resume_probe() {
 
   if [[ -e $worktree ]]; then
     if worktree_root=$(cd "$worktree" && pwd -P 2>/dev/null); then
+      # awk must drain git's full --porcelain output rather than `exit`ing on
+      # its first match: this repository can have many registered worktrees
+      # (Issues left gated with their worktree intentionally preserved), and
+      # an early exit closes the pipe while git may still be writing under
+      # `set -o pipefail` (bin/agentic-loop), which delivers SIGPIPE to git
+      # and silently kills the whole worker() process with exit 141 (Issue
+      # #218's CI-only failure investigation traced a scan-scaling test
+      # timeout to exactly this).
       registered_branch=$(git -C "$REPO_ROOT" worktree list --porcelain 2>/dev/null | awk -v path="$worktree_root" '
         $1 == "worktree" {matched=($2 == path)}
-        matched && $1 == "branch" {print $2; exit}
+        matched && $1 == "branch" && !found {print $2; found=1}
       ')
       # Only a worktree that is genuinely registered to a different branch is
       # unsafe; a path that is not a registered worktree at all (corrupted, or
