@@ -3241,6 +3241,29 @@ assert_contains "$TEST_ROOT/decomposition-calls.log" "issues/$child_b/dependenci
 grep -q -- '-f sub_issue_id=\|-f issue_id=' "$TEST_ROOT/decomposition-calls.log" && fail 'decomposition_materialize still sends sub_issue_id/issue_id as an untyped -f string parameter'
 grep -Eq -- "issue_id=($child_a|$child_b)([^0-9]|\$)" "$TEST_ROOT/decomposition-calls.log" && fail 'decomposition_materialize sent a child Issue number instead of its database id'
 
+# decomposition_validate rejects circular and forward-referencing depends_on
+# graphs instead of vacuously passing them. Regression guard for Issue #222:
+# the per-key dependency lookup used the jq-only `--arg` flag, which
+# mikefarah/yq rejects with a non-zero exit that a bare process-substitution
+# loop silently swallows, so the "depends_on may only reference an earlier
+# key" DAG check never actually ran.
+decomposition_validate_check() {
+  (
+    source "$PROJECT_ROOT/bin/lib/agentic-loop/common.sh"
+    source "$PROJECT_ROOT/bin/lib/agentic-loop/scope.sh"
+    source "$PROJECT_ROOT/bin/lib/agentic-loop/worker.sh"
+    readonly DECOMPOSITION_SCHEMA_VERSION=1 DECOMPOSITION_MAX_DIRECT_CHILDREN=6 \
+      DECOMPOSITION_MIN_DIRECT_CHILDREN=2 DECOMPOSITION_MAX_DEPTH=2 DECOMPOSITION_MAX_DESCENDANTS=20
+    decomposition_validate "$1" 0
+  )
+}
+circular_manifest=$(printf '{"schema":1,"mode":"children","integration_acceptance_criteria":"integration ok","children":[{"key":"child-a","title":"Child A","purpose":"purpose a","acceptance_criteria":"crit a","scope":"paths=docs/child-a","depends_on":["child-b"]},{"key":"child-b","title":"Child B","purpose":"purpose b","acceptance_criteria":"crit b","scope":"paths=docs/child-b","depends_on":["child-a"]}]}')
+decomposition_validate_check "$circular_manifest" && fail 'decomposition_validate accepted a circular depends_on graph (child-a<->child-b)'
+forward_ref_manifest=$(printf '{"schema":1,"mode":"children","integration_acceptance_criteria":"integration ok","children":[{"key":"child-a","title":"Child A","purpose":"purpose a","acceptance_criteria":"crit a","scope":"paths=docs/child-a","depends_on":["child-b"]},{"key":"child-b","title":"Child B","purpose":"purpose b","acceptance_criteria":"crit b","scope":"paths=docs/child-b","depends_on":[]}]}')
+decomposition_validate_check "$forward_ref_manifest" && fail 'decomposition_validate accepted depends_on referencing a later key (forward reference)'
+valid_manifest=$(printf '{"schema":1,"mode":"children","integration_acceptance_criteria":"integration ok","children":[{"key":"child-a","title":"Child A","purpose":"purpose a","acceptance_criteria":"crit a","scope":"paths=docs/child-a","depends_on":[]},{"key":"child-b","title":"Child B","purpose":"purpose b","acceptance_criteria":"crit b","scope":"paths=docs/child-b","depends_on":["child-a"]}]}')
+decomposition_validate_check "$valid_manifest" || fail 'decomposition_validate rejected a valid backward-only depends_on graph'
+
 # doctor rejects an invalid unknown_scope value.
 cp "$target/.agentic-loop.toml" "$target/.agentic-loop.toml.valid"
 printf '[queue]\nunknown_scope = "sometimes"\n' > "$target/.agentic-loop.toml"
