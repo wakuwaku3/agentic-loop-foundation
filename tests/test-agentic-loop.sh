@@ -1985,6 +1985,114 @@ assert_contains "$FAKE_GH_ROOT/$state_key.comments" '入力=123tok' 'claude usag
 # shellcheck disable=SC2016 # The dollar sign is a literal currency prefix in the recorded usage line.
 assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'cost=$0.0123' 'claude usage record lacked the reported cost'
 
+# --- Declared reasoning effort and per-stage cost ceiling reach claude (Issue #265) ---
+# A declared reasoning_effort must arrive as the claude CLI's --effort (it was
+# previously assembled only for Codex and silently dropped here), be observable
+# on the Issue's usage comment, and budget.max_stage_cost_usd must arrive as
+# --max-budget-usd. The fake claude records every argument it was given.
+cat > "$target/.agentic-loop.toml" <<'EFFORT_TOML'
+[agent]
+provider = "claude"
+
+[agent.plan]
+model = "opus"
+reasoning_effort = "xhigh"
+
+[agent.exec]
+model = "sonnet"
+reasoning_effort = "medium"
+
+[budget]
+max_stage_cost_usd = 3.5
+
+[queue]
+poll_seconds = 1
+max_workers = 1
+lease_seconds = 3
+stop_timeout = 10
+stale_days = 30
+EFFORT_TOML
+printf '265 queued open none 2026-01-01T00:00:00Z\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+: > "$FAKE_GH_ROOT/claude-calls"
+rm -f "$FAKE_GH_ROOT/claude-json-count"
+AGENTIC_LOOP_RUN_ONCE=1 FAKE_CLAUDE_SLEEP=1 "$target/bin/agentic-loop" _supervise
+grep -Eq '^265 completed closed' "$state" || fail 'claude effort Issue did not complete'
+assert_contains "$FAKE_GH_ROOT/claude-calls" '--effort xhigh' 'plan stage did not pass its declared reasoning effort to claude'
+assert_contains "$FAKE_GH_ROOT/claude-calls" '--effort medium' 'exec stage did not pass its declared reasoning effort to claude'
+assert_contains "$FAKE_GH_ROOT/claude-calls" '--max-budget-usd 3.5' 'claude stage did not pass the configured per-stage cost ceiling'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'reasoning_effort=xhigh' 'claude usage record did not show the applied plan effort'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'reasoning_effort=medium' 'claude usage record did not show the applied exec effort'
+
+# Reaching the cost ceiling is the operator's own cap, not a spent
+# subscription: it must not mark the pool exhausted or pause claiming, and the
+# Issue must follow the ordinary bounded failure/retry path instead.
+printf '267 queued open none 2026-01-01T00:00:00Z\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+: > "$FAKE_GH_ROOT/claude-calls"
+rm -rf "$state_root/pools"
+rm -f "$state_root/agent-exhausted" "$state_root/all-pools-paused" "$FAKE_GH_ROOT/claude-json-count"
+FAKE_CLAUDE_IS_ERROR=1 FAKE_CLAUDE_API_ERROR_STATUS='' \
+  FAKE_CLAUDE_RESULT='Reached the max budget for this session (--max-budget-usd 3.5); stopping.' \
+  AGENTIC_LOOP_RUN_ONCE=1 FAKE_CLAUDE_SLEEP=1 "$target/bin/agentic-loop" _supervise
+[[ ! -e $state_root/pools/claude/exhausted ]] || fail 'a cost-ceiling stop must not mark the claude pool exhausted'
+[[ ! -e $state_root/all-pools-paused ]] || fail 'a cost-ceiling stop must not pause claiming'
+[[ ! -e $state_root/agent-exhausted ]] || fail 'a cost-ceiling stop must not set the global exhaustion marker'
+grep -Eq '^267 (failed|queued) open' "$state" || fail 'a cost-ceiling stop did not follow the ordinary failure path'
+
+# An undeclared reasoning_effort and an unset ceiling add no arguments at all,
+# leaving the claude CLI defaults in place (the Codex plan=high / exec=low
+# fallback stays Codex-only).
+cat > "$target/.agentic-loop.toml" <<'NOEFFORT_TOML'
+[agent]
+provider = "claude"
+
+[agent.plan]
+model = "opus"
+
+[agent.exec]
+model = "sonnet"
+
+[queue]
+poll_seconds = 1
+max_workers = 1
+lease_seconds = 3
+stop_timeout = 10
+stale_days = 30
+NOEFFORT_TOML
+printf '266 queued open none 2026-01-01T00:00:00Z\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+: > "$FAKE_GH_ROOT/claude-calls"
+rm -f "$FAKE_GH_ROOT/claude-json-count"
+AGENTIC_LOOP_RUN_ONCE=1 FAKE_CLAUDE_SLEEP=1 "$target/bin/agentic-loop" _supervise
+grep -Eq '^266 completed closed' "$state" || fail 'claude Issue without a declared effort did not complete'
+if grep -Fq -- '--effort' "$FAKE_GH_ROOT/claude-calls"; then fail 'an undeclared reasoning effort must leave the claude CLI default in place'; fi
+if grep -Fq -- '--max-budget-usd' "$FAKE_GH_ROOT/claude-calls"; then fail 'an unset cost ceiling must not pass --max-budget-usd'; fi
+if grep -Fq 'reasoning_effort=' "$FAKE_GH_ROOT/$state_key.comments"; then fail 'an undeclared reasoning effort must not be recorded as applied'; fi
+
+# doctor treats a level the claude CLI does not accept, and a non-positive cost
+# ceiling, as configuration errors instead of silently ignoring them.
+cat > "$target/.agentic-loop.toml" <<'BAD_EFFORT_TOML'
+[agent]
+provider = "claude"
+
+[agent.plan]
+reasoning_effort = "ultra"
+
+[budget]
+max_stage_cost_usd = 0
+
+[queue]
+poll_seconds = 1
+max_workers = 1
+lease_seconds = 3
+stop_timeout = 10
+stale_days = 30
+BAD_EFFORT_TOML
+doctor_effort_out=$("$target/bin/agentic-loop" doctor || true)
+grep -Fq '[失敗] tiers設定 (plan)' <<< "$doctor_effort_out" || fail 'doctor did not flag an unsupported claude reasoning_effort'
+grep -Fq '[失敗] stageコスト上限' <<< "$doctor_effort_out" || fail 'doctor did not flag an invalid per-stage cost ceiling'
+
 # AGENT_PROVIDER=opencode routes the worker to `opencode run`, scoped to the worktree.
 write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=3 STOP_TIMEOUT=10 STALE_DAYS=30
 printf '30 queued open none 2026-01-01T00:00:00Z\n' > "$state"
