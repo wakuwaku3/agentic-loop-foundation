@@ -196,6 +196,10 @@ path = "tests/test-agentic-loop.sh"
 reason = "test-harness"
 
 [[widen]]
+path = "tests/test-stage-evidence.sh"
+reason = "test-harness"
+
+[[widen]]
 path = "tests/impact-map.toml"
 reason = "test-harness"
 
