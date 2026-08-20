@@ -288,6 +288,7 @@ decomposition_materialize() {
   category=$(repo_api "issues/$parent" --jq '[.labels[].name | select(startswith("category:"))][0] // "category:improvement"' 2>/dev/null) || return 3
   declare -A children=()
   while IFS=$'\t' read -r key title purpose criteria scope deps; do
+    # workload-unbounded: 親Issueの有限なIssue一覧を子Issue照合のため全件取得; bound=repository Issue count; track=#237
     existing=$(repo_api issues --method GET -f state=all -f per_page=100 --paginate --jq '.[] | select((.body // "") | contains("agentic-loop:child parent='"$parent"' key='"$key"' plan='"$hash"'")) | .number' 2>/dev/null | head -n1 || true)
     if [[ $existing =~ ^[1-9][0-9]*$ ]]; then child=$existing
     else
