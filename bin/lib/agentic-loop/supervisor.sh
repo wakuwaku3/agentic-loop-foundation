@@ -1,5 +1,6 @@
 # Module: supervisor.sh. Sourced by bin/agentic-loop (see docs/decisions/0013-agentic-loop-modules.md).
 # shellcheck shell=bash
+# shellcheck disable=SC2034,SC2329
 # shellcheck disable=SC2016,SC2155
 
 
@@ -153,19 +154,46 @@ next_poll_interval() {
 
 
 supervise() {
-  trap 'clear_supervisor_snapshot; rm -f "$STATE_ROOT/supervisor.pid"; rmdir "$STATE_ROOT/supervisor.lock" 2>/dev/null || true' EXIT
+  SUPERVISOR_STARTED_AT=$(date +%s)
+  SUPERVISOR_EXIT_RECORDED=0
+  supervisor_exit_handler() {
+    local code=$?
+    if (( SUPERVISOR_EXIT_RECORDED == 0 )) && supervisor_context_read; then
+      supervisor_termination_append exit "$code" "$SUPERVISOR_CTX_PID" "$SUPERVISOR_CTX_STARTED" \
+        "$SUPERVISOR_CTX_SEEN" "$SUPERVISOR_CTX_STAGE" "$SUPERVISOR_CTX_BOOT" "$SUPERVISOR_CTX_TICKS"
+    fi
+    rm -f "$SUPERVISOR_CONTEXT_FILE"
+    clear_supervisor_snapshot
+    rm -f "$STATE_ROOT/supervisor.pid"
+    rmdir "$STATE_ROOT/supervisor.lock" 2>/dev/null || true
+  }
+  supervisor_signal_handler() {
+    local signal=$1
+    supervisor_context_write shutdown
+    if supervisor_context_read; then
+      supervisor_termination_append signal "$signal" "$SUPERVISOR_CTX_PID" "$SUPERVISOR_CTX_STARTED" \
+        "$SUPERVISOR_CTX_SEEN" "$SUPERVISOR_CTX_STAGE" "$SUPERVISOR_CTX_BOOT" "$SUPERVISOR_CTX_TICKS"
+    fi
+    SUPERVISOR_EXIT_RECORDED=1
+    supervisor_graceful_shutdown
+    exit 0
+  }
+  trap supervisor_exit_handler EXIT
   # Graceful shutdown (see docs/decisions/0003): on SIGTERM/SIGINT (systemctl
   # stop, kill, OS/WSL shutdown) stop claiming, terminate each worker's process
   # group so nothing is orphaned, and requeue its Issue so the work is not lost.
-  trap 'supervisor_graceful_shutdown; exit 0' TERM INT
+  trap 'supervisor_signal_handler TERM' TERM
+  trap 'supervisor_signal_handler INT' INT
   mkdir -p "$STATE_ROOT/workers"
   printf '%s\n' "$$" > "$STATE_ROOT/supervisor.pid"
+  supervisor_context_write startup
   event_append supervisor start -
   local idle_streak=0 poll_interval=$POLL_SECONDS
   # Best-effort maintenance must never crash the supervisor (see docs/decisions/
   # 0003): a transient GitHub error (secondary rate limit / HTTP 403 / 5xx)
   # should skip this cycle and be retried next poll, not kill the loop under
   # set -e.
+  supervisor_context_write maintenance
   reconcile_worker_pidfiles || true
   recover_expired || true
   enforce_worker_timeout || true
@@ -174,6 +202,7 @@ supervise() {
   rebuild_scope_cache || true
   rebuild_project_hints || true
   while :; do
+    supervisor_context_write poll
     clear_supervisor_snapshot
     refresh_supervisor_snapshot || true
     # A failed initial all-Issue reconstruction is not an empty snapshot.
@@ -218,6 +247,7 @@ supervise() {
         refresh_supervisor_snapshot || true
         reconcile_scope_conflict_cache || true
         while [[ $(worker_count) -lt $MAX_WORKERS ]]; do
+          supervisor_context_write claim
           local issue worker claim
           claim=$(claim_next) || break
           IFS=$'\t' read -r issue worker <<< "$claim"
@@ -246,6 +276,7 @@ supervise() {
     fi
     poll_interval=$(next_poll_interval "$idle_streak")
     printf '%s\n' "$poll_interval" > "$STATE_ROOT/poll-interval"
+    supervisor_context_write sleep
     sleep "$poll_interval"
   done
   rm -f "$STATE_ROOT/stop.requested" "$STATE_ROOT/poll-interval"
