@@ -1244,11 +1244,6 @@ empty_repository() {
 
 target=$(new_repository installed-project)
 state_key=$(printf '%s' "$target" | tr '/' '_')
-# Give the existing-repository install fixture the declared affected-check
-# inputs so its generated capability manifest can exercise Issue #266.
-cp "$PROJECT_ROOT/Makefile" "$target/Makefile"
-mkdir -p "$target/tests"
-cp "$PROJECT_ROOT/tests/impact-map.toml" "$target/tests/impact-map.toml"
 AGENTIC_LOOP_SOURCE="$PROJECT_ROOT" AGENTIC_LOOP_TARGET="$target" AGENTIC_LOOP_SKIP_START=1 "$PROJECT_ROOT/install.sh"
 [[ -x $target/bin/agentic-loop ]] || fail 'install did not add the queue CLI'
 [[ -x $target/bin/agentic-loop-diagnose ]] || fail 'install did not add the manual diagnosis CLI'
@@ -2030,6 +2025,16 @@ candidate_order=$(printf '%s' "$queue_json" | yq -p json '.queue.candidates[].is
 # unknown_scope=open: this fixture also declares no scope and exercises the
 # worker limit and priority ordering, not scope conflict avoidance. The two
 # highest-priority Issues (90, 90) are claimed first; the lower ones stay queued.
+#
+# The installed-project fixture is a detection-only seed with no Makefile
+# (see the capability manifest scenario below, which asserts that absence).
+# Issue #266's worker-prompt assertions need a declared affected_check/
+# impact_map, so overlay them onto capabilities.toml just for this block and
+# restore the detection-only manifest immediately after (same pattern as the
+# preflight capability_orig backup/restore further down).
+queue_capabilities_orig="$TEST_ROOT/queue-capabilities-orig.toml"
+cp "$target/.agentic-loop/capabilities.toml" "$queue_capabilities_orig"
+sed -i '/^\[validation\]$/a affected_check = "devbox run --pure affected"\nimpact_map = "tests/impact-map.toml"' "$target/.agentic-loop/capabilities.toml"
 write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=2 LEASE_SECONDS=3 STOP_TIMEOUT=10 STALE_DAYS=30
 printf 'unknown_scope = "open"\n' >> "$target/.agentic-loop.toml"
 prio90=$(printf '<!-- agentic-loop:priority 90 -->' | base64 -w0)
@@ -2067,6 +2072,7 @@ assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'のハートビートです
 if grep -Eq 'danger-full-access|OPENAI_API_KEY|--add-dir /($| )|--add-dir /home($| )' "$FAKE_GH_ROOT/codex-calls"; then fail 'worker used forbidden Codex configuration or a broad writable path'; fi
 [[ ! -e $state_root/worktrees ]] || fail 'worker worktrees were placed inside Git metadata'
 assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'Token使用量（分析用）: provider=codex' 'codex worker did not record a token usage analysis entry'
+cp "$queue_capabilities_orig" "$target/.agentic-loop/capabilities.toml"
 
 # AGENT_PROVIDER=claude routes the worker to the Claude CLI, confining writes to the worktree.
 [[ -f $target/.claude/skills/submit-requirement/SKILL.md ]] || fail 'install did not add the Claude submit-requirement skill'
@@ -7119,6 +7125,22 @@ summary_without=$(source "$PROJECT_ROOT/bin/lib/agentic-loop/common.sh"; source 
 if grep -Fq '影響範囲検証（反復の短縮専用、push/merge gateではない）' <<< "$summary_without" || grep -Fq '影響範囲map:' <<< "$summary_without"; then
   fail 'capability summary fabricated undeclared affected details'
 fi
+
+# worker_time_budget_block (Issue #266): observed, not provider-claimed, and
+# opt-in via queue.worker_timeout_seconds. Absent/zero timeout or a missing/
+# unreadable started marker must render nothing (never a fabricated budget).
+time_budget_root="$TEST_ROOT/worker-time-budget"
+mkdir -p "$time_budget_root/workers"
+date +%s > "$time_budget_root/workers/9001.started"
+time_budget_disabled=$(STATE_ROOT="$time_budget_root" WORKER_TIMEOUT_SECONDS=0 bash -c \
+  'source "$0/bin/lib/agentic-loop/common.sh"; source "$0/bin/lib/agentic-loop/worker_state.sh"; source "$0/bin/lib/agentic-loop/worker.sh"; worker_time_budget_block 9001' "$PROJECT_ROOT")
+[[ -z $time_budget_disabled ]] || fail 'worker_time_budget_block rendered a budget with worker_timeout_seconds=0'
+time_budget_no_started=$(STATE_ROOT="$time_budget_root" WORKER_TIMEOUT_SECONDS=300 bash -c \
+  'source "$0/bin/lib/agentic-loop/common.sh"; source "$0/bin/lib/agentic-loop/worker_state.sh"; source "$0/bin/lib/agentic-loop/worker.sh"; worker_time_budget_block 9002' "$PROJECT_ROOT")
+[[ -z $time_budget_no_started ]] || fail 'worker_time_budget_block rendered a budget without a started marker'
+time_budget_enabled=$(STATE_ROOT="$time_budget_root" WORKER_TIMEOUT_SECONDS=300 bash -c \
+  'source "$0/bin/lib/agentic-loop/common.sh"; source "$0/bin/lib/agentic-loop/worker_state.sh"; source "$0/bin/lib/agentic-loop/worker.sh"; worker_time_budget_block 9001' "$PROJECT_ROOT")
+grep -Fq 'このworkerの実行時間予算: 上限=300秒' <<< "$time_budget_enabled" || fail 'worker_time_budget_block did not render an observed budget when enabled'
 
 # drift検出: affected_check_secondsがfull_check_seconds以上になると警告する
 # (bin/lib/agentic-loop/doctor.shはdrift:*をwildcardで既に処理する)。
