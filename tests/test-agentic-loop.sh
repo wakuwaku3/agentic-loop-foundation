@@ -699,9 +699,14 @@ case "${1:-} ${2:-}" in
         # resume_probe's open-PR detail jq matched in the else branch below.
         [[ -n ${FAKE_PR_BODY_FILE:-} && -r $FAKE_PR_BODY_FILE ]] && cat "$FAKE_PR_BODY_FILE"
       else
-        printf '%s\x1f%s\x1f%s\x1f%s\x1f%s\n' \
-          "${FAKE_RESUME_BASE_REF:-main}" "${FAKE_RESUME_BASE_SHA:-}" "${FAKE_RESUME_HEAD_SHA:-}" \
-          "${FAKE_RESUME_MERGEABLE:-null}" "${FAKE_RESUME_MERGEABLE_STATE:-unknown}"
+        # resume_probe must substitute SEP in its jq program before executing
+        # it. Returning literal SEP for an unconverted program makes this
+        # fixture preserve the production parser's empty-field regression.
+        detail_sep=SEP
+        [[ $jqarg == *$'\x1f'* ]] && detail_sep=$'\x1f'
+        printf '%s%s%s%s%s%s%s%s%s\n' \
+          "${FAKE_RESUME_BASE_REF:-main}" "$detail_sep" "${FAKE_RESUME_BASE_SHA:-}" "$detail_sep" "${FAKE_RESUME_HEAD_SHA:-}" "$detail_sep" \
+          "${FAKE_RESUME_MERGEABLE:-null}" "$detail_sep" "${FAKE_RESUME_MERGEABLE_STATE:-unknown}"
       fi
     elif [[ $endpoint == pulls && $* == *'resume-probe-prs'* ]]; then
       printf '%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\n' \
