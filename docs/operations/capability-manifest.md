@@ -120,7 +120,7 @@ manifestが存在しない場合は`installed: false`、警告1件（`not-instal
 
 ## worker promptへの反映
 
-検証済みmanifestが存在するときだけ、`issue_prompt`/`plan_prompt`が生成するprompt末尾に短いblockを差し込む（全検証コマンド、短時間検証、secret guard、`undetermined`）。manifestが存在しない、または検証に失敗する場合は何も差し込まず、従来どおりpolicy文書参照にfallbackする。
+検証済みmanifestが存在するときだけ、`issue_prompt`/`plan_prompt`が生成するprompt末尾に短いblockを差し込む（全検証コマンド、短時間検証、secret guard、`undetermined`）。`validation.affected_check`/`validation.impact_map`が宣言されていれば、反復の短縮専用でpush/merge gateではない旨のラベル付きでその2行も出す（ADR 0021・[local affected checkの運用ドキュメント](affected-checks.md)を参照。ポリシー本文はここでは再掲しない）。manifestが存在しない、または検証に失敗する場合は何も差し込まず、従来どおりpolicy文書参照にfallbackする。
 
 ## 再測定
 

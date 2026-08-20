@@ -341,7 +341,7 @@ workerが `AGENTIC_LOOP_RESULT=completed` を返しても、それだけでは�
 
 ### exec終了プロトコルと外部待機
 
-workerはCI、required checks、AI review、mergeなどの外部完了を同一turn内の前景処理で待つ。`gh pr checks --watch` 等は有限のtimeout単位で実行し、timeout後もpendingなら状態を再確認して繰り返す。background process、別agent、別sessionへの待機委譲、または「待機中です」だけの終了は許可しない。checks未確定、review feedback未対応、merge未実施、default branch検証未完了のいずれかでは最終応答を書かない。この待機は `[queue].worker_timeout_seconds` のworker全体上限の内側で行われ、上限を延長または無効化しない。
+workerはCI、required checks、AI review、mergeなどの外部完了を同一turn内の前景処理で待つ。`gh pr checks --watch` 等は有限のtimeout単位で実行し、timeout後もpendingなら状態を再確認して繰り返す。background process、別agent、別sessionへの待機委譲、または「待機中です」だけの終了は許可しない。checks未確定、review feedback未対応、merge未実施、default branch検証未完了のいずれかでは最終応答を書かない。この待機は `[queue].worker_timeout_seconds` のworker全体上限の内側で行われ、上限を延長または無効化しない。`worker_timeout_seconds`が正の値のとき、exec promptには`worker`開始時刻(epoch)からの観測に基づく上限・経過・残りが渡される（0のときは何も渡されない。providerの自己申告ではなく、開始markerからの実測値のみを使う）。上限が逼迫した場合の畳み方の優先順位は、達成済みの受け入れ条件をPRとして成立させる、未達分と本題外の不具合は別Issueとして切り出す、`needs-input`は人の判断が本当に必要な場合だけ使う、の順である。本題と無関係なflaky・CI固有失敗を発見した場合は、その場でこのIssueの反復を止め、本題の受け入れ条件に戻ってから別Issueへ切り出す。
 
 正当な終了時、providerは最後の非空行に `AGENTIC_LOOP_RESULT=completed`、`AGENTIC_LOOP_RESULT=failed`、`AGENTIC_LOOP_RESULT=needs-input`、`AGENTIC_LOOP_RESULT=declined` のいずれか一つだけを返す。provider processが正常終了しても有効なmarkerがない場合は、正常な失敗やCI待ちをreplan理由にせず、同一計画に「前景待機を完遂しmarkerを返す」補足を加えてexecを1回だけ即時再実行する。再実行もmarkerなしなら無限再試行・高コストなreplanへ進まず `failed` に遷移する。一方、providerの異常終了、明示的な `AGENTIC_LOOP_RESULT=failed`、token/rate-limit枯渇は既存のbounded replanまたはexhausted復旧処理をそのまま使う。GitHub設定の変更、新規外部service、追加課金は導入しない。
 
