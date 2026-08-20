@@ -5870,7 +5870,8 @@ grep -Fq 'Running Issues: none' <<< "$status_output" || fail 'idle status did no
 grep -Fq '競合待ちIssue: none' <<< "$status_output" || fail 'idle status did not report no conflict waits'
 grep -Fq 'キュー: 0件' <<< "$status_output" || fail 'idle status did not report an empty queue'
 grep -Fq '状態サマリ:' <<< "$status_output" || fail 'idle status did not show the state summary section'
-grep -Fq '警告: none' <<< "$status_output" || fail 'idle status unexpectedly reported an anomaly'
+grep -Fq '自動回復中: none' <<< "$status_output" || fail 'idle status unexpectedly reported automatic recovery'
+grep -Fq '要対応: none' <<< "$status_output" || fail 'idle status unexpectedly reported an action item'
 [[ $(git -C "$target" status --porcelain) == "$before_status" ]] || fail 'idle status modified the repository working tree'
 status_delta=$(tail -n +"$((calls_before + 1))" "$FAKE_GH_ROOT/calls")
 idle_core_reads=$(grep -c $'\tapi repos/' <<< "$status_delta" || true)
@@ -5966,10 +5967,16 @@ status_output=$("$target/bin/agentic-loop" status); status_rc=$?
 grep -Fq '#60' <<< "$status_output" || fail 'lease-expired status did not list the running Issue'
 grep -Fq '期限切れ' <<< "$status_output" || fail 'lease-expired status did not mark the running Issue lease as expired'
 grep -Fq 'lease-expired' <<< "$status_output" || fail 'lease-expired status did not report a lease-expired anomaly'
+grep -Fq '自動回復中:' <<< "$status_output" || fail 'lease-expired status did not separate automatic recovery'
+grep -Eq '経過[0-9]+秒' <<< "$status_output" || fail 'lease-expired status did not show elapsed time'
+grep -Fq '次pollで安全にqueueへ戻します。' <<< "$status_output" || fail 'lease-expired status did not show the next automatic action'
 [[ $(git -C "$target" status --porcelain) == "$before_status" ]] || fail 'lease-expired status modified the repository working tree'
 lease_json=$("$target/bin/agentic-loop" status --format json)
 [[ $(printf '%s' "$lease_json" | yq -p json '.workers[0].lease_expired') == true ]] || fail 'status --format json did not mark the worker lease as expired'
 [[ $(printf '%s' "$lease_json" | yq -p json '.anomalies[] | select(.code == "lease-expired") | .subject') == '#60' ]] || fail 'status --format json did not report the lease-expired anomaly'
+[[ $(printf '%s' "$lease_json" | yq -p json '.anomalies[] | select(.code == "lease-expired") | .classification') == recovering ]] || fail 'status JSON did not classify lease-expired as recovering'
+[[ $(printf '%s' "$lease_json" | yq -p json '.anomalies[] | select(.code == "lease-expired") | .elapsed') -ge 1 ]] || fail 'status JSON did not include elapsed for lease-expired'
+[[ -n $(printf '%s' "$lease_json" | yq -p json '.anomalies[] | select(.code == "lease-expired") | .action') ]] || fail 'status JSON did not include action for lease-expired'
 rm -rf "$state_root/workers"
 
 # Scenario: corrupted local-state files (a non-numeric .started, a malformed
@@ -5987,19 +5994,21 @@ status_output=$("$target/bin/agentic-loop" status); status_rc=$?
 (( status_rc == 0 )) || fail 'status crashed on corrupted local state'
 grep -Fq 'local-state-corrupt' <<< "$status_output" || fail 'status did not report the corrupted local-state files'
 grep -Fq 'supervisor-stale-pid' <<< "$status_output" || fail 'status did not report the stale supervisor.pid'
+grep -Fq '要対応:' <<< "$status_output" || fail 'status did not separate human action items'
+grep -Fq '対応: bin/agentic-loop start' <<< "$status_output" || fail 'status did not show the stale supervisor recovery action'
 [[ $(git -C "$target" status --porcelain) == "$before_status" ]] || fail 'status modified the repository working tree on corrupted local state'
 rm -f "$state_root/supervisor.pid" "$state_root/workers/70.started" "$state_root/workers/70.lease"
 
 # Scenario: a worktree/branch left over from an Issue no longer agent:running
-# is flagged, and clears once removed.
+# is left to Issue #211's supervisor prune and never adds status noise.
 git -C "$target" worktree add --quiet -b agent/issue-9999 "$target-worktrees/issue-9999" origin/main
 status_output=$("$target/bin/agentic-loop" status)
-grep -Fq 'residual-worktree' <<< "$status_output" || fail 'status did not flag a residual worktree'
-grep -Fq 'residual-branch' <<< "$status_output" || fail 'status did not flag a residual branch'
+grep -Fq 'residual-worktree' <<< "$status_output" && fail 'status reported a residual worktree despite automatic prune ownership'
+grep -Fq 'residual-branch' <<< "$status_output" && fail 'status reported a residual branch despite automatic prune ownership'
 git -C "$target" worktree remove --force "$target-worktrees/issue-9999"
 git -C "$target" branch -D agent/issue-9999 >/dev/null
 status_output=$("$target/bin/agentic-loop" status)
-grep -Fq 'residual-worktree' <<< "$status_output" && fail 'status kept flagging a removed worktree'
+grep -Fq 'residual-worktree' <<< "$status_output" && fail 'status reported a removed worktree'
 : > "$state"
 : > "$FAKE_GH_ROOT/$state_key.comments"
 rm -rf "$state_root/workers"

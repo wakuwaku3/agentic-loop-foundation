@@ -315,7 +315,30 @@ status_queue_candidate_reason() {
 }
 
 
-anomaly_add() { ANOMALY_LEVEL+=("$1"); ANOMALY_CODE+=("$2"); ANOMALY_SUBJECT+=("$3"); ANOMALY_DETAIL+=("$4"); }
+# An anomaly always says whether the supervisor is recovering it or an
+# operator must act.  Keep these as parallel arrays to preserve the small,
+# dependency-free JSON renderer below.
+anomaly_add() {
+  ANOMALY_LEVEL+=("$1"); ANOMALY_CODE+=("$2"); ANOMALY_SUBJECT+=("$3"); ANOMALY_DETAIL+=("$4")
+  ANOMALY_ACTION+=("$5"); ANOMALY_ELAPSED+=("$6"); ANOMALY_CLASSIFICATION+=("$7")
+}
+
+# Return a non-negative elapsed duration from a local-state epoch.  Invalid or
+# unavailable timestamps are represented as zero so every displayed anomaly
+# retains the required elapsed field without adding a GitHub read.
+status_elapsed_since() {
+  local then=$1 now
+  now=$(date +%s)
+  [[ $then =~ ^[0-9]+$ ]] || { printf '0'; return 0; }
+  (( then > now )) && then=$now
+  printf '%s' "$((now - then))"
+}
+
+status_file_elapsed() {
+  local file=$1 then
+  then=$(stat -c %Y "$file" 2>/dev/null || true)
+  status_elapsed_since "$then"
+}
 
 
 # Detect operational anomalies from purely local state (see docs/decisions/
@@ -325,46 +348,43 @@ anomaly_add() { ANOMALY_LEVEL+=("$1"); ANOMALY_CODE+=("$2"); ANOMALY_SUBJECT+=("
 # worktrees/branches, corrupted local-state files, a pending Project sync
 # retry queue, and an active claim pause. Never mutates state.
 status_collect_anomalies() {
-  local i issue started running_csv=',' item num count pause
+  local i issue started running_csv=',' count pause elapsed orphan_since orphan_elapsed orphan_detail file
   if [[ -r $STATE_ROOT/supervisor.pid ]] && ! pid_alive; then
-    anomaly_add warning supervisor-stale-pid supervisor.pid 'supervisor.pid が残っていますが、対応するprocessは生存していません。'
+    anomaly_add warning supervisor-stale-pid supervisor.pid 'supervisor.pid が残っていますが、対応するprocessは生存していません。' 'bin/agentic-loop start を実行してください（start/stop が stale state を自動整理します）。' "$(status_file_elapsed "$STATE_ROOT/supervisor.pid")" needs-attention
   fi
-  status_supervisor_lock_stale && anomaly_add warning supervisor-stale-pid supervisor.lock 'supervisor.lock が残っていますが、生存しているsupervisorがありません。'
+  status_supervisor_lock_stale && anomaly_add warning supervisor-stale-pid supervisor.lock 'supervisor.lock が残っていますが、生存しているsupervisorがありません。' 'bin/agentic-loop start を実行してください（start/stop が stale state を自動整理します）。' "$(status_file_elapsed "$STATE_ROOT/supervisor.lock")" needs-attention
 
   for i in "${!RUN_NUM[@]}"; do
     issue=${RUN_NUM[$i]}
     running_csv+="$issue,"
     if [[ -r $(worker_started_file "$issue") ]]; then
       read -r started < "$(worker_started_file "$issue")" || started=''
-      [[ $started =~ ^[0-9]+$ ]] || anomaly_add warning local-state-corrupt "#$issue" "workers/$issue.started の内容が不正です。"
+      [[ $started =~ ^[0-9]+$ ]] || anomaly_add warning local-state-corrupt "#$issue" "workers/$issue.started の内容が不正です。" "workers/$issue.started を確認し、worker停止後に問題の workers/$issue.* state を除去してください。" "$(status_file_elapsed "$(worker_started_file "$issue")")" needs-attention
     fi
     local to_exceeded=0 elapsed
     if (( WORKER_TIMEOUT_SECONDS > 0 )) && worker_pid_live "$issue"; then
       elapsed=$(worker_elapsed_seconds "$issue" 2>/dev/null || true)
       if [[ $elapsed =~ ^[0-9]+$ ]] && (( elapsed >= WORKER_TIMEOUT_SECONDS )); then
         to_exceeded=1
-        anomaly_add warning worker-timeout "#$issue" "実行時間上限（${WORKER_TIMEOUT_SECONDS}秒）を超過しています（経過 ${elapsed}秒）。次回pollで停止し自動的に再試行します。"
+        anomaly_add info worker-timeout "#$issue" "実行時間上限（${WORKER_TIMEOUT_SECONDS}秒）を超過しています。" '次pollでworkerを停止し、安全に再試行します。' "$elapsed" recovering
       fi
     fi
     status_progress_health "$issue" "$to_exceeded"
     if [[ $STATUS_RUN_HEALTH == stalled ]]; then
-      anomaly_add warning worker-stalled "#$issue" "最後の進行から ${STATUS_RUN_PROGRESS_AGE}秒経過しています（stall閾値 ${STATUS_STALL_SECONDS}秒）。観測のみで自動停止はしません（停止はworker_timeout_secondsの役割）。"
+      anomaly_add warning worker-stalled "#$issue" "最後の進行から ${STATUS_RUN_PROGRESS_AGE}秒経過しています（stall閾値 ${STATUS_STALL_SECONDS}秒）。" 'status --watch または tail で進行を確認し、必要なら worker_timeout_seconds 到達後の再試行を確認してください。' "${STATUS_RUN_PROGRESS_AGE}" needs-attention
     fi
     LEASE_ID='' LEASE_EXPIRES='' LEASE_HEARTBEAT=''
     if lease_read "$issue"; then
       if [[ -n $LEASE_ID && ! $LEASE_ID =~ ^[0-9]+$ ]]; then
-        anomaly_add warning local-state-corrupt "#$issue" "workers/$issue.lease の内容が不正です。"
+        anomaly_add warning local-state-corrupt "#$issue" "workers/$issue.lease の内容が不正です。" "workers/$issue.lease を確認し、worker停止後に問題の workers/$issue.* state を除去してください。" "$(status_file_elapsed "$STATE_ROOT/workers/$issue.lease")" needs-attention
       elif [[ $LEASE_EXPIRES =~ ^[0-9]+$ ]] && (( $(date +%s) > LEASE_EXPIRES )); then
-        anomaly_add warning lease-expired "#$issue" "リースが期限切れです（expires=$LEASE_EXPIRES）。次回pollで安全にqueueへ戻ります。"
+        anomaly_add info lease-expired "#$issue" "リースが期限切れです（expires=$LEASE_EXPIRES）。" '次pollで安全にqueueへ戻します。' "$(status_elapsed_since "$LEASE_EXPIRES")" recovering
       fi
-    fi
-    if [[ ! -r $(worker_started_file "$issue") && ! -r $(worker_phase_file "$issue") && ! -r $STATE_ROOT/workers/$issue.pid ]]; then
-      anomaly_add warning worker-missing "#$issue" 'このホストにlocal stateがありません。別ホストが担当している場合は正常です。'
     fi
   done
 
   shopt -s nullglob
-  local pidfile orphan_since orphan_elapsed orphan_detail
+  local pidfile
   for pidfile in "$STATE_ROOT"/workers/*.pid; do
     issue=$(basename "$pidfile" .pid)
     if worker_pid_live "$issue" && [[ $running_csv != *",$issue,"* ]]; then
@@ -373,43 +393,25 @@ status_collect_anomalies() {
         read -r orphan_since < "$(worker_orphan_since_file "$issue")" || orphan_since=''
         [[ $orphan_since =~ ^[0-9]+$ ]] && orphan_elapsed=$(( $(date +%s) - orphan_since ))
       fi
-      if (( WORKER_ORPHAN_GRACE_SECONDS == 0 )); then
-        orphan_detail='local workerは生存していますが、GitHub上ではagent:runningではありません（worker_orphan_grace_seconds=0のため自動停止は無効です）。'
-      elif [[ $orphan_elapsed =~ ^[0-9]+$ ]]; then
-        orphan_detail="local workerは生存していますが、GitHub上ではagent:runningではありません（観測 ${orphan_elapsed}秒/grace ${WORKER_ORPHAN_GRACE_SECONDS}秒。超過後の次回pollで自動停止します）。"
-      else
-        orphan_detail="local workerは生存していますが、GitHub上ではagent:runningではありません（次回pollからgrace ${WORKER_ORPHAN_GRACE_SECONDS}秒の観測を開始します）。"
-      fi
-      anomaly_add warning worker-orphan "#$issue" "$orphan_detail"
+      orphan_elapsed=${orphan_elapsed:-$(status_file_elapsed "$pidfile")}
+      orphan_detail="local workerは生存していますが、GitHub上ではagent:runningではありません（grace ${WORKER_ORPHAN_GRACE_SECONDS}秒）。"
+      anomaly_add info worker-orphan "#$issue" "$orphan_detail" '次pollでgraceを確認し、超過後はworkerを自動停止します。' "$orphan_elapsed" recovering
     fi
   done
   shopt -u nullglob
 
-  while IFS= read -r item; do
-    [[ -n $item ]] || continue
-    num=${item##*/issue-}
-    [[ $running_csv == *",$num,"* ]] || anomaly_add warning residual-worktree "$item" 'agent:runningに対応しないworktreeです。'
-  done < <(git -C "$REPO_ROOT" worktree list --porcelain 2>/dev/null | awk -v root="$WORKTREE_ROOT/issue-" '$1 == "worktree" && index($2, root) == 1 {print $2}')
-
-  while IFS= read -r item; do
-    [[ -n $item ]] || continue
-    num=${item#agent/issue-}
-    [[ $num =~ ^[0-9]+$ ]] || continue
-    [[ $running_csv == *",$num,"* ]] || anomaly_add warning residual-branch "$item" 'agent:runningに対応しないbranchです。'
-  done < <(git -C "$REPO_ROOT" for-each-ref --format='%(refname:short)' refs/heads/agent/ 2>/dev/null)
-
   if [[ -r $STATE_ROOT/project-pending ]]; then
     count=$(wc -l < "$STATE_ROOT/project-pending" 2>/dev/null || printf 0)
-    (( count > 0 )) && anomaly_add info project-sync-pending project "Project同期の再試行待ちが $count 件あります。"
+    (( count > 0 )) && anomaly_add info project-sync-pending project "Project同期の再試行待ちが $count 件あります。" '次pollで保留中のProject同期を再試行します。' "$(status_file_elapsed "$STATE_ROOT/project-pending")" recovering
   fi
 
   for i in "${!PAUSED_NUM[@]}"; do
     issue=${PAUSED_NUM[$i]}
-    worker_pid_live "$issue" && anomaly_add warning paused-worker-live "#$issue" 'agent:pausedですが、このホストのlocal workerがまだ生存しています。次回pollのdrain_paused_workersで停止します。'
+    worker_pid_live "$issue" && anomaly_add info paused-worker-live "#$issue" 'agent:pausedですが、このホストのlocal workerがまだ生存しています。' '次pollのdrain_paused_workersでworkerを停止します。' "$(status_file_elapsed "$STATE_ROOT/workers/$issue.pid")" recovering
   done
 
   pause=$(status_claim_pause_reasons)
-  [[ -n $pause ]] && anomaly_add info claim-paused supervisor "claimを一時停止しています: $pause"
+  [[ -n $pause ]] && anomaly_add info claim-paused supervisor "claimを一時停止しています: $pause" '次pollで利用可能なprovider・予算・停止要求を再評価し、可能になればclaimを再開します。' "$(status_file_elapsed "$STATE_ROOT/budget-paused")" recovering
   return 0
 }
 
@@ -583,12 +585,27 @@ status_render_text() {
   fi
 
   if (( ${#ANOMALY_LEVEL[@]} > 0 )); then
-    printf '警告:\n'
+    local recovering=0 needs_attention=0
     for i in "${!ANOMALY_LEVEL[@]}"; do
-      printf '  [%s] %s %s: %s\n' "${ANOMALY_LEVEL[$i]}" "${ANOMALY_CODE[$i]}" "${ANOMALY_SUBJECT[$i]}" "${ANOMALY_DETAIL[$i]}"
+      [[ ${ANOMALY_CLASSIFICATION[$i]} == recovering ]] && recovering=$((recovering + 1)) || needs_attention=$((needs_attention + 1))
     done
+    if (( recovering > 0 )); then
+      printf '自動回復中:\n'
+      for i in "${!ANOMALY_LEVEL[@]}"; do
+        [[ ${ANOMALY_CLASSIFICATION[$i]} == recovering ]] || continue
+        printf '  %s %s: %s — 経過%s秒, %s\n' "${ANOMALY_CODE[$i]}" "${ANOMALY_SUBJECT[$i]}" "${ANOMALY_DETAIL[$i]}" "${ANOMALY_ELAPSED[$i]}" "${ANOMALY_ACTION[$i]}"
+      done
+    fi
+    if (( needs_attention > 0 )); then
+      printf '要対応:\n'
+      for i in "${!ANOMALY_LEVEL[@]}"; do
+        [[ ${ANOMALY_CLASSIFICATION[$i]} == needs-attention ]] || continue
+        printf '  %s %s: %s — 経過%s秒 → 対応: %s\n' "${ANOMALY_CODE[$i]}" "${ANOMALY_SUBJECT[$i]}" "${ANOMALY_DETAIL[$i]}" "${ANOMALY_ELAPSED[$i]}" "${ANOMALY_ACTION[$i]}"
+      done
+    fi
   else
-    say '警告: none'
+    say '自動回復中: none'
+    say '要対応: none'
   fi
 }
 
@@ -741,7 +758,7 @@ status_render_json() {
   printf '"anomalies":['
   sep=''
   for i in "${!ANOMALY_LEVEL[@]}"; do
-    printf '%s{"level":"%s","code":"%s","subject":"%s","detail":"%s"}' "$sep" "${ANOMALY_LEVEL[$i]}" "${ANOMALY_CODE[$i]}" "$(json_escape "${ANOMALY_SUBJECT[$i]}")" "$(json_escape "${ANOMALY_DETAIL[$i]}")"
+    printf '%s{"level":"%s","code":"%s","subject":"%s","detail":"%s","action":"%s","elapsed":%s,"classification":"%s"}' "$sep" "${ANOMALY_LEVEL[$i]}" "${ANOMALY_CODE[$i]}" "$(json_escape "${ANOMALY_SUBJECT[$i]}")" "$(json_escape "${ANOMALY_DETAIL[$i]}")" "$(json_escape "${ANOMALY_ACTION[$i]}")" "${ANOMALY_ELAPSED[$i]}" "${ANOMALY_CLASSIFICATION[$i]}"
     sep=','
   done
   printf ']}\n'
@@ -789,7 +806,7 @@ cmd_status() {
   declare -ga QUEUE_NUM=() QUEUE_TITLE=() QUEUE_PRIORITY=() QUEUE_CATRANK=() QUEUE_CREATED=()
   declare -ga NEEDSINPUT_NUM=() NEEDSINPUT_TITLE=() FAILED_NUM=() FAILED_TITLE=() PARKED_NUM=() PARKED_TITLE=() INREVIEW_NUM=() INREVIEW_TITLE=() BLOCKED_NUM=() BLOCKED_TITLE=() PAUSED_NUM=() PAUSED_TITLE=()
   declare -ga STALE_NUM=() STALE_TITLE=()
-  declare -ga ANOMALY_LEVEL=() ANOMALY_CODE=() ANOMALY_SUBJECT=() ANOMALY_DETAIL=()
+  declare -ga ANOMALY_LEVEL=() ANOMALY_CODE=() ANOMALY_SUBJECT=() ANOMALY_DETAIL=() ANOMALY_ACTION=() ANOMALY_ELAPSED=() ANOMALY_CLASSIFICATION=()
   declare -g STATUS_GITHUB_OK=1 STATUS_STALE_TRUNCATED=0 STATUS_SNAPSHOT_RAW='' STATUS_SNAPSHOT_FETCHED='' STATUS_STALE_RAW='' STATUS_STALE_FETCHED=''
   status_collect_snapshot
   status_collect_stale
