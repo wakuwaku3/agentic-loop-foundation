@@ -122,10 +122,10 @@ supervisor_graceful_shutdown() {
     issue=$(basename "$pidfile" .pid)
     read -r pid < "$pidfile" 2>/dev/null || true
     if [[ $pid =~ ^[0-9]+$ ]]; then
-      kill -TERM "-$pid" 2>/dev/null || true
+      signal_process_tree "$pid" TERM
       waited=0
       while (( waited < 5 )) && kill -0 "$pid" 2>/dev/null; do sleep 1; waited=$((waited + 1)); done
-      kill -0 "$pid" 2>/dev/null && kill -KILL "-$pid" 2>/dev/null || true
+      kill -0 "$pid" 2>/dev/null && signal_process_tree "$pid" KILL || true
     fi
     lease_release "$issue" shutdown
     clear_worker_local "$issue"
