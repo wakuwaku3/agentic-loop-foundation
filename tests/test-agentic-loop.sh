@@ -2234,21 +2234,23 @@ assert_contains "$FAKE_GH_ROOT/opencode-calls" 'run --auto' 'exec phase did not 
 [[ $(grep -c -- '--sandbox workspace-write' "$FAKE_GH_ROOT/codex-calls") -eq 0 ]] || fail 'exec phase unexpectedly ran on codex'
 assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'provider=codex stage=plan' 'plan usage did not record the codex provider'
 
-# Each Issue runs a read-only plan stage before the workspace-write exec stage,
-# and an exec that never satisfies completion triggers bounded re-planning.
+# Each Issue runs a read-only plan stage before the workspace-write exec stage.
+# A plan whose every candidate fails is requeued without an empty-plan exec;
+# this preserves the preflight/workload/decomposition/scope gates for the next
+# claim and does not consume an Issue attempt.
 write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=30 STOP_TIMEOUT=10 STALE_DAYS=30
 printf '20 queued open none 2026-01-01T00:00:00Z\n' > "$state"
 : > "$FAKE_GH_ROOT/$state_key.comments"
 : > "$FAKE_GH_ROOT/codex-calls"
 AGENT_PLAN_MAX_RETRIES=1 FAKE_CODEX_RESULT='AGENTIC_LOOP_RESULT=failed' AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _supervise
-grep -Eq '^20 failed' "$state" || fail 'exhausted re-planning did not fail the Issue'
+grep -Eq '^20 queued' "$state" || fail 'plan failure did not requeue the Issue'
 plan_passes=$(grep -c -- '--sandbox read-only' "$FAKE_GH_ROOT/codex-calls")
-[[ $plan_passes -eq 2 ]] || fail "expected 2 planning passes (initial + 1 retry), got $plan_passes"
+[[ $plan_passes -eq 1 ]] || fail "expected 1 planning pass and no retry/exec, got $plan_passes"
 exec_passes=$(grep -c -- '--sandbox workspace-write' "$FAKE_GH_ROOT/codex-calls")
-[[ $exec_passes -eq 2 ]] || fail "expected 2 exec passes (initial + 1 retry), got $exec_passes"
-assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'flagshipモデルで計画を見直して再実行' 're-planning was not announced on the Issue'
+[[ $exec_passes -eq 0 ]] || fail 'plan failure unexpectedly started an empty-plan exec'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'reason=plan-failure' 'plan failure was not observable on the Issue'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" '試行回数を消費せずIssueを再キュー' 'plan failure did not document the non-attempt-consuming requeue'
 assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'stage=plan' 'plan stage usage was not recorded'
-assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'stage=exec' 'exec stage usage was not recorded'
 git -C "$target" worktree remove "$target-worktrees/issue-20" --force 2>/dev/null || true
 git -C "$target" branch -D agent/issue-20 >/dev/null 2>&1 || true
 

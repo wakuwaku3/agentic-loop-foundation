@@ -768,7 +768,15 @@ worker() {
     fi
     if (( plan_rc != 0 )); then
       : > "$plan_file"
-      say 'plan段の全候補が失敗したため、plan結果なしでexecへ進みます。' >&2
+      # A plan failure is an execution-environment/provider event, not a
+      # task failure.  Continuing with an empty plan would bypass scope
+      # refinement, preflight, workload, and decomposition simultaneously.
+      # Reuse the non-attempt-consuming requeue path used for pool exhaustion,
+      # while recording a distinct reason so status/Issue history is explicit.
+      say 'plan段の全候補が失敗したため、空計画でexecへは進まず再キューします。' >&2
+      exhausted=1
+      exit_code=$STAGE_EXIT_CODE
+      break
     fi
     worker_refine_scope_from_plan "$issue" "$plan_file"
     progress_touch "$issue" preflight
@@ -970,7 +978,11 @@ worker() {
     progress_touch "$issue" queued
     set_issue_state "$issue" queued
     project_sync_state "$issue" queued
-    comment_issue "$issue" "<!-- agentic-loop:exhausted worker=$worker pool=${LAST_EXHAUSTED_POOL:-} -->\nprovider の利用上限（token/rate limit）に達したため、Issueを failed にせず再キューします。全プールが利用不可の間だけSupervisorのclaimを一時停止し、枠回復後に自動再開します。"
+    if (( plan_rc != 0 )); then
+      comment_issue "$issue" "<!-- agentic-loop:requeued worker=$worker reason=plan-failure exit=$exit_code -->\nplan段の全候補が失敗したため、空計画でexecへは進まず、試行回数を消費せずIssueを再キューしました。preflight/workload/decomposition/scope精緻化はplan成功後に評価します。"
+    else
+      comment_issue "$issue" "<!-- agentic-loop:exhausted worker=$worker pool=${LAST_EXHAUSTED_POOL:-} -->\nprovider の利用上限（token/rate limit）に達したため、Issueを failed にせず再キューします。全プールが利用不可の間だけSupervisorのclaimを一時停止し、枠回復後に自動再開します。"
+    fi
   else
     progress_touch "$issue" failed
     set_issue_state "$issue" failed
