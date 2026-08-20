@@ -146,7 +146,8 @@ status_pool_pause_detail() {
 # status_oldest_marker_elapsed) STATUS_PAUSE_MARKERS -- called directly, never
 # via `$(...)`, since a command substitution subshell would discard both.
 status_claim_pause_reasons() {
-  local -a reasons=()
+  local -a reasons=() exhausted_details=()
+  local pool pool_count=0 exhausted_count=0
   STATUS_PAUSE_TEXT='' STATUS_PAUSE_MARKERS=()
   if [[ -e $STATE_ROOT/budget-paused ]]; then reasons+=('provider週次利用率のreserve'); STATUS_PAUSE_MARKERS+=("$STATE_ROOT/budget-paused"); fi
   if [[ -e $STATE_ROOT/core-budget-paused ]]; then reasons+=('REST(core)のreserve'); STATUS_PAUSE_MARKERS+=("$STATE_ROOT/core-budget-paused"); fi
@@ -158,18 +159,39 @@ status_claim_pause_reasons() {
       STATUS_PAUSE_MARKERS+=("$STATE_ROOT/agent-exhausted")
     fi
   fi
-  if [[ -e $STATE_ROOT/all-pools-paused ]]; then reasons+=('全プール利用不可'); STATUS_PAUSE_MARKERS+=("$STATE_ROOT/all-pools-paused"); fi
-  local pool
   for pool in $(agent_all_pools); do
+    pool_count=$((pool_count + 1))
     if agent_pool_marker_active "$pool"; then
-      reasons+=("$(status_pool_pause_detail "$pool")")
-      STATUS_PAUSE_MARKERS+=("$(agent_pool_marker "$pool")")
+      exhausted_count=$((exhausted_count + 1))
+      exhausted_details+=("$(status_pool_pause_detail "$pool")")
     fi
   done
+  # Match exhaustion_note_pause(): per-pool markers gate claims only when every
+  # declared pool is unavailable. all-pools-paused is a transition marker and
+  # can remain stale until the next supervisor poll, so it is not sufficient by
+  # itself when a usable pool is visible now.
+  if (( pool_count > 0 && exhausted_count == pool_count )); then
+    reasons+=("全プール利用不可: $(IFS=,; printf '%s' "${exhausted_details[*]}")")
+    for pool in $(agent_all_pools); do STATUS_PAUSE_MARKERS+=("$(agent_pool_marker "$pool")"); done
+    [[ -e $STATE_ROOT/all-pools-paused ]] && STATUS_PAUSE_MARKERS+=("$STATE_ROOT/all-pools-paused")
+  fi
   if [[ -e $STATE_ROOT/stop.requested ]]; then reasons+=('stop要求によるdrain中'); STATUS_PAUSE_MARKERS+=("$STATE_ROOT/stop.requested"); fi
   (( ${#reasons[@]} == 0 )) && return 0
   local IFS=,
   STATUS_PAUSE_TEXT="${reasons[*]}"
+}
+
+# Read-only slot count for status. worker_count() reconciles/removes pidfiles,
+# which would violate status' no-mutation contract.
+status_live_worker_count() {
+  local count=0 pid pidfile
+  shopt -s nullglob
+  for pidfile in "$STATE_ROOT"/workers/*.pid; do
+    pid=''; read -r pid < "$pidfile" 2>/dev/null || true
+    [[ $pid =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null && count=$((count + 1))
+  done
+  shopt -u nullglob
+  printf '%s' "$count"
 }
 
 # Oldest mtime among the pause markers status_claim_pause_reasons actually
@@ -310,7 +332,13 @@ status_running_detail() {
 # claim decision; see docs/operations/issue-queue.md). Sets
 # STATUS_CANDIDATE_REASON/STATUS_CANDIDATE_DETAIL.
 status_queue_candidate_reason() {
-  local issue=$1 file
+  local issue=$1 file live_workers
+  live_workers=$(status_live_worker_count)
+  if (( live_workers >= MAX_WORKERS )); then
+    STATUS_CANDIDATE_REASON='worker-slots-full'
+    STATUS_CANDIDATE_DETAIL="worker slotが満杯です（$live_workers/$MAX_WORKERS）。"
+    return 0
+  fi
   file=$(conflict_wait_file "$issue")
   if [[ -r $file ]]; then
     local other reason
@@ -565,6 +593,13 @@ status_render_text() {
         "$phase" "$NC_POOL" "$NC_PROVIDER" "$NC_MODEL" "$NC_TIER" "$NC_MODEL_IDX"
     else
       printf '次の%s候補: なし（全プール利用不可）\n' "$phase"
+    fi
+  done
+
+  local degraded_pool
+  for degraded_pool in $(agent_all_pools); do
+    if agent_pool_marker_active "$degraded_pool"; then
+      printf '利用不可pool: %s（利用可能な別poolがあればclaim継続）\n' "$(status_pool_pause_detail "$degraded_pool")"
     fi
   done
 
