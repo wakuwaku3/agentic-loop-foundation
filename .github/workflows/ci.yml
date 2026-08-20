@@ -21,8 +21,6 @@ jobs:
           - lifecycle
           - auxiliary
           - upgrade
-    env:
-      AGENTIC_LOOP_TEST_GROUP: ${{ matrix.group }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       - uses: jetify-com/devbox-install-action@a0d2d53632934ae004f878c840055956d9f741b0
@@ -31,4 +29,4 @@ jobs:
           sha256-checksum: 111bc3436fe1a1a60cdc67a532d6d5dae0402f092ef6f95055c139711374a800
           # The repository uses GitHub's default 10 GB limit; older entries are evicted at the limit.
           enable-cache: 'true'
-      - run: devbox run --pure check
+      - run: devbox run --pure -- env AGENTIC_LOOP_TEST_GROUP=${{ matrix.group }} make check

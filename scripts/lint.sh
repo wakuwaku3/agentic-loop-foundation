@@ -157,7 +157,7 @@ grep -Fq 'docs/decisions/0015-numeric-priority-marker.md' scripts/lib/foundation
   printf 'Numeric-priority ADR is not distributed.\n' >&2
   exit 1
 }
-grep -Fq 'devbox run --pure check' .github/workflows/ci.yml || {
+grep -Fq 'devbox run --pure -- env AGENTIC_LOOP_TEST_GROUP=${{ matrix.group }} make check' .github/workflows/ci.yml || {
   printf 'CI does not use the common Devbox entry point.\n' >&2
   exit 1
 }
@@ -540,7 +540,7 @@ for group in queue lifecycle auxiliary upgrade; do
     exit 1
   }
 done
-grep -Fq 'AGENTIC_LOOP_TEST_GROUP: ${{ matrix.group }}' .github/workflows/ci.yml || {
+grep -Fq 'devbox run --pure -- env AGENTIC_LOOP_TEST_GROUP=${{ matrix.group }} make check' .github/workflows/ci.yml || {
   printf 'CI matrix group is not connected to the common check entry point.\n' >&2
   exit 1
 }

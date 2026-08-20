@@ -130,7 +130,7 @@ manifestが存在しない場合は`installed: false`、警告1件（`not-instal
 
 `.github/workflows/ci.yml`のjob timeoutは、通常実測690〜735秒に対してrunner遅延とflaky診断用の限定再試行を許容する30分とする。`queue.worker_timeout_seconds`は、検証だけでなくplan・exec・PR reviewを含むworker全体の上限なので14400秒を維持する。
 
-CIは4つのE2E群を固定matrixへ分割し、各jobで`AGENTIC_LOOP_TEST_GROUP`を指定した同じ`devbox run --pure check`入口を実行する。全4checkの集合が完全検証であり、群の省略やaffected選択には使わない。GitHub上でpublic repositoryであることを確認したうえで標準hosted runnerを使い、matrix幅は4へ固定して追加課金と無制限なrunner増加を避ける。
+CIは4つのE2E群を固定matrixへ分割し、各jobで固定Devbox環境へ入った後に`AGENTIC_LOOP_TEST_GROUP`を指定して同じ`make check`入口を実行する。`devbox run --pure`は呼出元の任意環境変数を引き継がないため、群指定は固定環境内の`env`から渡す。全4checkの集合が完全検証であり、群の省略やaffected選択には使わない。GitHub上でpublic repositoryであることを確認したうえで標準hosted runnerを使い、matrix幅は4へ固定して追加課金と無制限なrunner増加を避ける。
 
 ## 費用
 

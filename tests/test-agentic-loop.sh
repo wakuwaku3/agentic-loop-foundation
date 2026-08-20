@@ -7697,6 +7697,18 @@ FAKE_RUNNER_STATE="$run_state1" "$run_e2e_sh" --groups queue --runner "$flaky_fa
 [[ $(yq -p json -r '.verdicts[0].verdict' "$run_record1") == passed ]] || fail 'run-e2e.sh record did not mark an always-passing group as passed'
 [[ $(yq -p json -r '.verdicts[0].attempts | length' "$run_record1") -eq 1 ]] || fail 'run-e2e.sh retried an always-passing group'
 
+# CI matrixは共通入口を変えず、環境変数でrun-e2e.shの既定群を1群へ絞る。
+# 明示的な--groupsを渡さない経路を固定し、各matrix jobが全4群を重複実行する
+# regressionを防ぐ。
+run_state_env="$TEST_ROOT/run-e2e-state-env"
+mkdir -p "$run_state_env"
+echo pass > "$run_state_env/lifecycle.behavior"
+run_report_env="$TEST_ROOT/run-e2e-report-env.tsv"
+AGENTIC_LOOP_TEST_GROUP=lifecycle FAKE_RUNNER_STATE="$run_state_env" "$run_e2e_sh" --runner "$flaky_fake_runner" --registry "$flaky_empty_registry" --report "$run_report_env" --no-record >/dev/null 2>&1 \
+  || fail 'run-e2e.sh failed for the CI matrix environment-selected group'
+[[ $(wc -l < "$run_report_env") -eq 1 ]] || fail 'run-e2e.sh ran more than one group for the CI matrix environment selection'
+grep -Eq '^lifecycle[[:space:]]+passed[[:space:]]+' "$run_report_env" || fail 'run-e2e.sh did not run the CI matrix environment-selected group'
+
 # 常時失敗: 隔離entryがあっても決定的失敗は非ゼロで終了する。
 run_state2="$TEST_ROOT/run-e2e-state-2"
 mkdir -p "$run_state2"
