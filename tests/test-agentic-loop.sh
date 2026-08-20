@@ -1162,6 +1162,11 @@ if [[ $* == *'--format json'* ]]; then
 else
   printf '%s\n' "$opencode_result"
 fi
+exit_var=FAKE_OPENCODE_EXIT
+if [[ $* == *--auto* && -v FAKE_OPENCODE_EXEC_EXIT_$auto_count ]]; then
+  exit_var="FAKE_OPENCODE_EXEC_EXIT_$auto_count"
+fi
+exit "${!exit_var:-0}"
 FAKE_OPENCODE
 cat > "$FAKE_BIN/systemctl" <<'FAKE_SYSTEMCTL'
 #!/usr/bin/env bash
@@ -2482,6 +2487,18 @@ grep -Eq '^62 completed closed' "$state" || { echo '---DEBUG STATE---'; cat "$st
 [[ ! -e $state_root/all-pools-paused ]] || fail 'a successful plan mentioning rate limits must not pause the supervisor'
 if grep -Fq 'agentic-loop:exhausted' "$FAKE_GH_ROOT/$state_key.comments"; then fail 'plan-text rate-limit mention was recorded as exhaustion'; fi
 
+# Regression (Issue #226): a successful stage whose output discusses model
+# failures must remain successful. Model-failure matching is gated by the
+# provider exit/error state just like pool-exhaustion matching.
+model_text_result="$TEST_ROOT/model-text-result"
+printf '%s\n' 'The report explains how to detect an invalid model or overloaded provider.' > "$model_text_result"
+if ( source "$PROJECT_ROOT/bin/lib/agentic-loop/agent.sh"; agent_result_is_model_failure "$model_text_result" 0 0 ); then
+  fail 'successful output mentioning model failure was misclassified'
+fi
+if ! ( source "$PROJECT_ROOT/bin/lib/agentic-loop/agent.sh"; agent_result_is_model_failure "$model_text_result" 1 0 ); then
+  fail 'non-zero model failure was not classified'
+fi
+
 # Complement (Issue #158): a genuine Claude usage-limit response -- is_error true
 # with api_error_status set, the way the CLI really reports it under
 # --output-format json -- IS pool exhaustion. The Issue is re-queued (never
@@ -2612,7 +2629,7 @@ printf '303 queued open none 2026-01-01T00:00:00Z\n' > "$state"
 : > "$FAKE_GH_ROOT/$state_key.comments"
 : > "$FAKE_GH_ROOT/opencode-calls"
 rm -f "$FAKE_GH_ROOT/opencode-auto-count" "$FAKE_GH_ROOT/codex-exec-count"
-FAKE_OPENCODE_EXEC_RESULT_1='overloaded' FAKE_OPENCODE_EXEC_RESULT_2='AGENTIC_LOOP_RESULT=completed' AGENTIC_LOOP_RUN_ONCE=1 FAKE_CODEX_SLEEP=1 "$target/bin/agentic-loop" _supervise
+FAKE_OPENCODE_EXEC_RESULT_1='overloaded' FAKE_OPENCODE_EXEC_EXIT_1=1 FAKE_OPENCODE_EXEC_RESULT_2='AGENTIC_LOOP_RESULT=completed' AGENTIC_LOOP_RUN_ONCE=1 FAKE_CODEX_SLEEP=1 "$target/bin/agentic-loop" _supervise
 grep -Eq '^303 completed closed' "$state" || fail 'model-failure fallback Issue did not complete'
 assert_contains "$FAKE_GH_ROOT/opencode-calls" '--model opencode-go/gpt-5.6-luna' 'model-failure retry did not start on the first model'
 assert_contains "$FAKE_GH_ROOT/opencode-calls" '--model opencode-go/deepseek-v4-pro' 'model-failure retry did not switch to the next model'
