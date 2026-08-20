@@ -4582,6 +4582,14 @@ for _ in $(seq 1 40); do [[ -r $state_root/supervisor.pid ]] && { relpath_seen=1
 relpath_status=$("$target/bin/agentic-loop" status)
 if grep -Fq 'supervisor-stale-pid' <<< "$relpath_status"; then fail 'a supervisor started via a relative path was misreported as having a stale pid'; fi
 grep -Fq 'running (pid' <<< "$relpath_status" || fail 'a supervisor started via a relative path was not recognized as running'
+relpath_worktree="$target-worktrees/issue-261"
+mkdir -p "$(dirname "$relpath_worktree")"
+git -C "$target" worktree add --quiet --detach "$relpath_worktree"
+worktree_status=$("$relpath_worktree/bin/agentic-loop" status)
+grep -Fq 'running (pid' <<< "$worktree_status" || fail 'status from a dedicated worktree did not recognize the main-worktree supervisor'
+"$relpath_worktree/bin/agentic-loop" start
+[[ $(cat "$state_root/supervisor.pid") == "$relpath_sup_pid" ]] || fail 'start from a dedicated worktree duplicated the supervisor'
+git -C "$target" worktree remove --force "$relpath_worktree"
 kill -TERM "$relpath_sup_pid" 2>/dev/null || true
 wait "$relpath_sup_pid" 2>/dev/null || true
 rm -f "$state_root/stop.requested"
