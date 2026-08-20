@@ -78,7 +78,13 @@ drain_paused_workers() {
 }
 
 
+# Reconciles workers/*.pid against the live /proc scan (Issue #219) before
+# counting, so a pidfile lost or pointing at the wrong pid can never make this
+# undercount a worker that is genuinely still running -- which is what let
+# claim_next's `worker_count() < MAX_WORKERS` gate above claim past the
+# configured limit.
 worker_count() {
+  reconcile_worker_pidfiles || true
   local count=0 pid
   shopt -s nullglob
   for pidfile in "$STATE_ROOT"/workers/*.pid; do
@@ -92,21 +98,38 @@ worker_count() {
 
 
 # Terminate every worker's process group and requeue its Issue so a shutdown
-# leaves no orphaned process and no Issue stuck at agent:running. Best-effort:
-# if the requeue API fails, the lease expiry and startup recovery still recover
-# the Issue on the next supervisor start.
+# leaves no orphaned process and no Issue stuck at agent:running.
+# reconcile_worker_pidfiles runs first so a lost/stale pidfile (Issue #219)
+# still gets this worker stopped and its Issue requeued, not silently
+# skipped. Each worker is actually confirmed stopped (TERM, wait, then KILL
+# escalation) before its lease/local state is torn down -- previously the
+# state was cleared first, so a provider CLI child that swallowed TERM or
+# took time to exit could keep writing to the worktree after this host
+# considered the Issue safely requeued, letting a later supervisor re-claim
+# it into a second concurrent worker. The requeue itself only fires when
+# GitHub still reports this Issue as agent:running: a worker that had just
+# finished and relabeled it (completed/needs-input/etc.) before this pidfile
+# could be cleaned up must never be bounced back to agent:queued underneath
+# it. Best-effort throughout: a requeue skipped here because the state read
+# failed is still recovered by lease-expiry on the next supervisor start.
 supervisor_graceful_shutdown() {
   : > "$STATE_ROOT/stop.requested" 2>/dev/null || true
   event_append supervisor stop -
-  local pidfile issue pid
+  reconcile_worker_pidfiles || true
+  local pidfile issue pid waited
   shopt -s nullglob
   for pidfile in "$STATE_ROOT"/workers/*.pid; do
     issue=$(basename "$pidfile" .pid)
     read -r pid < "$pidfile" 2>/dev/null || true
+    if [[ $pid =~ ^[0-9]+$ ]]; then
+      kill -TERM "-$pid" 2>/dev/null || true
+      waited=0
+      while (( waited < 5 )) && kill -0 "$pid" 2>/dev/null; do sleep 1; waited=$((waited + 1)); done
+      kill -0 "$pid" 2>/dev/null && kill -KILL "-$pid" 2>/dev/null || true
+    fi
     lease_release "$issue" shutdown
     clear_worker_local "$issue"
-    if [[ $pid =~ ^[0-9]+$ ]]; then kill -TERM "-$pid" 2>/dev/null || true; fi
-    if [[ $issue =~ ^[0-9]+$ ]]; then
+    if [[ $issue =~ ^[0-9]+$ ]] && repo_api "issues/$issue" --jq '.labels[].name' 2>/dev/null | grep -Fxq "$(state_label running)"; then
       set_issue_state "$issue" queued 2>/dev/null || true
       comment_issue "$issue" "<!-- agentic-loop:shutdown -->\nSupervisorが停止したため、進行中のIssueを安全にキューへ戻しました。次回のclaimで再開します。" 2>/dev/null || true
     fi
@@ -143,6 +166,7 @@ supervise() {
   # 0003): a transient GitHub error (secondary rate limit / HTTP 403 / 5xx)
   # should skip this cycle and be retried next poll, not kill the loop under
   # set -e.
+  reconcile_worker_pidfiles || true
   recover_expired || true
   enforce_worker_timeout || true
   reap_orphan_workers || true
@@ -164,6 +188,11 @@ supervise() {
     reconcile_scope_conflict_cache || true
     requeue_answered || true
     requeue_dependency_ready || true
+    # Runs once per poll, before recover_expired/enforce_worker_timeout/
+    # reap_orphan_workers below, so a pidfile lost between polls (Issue #219)
+    # is repaired from the live /proc scan before anything else concludes a
+    # genuinely-alive worker's Issue has no local worker.
+    reconcile_worker_pidfiles || true
     if [[ -e $STATE_ROOT/stop.requested ]]; then
       enforce_worker_timeout || true
       reap_orphan_workers || true

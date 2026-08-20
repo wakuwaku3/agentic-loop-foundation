@@ -3994,6 +3994,90 @@ grep -Eq '^15 queued' "$state" || fail 'graceful shutdown did not requeue the in
 [[ ! -e $state_root/workers/15.pid ]] || fail 'graceful shutdown left a worker pidfile'
 assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:shutdown' 'graceful shutdown was not recorded on the Issue'
 
+# --- .pid loss must not defeat max_workers or graceful shutdown (Issue #219) ---
+# Root cause 1: worker_count() (and therefore claim_next's `< MAX_WORKERS`
+# gate) counted only workers/*.pid files. A lost/mismatched pidfile made a
+# genuinely running worker invisible to that count, letting the supervisor
+# claim a second Issue past max_workers=1. reconcile_worker_pidfiles() now
+# repairs a missing pidfile from a live /proc scan before every count, so
+# deleting a still-live worker's pidfile must not let a second queued Issue
+# be claimed alongside it.
+write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=300 STOP_TIMEOUT=10 STALE_DAYS=30
+printf '2190 queued open none 2026-01-01T00:00:00Z\n2191 queued open none 2026-01-01T00:00:01Z\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+rm -f "$state_root/stop.requested"
+FAKE_CODEX_SLEEP=30 "$target/bin/agentic-loop" _supervise &
+pidloss_sup_pid=$!
+pidloss_claimed=0
+for _ in $(seq 1 40); do [[ -r $state_root/workers/2190.pid ]] && { pidloss_claimed=1; break; }; sleep 0.25; done
+[[ $pidloss_claimed == 1 ]] || { kill "$pidloss_sup_pid" 2>/dev/null; wait "$pidloss_sup_pid" 2>/dev/null; fail 'a worker was not claimed before the pidfile-loss max_workers test'; }
+pidloss_worker_pid=$(cat "$state_root/workers/2190.pid")
+rm -f "$state_root/workers/2190.pid"
+# Give the supervisor several polls (poll_seconds=1) to reconcile the lost
+# pidfile from its live /proc scan and to (incorrectly, if the fix regressed)
+# claim the second queued Issue.
+sleep 3
+pidloss_second_claimed=0
+grep -Eq '^2191 running' "$state" && pidloss_second_claimed=1
+pidloss_reconciled=0
+[[ -r $state_root/workers/2190.pid ]] && pidloss_reconciled=1
+kill -TERM "$pidloss_sup_pid" 2>/dev/null || true
+wait "$pidloss_sup_pid" 2>/dev/null || true
+rm -f "$state_root/stop.requested"
+[[ $pidloss_second_claimed == 0 ]] || fail 'worker_count() undercounted a live worker after its pidfile was lost, letting claim_next exceed max_workers'
+[[ $pidloss_reconciled == 1 ]] || fail 'a lost pidfile for a still-live worker was not reconciled from the live process scan'
+kill -0 "$pidloss_worker_pid" 2>/dev/null && { kill -TERM "-$pidloss_worker_pid" 2>/dev/null || true; wait "$pidloss_worker_pid" 2>/dev/null || true; }
+rm -f "$state_root/workers/2190.pid"
+
+# Root cause 3: graceful shutdown / stop iterated only workers/*.pid, so a
+# worker whose pidfile had already gone missing was left running (never
+# TERM'd) and its Issue was never requeued. reconcile_worker_pidfiles() runs
+# first inside supervisor_graceful_shutdown() too, so shutdown must still
+# find, stop, and requeue a worker whose pidfile was lost moments earlier.
+write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=300 STOP_TIMEOUT=10 STALE_DAYS=30
+printf '2192 queued open none 2026-01-01T00:00:00Z\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+rm -f "$state_root/stop.requested"
+FAKE_CODEX_SLEEP=30 "$target/bin/agentic-loop" _supervise &
+shutpid_sup_pid=$!
+shutpid_claimed=0
+for _ in $(seq 1 40); do [[ -r $state_root/workers/2192.pid ]] && { shutpid_claimed=1; break; }; sleep 0.25; done
+[[ $shutpid_claimed == 1 ]] || { kill "$shutpid_sup_pid" 2>/dev/null; wait "$shutpid_sup_pid" 2>/dev/null; fail 'a worker was not claimed before the pidfile-loss shutdown test'; }
+shutpid_worker_pid=$(cat "$state_root/workers/2192.pid")
+rm -f "$state_root/workers/2192.pid"
+kill -TERM "$shutpid_sup_pid" 2>/dev/null
+wait "$shutpid_sup_pid" 2>/dev/null || true
+rm -f "$state_root/stop.requested"
+grep -Eq '^2192 queued' "$state" || fail 'a worker whose pidfile was lost was not requeued by shutdown (Issue #219 requirement 3)'
+[[ ! -e $state_root/workers/2192.pid ]] || fail 'shutdown left a pidfile behind for the pidfile-loss scenario'
+shutpid_worker_gone=0
+for _ in $(seq 1 20); do kill -0 "$shutpid_worker_pid" 2>/dev/null || { shutpid_worker_gone=1; break; }; sleep 0.5; done
+[[ $shutpid_worker_gone == 1 ]] || fail 'a worker whose pidfile was lost was left running after shutdown (orphaned process)'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:shutdown' 'graceful shutdown was not recorded on the Issue for the pidfile-loss scenario'
+
+# Root cause 2: supervisor/worker liveness (service.sh's pid_alive,
+# worker_state.sh's worker_alive) matched cmdline against an absolute path.
+# A supervisor started with a relative path (the real-world trigger:
+# `./bin/agentic-loop _service`) recorded a relative argv[0], so the check
+# failed even though the process was alive, misreporting a live supervisor
+# as having a stale pid. bin/agentic-loop now re-execs itself through its
+# canonical absolute path on startup, so this must no longer misfire.
+write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=30 STOP_TIMEOUT=10 STALE_DAYS=30
+: > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+rm -f "$state_root/stop.requested" "$state_root/supervisor.pid"
+( cd "$target" && exec ./bin/agentic-loop _supervise ) &
+relpath_sup_pid=$!
+relpath_seen=0
+for _ in $(seq 1 40); do [[ -r $state_root/supervisor.pid ]] && { relpath_seen=1; break; }; sleep 0.25; done
+[[ $relpath_seen == 1 ]] || { kill "$relpath_sup_pid" 2>/dev/null; wait "$relpath_sup_pid" 2>/dev/null; fail 'a supervisor started via a relative path did not publish its pid'; }
+relpath_status=$("$target/bin/agentic-loop" status)
+if grep -Fq 'supervisor-stale-pid' <<< "$relpath_status"; then fail 'a supervisor started via a relative path was misreported as having a stale pid'; fi
+grep -Fq 'running (pid' <<< "$relpath_status" || fail 'a supervisor started via a relative path was not recognized as running'
+kill -TERM "$relpath_sup_pid" 2>/dev/null || true
+wait "$relpath_sup_pid" 2>/dev/null || true
+rm -f "$state_root/stop.requested"
+
 # Restart recovery fast path: a running Issue whose LOCAL worker has died is
 # requeued immediately from local state and reprocessed, without depending on the
 # GitHub lease.
