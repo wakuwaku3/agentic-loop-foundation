@@ -810,14 +810,19 @@ case "${1:-} ${2:-}" in
     name=''; for ((i=1; i<=$#; i++)); do [[ ${!i} == --name ]] && { j=$((i+1)); name=${!j}; }; done
     grep -Fxq "$name" "$project_fields" 2>/dev/null || printf '%s\n' "$name" >> "$project_fields" ;;
   'project item-edit')
-    item_id='' option_id='' text=''
+    item_id='' option_id='' text='' clear=0 text_given=0
     for ((i=1; i<=$#; i++)); do
       case ${!i} in
         --id) j=$((i+1)); item_id=${!j} ;;
         --single-select-option-id) j=$((i+1)); option_id=${!j} ;;
-        --text) j=$((i+1)); text=${!j} ;;
+        --text) j=$((i+1)); text=${!j}; text_given=1 ;;
+        --clear) clear=1 ;;
       esac
     done
+    # Real gh rejects an empty --text with "no changes to make" (exit 1);
+    # removing a text value requires --clear.  Accepting it here hid #268's
+    # "blocker cleared" reconciliation failure completely.
+    if (( text_given )) && [[ -z $text ]]; then printf 'error: no changes to make\n' >&2; exit 1; fi
     item_number=${item_id#PVTI_}
     status=''; category=''; blocked_b64=''
     IFS=$'\t' read -r status category blocked_b64 < <(awk -F '\t' -v n="$item_number" '$1 == n {print $2 "\t" $3 "\t" $4; exit}' "$project_values" 2>/dev/null || true)
@@ -828,7 +833,7 @@ case "${1:-} ${2:-}" in
       PVTFO_blocked) status=Blocked ;; PVTFO_improvement) category=Improvement ;;
       PVTFO_feature) category=Feature ;;
     esac
-    [[ -z $text ]] || blocked_b64=$(printf '%s' "$text" | base64 -w0)
+    if (( clear )); then blocked_b64=''; elif [[ -n $text ]]; then blocked_b64=$(printf '%s' "$text" | base64 -w0); fi
     awk -F '\t' -v n="$item_number" '$1 != n' "$project_values" 2>/dev/null > "$project_values.$$.tmp" || true
     printf '%s\t%s\t%s\t%s\n' "$item_number" "$status" "$category" "$blocked_b64" >> "$project_values.$$.tmp"
     mv "$project_values.$$.tmp" "$project_values" ;;
@@ -1623,6 +1628,27 @@ if [[ -e $pending_project ]]; then
   cat "$pending_project" >&2
   fail 'legacy/unactionable Project hints were never acknowledged and pinned project-sync-pending on'
 fi
+
+# Clearing a Blocked by (issue #268): once an Issue's blocker is gone the
+# desired text is empty, and gh accepts a removal only as --clear ("--text ''"
+# is rejected with "no changes to make").  Such an Issue therefore failed
+# reconciliation on every poll and stayed in project-pending forever.
+rm -f "$(git -C "$target" rev-parse --absolute-git-dir)/agentic-loop/graphql-rate-limit" "$pending_project"
+printf '98 needs-input open none 2026-01-01T00:00:00Z none improvement\n' > "$FAKE_GH_ROOT/$state_key.state"
+printf 'https://github.com/acme/installed-project/issues/98\n' >> "$FAKE_GH_ROOT/$state_key.project-items"
+printf '98\tNeeds input\tImprovement\t%s\n' "$(printf '依存: #7' | base64 -w0)" >> "$FAKE_GH_ROOT/$state_key.project-values"
+calls_before=$(wc -l < "$FAKE_GH_ROOT/calls")
+AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _supervise
+tail -n "+$((calls_before + 1))" "$FAKE_GH_ROOT/calls" > "$TEST_ROOT/blocked-clear-calls.log"
+[[ $(grep -c -- '--clear' "$TEST_ROOT/blocked-clear-calls.log" || true) -ge 1 ]] || fail 'a blocker that no longer applies was not removed with --clear'
+last_98_blocked=$(awk -F '\t' -v n=98 '$1 == n { v = $4 } END { print v }' "$FAKE_GH_ROOT/$state_key.project-values")
+[[ -z $last_98_blocked ]] || fail 'the stale Blocked by text survived reconciliation'
+if [[ -e $pending_project ]] && grep -Fxq '98' "$pending_project"; then
+  cat "$pending_project" >&2
+  fail 'an Issue whose blocker cleared was never acknowledged and stayed pending forever'
+fi
+# Restore the snapshot the following E4 case reads.
+printf '93 needs-input open none 2026-01-01T00:00:00Z none improvement\n' > "$FAKE_GH_ROOT/$state_key.state"
 
 # API failure is distinct from "not a member" (E4): a GraphQL error performs no
 # item-add/item-edit and the hint is retried, not acknowledged as a no-op.
