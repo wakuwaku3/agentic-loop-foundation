@@ -236,19 +236,23 @@ capability_render_text() {
 # manifest is absent or fails validation, so a broken/missing manifest can
 # never corrupt a prompt or silently degrade worker behavior.
 capability_summary_block() {
-  local repo_root=$1 rc=0 full_check fast_check secret_guard undetermined_list
+  local repo_root=$1 rc=0 full_check fast_check secret_guard affected_check impact_map undetermined_list
   capability_validate "$repo_root" >/dev/null 2>&1 || rc=1
   [[ -n $CAPABILITY_JSON ]] || return 0
   (( rc == 0 )) || return 0
   full_check=$(capability_query '.validation.full_check // ""')
   fast_check=$(capability_query '.validation.fast_check // ""')
   secret_guard=$(capability_query '.validation.secret_guard // ""')
+  affected_check=$(capability_query '.validation.affected_check // ""')
+  impact_map=$(capability_query '.validation.impact_map // ""')
   undetermined_list=$(capability_query '.undetermined[]?' | paste -sd', ' -)
-  [[ -n $full_check || -n $fast_check || -n $secret_guard || -n $undetermined_list ]] || return 0
+  [[ -n $full_check || -n $fast_check || -n $secret_guard || -n $affected_check || -n $impact_map || -n $undetermined_list ]] || return 0
   printf -- '--- repository capability manifest（.agentic-loop/capabilities.toml、検証済み） ---\n'
   [[ -n $full_check ]] && printf '全検証コマンド: %s\n' "$full_check"
   [[ -n $fast_check ]] && printf '短時間検証: %s\n' "$fast_check"
   [[ -n $secret_guard ]] && printf 'secret guard: %s\n' "$secret_guard"
+  [[ -n $affected_check ]] && printf '影響範囲検証（反復の短縮専用、push/merge gateではない）: %s\n' "$affected_check"
+  [[ -n $impact_map ]] && printf '影響範囲map: %s\n' "$impact_map"
   [[ -n $undetermined_list ]] && printf '未確定（推測で確定しないこと）: %s\n' "$undetermined_list"
   printf -- '--- ここまで ---\n'
 }
