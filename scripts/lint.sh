@@ -521,8 +521,27 @@ if grep -Fq -- '--skip)' scripts/flaky.sh tests/run-e2e.sh; then
   printf 'flaky.sh/run-e2e.sh must not gain a --skip interface.\n' >&2
   exit 1
 fi
-grep -Eq '^[[:space:]]*timeout-minutes:[[:space:]]*20$' .github/workflows/ci.yml || {
+grep -Eq '^[[:space:]]*timeout-minutes:[[:space:]]*30$' .github/workflows/ci.yml || {
   printf 'CI timeout-minutes was not raised for isolated flaky retries (see ADR 0022).\n' >&2
+  exit 1
+}
+ci_push_block=$(sed -n '/^  push:$/,/^  pull_request:$/p' .github/workflows/ci.yml)
+[[ $ci_push_block == $'  push:\n    branches:\n      - main\n  pull_request:' ]] || {
+  printf 'CI push trigger must be restricted to main to avoid duplicate PR checks.\n' >&2
+  exit 1
+}
+grep -Eq '^[[:space:]]*pull_request:[[:space:]]*$' .github/workflows/ci.yml || {
+  printf 'CI pull_request trigger is required for PR checks.\n' >&2
+  exit 1
+}
+for group in queue lifecycle auxiliary upgrade; do
+  grep -Eq "^[[:space:]]+-[[:space:]]+$group[[:space:]]*$" .github/workflows/ci.yml || {
+    printf 'CI matrix is missing required E2E group: %s\n' "$group" >&2
+    exit 1
+  }
+done
+grep -Fq 'AGENTIC_LOOP_TEST_GROUP: ${{ matrix.group }}' .github/workflows/ci.yml || {
+  printf 'CI matrix group is not connected to the common check entry point.\n' >&2
   exit 1
 }
 grep -Fq '"flaky"' bin/lib/agentic-loop/setup.sh || { printf 'flaky label is not created by setup.\n' >&2; exit 1; }

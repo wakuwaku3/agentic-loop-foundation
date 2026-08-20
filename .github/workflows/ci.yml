@@ -2,6 +2,8 @@ name: CI
 
 on:
   push:
+    branches:
+      - main
   pull_request:
 
 permissions:
@@ -10,7 +12,17 @@ permissions:
 jobs:
   check:
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        group:
+          - queue
+          - lifecycle
+          - auxiliary
+          - upgrade
+    env:
+      AGENTIC_LOOP_TEST_GROUP: ${{ matrix.group }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       - uses: jetify-com/devbox-install-action@a0d2d53632934ae004f878c840055956d9f741b0

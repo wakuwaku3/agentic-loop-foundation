@@ -15,11 +15,11 @@ full_check = "devbox run --pure check"   # repository共通の完全検証入口
 fast_check = ".githooks/pre-commit"      # commit前などの短時間・決定的な検証
 secret_guard = ".agentic-loop/guard-secrets.sh"
 secret_guard_modes = ["--staged", "--push", "--all", "--text", "--history", "--audit"]
-full_check_seconds = 300                 # 実測に基づく想定所要秒数。0=未計測
+full_check_seconds = 750                 # 実測に基づく想定所要秒数。0=未計測
 # local affected check（gateではない。ADR 0021）。任意宣言。
 affected_check = "devbox run --pure affected"
 impact_map = "tests/impact-map.toml"
-affected_check_seconds = 150
+affected_check_seconds = 735
 
 [environment]
 definition = ["devbox.json", "devbox.lock"]  # 環境定義の正本
@@ -125,6 +125,12 @@ manifestが存在しない場合は`installed: false`、警告1件（`not-instal
 ## 再測定
 
 `full_check_seconds`は実測値であり、devbox/CIの構成を大きく変えた場合は`devbox run --pure check`の実測所要時間で更新する。`queue.worker_timeout_seconds`がこの値を下回っている場合、`doctor`が矛盾として警告する。`affected_check_seconds`も同様に実測値であり、`full_check_seconds`以上になった場合は矛盾として警告する（[local affected checkの運用ドキュメント](affected-checks.md)を参照）。
+
+このFoundation自身の現在値は、2026-08-20のGitHub Actions `ubuntu-24.04` run 32342046751で`devbox run --pure check`が690秒、2026-08-21の固定Devbox環境で`devbox run --pure affected`が735秒だった実測に基づく。`full_check_seconds`は後者を10秒単位で切り上げた750秒、`affected_check_seconds`は実測735秒である。affected checkは変更範囲がshared dependencyへ及ぶと全4群へ拡大するため、常に大幅に短縮できるわけではない。実行環境と対象群による変動を含むため、いずれも厳密なtimeout値ではない。
+
+`.github/workflows/ci.yml`のjob timeoutは、通常実測690〜735秒に対してrunner遅延とflaky診断用の限定再試行を許容する30分とする。`queue.worker_timeout_seconds`は、検証だけでなくplan・exec・PR reviewを含むworker全体の上限なので14400秒を維持する。
+
+CIは4つのE2E群を固定matrixへ分割し、各jobで`AGENTIC_LOOP_TEST_GROUP`を指定した同じ`devbox run --pure check`入口を実行する。全4checkの集合が完全検証であり、群の省略やaffected選択には使わない。GitHub上でpublic repositoryであることを確認したうえで標準hosted runnerを使い、matrix幅は4へ固定して追加課金と無制限なrunner増加を避ける。
 
 ## 費用
 

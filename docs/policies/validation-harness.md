@@ -13,7 +13,7 @@
 - **local fast check**: format、lint、静的解析、secret検査など、短時間で決定的に完了する検証。該当する検証をcommit前を含む可能な限り早いlocal hookから実行し、失敗時はcommitを停止する。
 - **local affected check**: 変更されたfileから関係するtestだけを選んで実行し、編集中のfeedbackを短縮するための任意の検証。**push gateにもmerge gateにも一切使わない**。判定不能、共有基盤、build/runtime設定、dependency lock、migration、test基盤自体の変更は安全側として必ず完全検証（local full check）へ広げる。選択理由と実行結果は機械可読に記録し、選択漏れを診断できるようにする。flakyや過去の失敗を理由に特定のtestを黙って除外する経路を持たせてはならない。
 - **local full check**: 単体test、統合test、E2Eその他の時間がかかる検証を含む共通入口の全処理。変更対象のcommitに対してpush前に成功させ、失敗時はpushを停止する。pushに連動して実行する場合も、成功終了までpushを完了させてはならない。
-- **CI**: public repositoryでpushおよびpull requestに対して共通入口を実行する独立した完全検証。対象commitの必須checkがすべて成功するまでmergeを停止する。影響分析の結果を理由にCIの必須checkを削ってはならない。
+- **CI**: public repositoryでpushおよびpull requestに対して共通入口を実行する独立した完全検証。独立して実行可能なE2E群は、固定された有限個のmatrix jobへ分割してよい。この場合も各jobが同じ共通入口を使い、全群を列挙したmatrixの全checkを必須とし、その集合を完全検証とする。対象commitの必須checkがすべて成功するまでmergeを停止する。影響分析の結果を理由にCIの必須checkを削ってはならない。
 
 各検証は単独で再実行でき、以前の実行結果や実行順序に依存してはならない。失敗時は変更を先へ進めず、原因を修正して同じ入口を再実行する。hook bypass（`--no-verify` など）を通常運用として認めない。hook自体の障害でやむを得ず別経路を使う場合も、同一commitへの同等検証の成功、理由、実行環境、コマンド、結果を変更記録に残さなければpushまたはmergeしてはならない。
 
