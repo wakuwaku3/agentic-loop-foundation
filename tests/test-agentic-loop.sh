@@ -4489,6 +4489,14 @@ grep -Eq '^15 queued' "$state" || fail 'graceful shutdown did not requeue the in
 [[ ! -e $state_root/workers/15.pid ]] || fail 'graceful shutdown left a worker pidfile'
 assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:shutdown' 'graceful shutdown was not recorded on the Issue'
 
+# A graceful shutdown marker must not disable the next service boot.  The
+# systemd/manual entrypoint is _service, so exercise that path directly.
+write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=30 STOP_TIMEOUT=10 STALE_DAYS=30
+printf '16 queued open none 2026-01-01T00:00:00Z\n' > "$state"
+: > "$state_root/stop.requested"
+AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _service
+[[ ! -e $state_root/stop.requested ]] || fail 'service startup did not clear a stale stop.requested marker'
+
 # --- .pid loss must not defeat max_workers or graceful shutdown (Issue #219) ---
 # Root cause 1: worker_count() (and therefore claim_next's `< MAX_WORKERS`
 # gate) counted only workers/*.pid files. A lost/mismatched pidfile made a

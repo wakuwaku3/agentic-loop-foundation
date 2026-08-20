@@ -181,6 +181,10 @@ install_supervisor_unit() {
 
 cmd_service() {
   mkdir -p "$STATE_ROOT/logs" "$WORKTREE_ROOT"
+  # A previous graceful shutdown leaves this marker until the next service
+  # start.  Clear it before entering supervise so boot/systemd/manual starts
+  # are not mistaken for a shutdown drain and exit immediately.
+  rm -f "$STATE_ROOT/stop.requested"
   supervisor_record_stale_context
   clear_stale_lock || return 0
   mkdir "$STATE_ROOT/supervisor.lock" 2>/dev/null || return 0
