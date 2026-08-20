@@ -8044,6 +8044,7 @@ exit 1
 GHFAKE
 chmod +x "$retry_ceiling_dir/bin/gh"
 (
+  # shellcheck disable=SC2030,SC2031 # intentionally subshell-local retry fixture environment
   export PATH="$retry_ceiling_dir/bin:$TEST_HOST_PATH"
   # shellcheck disable=SC2030 # intentionally subshell-local: read by the api.sh sourced just below, within this same subshell
   export STATE_ROOT="$retry_ceiling_dir/state"
@@ -8076,6 +8077,7 @@ exit 1
 GHFAKE
 chmod +x "$timeout_method_dir/bin/gh"
 (
+  # shellcheck disable=SC2030,SC2031 # intentionally subshell-local timeout fixture environment
   export PATH="$timeout_method_dir/bin:$TEST_HOST_PATH"
   export STATE_ROOT="$timeout_method_dir/state" PROGRAM_NAME=timeout-method-test
   export API_RETRY_ATTEMPTS=3 API_RETRY_BASE_SECONDS=0
