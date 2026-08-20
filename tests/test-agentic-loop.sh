@@ -2247,7 +2247,7 @@ write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEA
 printf '20 queued open none 2026-01-01T00:00:00Z\n' > "$state"
 : > "$FAKE_GH_ROOT/$state_key.comments"
 : > "$FAKE_GH_ROOT/codex-calls"
-AGENT_PLAN_MAX_RETRIES=1 FAKE_CODEX_RESULT='AGENTIC_LOOP_RESULT=failed' AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _supervise
+AGENT_PLAN_MAX_RETRIES=1 FAKE_CODEX_EXIT=1 AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _supervise
 grep -Eq '^20 queued' "$state" || fail 'plan failure did not requeue the Issue'
 plan_passes=$(grep -c -- '--sandbox read-only' "$FAKE_GH_ROOT/codex-calls")
 [[ $plan_passes -eq 1 ]] || fail "expected 1 planning pass and no retry/exec, got $plan_passes"
