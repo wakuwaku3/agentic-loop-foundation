@@ -161,13 +161,24 @@ postmortem_consider_trigger() {
 # resume once its action items are done.
 postmortem_link() {
   local postmortem_issue=$1; shift
-  local action_issue child_id
+  local action_issue child_id result
   (( $# > 0 )) || return 1
   for action_issue in "$@"; do
     [[ $action_issue =~ ^[1-9][0-9]*$ ]] || return 1
+    # sub_issue_id/issue_id are typed-integer properties (gh api -f always
+    # sends strings, which GitHub 422s: Issue #252) and both native
+    # endpoints require the target's database id, not its Issue number
+    # (verified against the REST docs and the number/id mixup in #252's
+    # discussion) -- one lookup here covers both call sites below.
     child_id=$(repo_api "issues/$action_issue" --jq .id 2>/dev/null) || return 1
-    repo_api "issues/$postmortem_issue/sub_issues" --method POST -f sub_issue_id="$child_id" >/dev/null 2>&1 || return 1
-    repo_api "issues/$postmortem_issue/dependencies/blocked_by" --method POST -f issue_id="$action_issue" >/dev/null 2>&1 || return 1
+    if ! result=$(repo_api "issues/$postmortem_issue/sub_issues" --method POST -F sub_issue_id="$child_id" 2>&1); then
+      say "postmortem_link: issues/$postmortem_issue/sub_issues への登録に失敗しました(sub_issue_id=$child_id): $result" >&2
+      return 1
+    fi
+    if ! result=$(repo_api "issues/$postmortem_issue/dependencies/blocked_by" --method POST -F issue_id="$child_id" 2>&1); then
+      say "postmortem_link: issues/$postmortem_issue/dependencies/blocked_by への登録に失敗しました(issue_id=$child_id): $result" >&2
+      return 1
+    fi
   done
   lease_release "$postmortem_issue" postmortem-link
   scope_cache_clear "$postmortem_issue"; clear_conflict_wait "$postmortem_issue"; clear_worker_local "$postmortem_issue"

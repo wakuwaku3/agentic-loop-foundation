@@ -51,7 +51,7 @@ dispose_validate_target() {
 # Native dependency transfer is fail-closed: consolidation must never make a
 # previously blocked requirement claimable merely because its source was closed.
 dispose_transfer_dependencies() {
-  local source=$1 target=$2 dependency target_dependencies
+  local source=$1 target=$2 dependency dependency_id target_dependencies result
   [[ -n $target ]] || return 0
   # GitHub's issue-dependencies REST API returns the Issues blocking source.
   # An unavailable endpoint/scope is not treated as an empty list.
@@ -60,7 +60,14 @@ dispose_transfer_dependencies() {
   while IFS= read -r dependency; do
     [[ -z $dependency ]] && continue
     [[ $dependency =~ ^[1-9][0-9]*$ && $dependency != "$target" ]] || return 1
-    repo_api "issues/$target/dependencies/blocked_by" --method POST -f issue_id="$dependency" >/dev/null 2>&1 || return 1
+    # issue_id is a typed-integer property requiring the blocking Issue's
+    # database id, not its Issue number (Issue #252): the GET above returns
+    # numbers, so resolve each to its id before the POST.
+    dependency_id=$(repo_api "issues/$dependency" --jq .id 2>/dev/null) || return 1
+    if ! result=$(repo_api "issues/$target/dependencies/blocked_by" --method POST -F issue_id="$dependency_id" 2>&1); then
+      say "dispose_transfer_dependencies: issues/$target/dependencies/blocked_by への登録に失敗しました(issue_id=$dependency_id): $result" >&2
+      return 1
+    fi
   done <<< "$dependencies"
   # workload-unbounded: same as above, bound=blocked_by count
   target_dependencies=$(repo_api "issues/$target/dependencies/blocked_by" --method GET -f per_page=100 --paginate --jq '.[].number' 2>/dev/null) || return 1

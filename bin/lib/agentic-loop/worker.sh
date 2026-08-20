@@ -261,7 +261,7 @@ decomposition_validate() {
 
 
 decomposition_materialize() {
-  local parent=$1 plan=$2 manifest hash category key title purpose criteria scope deps child body child_id existing
+  local parent=$1 plan=$2 manifest hash category key title purpose criteria scope deps child body child_id existing dep dep_id result
   manifest=$(decomposition_manifest_from_plan "$plan")
   [[ -z $manifest ]] && return 1
   decomposition_validate "$manifest" 0 || return 2
@@ -277,14 +277,30 @@ decomposition_materialize() {
       [[ $child =~ ^[1-9][0-9]*$ ]] || return 3
     fi
     children["$key"]=$child
+    # sub_issue_id/issue_id are typed-integer properties (gh api -f always
+    # sends strings, which GitHub 422s: Issue #252) and both native
+    # endpoints require the target's database id, not its Issue number.
     child_id=$(repo_api "issues/$child" --jq .id 2>/dev/null) || return 3
-    repo_api "issues/$parent/sub_issues" --method POST -f sub_issue_id="$child_id" >/dev/null 2>&1 || return 3
-    repo_api "issues/$parent/dependencies/blocked_by" --method POST -f issue_id="$child" >/dev/null 2>&1 || return 3
+    if ! result=$(repo_api "issues/$parent/sub_issues" --method POST -F sub_issue_id="$child_id" 2>&1); then
+      say "decomposition_materialize: issues/$parent/sub_issues への登録に失敗しました(sub_issue_id=$child_id): $result" >&2
+      return 3
+    fi
+    if ! result=$(repo_api "issues/$parent/dependencies/blocked_by" --method POST -F issue_id="$child_id" 2>&1); then
+      say "decomposition_materialize: issues/$parent/dependencies/blocked_by への登録に失敗しました(issue_id=$child_id): $result" >&2
+      return 3
+    fi
   done < <(yq -p json -r '.children[] | [.key,.title,.purpose,.acceptance_criteria,.scope,([.depends_on[]?] | join(","))] | @tsv' <<< "$manifest")
   while IFS=$'\t' read -r key deps; do
     child=${children[$key]}
     IFS=, read -ra dep_list <<< "$deps"
-    for dep in "${dep_list[@]}"; do [[ -z $dep ]] || repo_api "issues/$child/dependencies/blocked_by" --method POST -f issue_id="${children[$dep]}" >/dev/null 2>&1 || return 3; done
+    for dep in "${dep_list[@]}"; do
+      [[ -z $dep ]] && continue
+      dep_id=$(repo_api "issues/${children[$dep]}" --jq .id 2>/dev/null) || return 3
+      if ! result=$(repo_api "issues/$child/dependencies/blocked_by" --method POST -F issue_id="$dep_id" 2>&1); then
+        say "decomposition_materialize: issues/$child/dependencies/blocked_by への登録に失敗しました(issue_id=$dep_id): $result" >&2
+        return 3
+      fi
+    done
     repo_api "issues/$child/labels" --method PUT --input - <<< "{\"labels\":[\"$category\",\"agent:queued\"]}" >/dev/null 2>&1 || return 3
     project_add_issue "$child" || true; project_sync_state "$child" queued || true
   done < <(yq -p json -r '.children[] | [.key,([.depends_on[]?] | join(","))] | @tsv' <<< "$manifest")
