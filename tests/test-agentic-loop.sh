@@ -5371,7 +5371,11 @@ pf_scan_scaling_scenario() {
   printf '%s running open\n' "$issue" > "$state"
   : > "$rows_log"
   FAKE_CODEX_RESULT="$(preflight_plan_body "$pf_record")" "$target/bin/agentic-loop" _worker "$issue" "preflight-scan-scaling-approved-worker-$issue" >/dev/null 2>&1
-  grep -Eq "^$issue completed closed" "$state" || fail "an approved envelope did not complete for issue $issue after $filler_count filler comments"
+  if ! grep -Eq "^$issue completed closed" "$state"; then
+    diag_state=$(grep "^$issue " "$state" 2>/dev/null || printf '(no state row)')
+    diag_comments=$(grep "^$issue " "$FAKE_GH_ROOT/$state_key.comments" 2>/dev/null | tail -n5 || printf '(no comments)')
+    fail "an approved envelope did not complete for issue $issue after $filler_count filler comments -- state=[$diag_state] last_comments=[$diag_comments]"
+  fi
   warm_rows=$(cat "$rows_log") || fail "scan-scaling: no preflight_approved scan was recorded for issue $issue's post-approval re-check"
   printf '%s\n' "$warm_rows"
 }
