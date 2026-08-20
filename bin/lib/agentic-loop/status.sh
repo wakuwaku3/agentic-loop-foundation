@@ -142,25 +142,47 @@ status_pool_pause_detail() {
 # Human-readable (Japanese) reason claiming is currently paused, or empty if
 # it is not. Purely local: reads the same marker files the supervisor's own
 # poll loop checks (see docs/decisions/0003), so `status` never queries
-# rate_limit itself.
+# rate_limit itself. Sets STATUS_PAUSE_TEXT and (as a side effect consumed by
+# status_oldest_marker_elapsed) STATUS_PAUSE_MARKERS -- called directly, never
+# via `$(...)`, since a command substitution subshell would discard both.
 status_claim_pause_reasons() {
   local -a reasons=()
-  [[ -e $STATE_ROOT/budget-paused ]] && reasons+=('provider週次利用率のreserve')
-  [[ -e $STATE_ROOT/core-budget-paused ]] && reasons+=('REST(core)のreserve')
+  STATUS_PAUSE_TEXT='' STATUS_PAUSE_MARKERS=()
+  if [[ -e $STATE_ROOT/budget-paused ]]; then reasons+=('provider週次利用率のreserve'); STATUS_PAUSE_MARKERS+=("$STATE_ROOT/budget-paused"); fi
+  if [[ -e $STATE_ROOT/core-budget-paused ]]; then reasons+=('REST(core)のreserve'); STATUS_PAUSE_MARKERS+=("$STATE_ROOT/core-budget-paused"); fi
   if [[ -r $STATE_ROOT/agent-exhausted ]]; then
     local resume=''
     read -r resume < "$STATE_ROOT/agent-exhausted" || true
-    [[ $resume =~ ^[0-9]+$ ]] && (( $(date +%s) < resume )) && reasons+=('全プール利用不可')
+    if [[ $resume =~ ^[0-9]+$ ]] && (( $(date +%s) < resume )); then
+      reasons+=('全プール利用不可')
+      STATUS_PAUSE_MARKERS+=("$STATE_ROOT/agent-exhausted")
+    fi
   fi
-  [[ -e $STATE_ROOT/all-pools-paused ]] && reasons+=('全プール利用不可')
+  if [[ -e $STATE_ROOT/all-pools-paused ]]; then reasons+=('全プール利用不可'); STATUS_PAUSE_MARKERS+=("$STATE_ROOT/all-pools-paused"); fi
   local pool
   for pool in $(agent_all_pools); do
-    if agent_pool_marker_active "$pool"; then reasons+=("$(status_pool_pause_detail "$pool")"); fi
+    if agent_pool_marker_active "$pool"; then
+      reasons+=("$(status_pool_pause_detail "$pool")")
+      STATUS_PAUSE_MARKERS+=("$(agent_pool_marker "$pool")")
+    fi
   done
-  [[ -e $STATE_ROOT/stop.requested ]] && reasons+=('stop要求によるdrain中')
+  if [[ -e $STATE_ROOT/stop.requested ]]; then reasons+=('stop要求によるdrain中'); STATUS_PAUSE_MARKERS+=("$STATE_ROOT/stop.requested"); fi
   (( ${#reasons[@]} == 0 )) && return 0
   local IFS=,
-  printf '%s' "${reasons[*]}"
+  STATUS_PAUSE_TEXT="${reasons[*]}"
+}
+
+# Oldest mtime among the pause markers status_claim_pause_reasons actually
+# matched (set as its side effect in STATUS_PAUSE_MARKERS), so elapsed
+# reflects whichever reason is truly in effect instead of assuming
+# budget-paused specifically (see docs/decisions/0005).
+status_oldest_marker_elapsed() {
+  local marker mtime oldest=''
+  for marker in "${STATUS_PAUSE_MARKERS[@]}"; do
+    mtime=$(stat -c %Y "$marker" 2>/dev/null) || continue
+    if [[ -z $oldest ]] || (( mtime < oldest )); then oldest=$mtime; fi
+  done
+  status_elapsed_since "$oldest"
 }
 
 
@@ -288,7 +310,7 @@ status_running_detail() {
 # claim decision; see docs/operations/issue-queue.md). Sets
 # STATUS_CANDIDATE_REASON/STATUS_CANDIDATE_DETAIL.
 status_queue_candidate_reason() {
-  local issue=$1 file pause
+  local issue=$1 file
   file=$(conflict_wait_file "$issue")
   if [[ -r $file ]]; then
     local other reason
@@ -304,10 +326,10 @@ status_queue_candidate_reason() {
     STATUS_CANDIDATE_DETAIL='直前の失敗からの再試行待機時間内です。'
     return 0
   fi
-  pause=$(status_claim_pause_reasons)
-  if [[ -n $pause ]]; then
+  status_claim_pause_reasons
+  if [[ -n $STATUS_PAUSE_TEXT ]]; then
     STATUS_CANDIDATE_REASON='claim-paused'
-    STATUS_CANDIDATE_DETAIL="$pause"
+    STATUS_CANDIDATE_DETAIL="$STATUS_PAUSE_TEXT"
     return 0
   fi
   STATUS_CANDIDATE_REASON=claimable
@@ -319,25 +341,56 @@ status_queue_candidate_reason() {
 # operator must act.  Keep these as parallel arrays to preserve the small,
 # dependency-free JSON renderer below.
 anomaly_add() {
+  local elapsed=$6
+  [[ $elapsed =~ ^[0-9]+$ ]] || elapsed=0
   ANOMALY_LEVEL+=("$1"); ANOMALY_CODE+=("$2"); ANOMALY_SUBJECT+=("$3"); ANOMALY_DETAIL+=("$4")
-  ANOMALY_ACTION+=("$5"); ANOMALY_ELAPSED+=("$6"); ANOMALY_CLASSIFICATION+=("$7")
+  ANOMALY_ACTION+=("$5"); ANOMALY_ELAPSED+=("$elapsed"); ANOMALY_CLASSIFICATION+=("$7")
 }
 
 # Return a non-negative elapsed duration from a local-state epoch.  Invalid or
 # unavailable timestamps are represented as zero so every displayed anomaly
 # retains the required elapsed field without adding a GitHub read.
 status_elapsed_since() {
-  local then=$1 now
+  local since=$1 now
   now=$(date +%s)
-  [[ $then =~ ^[0-9]+$ ]] || { printf '0'; return 0; }
-  (( then > now )) && then=$now
-  printf '%s' "$((now - then))"
+  [[ $since =~ ^[0-9]+$ ]] || { printf '0'; return 0; }
+  (( since > now )) && since=$now
+  printf '%s' "$((now - since))"
 }
 
 status_file_elapsed() {
-  local file=$1 then
-  then=$(stat -c %Y "$file" 2>/dev/null || true)
-  status_elapsed_since "$then"
+  local file=$1 since
+  since=$(stat -c %Y "$file" 2>/dev/null || true)
+  status_elapsed_since "$since"
+}
+
+# Like status_file_elapsed, but the epoch comes from the marker's own first
+# line (as written by `date +%s > file`) rather than the file's mtime. Use
+# this for markers such as project-pending.since whose whole purpose is to
+# remember a timestamp that must survive later touches (renames, appends) of
+# other files -- an mtime would just track "last written", not "since when".
+status_marker_content_elapsed() {
+  local file=$1 since=''
+  read -r since < "$file" 2>/dev/null || true
+  status_elapsed_since "$since"
+}
+
+# Render a seconds count as a human-readable Japanese duration for text
+# output (e.g. `12分30秒`, `3時間5分`, `2日4時間`) so a long-stuck anomaly is
+# legible without reading digit-by-digit. `--format json`'s elapsed stays a
+# raw integer second count; only the text renderer calls this.
+status_format_duration() {
+  local seconds=$1
+  [[ $seconds =~ ^[0-9]+$ ]] || seconds=0
+  if (( seconds < 60 )); then
+    printf '%s秒' "$seconds"
+  elif (( seconds < 3600 )); then
+    printf '%s分%s秒' "$((seconds / 60))" "$((seconds % 60))"
+  elif (( seconds < 86400 )); then
+    printf '%s時間%s分' "$((seconds / 3600))" "$(((seconds % 3600) / 60))"
+  else
+    printf '%s日%s時間' "$((seconds / 86400))" "$(((seconds % 86400) / 3600))"
+  fi
 }
 
 
@@ -348,7 +401,7 @@ status_file_elapsed() {
 # worktrees/branches, corrupted local-state files, a pending Project sync
 # retry queue, and an active claim pause. Never mutates state.
 status_collect_anomalies() {
-  local i issue started running_csv=',' count pause elapsed orphan_since orphan_elapsed orphan_detail file
+  local i issue started running_csv=',' count pause orphan_since orphan_elapsed
   if [[ -r $STATE_ROOT/supervisor.pid ]] && ! pid_alive; then
     anomaly_add warning supervisor-stale-pid supervisor.pid 'supervisor.pid が残っていますが、対応するprocessは生存していません。' 'bin/agentic-loop start を実行してください（start/stop が stale state を自動整理します）。' "$(status_file_elapsed "$STATE_ROOT/supervisor.pid")" needs-attention
   fi
@@ -388,21 +441,27 @@ status_collect_anomalies() {
   for pidfile in "$STATE_ROOT"/workers/*.pid; do
     issue=$(basename "$pidfile" .pid)
     if worker_pid_live "$issue" && [[ $running_csv != *",$issue,"* ]]; then
-      orphan_since='' orphan_elapsed=''
+      if (( WORKER_ORPHAN_GRACE_SECONDS == 0 )); then
+        anomaly_add warning worker-orphan "#$issue" "local workerは生存していますが、GitHub上ではagent:runningではありません。queue.worker_orphan_grace_seconds=0 のため自動停止は無効です。" 'queue.worker_orphan_grace_seconds を設定して自動停止を有効化するか、対象workerを停止してください（worker_timeout_seconds 到達までは停止しません）。' "$(status_file_elapsed "$pidfile")" needs-attention
+        continue
+      fi
+      orphan_since=''
       if [[ -r $(worker_orphan_since_file "$issue") ]]; then
         read -r orphan_since < "$(worker_orphan_since_file "$issue")" || orphan_since=''
-        [[ $orphan_since =~ ^[0-9]+$ ]] && orphan_elapsed=$(( $(date +%s) - orphan_since ))
       fi
-      orphan_elapsed=${orphan_elapsed:-$(status_file_elapsed "$pidfile")}
-      orphan_detail="local workerは生存していますが、GitHub上ではagent:runningではありません（grace ${WORKER_ORPHAN_GRACE_SECONDS}秒）。"
-      anomaly_add info worker-orphan "#$issue" "$orphan_detail" '次pollでgraceを確認し、超過後はworkerを自動停止します。' "$orphan_elapsed" recovering
+      if [[ $orphan_since =~ ^[0-9]+$ ]]; then
+        orphan_elapsed=$(status_elapsed_since "$orphan_since")
+        anomaly_add info worker-orphan "#$issue" "local workerは生存していますが、GitHub上ではagent:runningではありません（grace ${WORKER_ORPHAN_GRACE_SECONDS}秒、観測 ${orphan_elapsed}秒）。" "grace ${WORKER_ORPHAN_GRACE_SECONDS}秒を超えた次pollでworkerを自動停止します。" "$orphan_elapsed" recovering
+      else
+        anomaly_add info worker-orphan "#$issue" "local workerは生存していますが、GitHub上ではagent:runningではありません（grace ${WORKER_ORPHAN_GRACE_SECONDS}秒、観測 0秒）。" "次pollからgrace ${WORKER_ORPHAN_GRACE_SECONDS}秒の観測を開始します。" 0 recovering
+      fi
     fi
   done
   shopt -u nullglob
 
   if [[ -r $STATE_ROOT/project-pending ]]; then
     count=$(wc -l < "$STATE_ROOT/project-pending" 2>/dev/null || printf 0)
-    (( count > 0 )) && anomaly_add info project-sync-pending project "Project同期の再試行待ちが $count 件あります。" '次pollで保留中のProject同期を再試行します。' "$(status_file_elapsed "$STATE_ROOT/project-pending")" recovering
+    (( count > 0 )) && anomaly_add info project-sync-pending project "Project同期の再試行待ちが $count 件あります。" '次pollで保留中のProject同期を再試行します。' "$(status_marker_content_elapsed "$STATE_ROOT/project-pending.since")" recovering
   fi
 
   for i in "${!PAUSED_NUM[@]}"; do
@@ -410,8 +469,9 @@ status_collect_anomalies() {
     worker_pid_live "$issue" && anomaly_add info paused-worker-live "#$issue" 'agent:pausedですが、このホストのlocal workerがまだ生存しています。' '次pollのdrain_paused_workersでworkerを停止します。' "$(status_file_elapsed "$STATE_ROOT/workers/$issue.pid")" recovering
   done
 
-  pause=$(status_claim_pause_reasons)
-  [[ -n $pause ]] && anomaly_add info claim-paused supervisor "claimを一時停止しています: $pause" '次pollで利用可能なprovider・予算・停止要求を再評価し、可能になればclaimを再開します。' "$(status_file_elapsed "$STATE_ROOT/budget-paused")" recovering
+  status_claim_pause_reasons
+  pause=$STATUS_PAUSE_TEXT
+  [[ -n $pause ]] && anomaly_add info claim-paused supervisor "claimを一時停止しています: $pause" '次pollで利用可能なprovider・予算・停止要求を再評価し、可能になればclaimを再開します。' "$(status_oldest_marker_elapsed)" recovering
   return 0
 }
 
@@ -593,14 +653,14 @@ status_render_text() {
       printf '自動回復中:\n'
       for i in "${!ANOMALY_LEVEL[@]}"; do
         [[ ${ANOMALY_CLASSIFICATION[$i]} == recovering ]] || continue
-        printf '  %s %s: %s — 経過%s秒, %s\n' "${ANOMALY_CODE[$i]}" "${ANOMALY_SUBJECT[$i]}" "${ANOMALY_DETAIL[$i]}" "${ANOMALY_ELAPSED[$i]}" "${ANOMALY_ACTION[$i]}"
+        printf '  %s %s: %s — 経過%s, %s\n' "${ANOMALY_CODE[$i]}" "${ANOMALY_SUBJECT[$i]}" "${ANOMALY_DETAIL[$i]}" "$(status_format_duration "${ANOMALY_ELAPSED[$i]}")" "${ANOMALY_ACTION[$i]}"
       done
     fi
     if (( needs_attention > 0 )); then
       printf '要対応:\n'
       for i in "${!ANOMALY_LEVEL[@]}"; do
         [[ ${ANOMALY_CLASSIFICATION[$i]} == needs-attention ]] || continue
-        printf '  %s %s: %s — 経過%s秒 → 対応: %s\n' "${ANOMALY_CODE[$i]}" "${ANOMALY_SUBJECT[$i]}" "${ANOMALY_DETAIL[$i]}" "${ANOMALY_ELAPSED[$i]}" "${ANOMALY_ACTION[$i]}"
+        printf '  %s %s: %s — 経過%s → 対応: %s\n' "${ANOMALY_CODE[$i]}" "${ANOMALY_SUBJECT[$i]}" "${ANOMALY_DETAIL[$i]}" "$(status_format_duration "${ANOMALY_ELAPSED[$i]}")" "${ANOMALY_ACTION[$i]}"
       done
     fi
   else
@@ -807,6 +867,8 @@ cmd_status() {
   declare -ga NEEDSINPUT_NUM=() NEEDSINPUT_TITLE=() FAILED_NUM=() FAILED_TITLE=() PARKED_NUM=() PARKED_TITLE=() INREVIEW_NUM=() INREVIEW_TITLE=() BLOCKED_NUM=() BLOCKED_TITLE=() PAUSED_NUM=() PAUSED_TITLE=()
   declare -ga STALE_NUM=() STALE_TITLE=()
   declare -ga ANOMALY_LEVEL=() ANOMALY_CODE=() ANOMALY_SUBJECT=() ANOMALY_DETAIL=() ANOMALY_ACTION=() ANOMALY_ELAPSED=() ANOMALY_CLASSIFICATION=()
+  declare -ga STATUS_PAUSE_MARKERS=()
+  declare -g STATUS_PAUSE_TEXT=''
   declare -g STATUS_GITHUB_OK=1 STATUS_STALE_TRUNCATED=0 STATUS_SNAPSHOT_RAW='' STATUS_SNAPSHOT_FETCHED='' STATUS_STALE_RAW='' STATUS_STALE_FETCHED=''
   status_collect_snapshot
   status_collect_stale

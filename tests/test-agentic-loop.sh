@@ -1563,7 +1563,16 @@ tail -n "+$((calls_before + 1))" "$FAKE_GH_ROOT/calls" > "$TEST_ROOT/sync-issue-
 [[ $(grep -c $'\tproject field-list ' "$TEST_ROOT/sync-issue-project-calls.log" || true) -le 1 ]] || fail 'one Issue sync fetched Project fields repeatedly'
 pending_project="$(git -C "$target" rev-parse --absolute-git-dir)/agentic-loop/project-pending"
 assert_contains "$pending_project" '91' 'temporary Project failure was not persisted as an Issue hint'
+pending_project_since="${pending_project}.since"
+[[ -r $pending_project_since ]] || fail 'the first pending Project retry did not record a .since timestamp'
+first_since=$(cat "$pending_project_since")
+[[ $first_since =~ ^[0-9]+$ ]] || fail '.since did not record a numeric epoch'
 FAKE_PROJECT_FAILURES=1 "$target/bin/agentic-loop" sync-issue 91 >/dev/null
+# .since must keep recording the oldest unresolved retry, not reset on
+# every touch of project-pending (regression: status used to read
+# project-pending's own mtime, which reconcile_pending_project's awk+mv ack
+# and every enqueue both reset).
+[[ $(cat "$pending_project_since") == "$first_since" ]] || fail '.since advanced while the pending entry was still unresolved'
 [[ $(grep -Fxc 'https://github.com/acme/installed-project/issues/91' "$FAKE_GH_ROOT/$state_key.project-items") -eq 1 ]] || fail 'repeated immediate synchronization duplicated the Issue item'
 printf '91 needs-input open none 2026-01-01T00:00:00Z none improvement\n92 needs-input open none 2026-01-01T00:00:00Z none improvement\n' > "$FAKE_GH_ROOT/$state_key.state"
 AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _supervise
@@ -2716,9 +2725,9 @@ printf '310 queued open none 2026-01-01T00:00:00Z\n' > "$state"
 rm -rf "$state_root/pools"
 rm -f "$FAKE_GH_ROOT/codex-exec-count" "$FAKE_GH_ROOT/opencode-auto-count" \
   "$state_root/agent-exhausted" "$state_root/all-pools-paused"
-expected_reset=$(date -d 'Aug 20, 2026 9:27 PM' +%s)
+expected_reset=$(date -d 'Aug 20, 2099 9:27 PM' +%s)
 FAKE_CODEX_EXIT=1 \
-FAKE_CODEX_STDERR="ERROR: You've hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at Aug 20th, 2026 9:27 PM." \
+FAKE_CODEX_STDERR="ERROR: You've hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at Aug 20th, 2099 9:27 PM." \
 FAKE_OPENCODE_EXEC_RESULT_1='plan body from gogo
 <!-- agentic-loop:scope paths=bin/agentic-loop -->' \
 FAKE_OPENCODE_EXEC_RESULT_2='AGENTIC_LOOP_RESULT=completed' \
@@ -5968,7 +5977,7 @@ grep -Fq '#60' <<< "$status_output" || fail 'lease-expired status did not list t
 grep -Fq '期限切れ' <<< "$status_output" || fail 'lease-expired status did not mark the running Issue lease as expired'
 grep -Fq 'lease-expired' <<< "$status_output" || fail 'lease-expired status did not report a lease-expired anomaly'
 grep -Fq '自動回復中:' <<< "$status_output" || fail 'lease-expired status did not separate automatic recovery'
-grep -Eq '経過[0-9]+秒' <<< "$status_output" || fail 'lease-expired status did not show elapsed time'
+grep -Eq '経過[0-9]+(秒|分[0-9]+秒|時間[0-9]+分|日[0-9]+時間)' <<< "$status_output" || fail 'lease-expired status did not show a human-readable elapsed time'
 grep -Fq '次pollで安全にqueueへ戻します。' <<< "$status_output" || fail 'lease-expired status did not show the next automatic action'
 [[ $(git -C "$target" status --porcelain) == "$before_status" ]] || fail 'lease-expired status modified the repository working tree'
 lease_json=$("$target/bin/agentic-loop" status --format json)
@@ -5998,6 +6007,74 @@ grep -Fq '要対応:' <<< "$status_output" || fail 'status did not separate huma
 grep -Fq '対応: bin/agentic-loop start' <<< "$status_output" || fail 'status did not show the stale supervisor recovery action'
 [[ $(git -C "$target" status --porcelain) == "$before_status" ]] || fail 'status modified the repository working tree on corrupted local state'
 rm -f "$state_root/supervisor.pid" "$state_root/workers/70.started" "$state_root/workers/70.lease"
+
+# Scenario: project-sync-pending's elapsed tracks the oldest unresolved
+# retry via project-pending.since, not project-pending's own mtime
+# (regression: an ack rewrites the file via awk+mv and a later enqueue
+# appends to it, both of which reset a plain mtime-based elapsed to near
+# zero even though the retry queue never actually drained).
+: > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+printf '95\n' > "$state_root/project-pending"
+printf '%s\n' "$(($(date +%s) - 120))" > "$state_root/project-pending.since"
+sleep 1
+printf '96\n' >> "$state_root/project-pending"
+pending_json=$("$target/bin/agentic-loop" status --format json)
+pending_elapsed=$(printf '%s' "$pending_json" | yq -p json '.anomalies[] | select(.code == "project-sync-pending") | .elapsed')
+(( pending_elapsed >= 120 )) || fail "project-sync-pending elapsed did not reflect the oldest pending entry despite a later append touching the file's mtime (got $pending_elapsed)"
+rm -f "$state_root/project-pending" "$state_root/project-pending.since"
+
+# Scenario: claim-paused elapsed reflects whichever pause marker is actually
+# in effect (regression: it used to be hardcoded to budget-paused's mtime and
+# read as 0 -- via a stat that always failed -- whenever some other reason,
+# e.g. a stop-request drain, was the actual cause).
+: > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+rm -f "$state_root/budget-paused" "$state_root/core-budget-paused" "$state_root/agent-exhausted" "$state_root/all-pools-paused"
+: > "$state_root/stop.requested"
+sleep 1
+claimpause_output=$("$target/bin/agentic-loop" status)
+grep -Fq 'claim-paused' <<< "$claimpause_output" || fail 'status did not report a claim-paused anomaly for a stop-request drain'
+claimpause_json=$("$target/bin/agentic-loop" status --format json)
+claimpause_elapsed=$(printf '%s' "$claimpause_json" | yq -p json '.anomalies[] | select(.code == "claim-paused") | .elapsed')
+(( claimpause_elapsed >= 1 )) || fail "claim-paused elapsed was not derived from the stop.requested marker when budget-paused was absent (got $claimpause_elapsed)"
+rm -f "$state_root/stop.requested"
+
+# Scenario: worker-orphan is needs-attention (not recovering) and says the
+# automatic stop is disabled when queue.worker_orphan_grace_seconds=0, but
+# recovering when grace is positive (regression: status used to always claim
+# the supervisor would eventually auto-stop the worker, which is false at
+# grace=0 -- worker_orphan_reap itself no-ops when grace is 0).
+printf '93 needs-input open none 2026-01-01T00:00:00Z\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+mkdir -p "$state_root/workers"
+printf '%s\n' "$$" > "$state_root/workers/93.pid"
+write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=30 STOP_TIMEOUT=10 STALE_DAYS=30 WORKER_ORPHAN_GRACE_SECONDS=0
+orphan0_output=$("$target/bin/agentic-loop" status)
+grep -Fq '自動停止は無効です' <<< "$orphan0_output" || fail 'worker-orphan with grace=0 did not say the automatic stop is disabled'
+orphan0_json=$("$target/bin/agentic-loop" status --format json)
+[[ $(printf '%s' "$orphan0_json" | yq -p json '.anomalies[] | select(.code == "worker-orphan") | .classification') == needs-attention ]] || fail 'worker-orphan with grace=0 was not classified as needs-attention'
+write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=30 STOP_TIMEOUT=10 STALE_DAYS=30
+orphan1_json=$("$target/bin/agentic-loop" status --format json)
+[[ $(printf '%s' "$orphan1_json" | yq -p json '.anomalies[] | select(.code == "worker-orphan") | .classification') == recovering ]] || fail 'worker-orphan with grace>0 was not classified as recovering'
+rm -rf "$state_root/workers"
+: > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+
+# Structural check: every anomaly a running scenario produces carries both a
+# non-empty action and classification (Issue #212's requirement that every
+# displayed line has a next step), checked mechanically instead of per-code.
+printf '94 running open\n' > "$state"
+mkdir -p "$state_root/workers"
+now=$(date +%s)
+printf '%s\n' "$((now - 100))" > "$state_root/workers/94.started"
+printf '222\t%s\t%s\n' "$((now - 100))" "$((now - 400))" > "$state_root/workers/94.lease"
+structural_json=$("$target/bin/agentic-loop" status --format json)
+[[ $(printf '%s' "$structural_json" | yq -p json '.anomalies | length') -ge 1 ]] || fail 'structural anomaly check scenario produced no anomalies to verify'
+[[ $(printf '%s' "$structural_json" | yq -p json '[.anomalies[] | select(.action == "" or .classification == "")] | length') -eq 0 ]] || fail 'some anomaly is missing an action or a classification'
+rm -rf "$state_root/workers"
+: > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
 
 # Scenario: a worktree/branch left over from an Issue no longer agent:running
 # is left to Issue #211's supervisor prune and never adds status noise.
