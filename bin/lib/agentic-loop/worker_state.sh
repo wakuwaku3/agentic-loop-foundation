@@ -305,6 +305,55 @@ worker_pid_live() {
 }
 
 
+# The process-group id of `pid`, read from /proc at call time (procps is not a
+# pinned dependency of this repository, so `ps -o pgid=` is deliberately not
+# used). Field 2 of /proc/<pid>/stat is the parenthesized comm, which may
+# itself contain spaces and ')', so the remainder is taken after the *last*
+# ') ' -- what follows is "state ppid pgrp ...".
+process_group_of() {
+  local pid=$1 stat rest
+  local -a fields
+  [[ $pid =~ ^[0-9]+$ ]] || return 1
+  [[ -r /proc/$pid/stat ]] || return 1
+  read -r stat < "/proc/$pid/stat" || return 1
+  rest=${stat##*') '}
+  read -r -a fields <<< "$rest"
+  [[ ${fields[2]:-} =~ ^[0-9]+$ ]] || return 1
+  printf '%s\n' "${fields[2]}"
+}
+
+
+# Signal a worker's whole process tree, given the pid recorded in its pidfile.
+#
+# Every worker-stop path (graceful shutdown, timeout enforcement, orphan reap,
+# pause/abort drain, dispose) must take the provider CLI child down with the
+# worker, so the signal goes to a process *group*. The pidfile's pid used to be
+# passed straight to `kill -TERM "-$pid"`, which assumes that pid is its own
+# group leader. It usually is (claim spawns workers via `setsid`), but not
+# always: reconcile_worker_pidfiles repairs a lost pidfile from the live /proc
+# scan (Issue #219) and legitimately records a *descendant* of the group
+# leader. `-$pid` then names a process group that does not exist, kill fails
+# with ESRCH, and every call site swallows it with `|| true` -- so the worker
+# survives every stop attempt and holds its MAX_WORKERS slot forever (Issue
+# #292: #251's pid 2688428 / pgid 2688254 was "reaped" once per poll for
+# 8h50m while 46 queued Issues were never claimed).
+#
+# Resolve the real group at signal time instead, and never group-signal our own
+# group: a worker that was not setsid'd into its own group would otherwise take
+# the supervisor (or this CLI) down with it. When the group is unknown or is
+# ours, fall back to signalling the single pid.
+signal_process_tree() {
+  local pid=$1 signal=$2 pgid self_pgid
+  [[ $pid =~ ^[0-9]+$ ]] || return 0
+  pgid=$(process_group_of "$pid") || pgid=''
+  self_pgid=$(process_group_of "$$") || self_pgid=''
+  if [[ $pgid =~ ^[0-9]+$ && $pgid != "$self_pgid" ]]; then
+    kill "-$signal" "-$pgid" 2>/dev/null && return 0
+  fi
+  kill "-$signal" "$pid" 2>/dev/null || true
+}
+
+
 # Enumerate this repository's actually-live `_worker <issue> <worker-id>`
 # processes straight from /proc, independent of workers/*.pid bookkeeping
 # (Issue #219): a pidfile is this host's own record of what it spawned, and
@@ -482,10 +531,10 @@ enforce_worker_timeout() {
     (( elapsed >= WORKER_TIMEOUT_SECONDS )) || continue
     read -r pid < "$pidfile" || continue
     [[ $pid =~ ^[0-9]+$ ]] || continue
-    kill -TERM "-$pid" 2>/dev/null || true
+    signal_process_tree "$pid" TERM
     waited=0
     while (( waited < 5 )) && kill -0 "$pid" 2>/dev/null; do sleep 1; waited=$((waited + 1)); done
-    kill -0 "$pid" 2>/dev/null && kill -KILL "-$pid" 2>/dev/null || true
+    kill -0 "$pid" 2>/dev/null && signal_process_tree "$pid" KILL || true
     lease_release "$issue" timeout
     clear_worker_local "$issue"
     scope_cache_clear "$issue"
@@ -592,10 +641,10 @@ reap_orphan_workers() {
     fi
     read -r pid < "$pidfile" || continue
     [[ $pid =~ ^[0-9]+$ ]] || continue
-    kill -TERM "-$pid" 2>/dev/null || true
+    signal_process_tree "$pid" TERM
     waited=0
     while (( waited < 5 )) && kill -0 "$pid" 2>/dev/null; do sleep 1; waited=$((waited + 1)); done
-    kill -0 "$pid" 2>/dev/null && kill -KILL "-$pid" 2>/dev/null || true
+    kill -0 "$pid" 2>/dev/null && signal_process_tree "$pid" KILL || true
     lease_release "$issue" orphan
     clear_worker_local "$issue"
     scope_cache_clear "$issue"

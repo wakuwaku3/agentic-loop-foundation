@@ -30,9 +30,9 @@ dispose_stop_local_worker() {
   [[ -r $pidfile ]] || return 0
   read -r pid < "$pidfile" || return 0
   [[ $pid =~ ^[0-9]+$ ]] || return 0
-  kill -TERM "-$pid" 2>/dev/null || true
+  signal_process_tree "$pid" TERM
   while kill -0 "$pid" 2>/dev/null && (( waited < STOP_TIMEOUT )); do sleep 1; waited=$((waited + 1)); done
-  kill -0 "$pid" 2>/dev/null && kill -KILL "-$pid" 2>/dev/null || true
+  kill -0 "$pid" 2>/dev/null && signal_process_tree "$pid" KILL || true
   lease_release "$issue" stopping
   scope_cache_clear "$issue"; clear_conflict_wait "$issue"; clear_worker_local "$issue"
 }
