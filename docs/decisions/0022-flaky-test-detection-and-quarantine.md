@@ -64,7 +64,7 @@ retryは`verdict`の分類と証拠収集にしか使わず、**最初の失敗�
 
 ### 4つの連携
 
-- **CI**: 共通入口は変えない。隔離再実行のぶん実行時間が伸びうるため`.github/workflows/ci.yml`の`timeout-minutes`を10から20へ引き上げる。timeoutは依然失敗なのでgateは弱まらない。
+- **CI**: 共通入口は変えない。隔離再実行のぶん実行時間が伸びうるため、導入時に`.github/workflows/ci.yml`の`timeout-minutes`を10から20へ引き上げた。その後、完全検証690秒とrunner遅延による20分超過が実測されたため30へ更新した。timeoutは依然失敗なのでgateは弱まらない。
 - **Projects Recovery View**: `setup.sh`のRecovery viewのfilterへ`flaky` labelを追加し、`flaky` labelを冪等に作成する。
 - **自己診断**: `diagnose-codebase` skill（`.agents/`・`.claude/`双方）の監査対象へ、`bin/agentic-loop flaky --format json`が報告する期限切れ・未修復entryを追加する。
 - **Issueキュー**: 修復Issueは通常の`agent:queued`としてSupervisorが処理する。`doctor`はregistryの期限切れを失敗、残期間3日以内を警告として可視化する。
