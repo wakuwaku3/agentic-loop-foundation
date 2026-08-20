@@ -4094,6 +4094,24 @@ grep -Eq '^14 completed closed' "$state" || fail 'resuming an already-merged PR 
 assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:completed pr=99' 'resumed merged-PR completion was not recorded'
 assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'resumed=1' 'resumed merged-PR completion did not mark itself as a resume fast path'
 
+# A local branch at an ancestor of the merged PR head is also safe to
+# complete: it has no local-only commits, so exact SHA equality is unnecessary
+# (Issue #283).
+printf '16 running open\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+git -C "$target" worktree add --quiet -b agent/issue-16 "$target-worktrees/issue-16" origin/main
+git -C "$target-worktrees/issue-16" commit --quiet --allow-empty -m 'resume ancestor base'
+git -C "$target-worktrees/issue-16" branch agent/issue-16-merged
+ancestor_head=$(git -C "$target-worktrees/issue-16" rev-parse HEAD)
+git -C "$target-worktrees/issue-16" commit --quiet --allow-empty -m 'merged PR follow-up'
+merged_head=$(git -C "$target-worktrees/issue-16" rev-parse HEAD)
+git -C "$target-worktrees/issue-16" reset --quiet --hard "$ancestor_head"
+FAKE_RESUME_MERGED_PR=100 FAKE_RESUME_MERGED_SHA=$merged_head FAKE_RESUME_MERGED_URL="https://github.example/acme/installed-project/pull/100" \
+  "$target/bin/agentic-loop" _worker 16 resume-ancestor-worker
+grep -Eq '^16 completed closed' "$state" || fail 'a merged PR whose local branch is an ancestor did not complete the Issue'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:completed pr=100' 'ancestor resume completion was not recorded'
+git -C "$target" branch -D agent/issue-16-merged >/dev/null 2>&1 || true
+
 # A branch that has diverged from its remote (both sides carry commits the
 # other lacks) is routed to needs-input; no force-push, reset, or deletion of
 # either branch is attempted, and no provider is started.
