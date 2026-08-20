@@ -12,7 +12,7 @@ pid_alive() {
   [[ -r /proc/$pid/cmdline ]] || return 1
   command_line=$(tr '\0' ' ' < "/proc/$pid/cmdline") || return 1
   process_repo_matches "$pid" || return 1
-  [[ $command_line == *' _service'* || $command_line == *' _supervise'* ]]
+  [[ $command_line == *'agentic-loop _service'* || $command_line == *'agentic-loop _supervise'* ]]
 }
 
 

@@ -290,7 +290,7 @@ worker_alive() {
   [[ -r /proc/$pid/cmdline ]] || return 1
   command_line=$(tr '\0' ' ' < "/proc/$pid/cmdline") || return 1
   process_repo_matches "$pid" || return 1
-  [[ $command_line == *" _worker $issue "* ]]
+  [[ $command_line == *"agentic-loop _worker $issue "* ]]
 }
 
 
@@ -330,8 +330,8 @@ live_worker_processes() {
     # _worker ..." rather than starting with PROGRAM_PATH itself. The
     # repository cwd/common-dir match below supplies the repository identity.
     process_repo_matches "$pid" || continue
-    [[ $command_line == *' _worker '* ]] || continue
-    issue=${command_line#*' _worker '}
+    [[ $command_line == *'agentic-loop _worker '* ]] || continue
+    issue=${command_line#*'agentic-loop _worker '}
     issue=${issue%% *}
     [[ $issue =~ ^[0-9]+$ ]] || continue
     printf '%s\t%s\n' "$issue" "$pid"
