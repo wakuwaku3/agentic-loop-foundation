@@ -946,6 +946,11 @@ agent_run_stage() {
   fi
   finished_ms=$(date +%s%3N)
   duration_ms=$((finished_ms - started_ms))
+  # A provider may abort before creating --output-last-message.  Normalize
+  # that launch-failure shape to an empty stream so diagnostics and byte
+  # accounting remain reliable instead of masking the provider exit code.
+  [[ -f $raw_result ]] || : > "$raw_result"
+  [[ -f $stderr_file ]] || : > "$stderr_file"
   stdout_bytes=$(wc -c < "$raw_result")
   stderr_bytes=$(wc -c < "$stderr_file")
   printf 'provider_exit=%s\nduration_ms=%s\nstdout_bytes=%s\nstderr_bytes=%s\n' \
