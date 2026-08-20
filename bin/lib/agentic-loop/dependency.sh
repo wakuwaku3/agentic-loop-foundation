@@ -41,6 +41,9 @@ dependency_note_failure() {
 # or a URL), which this feature does not support.
 dependency_refs_from_body() {
   local body=$1 count line token
+  # GitHub本文はWeb UI/API経由ではCRLFになることがある。行末CRを
+  # 構文判定の前に除去し、同一repositoryの依存を誤ってcross-repo扱いしない。
+  body=${body//$'\r'/}
   count=$(grep -c '^Blocked by:' <<< "$body" || true)
   (( count == 0 )) && return 0
   (( count == 1 )) || return 1

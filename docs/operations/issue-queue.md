@@ -61,6 +61,8 @@ CLIの公開入口は変更後も `bin/agentic-loop` のままである（[ADR 0
 
 `bin/agentic-loop tail [--issue N] [--follow]`は、`$STATE_ROOT/events.log`（append-only。`epoch<TAB>issue番号|supervisor<TAB>code<TAB>stage-or-`、codeは`progress`/`claim`/`recover`/`timeout`/`stop`/`start`のenum）を時刻整形して流す読み取り専用コマンドである。REST(core)読み取りは0回で、GitHub・作業ツリーへ書き込まない。`--issue N`で特定Issueだけに絞り込み、`--follow`で追尾（ログのinode回転にも追従）。`status --watch`は全Issueの`tail --follow`のショートカットであり、`tail`は`--issue`絞り込みや非followの履歴表示も担う。worker log本文・Issue本文・コメントは一切読まない・出さない。
 
+Supervisorは開始epoch、PID、Linux boot ID、`/proc`のprocess開始tick、最終観測epoch、固定enumのstageを`$STATE_ROOT/supervisor.context`へ原子的に記録する。正常exitおよびTERM/INTは`supervisor.last-exit`と最大100行の`supervisor-terminations.log`へ確定する。SIGKILL、OOM kill、host/session teardownなどtrap不能な終了ではcontextが残り、次回`start`が生存しないPIDを検証して`kind=abrupt detail=unknown`として確定する。`status`と`status --format json`の`supervisor.last_exit`は前回終了の分類、直前stage、終了記録時刻、最終観測時刻を表示する。固定enumと数値だけを保存し、command line、Issue本文、provider出力、環境変数は記録しない。`abrupt`は捕捉不能終了を証明するがsignal送信者までは識別できないため、同時刻のkernel/systemd journalとboot IDを相関して調査する。
+
 ### 認可済みの終了・統合
 
 `dispose ISSUE --reason cancelled|superseded|duplicate|merged [--target ISSUE]` は唯一の終了入口である。実行者はGitHub認証済みで対象repositoryのwrite/maintain/admin権限を持つ必要がある。`cancelled` は要求撤回、`superseded` は後続Issueへの置換、`duplicate` は同一成果の重複、`merged` は異なる要求の統合を表す。後三者はopenで未終了の同一repository Issueを `--target` として必要とし、自己参照を拒否する。
@@ -341,7 +343,7 @@ workerが `AGENTIC_LOOP_RESULT=completed` を返しても、それだけでは�
 
 ### exec終了プロトコルと外部待機
 
-workerはCI、required checks、AI review、mergeなどの外部完了を同一turn内の前景処理で待つ。`gh pr checks --watch` 等は有限のtimeout単位で実行し、timeout後もpendingなら状態を再確認して繰り返す。background process、別agent、別sessionへの待機委譲、または「待機中です」だけの終了は許可しない。checks未確定、review feedback未対応、merge未実施、default branch検証未完了のいずれかでは最終応答を書かない。この待機は `[queue].worker_timeout_seconds` のworker全体上限の内側で行われ、上限を延長または無効化しない。
+workerはCI、required checks、AI review、mergeなどの外部完了を同一turn内の前景処理で待つ。`gh pr checks --watch` 等は有限のtimeout単位で実行し、timeout後もpendingなら状態を再確認して繰り返す。background process、別agent、別sessionへの待機委譲、または「待機中です」だけの終了は許可しない。checks未確定、review feedback未対応、merge未実施、default branch検証未完了のいずれかでは最終応答を書かない。この待機は `[queue].worker_timeout_seconds` のworker全体上限の内側で行われ、上限を延長または無効化しない。`worker_timeout_seconds`が正の値のとき、exec promptには`worker`開始時刻(epoch)からの観測に基づく上限・経過・残りが渡される（0のときは何も渡されない。providerの自己申告ではなく、開始markerからの実測値のみを使う）。上限が逼迫した場合の畳み方の優先順位は、達成済みの受け入れ条件をPRとして成立させる、未達分と本題外の不具合は別Issueとして切り出す、`needs-input`は人の判断が本当に必要な場合だけ使う、の順である。本題と無関係なflaky・CI固有失敗を発見した場合は、その場でこのIssueの反復を止め、本題の受け入れ条件に戻ってから別Issueへ切り出す。
 
 正当な終了時、providerは最後の非空行に `AGENTIC_LOOP_RESULT=completed`、`AGENTIC_LOOP_RESULT=failed`、`AGENTIC_LOOP_RESULT=needs-input`、`AGENTIC_LOOP_RESULT=declined` のいずれか一つだけを返す。provider processが正常終了しても有効なmarkerがない場合は、正常な失敗やCI待ちをreplan理由にせず、同一計画に「前景待機を完遂しmarkerを返す」補足を加えてexecを1回だけ即時再実行する。再実行もmarkerなしなら無限再試行・高コストなreplanへ進まず `failed` に遷移する。一方、providerの異常終了、明示的な `AGENTIC_LOOP_RESULT=failed`、token/rate-limit枯渇は既存のbounded replanまたはexhausted復旧処理をそのまま使う。GitHub設定の変更、新規外部service、追加課金は導入しない。
 

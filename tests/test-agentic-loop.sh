@@ -2025,6 +2025,16 @@ candidate_order=$(printf '%s' "$queue_json" | yq -p json '.queue.candidates[].is
 # unknown_scope=open: this fixture also declares no scope and exercises the
 # worker limit and priority ordering, not scope conflict avoidance. The two
 # highest-priority Issues (90, 90) are claimed first; the lower ones stay queued.
+#
+# The installed-project fixture is a detection-only seed with no Makefile
+# (see the capability manifest scenario below, which asserts that absence).
+# Issue #266's worker-prompt assertions need a declared affected_check/
+# impact_map, so overlay them onto capabilities.toml just for this block and
+# restore the detection-only manifest immediately after (same pattern as the
+# preflight capability_orig backup/restore further down).
+queue_capabilities_orig="$TEST_ROOT/queue-capabilities-orig.toml"
+cp "$target/.agentic-loop/capabilities.toml" "$queue_capabilities_orig"
+sed -i '/^\[validation\]$/a affected_check = "devbox run --pure affected"\nimpact_map = "tests/impact-map.toml"' "$target/.agentic-loop/capabilities.toml"
 write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=2 LEASE_SECONDS=3 STOP_TIMEOUT=10 STALE_DAYS=30
 printf 'unknown_scope = "open"\n' >> "$target/.agentic-loop.toml"
 prio90=$(printf '<!-- agentic-loop:priority 90 -->' | base64 -w0)
@@ -2054,10 +2064,15 @@ assert_contains "$FAKE_GH_ROOT/codex-calls" 'GitHubのIssue、PR' 'worker prompt
 assert_contains "$FAKE_GH_ROOT/codex-calls" '実在しない承認コマンド・設定・権限フローを創作して停止してはいけません' 'worker prompt did not forbid fabricating nonexistent approval mechanisms (Issue #191)'
 assert_contains "$FAKE_GH_ROOT/codex-calls" 'devbox.lock' 'worker prompt did not clarify that toolchain lock changes need no worker pre-approval (Issue #191)'
 assert_contains "$FAKE_GH_ROOT/codex-calls" '変更の重大さについての自己判断だけを理由にaxisをhighにしたりapproval.required=trueにしないでください' 'plan prompt did not forbid self-invented approval requirements (Issue #191)'
+assert_contains "$FAKE_GH_ROOT/codex-calls" '影響範囲検証（反復の短縮専用、push/merge gateではない）' 'worker prompt did not expose the declared affected check (Issue #266)'
+assert_contains "$FAKE_GH_ROOT/codex-calls" '影響範囲map: tests/impact-map.toml' 'worker prompt did not expose the declared impact map (Issue #266)'
+assert_contains "$FAKE_GH_ROOT/codex-calls" 'このworkerの実行時間予算: 上限=' 'worker prompt did not expose the observed time budget (Issue #266)'
+assert_contains "$FAKE_GH_ROOT/codex-calls" '本題外のflaky・CI固有失敗を見つけたら' 'worker prompt did not define the out-of-scope failure stop rule (Issue #266)'
 assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'のハートビートです' 'supervisor did not write its Issue comments in Japanese'
 if grep -Eq 'danger-full-access|OPENAI_API_KEY|--add-dir /($| )|--add-dir /home($| )' "$FAKE_GH_ROOT/codex-calls"; then fail 'worker used forbidden Codex configuration or a broad writable path'; fi
 [[ ! -e $state_root/worktrees ]] || fail 'worker worktrees were placed inside Git metadata'
 assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'Token使用量（分析用）: provider=codex' 'codex worker did not record a token usage analysis entry'
+cp "$queue_capabilities_orig" "$target/.agentic-loop/capabilities.toml"
 
 # AGENT_PROVIDER=claude routes the worker to the Claude CLI, confining writes to the worktree.
 [[ -f $target/.claude/skills/submit-requirement/SKILL.md ]] || fail 'install did not add the Claude submit-requirement skill'
@@ -3471,6 +3486,13 @@ rm -f "$state_root/scope/issue-260" "$state_root/conflict/issue-261" "$state_roo
 
 # --- Issue dependency gating (Issue #41) ---
 
+# GitHub Web UI/API may return CRLF bodies. Normalize it before parsing so a
+# same-repository dependency is not classified as cross-repository.
+crlf_dependency_body=$(printf 'Blocked by: #300\r\n' | base64 -w0)
+printf '300 completed closed\n305 queued open none 2026-01-01T00:00:00Z none none %s\n' "$crlf_dependency_body" > "$state"
+AGENTIC_LOOP_RUN_ONCE=1 FAKE_CODEX_SLEEP=1 "$target/bin/agentic-loop" _supervise
+grep -Eq '^305 completed closed' "$state" || fail 'CRLF dependency body was not normalized'
+
 write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=3 LEASE_SECONDS=3 STOP_TIMEOUT=10 STALE_DAYS=30
 printf 'unknown_scope = "open"\n' >> "$target/.agentic-loop.toml"
 rm -f "$FAKE_GH_ROOT/$state_key.dep-links"
@@ -3805,6 +3827,12 @@ printf '93 queued open none 2026-01-01T00:00:00Z none none %s\n91 completed clos
 "$target/bin/agentic-loop" postmortem complete 93 || fail 'postmortem complete failed despite all gate conditions being satisfied'
 assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:postmortem-verified' 'postmortem complete did not record its verification comment'
 [[ $(cat "$state_root/postmortem/turn-93" 2>/dev/null) == complete ]] || fail 'postmortem complete did not write the complete turn marker consumed by worker.sh'
+
+# CRLF headings must be recognized by the postmortem completion gate.
+gate_body_crlf=$(printf 'Blocked by: #91\r\n\r\n## 残余リスク\r\n\r\n実施しない項目はない。\r\n' | base64 -w0)
+printf '94 queued open none 2026-01-01T00:00:00Z none none %s\n91 completed closed\n' "$gate_body_crlf" > "$state"
+"$target/bin/agentic-loop" postmortem complete 94 || fail 'postmortem complete did not normalize CRLF headings'
+[[ $(cat "$state_root/postmortem/turn-94" 2>/dev/null) == complete ]] || fail 'CRLF postmortem did not write the complete marker'
 
 rm -rf "$state_root/postmortem" "$state_root/attempts" "$state_root/workers/90.lease"
 write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=2 LEASE_SECONDS=3 STOP_TIMEOUT=10 STALE_DAYS=30
@@ -6333,6 +6361,12 @@ grep -Fq 'supervisor-stale-pid' <<< "$status_output" || fail 'status did not rep
 grep -Fq '要対応:' <<< "$status_output" || fail 'status did not separate human action items'
 grep -Fq '対応: bin/agentic-loop start' <<< "$status_output" || fail 'status did not show the stale supervisor recovery action'
 [[ $(git -C "$target" status --porcelain) == "$before_status" ]] || fail 'status modified the repository working tree on corrupted local state'
+printf '1\t1700000030\tabrupt\tunknown\t%s\t1700000000\t1700000020\tpoll\t00000000-0000-0000-0000-000000000000\t12345\n' "$dead_pid" > "$state_root/supervisor.last-exit"
+status_output=$("$target/bin/agentic-loop" status)
+status_json=$("$target/bin/agentic-loop" status --format json)
+grep -Fq '前回のSupervisor終了: kind=abrupt detail=unknown' <<< "$status_output" || fail 'status did not render the previous abrupt supervisor termination'
+[[ $(printf '%s' "$status_json" | yq -p json '.supervisor.last_exit.kind') == abrupt ]] || fail 'status JSON did not expose the previous supervisor termination kind'
+[[ $(printf '%s' "$status_json" | yq -p json '.supervisor.last_exit.stage') == poll ]] || fail 'status JSON did not expose the last supervisor stage'
 rm -f "$state_root/supervisor.pid" "$state_root/workers/70.started" "$state_root/workers/70.lease"
 
 # Scenario: project-sync-pending's elapsed tracks the oldest unresolved
@@ -7221,6 +7255,32 @@ printf 'check:\n\t/bin/true\n' > "$affected_cap_without/Makefile"
 ( source "$PROJECT_ROOT/bin/lib/agentic-loop/common.sh"; source "$PROJECT_ROOT/bin/lib/agentic-loop/capability.sh"; capability_generate "$affected_cap_without" )
 grep -Fxq 'validation.affected_check' <(yq -p toml -r '.undetermined[]' "$affected_cap_without/.agentic-loop/capabilities.toml") || fail 'capability_generate fabricated validation.affected_check without a Makefile affected: target'
 grep -Fxq 'validation.impact_map' <(yq -p toml -r '.undetermined[]' "$affected_cap_without/.agentic-loop/capabilities.toml") || fail 'capability_generate fabricated validation.impact_map without an impact map file'
+
+# Worker prompt capability rendering is declaration-driven: affected details
+# appear only when both values are present in a valid manifest (Issue #266).
+summary_with=$(source "$PROJECT_ROOT/bin/lib/agentic-loop/common.sh"; source "$PROJECT_ROOT/bin/lib/agentic-loop/capability.sh"; capability_summary_block "$affected_cap_with")
+grep -Fq '影響範囲検証（反復の短縮専用、push/merge gateではない）' <<< "$summary_with" || fail 'capability summary omitted a declared affected check'
+grep -Fq '影響範囲map: tests/impact-map.toml' <<< "$summary_with" || fail 'capability summary omitted a declared impact map'
+summary_without=$(source "$PROJECT_ROOT/bin/lib/agentic-loop/common.sh"; source "$PROJECT_ROOT/bin/lib/agentic-loop/capability.sh"; capability_summary_block "$affected_cap_without")
+if grep -Fq '影響範囲検証（反復の短縮専用、push/merge gateではない）' <<< "$summary_without" || grep -Fq '影響範囲map:' <<< "$summary_without"; then
+  fail 'capability summary fabricated undeclared affected details'
+fi
+
+# worker_time_budget_block (Issue #266): observed, not provider-claimed, and
+# opt-in via queue.worker_timeout_seconds. Absent/zero timeout or a missing/
+# unreadable started marker must render nothing (never a fabricated budget).
+time_budget_root="$TEST_ROOT/worker-time-budget"
+mkdir -p "$time_budget_root/workers"
+date +%s > "$time_budget_root/workers/9001.started"
+time_budget_disabled=$(STATE_ROOT="$time_budget_root" WORKER_TIMEOUT_SECONDS=0 bash -c \
+  'source "$0/bin/lib/agentic-loop/common.sh"; source "$0/bin/lib/agentic-loop/worker_state.sh"; source "$0/bin/lib/agentic-loop/worker.sh"; worker_time_budget_block 9001' "$PROJECT_ROOT")
+[[ -z $time_budget_disabled ]] || fail 'worker_time_budget_block rendered a budget with worker_timeout_seconds=0'
+time_budget_no_started=$(STATE_ROOT="$time_budget_root" WORKER_TIMEOUT_SECONDS=300 bash -c \
+  'source "$0/bin/lib/agentic-loop/common.sh"; source "$0/bin/lib/agentic-loop/worker_state.sh"; source "$0/bin/lib/agentic-loop/worker.sh"; worker_time_budget_block 9002' "$PROJECT_ROOT")
+[[ -z $time_budget_no_started ]] || fail 'worker_time_budget_block rendered a budget without a started marker'
+time_budget_enabled=$(STATE_ROOT="$time_budget_root" WORKER_TIMEOUT_SECONDS=300 bash -c \
+  'source "$0/bin/lib/agentic-loop/common.sh"; source "$0/bin/lib/agentic-loop/worker_state.sh"; source "$0/bin/lib/agentic-loop/worker.sh"; worker_time_budget_block 9001' "$PROJECT_ROOT")
+grep -Fq 'このworkerの実行時間予算: 上限=300秒' <<< "$time_budget_enabled" || fail 'worker_time_budget_block did not render an observed budget when enabled'
 
 # drift検出: affected_check_secondsがfull_check_seconds以上になると警告する
 # (bin/lib/agentic-loop/doctor.shはdrift:*をwildcardで既に処理する)。

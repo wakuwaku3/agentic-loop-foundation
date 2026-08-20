@@ -15,6 +15,24 @@ EOF
 }
 
 
+# A bounded, observed time budget for the exec prompt.  The started marker is
+# written before provider invocation, so this never depends on provider claims.
+worker_time_budget_block() {
+  local issue=$1 started now elapsed remaining timeout
+  timeout=${WORKER_TIMEOUT_SECONDS:-0}
+  [[ $timeout =~ ^[0-9]+$ && $timeout -gt 0 ]] || return 0
+  [[ -r $(worker_started_file "$issue") ]] || return 0
+  read -r started < "$(worker_started_file "$issue")" || return 0
+  [[ $started =~ ^[0-9]+$ ]] || return 0
+  now=$(date +%s)
+  elapsed=$(( now - started )); (( elapsed < 0 )) && elapsed=0
+  remaining=$(( timeout - elapsed )); (( remaining < 0 )) && remaining=0
+  printf 'このworkerの実行時間予算: 上限=%s秒、開始時刻(epoch)=%s、観測時点の経過=%s秒、残り=%s秒。\n' "$timeout" "$started" "$elapsed" "$remaining"
+  printf '時間予算が尽きかけたら、受け入れ条件の達成済み範囲をPRとして成立させ、未達分と本題外の不具合は分割Issueとして残してください。needs-inputは人の判断が本当に必要な場合だけ使用し、時間切れを理由に条件を黙って縮小しないでください。\n'
+  printf '本題外のflaky・CI固有失敗を見つけたら、このIssueの反復を止めて別Issueへ切り出し、本題の受け入れ条件へ戻ってください。\n'
+}
+
+
 # plan stage prompt: investigate only and emit a concrete plan. On a retry the
 # previous exec failure is appended so the plan can address the root cause. If
 # resume_context is non-empty (a resumed Issue whose branch already carries
@@ -46,6 +64,7 @@ exec_prompt() {
   local issue=$1 repository=$2 plan_file=$3 resume_context=${4:-}
   [[ -n $resume_context ]] && printf '%s\n' "$resume_context"
   issue_prompt "$issue" "$repository"
+  worker_time_budget_block "$issue"
   if [[ -n ${PREFLIGHT_VERDICT:-} && ${PREFLIGHT:-off} != off ]]; then
     printf '変更影響とリスクのpreflight判定: %s（detail=%s）%s。実装中に、宣言した変更scope・外部操作・リスク水準を超える破壊的・不可逆・重大costまたはsecurity上のリスクを新たに発見した場合は、実装や変更を進めず、最終応答を AGENTIC_LOOP_RESULT=needs-input で終えてください。\n' \
       "$PREFLIGHT_VERDICT" "${PREFLIGHT_DETAIL:-}" "${PREFLIGHT_APPROVAL_TOKEN:+ (承認済みenvelope token=$PREFLIGHT_APPROVAL_TOKEN)}"
