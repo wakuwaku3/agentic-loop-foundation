@@ -7,6 +7,27 @@ set -euo pipefail
 
 readonly PROGRAM_NAME="${0##*/}"
 readonly SCRIPT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+readonly PROGRAM_PATH="$SCRIPT_ROOT/bin/agentic-loop"
+# Startup path normalization (Issue #219): whatever path the caller used to
+# invoke this process (relative, PATH lookup, symlink), re-exec through the
+# canonical PROGRAM_PATH so every later /proc/<pid>/cmdline observation
+# (service.sh's pid_alive, worker_state.sh's worker_alive/live_worker_
+# processes) and every "$0"-based re-invocation (cmd_start's nohup fallback,
+# supervise()'s worker spawn) records one invocation-independent identity.
+# Before this normalization, starting the supervisor with a relative path
+# (e.g. `./bin/agentic-loop _service`) made the absolute-path cmdline check
+# fail even though the process was alive, which cascaded into worker_alive()
+# false negatives, worker_count() undercounting, and claim_next() exceeding
+# max_workers. Guarded by AGENTIC_LOOP_REEXECED so a normalized process never
+# loops back into its own exec.
+if [[ -z ${AGENTIC_LOOP_REEXECED:-} ]]; then
+  self_path=$(realpath -- "$0" 2>/dev/null || printf '%s' "$0")
+  if [[ $self_path != "$PROGRAM_PATH" ]]; then
+    export AGENTIC_LOOP_REEXECED=1
+    exec "$PROGRAM_PATH" "$@"
+  fi
+  unset self_path
+fi
 readonly REPO_ROOT="$(git -C "$SCRIPT_ROOT" rev-parse --show-toplevel 2>/dev/null || printf '%s' "$SCRIPT_ROOT")"
 readonly STATE_ROOT="$(git -C "$REPO_ROOT" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || printf '%s/.git' "$REPO_ROOT")/agentic-loop"
 readonly RUNTIME_PATH_FILE="$STATE_ROOT/runtime.path"

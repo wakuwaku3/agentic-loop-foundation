@@ -305,6 +305,64 @@ worker_pid_live() {
 }
 
 
+# Enumerate this repository's actually-live `_worker <issue> <worker-id>`
+# processes straight from /proc, independent of workers/*.pid bookkeeping
+# (Issue #219): a pidfile is this host's own record of what it spawned, and
+# can go missing or point at the wrong pid without the underlying worker
+# process itself dying. Matched against the exact PROGRAM_PATH argv[0] (see
+# bin/agentic-loop's startup re-exec) so a sibling agentic-loop deployment's
+# workers, or an unrelated process that merely mentions "_worker", is never
+# counted. Emits "issue<TAB>pid" per live match; best-effort (an unreadable
+# /proc/<pid>/cmdline -- permission, already-exited between listing and read
+# -- is skipped, never fatal).
+live_worker_processes() {
+  local pid_dir pid command_line issue
+  shopt -s nullglob
+  for pid_dir in /proc/[0-9]*; do
+    pid=${pid_dir#/proc/}
+    [[ -r $pid_dir/cmdline ]] || continue
+    command_line=$(tr '\0' ' ' 2>/dev/null < "$pid_dir/cmdline") || continue
+    # Substring match, not a prefix match: a script invoked directly (as
+    # every caller here does) is exec'd by the kernel's #!/usr/bin/env bash
+    # shebang handling, which rewrites argv[0] to the interpreter and shifts
+    # PROGRAM_PATH into argv[1] -- so cmdline reads "bash <PROGRAM_PATH>
+    # _worker ..." rather than starting with PROGRAM_PATH itself. Mirrors the
+    # same substring check pid_alive() and worker_alive() already use for
+    # this exact reason.
+    [[ $command_line == *"$PROGRAM_PATH"' _worker '* ]] || continue
+    issue=${command_line#*"$PROGRAM_PATH"' _worker '}
+    issue=${issue%% *}
+    [[ $issue =~ ^[0-9]+$ ]] || continue
+    printf '%s\t%s\n' "$issue" "$pid"
+  done
+  shopt -u nullglob
+}
+
+
+# Repair workers/<issue>.pid from the live /proc scan when it is missing or
+# stale (points at a pid that is no longer alive), so worker_count() and
+# every pidfile-driven maintenance pass (graceful shutdown, timeout
+# enforcement, orphan reap) see a worker that is genuinely still running even
+# when this host's own bookkeeping lost track of it (Issue #219). Never
+# invents a pidfile for an issue with no live worker process, and never
+# overwrites a pidfile whose recorded pid is still alive (that pid remains
+# the authoritative one even if a second live process also matched, which
+# should not happen in practice since claim_next serializes one worker per
+# issue).
+reconcile_worker_pidfiles() {
+  local issue pid pidfile existing
+  while IFS=$'\t' read -r issue pid; do
+    [[ -n $issue && -n $pid ]] || continue
+    pidfile="$STATE_ROOT/workers/$issue.pid"
+    existing=''
+    if [[ -r $pidfile ]]; then read -r existing < "$pidfile" 2>/dev/null || true; fi
+    if [[ $existing =~ ^[0-9]+$ ]] && kill -0 "$existing" 2>/dev/null; then continue; fi
+    mkdir -p "$STATE_ROOT/workers"
+    printf '%s\n' "$pid" > "$pidfile"
+  done < <(live_worker_processes)
+}
+
+
 # Poll-scoped memo of open agent:running Issue numbers, shared by
 # recover_expired and reap_orphan_workers so a poll issues at most one GitHub
 # list call for this set (or none when refresh_supervisor_snapshot's snapshot
