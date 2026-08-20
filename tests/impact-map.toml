@@ -110,6 +110,11 @@ units = ["e2e:upgrade"]
 reason = "upgrade入口の挙動はupgrade群が覆う"
 
 [[rule]]
+path = "scripts/smoke.sh"
+units = []
+reason = "明示実行の外部smoke入口はlintの存在・構文検査で扱う"
+
+[[rule]]
 path = "scripts/install-target.sh"
 units = ["e2e:lifecycle", "e2e:upgrade"]
 reason = "install入口はlifecycle群のinstall検証とupgrade群の初期状態にまたがる"
