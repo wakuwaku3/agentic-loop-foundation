@@ -690,7 +690,7 @@ worker() {
     done
   ) & heartbeat_pid=$!
   local plan_usage="$STATE_ROOT/issue-$issue-plan-usage.txt" exec_usage="$STATE_ROOT/issue-$issue-usage.txt"
-  local plan_file="$STATE_ROOT/issue-$issue-plan.txt" attempt=0 protocol_retry=0 max_retries started failure_context='' exhausted=0 exec_rc plan_rc
+  local plan_file="$(preflight_plan_file "$issue")" attempt=0 protocol_retry=0 max_retries started failure_context='' exhausted=0 exec_rc plan_rc
   local resume_context; resume_context=$(resume_context_block "$branch")
   max_retries=$(agent_plan_max_retries)
   while :; do

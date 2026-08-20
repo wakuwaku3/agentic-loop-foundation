@@ -144,13 +144,14 @@ preflight_record_json() {
 # shellcheck disable=SC2016 # Backticks are literal Markdown fencing in the fabricated plan body.
 preflight_plan_body() { printf '## 計画\n\n```agentic-loop:preflight\n%s\n```\n\n<!-- agentic-loop:scope paths=README.md -->\nAGENTIC_LOOP_RESULT=completed\n' "$1"; }
 
-# preflight_token_for ISSUE RECORD_JSON -> the 12-hex approval envelope token
-# a real worker would compute for this record (see preflight.sh's preflight_token).
-preflight_token_for() { ( source "$PROJECT_ROOT/bin/lib/agentic-loop/common.sh"; source "$PROJECT_ROOT/bin/lib/agentic-loop/preflight.sh"; preflight_token "$1" "$2" ); }
-
-# preflight_signal_token_for ISSUE SIGNAL_REASON -> the 12-hex token for a
-# record-absent signal-derived envelope (see preflight.sh's preflight_signal_token).
-preflight_signal_token_for() { ( source "$PROJECT_ROOT/bin/lib/agentic-loop/common.sh"; source "$PROJECT_ROOT/bin/lib/agentic-loop/preflight.sh"; preflight_signal_token "$1" "$2" ); }
+# preflight_envelope_token_for ISSUE RECORD_JSON SIGNAL_CLASS SIGNAL_REASON ->
+# the 12-hex approval envelope token a real worker (preflight_gate or
+# preflight_reevaluate_diff) would compute for RECORD_JSON's declared parts
+# (pass "" for no record) combined with a given signal (see preflight.sh's
+# preflight_envelope_token). Pass SIGNAL_CLASS=none SIGNAL_REASON='' for a
+# declared-risk-only envelope, or RECORD_JSON='' SIGNAL_CLASS=approval for a
+# record-absent, signal-derived one.
+preflight_envelope_token_for() { ( source "$PROJECT_ROOT/bin/lib/agentic-loop/common.sh"; source "$PROJECT_ROOT/bin/lib/agentic-loop/preflight.sh"; preflight_envelope_token "$1" "$(preflight_declared_parts "$2")" "$3" "$4" ); }
 
 # workload_unit_json OPERATION PER_UNIT GROWTH STOP_CONDITION REUSE -> one
 # "units[]" element of an agentic-loop:workload record (see
@@ -5087,7 +5088,7 @@ grep -Eq '^7113 completed closed' "$state" || fail 'preflight off mode blocked c
 # and a re-run of the same plan (same declared risk, same token) completes.
 pf_risks=$(preflight_risks_json security "$(preflight_risk_json security high '承認往復test')")
 pf_record=$(preflight_record_json 7114 "$pf_risks" '{"scope":"","tests":[],"external_operations":[],"rollback":""}' '{"required":true,"triggers":["security"]}')
-pf_token=$(preflight_token_for 7114 "$pf_record")
+pf_token=$(preflight_envelope_token_for 7114 "$pf_record" none '')
 write_queue_config "$target/.agentic-loop.toml" PREFLIGHT=warn TRACEABILITY=off
 printf '7114 running open\n' > "$state"
 : > "$FAKE_GH_ROOT/$state_key.comments"
@@ -5177,7 +5178,7 @@ git -C "$target" show-ref --verify --quiet refs/heads/agent/issue-7117 || fail '
 
 # 13) The same escalation, this time already approved: completion proceeds
 # and cleanup runs as normal.
-escalation_token=$(preflight_signal_token_for 7118 'protected:devbox.lock')
+escalation_token=$(preflight_envelope_token_for 7118 '' approval 'protected:devbox.lock')
 write_queue_config "$target/.agentic-loop.toml" PREFLIGHT=warn TRACEABILITY=off
 printf '7118 running open\n' > "$state"
 : > "$FAKE_GH_ROOT/$state_key.comments"
@@ -5193,9 +5194,156 @@ grep -Eq '^7118 completed closed' "$state" || fail 'an approved escalation signa
 [[ ! -e $target-worktrees/issue-7118 ]] || fail 'an approved escalation did not clean up its worktree'
 ! git -C "$target" show-ref --verify --quiet refs/heads/agent/issue-7118 || fail 'an approved escalation did not remove its branch'
 
+# 15) Token consistency across stages (Issue #218): for a *mixed* envelope --
+# a declared high-risk axis together with a scope that also touches a
+# protected path -- preflight_gate (before exec) and preflight_reevaluate_diff
+# (the post-exec escalation backstop) must derive the byte-identical token,
+# because both now read the same persisted plan record through
+# preflight_envelope_token. Before this fix, the gate used a manifest-derived
+# token while the escalation used a signal-only token, so an operator's
+# gate-time approval silently stopped covering the same change once exec
+# reached the escalation re-evaluation.
+pf_risks=$(preflight_risks_json security "$(preflight_risk_json security high '混在envelope token一致test')")
+pf_record=$(preflight_record_json 7122 "$pf_risks" '{"scope":"","tests":[],"external_operations":[],"rollback":""}' '{"required":true,"triggers":["security"]}')
+pf_mixed_plan=$(printf '## 計画\n\n```agentic-loop:preflight\n%s\n```\n\n<!-- agentic-loop:scope paths=devbox.lock -->\nAGENTIC_LOOP_RESULT=completed\n' "$pf_record")
+write_queue_config "$target/.agentic-loop.toml" PREFLIGHT=warn TRACEABILITY=off
+printf '7122 running open\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+: > "$FAKE_GH_ROOT/codex-calls"
+FAKE_CODEX_RESULT="$pf_mixed_plan" "$target/bin/agentic-loop" _worker 7122 preflight-mixed-gate-worker
+grep -Eq '^7122 needs-input open' "$state" || fail 'a mixed declared-risk + protected-path envelope was not gated'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'reason=preflight-approval' 'a mixed envelope with a declared high-risk axis was not classified via reason=preflight-approval'
+gate_token=$(grep -oE 'reason=preflight-approval token=[0-9a-f]{12}' "$FAKE_GH_ROOT/$state_key.comments" | tail -n1 | grep -oE '[0-9a-f]{12}')
+[[ -n $gate_token ]] || fail 'could not extract the gate token for the mixed envelope scenario'
+expected_mixed_token=$(preflight_envelope_token_for 7122 "$pf_record" approval 'protected:devbox.lock')
+[[ $gate_token == "$expected_mixed_token" ]] || fail "the gate token ($gate_token) for a mixed envelope did not match the envelope formula ($expected_mixed_token)"
+! grep -Fq -- '--sandbox workspace-write' "$FAKE_GH_ROOT/codex-calls" || fail 'a mixed envelope gate unexpectedly started exec'
+[[ -e $target-worktrees/issue-7122 ]] || fail 'a preflight gate removed the worktree despite blocking completion'
+
+printf 'preflight-escalation-test\n' >> "$target-worktrees/issue-7122/devbox.lock"
+git -C "$target-worktrees/issue-7122" add devbox.lock
+git -C "$target-worktrees/issue-7122" commit --quiet -m 'touch protected path'
+mixed_escalation_sha=$(git -C "$target-worktrees/issue-7122" rev-parse HEAD)
+printf '7122 running open\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+FAKE_RESUME_MERGED_PR=7122 FAKE_RESUME_MERGED_SHA=$mixed_escalation_sha FAKE_RESUME_MERGED_URL="https://github.example/acme/installed-project/pull/7122" \
+  "$target/bin/agentic-loop" _worker 7122 preflight-mixed-escalation-worker
+grep -Eq '^7122 needs-input open' "$state" || fail 'the escalation backstop did not re-gate the still-unapproved mixed envelope'
+escalation_token=$(grep -oE 'reason=preflight-escalation token=[0-9a-f]{12}' "$FAKE_GH_ROOT/$state_key.comments" | tail -n1 | grep -oE '[0-9a-f]{12}')
+[[ -n $escalation_token ]] || fail 'could not extract the escalation token for the mixed envelope scenario'
+[[ $escalation_token == "$gate_token" ]] || fail "preflight_gate's token ($gate_token) and preflight_reevaluate_diff's token ($escalation_token) diverged for the same declared-risk + protected-path envelope (Issue #218)"
+
+# 16) ...and once that shared token is approved once, at the gate, the later
+# escalation re-evaluation of the identical envelope never re-blocks:
+# completion proceeds and cleanup runs as normal (Issue #218 acceptance
+# criterion 2).
+"$target/bin/agentic-loop" preflight 7122 --approve --token "$gate_token" >/dev/null || fail 'approving the mixed envelope gate token failed'
+grep -Eq '^7122 queued open' "$state" || fail 'approving the mixed envelope token did not requeue the Issue'
+printf '7122 running open\n' > "$state"
+# Comments are intentionally NOT cleared here: preflight_approved's cache-miss
+# scan (Issue #197) needs the approval marker just posted above still present
+# in this fixture's comment log to find it. A byte offset, not a clear, is
+# used below to isolate only what this next _worker call newly posts.
+comments_before_approved_run=$(wc -c < "$FAKE_GH_ROOT/$state_key.comments")
+FAKE_RESUME_MERGED_PR=7122 FAKE_RESUME_MERGED_SHA=$mixed_escalation_sha FAKE_RESUME_MERGED_URL="https://github.example/acme/installed-project/pull/7122" \
+  "$target/bin/agentic-loop" _worker 7122 preflight-mixed-approved-worker
+grep -Eq '^7122 completed closed' "$state" || fail 'a gate-approved mixed envelope was re-blocked by the escalation backstop instead of completing'
+! tail -c "+$((comments_before_approved_run + 1))" "$FAKE_GH_ROOT/$state_key.comments" | grep -Fq 'reason=preflight-escalation' || fail 'an approved mixed envelope still posted a new escalation gate comment'
+[[ ! -e $target-worktrees/issue-7122 ]] || fail 'an approved mixed envelope did not clean up its worktree'
+
+# 17) An envelope that actually grows must never be covered by a narrower
+# approval (Issue #218 acceptance criterion 4): approve a security-only
+# high-risk envelope, then re-plan the same Issue with an additional
+# cost=high axis -- the gate must fire again, carrying its own distinct
+# token, and the already-approved narrower token must not satisfy it.
+pf_risks_narrow=$(preflight_risks_json security "$(preflight_risk_json security high '承認範囲test-narrow')")
+pf_record_narrow=$(preflight_record_json 7123 "$pf_risks_narrow" '{"scope":"","tests":[],"external_operations":[],"rollback":""}' '{"required":true,"triggers":["security"]}')
+narrow_token=$(preflight_envelope_token_for 7123 "$pf_record_narrow" none '')
+write_queue_config "$target/.agentic-loop.toml" PREFLIGHT=warn TRACEABILITY=off
+printf '7123 running open\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+FAKE_CODEX_RESULT="$(preflight_plan_body "$pf_record_narrow")" "$target/bin/agentic-loop" _worker 7123 preflight-narrow-gate-worker
+grep -Eq '^7123 needs-input open' "$state" || fail 'setup: the narrow envelope gate did not fire'
+"$target/bin/agentic-loop" preflight 7123 --approve --token "$narrow_token" >/dev/null || fail 'approving the narrow envelope token failed'
+grep -Eq '^7123 queued open' "$state" || fail 'setup: approving the narrow envelope token did not requeue the Issue'
+
+pf_risks_wide='[{"axis":"security","level":"high","reason":"承認範囲test-wide"},{"axis":"confidentiality","level":"low"},{"axis":"integrity","level":"low"},{"axis":"availability","level":"low"},{"axis":"data_migration","level":"low"},{"axis":"external_environment","level":"low"},{"axis":"cost","level":"high","reason":"追加費用の発生"},{"axis":"compatibility","level":"low"},{"axis":"release_deploy","level":"low"},{"axis":"rollback","level":"low"}]'
+pf_record_wide=$(preflight_record_json 7123 "$pf_risks_wide" '{"scope":"","tests":[],"external_operations":[],"rollback":""}' '{"required":true,"triggers":["security","cost"]}')
+wide_token=$(preflight_envelope_token_for 7123 "$pf_record_wide" none '')
+[[ $wide_token != "$narrow_token" ]] || fail 'a wider declared-risk envelope collided with the already-approved narrower one'
+printf '7123 running open\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+FAKE_CODEX_RESULT="$(preflight_plan_body "$pf_record_wide")" "$target/bin/agentic-loop" _worker 7123 preflight-wide-gate-worker
+grep -Eq '^7123 needs-input open' "$state" || fail 'an envelope that grew beyond an already-approved one was not re-gated with a new token (Issue #218)'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" "token=$wide_token" 'the re-gated wider envelope did not carry its own distinct token'
+! grep -Fq "token=$narrow_token" "$FAKE_GH_ROOT/$state_key.comments" || fail 'the re-gated wider envelope was incorrectly satisfied by the narrower approved token'
+
+# 18) missing↔invalid convergence, at the escalation stage (Issue #218
+# acceptance criterion 3): preflight_reevaluate_diff derives the identical
+# token whether the persisted plan record is entirely absent or present but
+# schema-invalid (one axis missing here, mirroring scenario 4 above), for the
+# same protected-path signal.
+write_queue_config "$target/.agentic-loop.toml" PREFLIGHT=warn TRACEABILITY=off
+printf '7124 running open\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+git -C "$target" worktree add --quiet -b agent/issue-7124 "$target-worktrees/issue-7124" origin/main
+printf 'preflight-escalation-test\n' >> "$target-worktrees/issue-7124/devbox.lock"
+git -C "$target-worktrees/issue-7124" add devbox.lock
+git -C "$target-worktrees/issue-7124" commit --quiet -m 'touch protected path'
+invalid_escalation_sha=$(git -C "$target-worktrees/issue-7124" rev-parse HEAD)
+rm -f "$state_root/issue-7124-plan.txt"
+FAKE_RESUME_MERGED_PR=7124 FAKE_RESUME_MERGED_SHA=$invalid_escalation_sha FAKE_RESUME_MERGED_URL="https://github.example/acme/installed-project/pull/7124" \
+  "$target/bin/agentic-loop" _worker 7124 preflight-escalation-missing-plan-worker
+grep -Eq '^7124 needs-input open' "$state" || fail 'setup: the no-plan-file escalation did not gate'
+missing_plan_token=$(grep -oE 'reason=preflight-escalation token=[0-9a-f]{12}' "$FAKE_GH_ROOT/$state_key.comments" | tail -n1 | grep -oE '[0-9a-f]{12}')
+[[ -n $missing_plan_token ]] || fail 'could not extract the no-plan-file escalation token'
+
+printf '## 計画\n\n```agentic-loop:preflight\n%s\n```\n' "$(preflight_record_json 7124 "$pf_incomplete_risks")" > "$state_root/issue-7124-plan.txt"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+printf '7124 running open\n' > "$state"
+FAKE_RESUME_MERGED_PR=7124 FAKE_RESUME_MERGED_SHA=$invalid_escalation_sha FAKE_RESUME_MERGED_URL="https://github.example/acme/installed-project/pull/7124" \
+  "$target/bin/agentic-loop" _worker 7124 preflight-escalation-invalid-plan-worker
+grep -Eq '^7124 needs-input open' "$state" || fail 'setup: the invalid-plan-file escalation did not gate'
+invalid_plan_token=$(grep -oE 'reason=preflight-escalation token=[0-9a-f]{12}' "$FAKE_GH_ROOT/$state_key.comments" | tail -n1 | grep -oE '[0-9a-f]{12}')
+[[ -n $invalid_plan_token ]] || fail 'could not extract the invalid-plan-file escalation token'
+[[ $missing_plan_token == "$invalid_plan_token" ]] || fail "the escalation token differed between a missing plan record ($missing_plan_token) and a schema-invalid one ($invalid_plan_token) under the same signal (Issue #218)"
+
 cp "$capability_orig" "$target/.agentic-loop/capabilities.toml"
 
-# 14) preflight_approved's comment scan does not grow with the Issue's
+# 19) Prose invariance (Issue #218 acceptance criterion 7): re-planning the
+# same Issue with different free-text prose (risk reason, change scope,
+# tests, rollback) but the identical declared risk axes and approval
+# triggers must derive the byte-identical envelope token, both via the
+# formula directly and through a real gate/re-plan cycle -- a previously
+# approved token must still satisfy the re-planned envelope with no new
+# gate comment posted.
+pf_risks_prose_a=$(preflight_risks_json security "$(preflight_risk_json security high 'prose-a: 初回の説明文')")
+pf_record_prose_a=$(preflight_record_json 7125 "$pf_risks_prose_a" '{"scope":"scope A","tests":["test A"],"external_operations":[],"rollback":"rollback A"}' '{"required":true,"triggers":["security"]}')
+pf_risks_prose_b=$(preflight_risks_json security "$(preflight_risk_json security high 'prose-b: 書き直した別の説明文')")
+pf_record_prose_b=$(preflight_record_json 7125 "$pf_risks_prose_b" '{"scope":"scope B (再計画で変更)","tests":["test B","test C"],"external_operations":[],"rollback":"rollback B"}' '{"required":true,"triggers":["security"]}')
+prose_token_a=$(preflight_envelope_token_for 7125 "$pf_record_prose_a" none '')
+prose_token_b=$(preflight_envelope_token_for 7125 "$pf_record_prose_b" none '')
+[[ $prose_token_a == "$prose_token_b" ]] || fail "re-planning with only prose changes (reason/scope/tests/rollback text) produced a different token ($prose_token_a vs $prose_token_b) despite identical declared risk axes and approval triggers (Issue #218)"
+
+write_queue_config "$target/.agentic-loop.toml" PREFLIGHT=warn TRACEABILITY=off
+printf '7125 running open\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+FAKE_CODEX_RESULT="$(preflight_plan_body "$pf_record_prose_a")" "$target/bin/agentic-loop" _worker 7125 preflight-prose-gate-worker
+grep -Eq '^7125 needs-input open' "$state" || fail 'setup: the initial prose-a plan did not gate'
+prose_gate_token=$(grep -oE 'reason=preflight-approval token=[0-9a-f]{12}' "$FAKE_GH_ROOT/$state_key.comments" | tail -n1 | grep -oE '[0-9a-f]{12}')
+[[ -n $prose_gate_token ]] || fail 'could not extract the gate token for the prose-invariance scenario'
+[[ $prose_gate_token == "$prose_token_a" ]] || fail "the gate token ($prose_gate_token) did not match the envelope formula ($prose_token_a)"
+"$target/bin/agentic-loop" preflight 7125 --approve --token "$prose_gate_token" >/dev/null || fail 'approving the prose-a envelope token failed'
+grep -Eq '^7125 queued open' "$state" || fail 'setup: approving the prose-a token did not requeue the Issue'
+
+printf '7125 running open\n' > "$state"
+comments_before_prose_replan=$(wc -c < "$FAKE_GH_ROOT/$state_key.comments")
+FAKE_CODEX_RESULT="$(preflight_plan_body "$pf_record_prose_b")" "$target/bin/agentic-loop" _worker 7125 preflight-prose-replan-worker
+grep -Eq '^7125 completed closed' "$state" || fail 'a re-plan that changed only prose text (same declared risk + triggers) was re-blocked instead of completing (Issue #218)'
+! tail -c "+$((comments_before_prose_replan + 1))" "$FAKE_GH_ROOT/$state_key.comments" | grep -Fq 'reason=preflight-approval' || fail 'a prose-only re-plan unexpectedly posted a new gate comment despite an identical declared-risk envelope already being approved'
+[[ ! -e $target-worktrees/issue-7125 ]] || fail 'a prose-only re-planned, already-approved envelope did not clean up its worktree'
+
+# 20) preflight_approved's comment scan does not grow with the Issue's
 # lifetime comment count (Issue #197): a re-check after approval only ever
 # re-scans comments posted since the last check, not the whole history.
 # `preflight-approved-rows.log` (populated by the fake gh's mock, one line per
@@ -5207,7 +5355,7 @@ pf_scan_scaling_scenario() {
   local rows_log="$FAKE_GH_ROOT/preflight-approved-rows.log"
   pf_risks=$(preflight_risks_json security "$(preflight_risk_json security high 'scan境界test')")
   pf_record=$(preflight_record_json "$issue" "$pf_risks" '{"scope":"","tests":[],"external_operations":[],"rollback":""}' '{"required":true,"triggers":["security"]}')
-  pf_token=$(preflight_token_for "$issue" "$pf_record")
+  pf_token=$(preflight_envelope_token_for "$issue" "$pf_record" none '')
   write_queue_config "$target/.agentic-loop.toml" PREFLIGHT=warn TRACEABILITY=off
   printf '%s running open\n' "$issue" > "$state"
   : > "$FAKE_GH_ROOT/$state_key.comments"

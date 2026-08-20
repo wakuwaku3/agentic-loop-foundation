@@ -51,8 +51,8 @@ reason = "pause/resume/abortはlifecycle群が覆う"
 
 [[rule]]
 path = "bin/lib/agentic-loop/preflight.sh"
-units = ["e2e:auxiliary"]
-reason = "preflight判定はauxiliary群のfixtureが覆う"
+units = ["e2e:lifecycle"]
+reason = "preflight判定はlifecycle群のfixture(scenario 15-20)が覆う"
 
 [[rule]]
 path = "bin/lib/agentic-loop/trace.sh"
