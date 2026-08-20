@@ -1,6 +1,6 @@
 .DEFAULT_GOAL := check
 
-.PHONY: environment format lint test check affected affected-audit
+.PHONY: environment format lint test check smoke affected affected-audit
 
 environment:
 	./scripts/check-environment.sh
@@ -15,6 +15,9 @@ test:
 	./tests/run-e2e.sh
 
 check: environment lint test
+
+smoke:
+	./scripts/smoke.sh
 
 # local affected check: gateではない。編集中のfeedback短縮専用（docs/policies/
 # validation-harness.md、docs/decisions/0021-affected-check-selection.md）。

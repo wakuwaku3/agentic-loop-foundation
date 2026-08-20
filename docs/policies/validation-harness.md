@@ -6,6 +6,8 @@
 
 ## 共通入口と検証層
 
+実CLI境界の確認には、明示的な `devbox run --pure smoke` を使用する。これは実 `gh` のGraphQL（Project contentの接続レベル`pageInfo`を含む）と読み取り専用REST、および設定済みprovider CLIの構造化応答を各1回検証する。実行には `AGENTIC_LOOP_SMOKE_PROJECT_ID`（必要なら`AGENTIC_LOOP_SMOKE_ISSUE`）を指定する。ネットワークとprovider quotaを伴うため、smokeは`check`/CI/merge gateへ自動的に組み込まない。Issue完了時には実環境での実行結果をIssueまたはPRへ記録する。
+
 ローカルとCIは、同じリポジトリ内のコード化済み環境と同じ共通入口を使用する。共通入口から呼ぶ処理や依存をCI専用に分岐させてはならず、検証内容の追加・変更は共通入口へ反映する。このリポジトリの完全チェックとCIの共通入口は `devbox run --pure check` とする。
 
 検証を次の層に分ける。
