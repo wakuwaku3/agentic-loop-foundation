@@ -11,9 +11,15 @@
 # search_issues_api both fan into this so retry/output-file plumbing lives in
 # exactly one place.
 gh_api_call() {
-  local api_endpoint=$1 attempt=0 delay=$API_RETRY_BASE_SECONDS rc output error input='' index
+  local api_endpoint=$1 attempt=0 delay=$API_RETRY_BASE_SECONDS rc output error input='' index method=GET
   shift
   local -a args=("$@")
+  for ((index=0; index<${#args[@]}; index++)); do
+    if [[ ${args[$index]} == --method ]]; then
+      method=${args[$((index + 1))]:-GET}
+      break
+    fi
+  done
   mkdir -p "$STATE_ROOT"
   output="$STATE_ROOT/api-output.$$"; error="$STATE_ROOT/api-error.$$"
   for ((index=0; index<${#args[@]}; index++)); do
@@ -28,7 +34,15 @@ gh_api_call() {
       rc=$?
     fi
     attempt=$((attempt + 1))
-    if (( attempt >= API_RETRY_ATTEMPTS )) || ! grep -Eqi 'rate limit|secondary rate|HTTP (429|5[0-9][0-9])|timed? out|timeout|connection reset|temporary failure|service unavailable|bad gateway' "$error"; then
+    # A client timeout is ambiguous: GitHub may have committed a non-idempotent
+    # write even though gh did not receive the response. Retrying such a
+    # request can create duplicate comments or Issues, so only retry timeout
+    # failures for explicitly idempotent read methods. Other transient errors
+    # retain the bounded retry behavior established by ADR 0025.
+    local transient timeout_failure
+    transient=$(grep -Eqi 'rate limit|secondary rate|HTTP (429|5[0-9][0-9])|timed? out|timeout|connection reset|temporary failure|service unavailable|bad gateway' "$error"; printf '%s' "$?")
+    timeout_failure=$(grep -Eqi 'timed? out|timeout' "$error"; printf '%s' "$?")
+    if (( attempt >= API_RETRY_ATTEMPTS )) || (( transient != 0 )) || { (( timeout_failure == 0 )) && [[ $method != GET && $method != HEAD ]]; }; then
       cat "$error" >&2; rm -f "$output" "$error" "$input"; return "$rc"
     fi
     say "GitHub REST APIの一時障害を再試行します（attempt=$attempt/$API_RETRY_ATTEMPTS, wait=${delay}s）。" >&2
