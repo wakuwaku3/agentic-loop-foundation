@@ -189,11 +189,87 @@ opencode_go_usage_cached() {
 }
 
 
+# Lightweight headless probe for Claude pool recovery (Issue #251). Unlike
+# Codex's session log or the OpenCode Go usage API, Claude exposes no passive
+# usage telemetry, so recovery can only be confirmed by actually attempting a
+# minimal call. A clean reply (is_error:false) means the pool accepts calls
+# right now -- read as 0% used; a structured provider error is read as fully
+# spent (100%), matching agent_provider_usage_state's >=100 exhausted test.
+# Anything else (CLI missing, no `timeout`, a hung call, malformed output) is
+# unreadable so callers fail open into the existing marker/backoff path
+# instead of guessing. This probe is billed like any other Claude call
+# (observed ~$0.10/call, mostly cache creation), so it must only ever be
+# reached through claude_probe_usage_cached, never on every poll.
+claude_probe_usage_percent() {
+  command -v claude >/dev/null 2>&1 || return 1
+  command -v timeout >/dev/null 2>&1 || return 1
+  local response is_error
+  # AGENTIC_LOOP_PROBE distinguishes this zero-side-effect health check from an
+  # ordinary plan/exec stage invocation (see agent_run_stage) for anything that
+  # wraps or fakes the `claude` binary; no directories are granted since the
+  # probe never touches the worktree.
+  response=$(AGENTIC_LOOP_PROBE=1 timeout 30 claude --print --output-format json --dangerously-skip-permissions 'say OK' 2>/dev/null) || true
+  [[ -n $response ]] || return 1
+  # Query .is_error bare, never with a `// fallback`: yq's (and jq's) `//`
+  # treats the boolean `false` itself as falsy and substitutes the fallback,
+  # which would make a genuine successful probe indistinguishable from a
+  # missing/malformed field.
+  is_error=$(yq -r '.is_error' - <<< "$response" 2>/dev/null || printf '')
+  case $is_error in
+    false) printf '0\n' ;;
+    true) printf '100\n' ;;
+    *) return 1 ;;
+  esac
+}
+
+
+# Cached wrapper around claude_probe_usage_percent, mirroring
+# opencode_go_usage_cached: the probe runs at most once per USAGE_CACHE_SECONDS,
+# and a failed probe is remembered too so an outage does not retry (and
+# re-bill) every poll. The cache holds only the numeric percent (no
+# tokens/secrets) under STATE_ROOT/pools/.
+claude_probe_usage_cached() {
+  local cache_file="$STATE_ROOT/pools/usage-claude" now fetched percent
+  now=$(date +%s)
+  if [[ -r $cache_file ]]; then
+    IFS=$'\t' read -r fetched percent < "$cache_file" 2>/dev/null || true
+    if [[ $fetched =~ ^[0-9]+$ ]] && (( now - fetched < USAGE_CACHE_SECONDS )); then
+      [[ $percent =~ ^[0-9]+(\.[0-9]+)?$ ]] || return 1
+      printf '%s' "$percent"
+      return 0
+    fi
+  fi
+  if ! percent=$(claude_probe_usage_percent); then
+    mkdir -p "$STATE_ROOT/pools"
+    printf '%s\t\n' "$now" > "$cache_file.tmp" 2>/dev/null && mv "$cache_file.tmp" "$cache_file" 2>/dev/null || true
+    return 1
+  fi
+  mkdir -p "$STATE_ROOT/pools"
+  printf '%s\t%s\n' "$now" "$percent" > "$cache_file.tmp" 2>/dev/null && mv "$cache_file.tmp" "$cache_file" 2>/dev/null || true
+  printf '%s' "$percent"
+}
+
+
 # Measure one provider's pool usage: 0-100 on stdout, non-zero when unreadable.
 agent_provider_usage_percent() {
   case $1 in
     codex) codex_weekly_used_percent || return 1 ;;
     opencode) opencode_go_usage_cached || return 1 ;;
+    claude) claude_probe_usage_cached || return 1 ;;
+    *) return 1 ;;
+  esac
+}
+
+
+# Providers whose usage probe is an active, real-time call (attempts the
+# actual thing right now) rather than a passive telemetry read of a rolling
+# window that may not reflect the specific limit that just tripped. Only an
+# active probe is trusted to end a pause before its resume_epoch (see
+# agent_pool_exhausted) -- a passive read staying cautious until resume_epoch
+# is unchanged from before Issue #251.
+agent_provider_active_probe() {
+  case $1 in
+    claude) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -241,10 +317,11 @@ agent_pool_basis_set() {
 
 # Consecutive same-pool re-exhaustion count (Git-ignored, numeric only), used
 # solely to grow the pause when a fresh mark has neither a provider-stated
-# reset nor a usage measurement to confirm real recovery (Issue #158): a
-# provider with no agent_provider_usage_percent case (e.g. claude today) would
-# otherwise repeat the flat EXHAUSTION_PAUSE_SECONDS forever -- mark, one
-# blind retry, still exhausted, remark, forever -- instead of backing off.
+# reset nor a usage measurement to confirm real recovery (Issue #158): a pool
+# whose usage is unreadable (no working probe, or the probe itself cannot be
+# run) would otherwise repeat the flat EXHAUSTION_PAUSE_SECONDS forever --
+# mark, one blind retry, still exhausted, remark, forever -- instead of
+# backing off.
 # Cleared on a provider-stated reset, a measured recovery, or a genuine
 # successful stage run on the pool; never cleared by the blind retry itself,
 # so a retry that fails again keeps growing the pause.
@@ -267,6 +344,44 @@ agent_pool_streak_bump() {
   printf '%s\n' "$n" > "$file"
   printf '%s' "$n"
 }
+
+
+# --- Escalation for a pool that a usage probe keeps confirming as spent
+# (Issue #251) ---
+# A provider-stated reset (basis=reset) always resolves by its own deadline,
+# so it never needs this. A probe-confirmed still-exhausted pool (basis=probe)
+# has no such guarantee: some 429s (e.g. Claude's "individual spend limit")
+# never resolve by elapsed time at all, so re-probing forever with no other
+# signal is exactly the silent-forever failure mode Issue #251 reported (a
+# human had to notice and delete the marker by hand). Counts consecutive
+# probe-confirmed re-exhaustions (distinct from agent_pool_streak, which must
+# stay frozen while a probe is available -- see agent_pool_exhausted) and
+# raises one postmortem Issue, once, after PROBE_ESCALATE_AFTER.
+agent_pool_probe_confirm_file() { printf '%s/pools/%s/probe-confirmed' "$STATE_ROOT" "$(agent_pool_sanitize "$1")"; }
+agent_pool_probe_escalated_file() { printf '%s/pools/%s/probe-escalated' "$STATE_ROOT" "$(agent_pool_sanitize "$1")"; }
+
+agent_pool_probe_confirm_clear() {
+  rm -f "$(agent_pool_probe_confirm_file "$1")" "$(agent_pool_probe_escalated_file "$1")"
+}
+
+agent_pool_probe_confirm_bump() {
+  local pool=$1 file n escalated
+  file=$(agent_pool_probe_confirm_file "$pool")
+  n=0; [[ -r $file ]] && read -r n < "$file"
+  [[ $n =~ ^[0-9]+$ ]] || n=0
+  n=$((n + 1))
+  mkdir -p "$(dirname "$file")"
+  printf '%s\n' "$n" > "$file"
+  escalated=$(agent_pool_probe_escalated_file "$pool")
+  if (( n >= PROBE_ESCALATE_AFTER )) && [[ ! -e $escalated ]]; then
+    : > "$escalated"
+    postmortem_consider_trigger resource-exhaustion "pool-$pool-probe" \
+      "pool=$pool が実測プローブで${n}回連続して枯渇を確認した（reset時刻の提示なし）" \
+      "pool=$pool の実測プローブが${PROBE_ESCALATE_AFTER}回連続で枯渇を確認しました。provider側から回復時刻の提示がないため、時刻経過では回復しないspend limit型の可能性があります。課金上限など人手での確認・対応を検討してください。実測プローブ自体は継続しており、回復が確認できれば自動的にclaimを再開します。" \
+      || true
+  fi
+}
+
 
 # Best-effort parse of a provider-stated reset instant into epoch seconds.
 # Accepts ISO-8601 (…Z) and Codex-style "try again at Aug 20th, 2026 9:27 PM".
@@ -365,19 +480,40 @@ agent_pool_usage_still_exhausted() {
 
 
 # Whether the pool is currently exhausted. A marker before its resume_epoch is
-# always binding (provider-stated multi-day resets must not be cut short by a
-# stale session-log "recovered" reading). After resume_epoch: clear on measured
-# recovery or unreadable usage (retry); if usage is still exhausted, extend the
-# marker by EXHAUSTION_PAUSE_SECONDS and stay exhausted. A real usage probe
-# (still-exhausted or recovered) is never a blind guess, so it also clears the
-# backoff streak: growth is reserved for pools no provider can measure
-# (Issue #158). Returns 0 when exhausted.
+# normally binding (provider-stated multi-day resets must not be cut short by
+# a stale session-log "recovered" reading), with one exception (Issue #251):
+# when the pool has an active, real-time probe (agent_provider_active_probe --
+# today only Claude's minimal headless call, not Codex/OpenCode's passive
+# telemetry reads) and its basis is not a provider-stated reset, a measured
+# recovery ends the pause immediately instead of waiting out a blind backoff
+# guess or a previous probe's flat re-check window. This is what actually
+# fixes the incident: a claude spend-limit 429 has no reset instant, so it
+# fell back to exponential backoff and stayed paused for up to
+# EXHAUSTION_BACKOFF_MAX_SECONDS even though the quota had already recovered.
+# After resume_epoch (or immediately, for the active-probe case above): clear
+# on measured recovery or unreadable usage (retry); if usage is still
+# exhausted, extend the marker by EXHAUSTION_PAUSE_SECONDS, switch basis to
+# probe, and bump the escalation counter (agent_pool_probe_confirm_bump) --
+# never the backoff streak, whose growth is reserved for pools no provider can
+# measure (Issue #158). Returns 0 when exhausted.
 agent_pool_exhausted() {
-  local pool=$1 marker resume now
+  local pool=$1 marker resume now basis provider active_probe=0
   marker=$(agent_pool_marker "$pool")
   [[ -r $marker ]] || return 1
   read -r resume < "$marker" || true
   now=$(date +%s)
+  basis=$(agent_pool_basis_get "$pool")
+  if [[ $basis != reset ]]; then
+    for provider in $(agent_pool_providers "$pool"); do
+      agent_provider_active_probe "$provider" && { active_probe=1; break; }
+    done
+    if (( active_probe == 1 )) && agent_pool_usage_recovered "$pool"; then
+      rm -f "$marker" "$(agent_pool_basis_file "$pool")"
+      agent_pool_streak_clear "$pool"
+      agent_pool_probe_confirm_clear "$pool"
+      return 1
+    fi
+  fi
   if [[ $resume =~ ^[0-9]+$ ]] && (( now < resume )); then
     return 0
   fi
@@ -385,11 +521,13 @@ agent_pool_exhausted() {
     printf '%s\n' "$(( now + EXHAUSTION_PAUSE_SECONDS ))" > "$marker"
     agent_pool_basis_set "$pool" probe
     agent_pool_streak_clear "$pool"
+    agent_pool_probe_confirm_bump "$pool"
     return 0
   fi
   if agent_pool_usage_recovered "$pool"; then
     rm -f "$marker" "$(agent_pool_basis_file "$pool")"
     agent_pool_streak_clear "$pool"
+    agent_pool_probe_confirm_clear "$pool"
     return 1
   fi
   # resume_epoch reached and usage unreadable: allow a single retry attempt.
@@ -887,8 +1025,10 @@ run_stage_candidates() {
     fi
     # A genuine success is real, positive evidence the pool works right now --
     # reset its backoff streak so a later, unrelated exhaustion starts from the
-    # short default pause again instead of continuing to grow (Issue #158).
+    # short default pause again instead of continuing to grow (Issue #158),
+    # and clear any pending probe-escalation count (Issue #251).
     agent_pool_streak_clear "$CAND_POOL"
+    agent_pool_probe_confirm_clear "$CAND_POOL"
     return 0
   done
 }
