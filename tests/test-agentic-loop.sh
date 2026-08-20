@@ -2894,6 +2894,55 @@ status_json=$("$target/bin/agentic-loop" status --format json)
   || fail 'status JSON did not report the fallback exec pool'
 [[ $(printf '%s' "$status_json" | yq -p json '.next_candidates.exec.model') == opencode-go/deepseek-v4-flash ]] \
   || fail 'status JSON did not report the fallback exec model'
+
+# A single exhausted pool is degraded capacity, not a global claim pause. The
+# same fixture already proved above that _supervise actually claims via gogo;
+# status must report the same decision in both text and JSON (Issue #288).
+printf '309 queued open none 2026-01-01T00:00:00Z\n' > "$state"
+status_out=$("$target/bin/agentic-loop" status)
+grep -Fq '利用不可pool: pool=plus 枯渇' <<< "$status_out" \
+  || fail 'status text did not expose a partially exhausted pool as degraded capacity'
+! grep -Fq 'claim-paused supervisor' <<< "$status_out" \
+  || fail 'status globally paused claims when only one of two pools was exhausted'
+grep -Fq '#309 Fake issue 309 (claimable)' <<< "$status_out" \
+  || fail 'status did not agree with the supervisor that the queued Issue can use the fallback pool'
+status_json=$("$target/bin/agentic-loop" status --format json)
+[[ $(printf '%s' "$status_json" | yq -p json '.queue.claimable') -eq 1 ]] \
+  || fail 'status JSON hid a claimable Issue during partial pool exhaustion'
+[[ $(printf '%s' "$status_json" | yq -p json '[.anomalies[] | select(.code == "claim-paused")] | length') -eq 0 ]] \
+  || fail 'status JSON reported global claim-paused during partial pool exhaustion'
+
+# Even a stale transition marker must not override the currently usable pool.
+: > "$state_root/all-pools-paused"
+status_json=$("$target/bin/agentic-loop" status --format json)
+[[ $(printf '%s' "$status_json" | yq -p json '.queue.claimable') -eq 1 ]] \
+  || fail 'a stale all-pools-paused marker hid a currently usable fallback pool'
+rm -f "$state_root/all-pools-paused"
+
+# When every configured pool is exhausted, status retains the global gate.
+for exhausted_pool in gogo codex; do
+  mkdir -p "$state_root/pools/$exhausted_pool"
+  printf '%s\n' "$(( $(date +%s) + 600 ))" > "$state_root/pools/$exhausted_pool/exhausted"
+done
+status_json=$("$target/bin/agentic-loop" status --format json)
+[[ $(printf '%s' "$status_json" | yq -p json '.queue.claimable') -eq 0 ]] \
+  || fail 'status JSON exposed a claimable Issue while every pool was exhausted'
+[[ $(printf '%s' "$status_json" | yq -p json '.queue.candidates[0].withheld') == claim-paused ]] \
+  || fail 'all-pool exhaustion was not classified as claim-paused'
+[[ $(printf '%s' "$status_json" | yq -p json '[.anomalies[] | select(.code == "claim-paused")] | length') -eq 1 ]] \
+  || fail 'all-pool exhaustion did not produce the global claim-paused anomaly'
+rm -rf "$state_root/pools/gogo" "$state_root/pools/codex"
+
+# A full worker pool is a slot constraint, never a provider-exhaustion claim.
+mkdir -p "$state_root/workers"
+sleep 30 & status_slot_pid=$!
+printf '%s\n' "$status_slot_pid" > "$state_root/workers/999.pid"
+status_json=$("$target/bin/agentic-loop" status --format json)
+[[ $(printf '%s' "$status_json" | yq -p json '.queue.candidates[0].withheld') == worker-slots-full ]] \
+  || fail 'max_workers saturation was not reported as worker-slots-full'
+kill "$status_slot_pid" 2>/dev/null || true
+wait "$status_slot_pid" 2>/dev/null || true
+rm -f "$state_root/workers/999.pid"
 # Clearing the marker restores the preferred candidate.
 rm -rf "$state_root/pools"
 status_out=$("$target/bin/agentic-loop" status)
