@@ -176,6 +176,10 @@ path = "scripts/lint.sh"
 reason = "shared-dependency"
 
 [[widen]]
+path = "scripts/lint-cli-contracts.sh"
+reason = "shared-dependency"
+
+[[widen]]
 path = "scripts/format.sh"
 reason = "shared-dependency"
 
