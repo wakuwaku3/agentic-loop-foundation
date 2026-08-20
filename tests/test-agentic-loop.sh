@@ -3016,7 +3016,7 @@ rm -f "$FAKE_GH_ROOT/codex-exec-count" "$FAKE_GH_ROOT/opencode-auto-count" \
   "$state_root/agent-exhausted" "$state_root/all-pools-paused"
 expected_reset=$(date -d 'Aug 20, 2099 9:27 PM' +%s)
 FAKE_CODEX_EXIT=1 \
-FAKE_CODEX_STDERR="ERROR: You've hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at Aug 20th, 2099 9:27 PM." \
+FAKE_CODEX_STDERR="2026-08-20T05:12:33Z ERROR: You've hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at Aug 20th, 2099 9:27 PM." \
 FAKE_OPENCODE_EXEC_RESULT_1='plan body from gogo
 <!-- agentic-loop:scope paths=bin/agentic-loop -->' \
 FAKE_OPENCODE_EXEC_RESULT_2='AGENTIC_LOOP_RESULT=completed' \
