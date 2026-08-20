@@ -395,6 +395,23 @@ if grep -Fq 'state=closed' <<< "$preflight_fn_body"; then
   printf 'Preflight gate/CLI must not close Issues (see docs/decisions/0016).\n' >&2
   exit 1
 fi
+# The gate and the post-exec escalation re-evaluation must derive their token
+# from the single preflight_envelope_token function, never from their own
+# sha256sum call, or the two stages can silently diverge on the same envelope
+# (Issue #218).
+if [[ $(grep -c '| sha256sum' bin/lib/agentic-loop/preflight.sh) -ne 1 ]]; then
+  printf 'Preflight token derivation must have exactly one sha256sum call site (see docs/decisions/0020, Issue #218).\n' >&2
+  exit 1
+fi
+reevaluate_diff_body=$(awk '
+  $0 ~ "^preflight_reevaluate_diff\\(\\) \\{" { capture=1; next }
+  capture && /^}/ { capture=0 }
+  capture { print }
+' bin/lib/agentic-loop/preflight.sh)
+grep -Fq 'preflight_envelope_token' <<< "$reevaluate_diff_body" || {
+  printf 'preflight_reevaluate_diff must derive its token via preflight_envelope_token, the same function preflight_gate uses (Issue #218).\n' >&2
+  exit 1
+}
 
 for doc in README.md docs/operations/issue-queue.md docs/operations/codebase-diagnosis.md; do
   grep -Fq 'opencode' "$doc" || {

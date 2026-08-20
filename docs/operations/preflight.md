@@ -85,7 +85,7 @@ gate時のcommentは`<!-- agentic-loop:needs-input worker=preflight reason=<reas
 bin/agentic-loop preflight ISSUE --approve --token TOKEN [--note TEXT]
 ```
 
-これは`<!-- agentic-loop:preflight-approved schema=1 actor=... token=... at=... -->`markerを投稿し、Issueが`agent:needs-input`であれば`agent:queued`へ戻す。tokenは「`low`以外の軸+水準」と`approval.triggers`の集合から導く安定な12桁16進値で、再planでrecordの文言が変わっても宣言リスクが同じなら失効しない。record不在でsignalだけがgateした場合はsignalの理由から同様のtokenを計算する。
+これは`<!-- agentic-loop:preflight-approved schema=1 actor=... token=... at=... -->`markerを投稿し、Issueが`agent:needs-input`であれば`agent:queued`へ戻す。tokenは「`low`以外の軸+水準」と`approval.triggers`の集合（宣言リスク成分）に、signalが`approval`のときだけ`signal=<reason>`（signal成分）を加えた集合から導く安定な12桁16進値で、再planでrecordの文言が変わっても宣言リスクとsignalが同じなら失効しない。gateで承認したtokenは、同一envelopeであれば後述のexec後escalationでも同じ値になるため再承認は不要である。逆に、宣言軸・triggerが増減した、またはsignalが変わった（例: 宣言に無い保護対象へ到達した）場合は新しいtokenが発行され、再承認が必要になる。
 
 読み取り専用の確認:
 
@@ -97,7 +97,7 @@ bin/agentic-loop preflight ISSUE [--format json]
 
 ## 実装中のscope・リスク増大の再評価
 
-execは1 turnで実装からPRのmergeまでを完遂するため（[worker resume](issue-queue.md#中断からの再開)を参照）、`preflight_reevaluate_diff`はmerge前にexecそのものを止めることはできない。その代わり、**完了の確定（cleanup・`agent:completed`遷移・close）の直前**（通常のexec完了経路と、`pr-merged`resume経路の両方）で、実測したdiffから`signal`を再評価する。承認されていない`approval`signalを検出した場合、Issueはcloseせず、worktree・branch・PRを保持したまま`agent:needs-input`（`reason=preflight-escalation`）へ移す。承認後、`agent:queued`を再度付与すると、次のworkerがこの再評価を通過して完了処理を続行する。
+execは1 turnで実装からPRのmergeまでを完遂するため（[worker resume](issue-queue.md#中断からの再開)を参照）、`preflight_reevaluate_diff`はmerge前にexecそのものを止めることはできない。その代わり、**完了の確定（cleanup・`agent:completed`遷移・close）の直前**（通常のexec完了経路と、`pr-merged`resume経路の両方）で、実測したdiffから`signal`を再評価する。承認されていない`approval`signalを検出した場合、Issueはcloseせず、worktree・branch・PRを保持したまま`agent:needs-input`（`reason=preflight-escalation`）へ移す。承認後、`agent:queued`を再度付与すると、次のworkerがこの再評価を通過して完了処理を続行する。tokenはgate段が読んだのと同じ`$STATE_ROOT/issue-<N>-plan.txt`の宣言リスク成分から再計算するため、gateで得た承認は同一envelopeであればここでも有効であり、追加のGitHub API呼び出しは発生しない。
 
 ## `category`・`needs-input`・検証ハーネスポリシー・継続的デリバリーポリシーとの関係
 

@@ -178,7 +178,10 @@ for group in "${TEST_GROUPS[@]}"; do
   else
     result=failed
     printf 'E2E group failed: %s\n' "$group" >&2
-    sed -n '1,240p' "$RUN_ROOT/$group.attempt1.log" >&2
+    last_log="$RUN_ROOT/$group.attempt1.log"
+    [[ -z ${attempt2_exit[$group]:-} ]] || last_log="$RUN_ROOT/$group.attempt2.log"
+    [[ -z ${attempt3_exit[$group]:-} ]] || last_log="$RUN_ROOT/$group.attempt3.log"
+    tail -n 240 "$last_log" >&2
     overall_failed=1
   fi
   printf '%s\t%s\t%s\n' "$group" "$result" "$total_seconds" >> "$RUN_ROOT/report.tsv"

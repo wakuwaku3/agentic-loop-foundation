@@ -30,6 +30,15 @@ preflight_manifest_from_plan() {
 }
 
 
+# The plan stage's own record, persisted at $STATE_ROOT (git-common-dir, so it
+# survives across worktrees and is never removed by clear_worker_local). Both
+# the gate (preflight_gate, via the caller-supplied plan_file) and the later
+# escalation re-evaluation (preflight_reevaluate_diff, which has no plan_file
+# argument at some call sites) resolve to this same path, so an envelope's
+# declared parts are computed from one record no matter which stage asks.
+preflight_plan_file() { printf '%s/issue-%s-plan.txt' "$STATE_ROOT" "$1"; }
+
+
 preflight_text_field_safe() {
   local text=$1 max=$2
   [[ ${#text} -le $max && $text != *$'\n'* && $text != *'`'* ]]
@@ -224,36 +233,51 @@ preflight_evaluate() {
 
 
 # --- Approval envelope token -------------------------------------------------
-# A stable 12-hex identifier over the risk envelope (every non-low axis/level
-# plus every declared trigger), so a re-plan whose prose differs but whose
-# declared risk is identical still matches an already-granted approval, while
-# any actual change to the declared risk mints a new token that must be
-# re-approved.
-preflight_token() {
-  local issue=$1 manifest=$2 parts
+# A stable 12-hex identifier over the risk envelope, so a re-plan whose prose
+# differs but whose declared risk is identical still matches an already-
+# granted approval, while an actual change to the declared risk or the
+# repository signal mints a new token that must be re-approved. Every caller
+# funnels through preflight_envelope_token below -- the only sha256sum call
+# site in this file (scripts/lint.sh enforces this) -- so the gate
+# (preflight_gate) and the post-exec escalation re-evaluation
+# (preflight_reevaluate_diff) always derive the same token for the same
+# envelope instead of drifting between a manifest-derived and a
+# signal-derived value (see docs/decisions/0020, Issue #218).
+#
+# The envelope is the union of:
+#   - declared parts (preflight_declared_parts): every non-"low" axis:level
+#     plus every declared approval.triggers entry, taken ONLY from a record
+#     that has passed preflight_validate_schema. A missing record and an
+#     invalid record both contribute no declared parts, so they converge on
+#     the same envelope for a given signal instead of moving the token.
+#   - a signal part (`signal=<reason>`), included only when the signal class
+#     is "approval" (a protected path, or the whole repository, is in scope).
+preflight_declared_parts() {
+  local manifest=$1
+  [[ -n $manifest ]] || return 0
+  {
+    yq -p json -r '.risks[] | select(.level != "low") | "\(.axis):\(.level)"' <<< "$manifest" 2>/dev/null
+    yq -p json -r '.approval.triggers[]? // ""' <<< "$manifest" 2>/dev/null
+  } | sed '/^$/d'
+}
+
+
+preflight_envelope_token() {
+  local issue=$1 declared=$2 signal_class=$3 signal_reason=$4 parts
   parts=$(
     {
-      yq -p json -r '.risks[] | select(.level != "low") | "\(.axis):\(.level)"' <<< "$manifest" 2>/dev/null
-      yq -p json -r '.approval.triggers[]? // ""' <<< "$manifest" 2>/dev/null
-    } | sed '/^$/d' | sort -u
+      [[ -n $declared ]] && printf '%s\n' "$declared"
+      [[ $signal_class == approval ]] && printf 'signal=%s\n' "$signal_reason"
+    } | sort -u
   )
   printf 'issue=%s\n%s' "$issue" "$parts" | sha256sum | cut -c1-12
 }
 
 
-preflight_signal_token() {
-  local issue=$1 reason=$2
-  printf 'issue=%s\nsignal=%s' "$issue" "$reason" | sha256sum | cut -c1-12
-}
-
-
 preflight_compute_token() {
-  local issue=$1
-  if [[ -n ${PREFLIGHT_MANIFEST:-} ]]; then
-    preflight_token "$issue" "$PREFLIGHT_MANIFEST"
-  else
-    preflight_signal_token "$issue" "${PREFLIGHT_SIGNAL_REASON:-}"
-  fi
+  local issue=$1 declared=''
+  [[ ${PREFLIGHT_MANIFEST_VALID:-0} == 1 ]] && declared=$(preflight_declared_parts "$PREFLIGHT_MANIFEST")
+  preflight_envelope_token "$issue" "$declared" "${PREFLIGHT_SIGNAL_CLASS:-none}" "${PREFLIGHT_SIGNAL_REASON:-}"
 }
 
 
@@ -455,14 +479,17 @@ preflight_gate() {
 # discussion of this limitation). It only ever withholds the *completion*
 # confirmation (cleanup + close), mirroring trace_gate's position in worker().
 preflight_reevaluate_diff() {
-  local issue=$1 head=$2 default_branch=$3 mode=${PREFLIGHT:-warn} measured signal token
+  local issue=$1 head=$2 default_branch=$3 mode=${PREFLIGHT:-warn} measured signal token declared plan_manifest
   [[ $mode == off ]] && return 0
   measured=$(git -C "$REPO_ROOT" diff --name-only "origin/$default_branch" "$head" 2>/dev/null | sed 's#^#path:#' | sort -u)
   [[ -n $measured ]] && worker_update_scope "$issue" "$(scope_apply_exclusive_paths "$measured")"
   preflight_signal_class "$REPO_ROOT" "$issue"
   signal=$PREFLIGHT_SIGNAL_CLASS
   [[ $signal == approval ]] || return 0
-  token=$(preflight_signal_token "$issue" "$PREFLIGHT_SIGNAL_REASON")
+  declared=''
+  plan_manifest=$(preflight_manifest_from_plan "$(preflight_plan_file "$issue")")
+  preflight_validate_schema "$plan_manifest" "$issue" && declared=$(preflight_declared_parts "$plan_manifest")
+  token=$(preflight_envelope_token "$issue" "$declared" "$signal" "$PREFLIGHT_SIGNAL_REASON")
   preflight_approved "$issue" "$token" && return 0
   progress_touch "$issue" needs-input
   set_issue_state "$issue" needs-input

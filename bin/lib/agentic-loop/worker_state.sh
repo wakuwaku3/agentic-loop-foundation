@@ -590,9 +590,14 @@ prune_worktree_and_branch() {
   local_oid=$(git -C "$REPO_ROOT" rev-parse --verify -q "$branch_ref" 2>/dev/null) || return 1
   if [[ -e $worktree_root ]]; then
     [[ ! -L $worktree_root ]] || return 1
+    # Must not `exit` on first match (Issue #218, see worker.sh's
+    # resume_probe/cleanup_completed_worker for the full explanation): an
+    # early exit here can SIGPIPE-kill `git worktree list` while it is still
+    # writing, and under this script's `set -o pipefail` that silently kills
+    # the whole calling process with exit 141.
     registered_branch=$(git -C "$REPO_ROOT" worktree list --porcelain 2>/dev/null | awk -v path="$worktree_root" '
       $1 == "worktree" {matched=($2 == path)}
-      matched && $1 == "branch" {print $2; exit}
+      matched && $1 == "branch" && !found {print $2; found=1}
     ')
     [[ $registered_branch == "$branch_ref" ]] || return 1
     if [[ $force == 1 ]]; then

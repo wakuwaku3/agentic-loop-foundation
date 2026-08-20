@@ -44,7 +44,7 @@ AGENTS.mdの不変条件「破壊的・不可逆または重大なコストを�
 
 ### 承認はrecordの文面ではなく「リスクのenvelope」に対して行う
 
-再planでrecordの文言が変わっても、宣言されたリスク（`low`以外の軸+水準の集合とtrigger集合）が同じなら、既に得た承認は失効しない。`preflight_token`は、issue番号と「`low`以外の`axis:level`」「trigger」をsortしてsha256の先頭12桁を取ったものを使う。record不在でsignalだけがgateした場合は、signalの理由文字列（例: `protected:devbox.lock`）からtokenを計算する（`preflight_signal_token`）。
+再planでrecordの文言が変わっても、宣言されたリスク（`low`以外の軸+水準の集合とtrigger集合）が同じなら、既に得た承認は失効しない。envelopeは「宣言リスク成分（`low`以外の`axis:level`とtrigger、検証を通過したrecordからのみ採る）」と「signal成分（`signal=<reason>`、signalが`approval`のときのみ）」の集合であり、issue番号と合わせてsortしてsha256の先頭12桁を取ったものがtokenになる。`preflight_gate`（record有・plan直後）と`preflight_reevaluate_diff`（完了確定直前のescalation再評価）は、`preflight_envelope_token`という単一関数だけからtokenを導く（Issue #218）。record不在（missing）とschema検証失敗（invalid）はどちらも宣言リスク成分ゼロの同じenvelopeへ収束させる。これにより、gate段の宣言リスクだけのtokenと、escalation段のsignalだけのtokenが同じ変更に対して食い違い、承認済みのはずのIssueがescalationで再度needs-inputへ落ちる、という不具合（Issue #61由来、Issue #218で修正）を構造的に防ぐ。escalation段はgateと同じ`$STATE_ROOT/issue-<N>-plan.txt`（`preflight_plan_file`、git-common-dir配下でworktreeをまたいで残る）から宣言リスク成分を復元するため、追加のGitHub API呼び出しは発生しない。
 
 承認は自由記述のIssue返信では判定しない。`requeue_answered`（既存機構）は`agentic-loop:`で始まらないcommentを人間の返信として検出し、Issueを`agent:queued`へ戻すが、それ自体はrecordの承認にはならない。**承認の正本は`bin/agentic-loop preflight ISSUE --approve --token TOKEN`が投稿する`<!-- agentic-loop:preflight-approved token=... -->`markerだけ**であり、`dispose`/`resume`/`pause`/`abort`（ADR 0010、0019）と同じ`authorized_operator`（`gh api user` → collaborator permission `write|maintain|admin`）による認可を要求する。このCLIは承認markerの投稿に加えて、Issueが`agent:needs-input`であれば`agent:queued`へ戻す（承認だけでは再開せず、別途返信を待つという回りくどい経路を避けるため）。再planしたworkerは同じenvelopeなら同じtokenを再計算し、承認markerを見つければ続行する。
 
@@ -56,6 +56,10 @@ execは1 turnでplanの実装からPRのmergeまでを完遂する構造（`docs
 2. **完了確定の機械的backstop（`preflight_reevaluate_diff`）**: `trace_gate`と同じ位置（完了確定シーケンスの直前、`pr-merged`resume経路と通常exec完了経路の両方）で、実際に測定したdiff（`worker_refine_scope_from_diff`と同じ手法）からsignalを再評価する。承認されていない`approval`signalを検出したら、**cleanup・close・completed遷移を行わず**、`agent:needs-input`へ移してworktree/branch/PRを保持する。
 
 つまり2は「merge済みの変更を取り消す」ものではなく、`trace_gate`同様「完了の確定（cleanup+close）を止める防波堤」である。この限界は意図的であり、production環境でexecがGitHubへの書き込みを自律的に行う設計そのものに起因する（悪意ある変更ではなく、宣言を超えて広がった正当な変更を人が確認するための停止点）。
+
+### 既知の限界: plan recordはホストローカルである
+
+`preflight_reevaluate_diff`が宣言リスク成分を復元する元になる`$STATE_ROOT/issue-<N>-plan.txt`（`preflight_plan_file`）はgit-common-dir配下のlocal fileであり、GitHubには存在しない。planしたホストとescalationが走るホストが異なる場合（例: 複数worker機がある構成でresumeが別machineに移った場合）、宣言リスク成分は復元できず、envelopeはsignal成分だけになる。この場合、gate段で得た承認token（宣言リスク成分を含む）とescalation段のtoken（signal成分のみ）は一致せず、承認済みのはずのIssueが再度needs-inputへ落ちる。これはfail-safe方向の劣化（宣言を復元できないときに「承認済み」と誤認して素通りさせるより、安全側に倒して再承認を求める）として許容する。代替として、gate時にIssue commentへ書いたtokenをGitHub API経由で読み直す案も検討したが、追加のAPI呼び出しが発生するうえ、承認前の古いtokenやtoken不一致のcommentを誤って拾うリスクがあるため採用しない。
 
 ## 対象外
 
