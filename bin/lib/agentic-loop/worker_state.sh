@@ -375,9 +375,8 @@ live_worker_processes() {
     # every caller here does) is exec'd by the kernel's #!/usr/bin/env bash
     # shebang handling, which rewrites argv[0] to the interpreter and shifts
     # PROGRAM_PATH into argv[1] -- so cmdline reads "bash <PROGRAM_PATH>
-    # _worker ..." rather than starting with PROGRAM_PATH itself. Mirrors the
-    # same substring check pid_alive() and worker_alive() already use for
-    # this exact reason.
+    # _worker ..." rather than starting with PROGRAM_PATH itself. The
+    # repository cwd/common-dir match below supplies the repository identity.
     [[ $command_line == *"$PROGRAM_PATH"' _worker '* ]] || continue
     issue=${command_line#*"$PROGRAM_PATH"' _worker '}
     issue=${issue%% *}

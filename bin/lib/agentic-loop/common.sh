@@ -8,6 +8,17 @@ say() { printf '%s\n' "$*"; }
 
 fail() { printf '%s: %s\n' "$PROGRAM_NAME" "$*" >&2; exit 1; }
 
+# A process argv contains the path spelling used at startup (relative,
+# absolute, worktree, or symlink).  Its canonical Git common directory is the
+# repository identity that remains stable across those spellings.
+process_repo_matches() {
+  local pid=$1 process_cwd process_common expected_common
+  process_cwd=$(readlink -f "/proc/$pid/cwd" 2>/dev/null) || return 1
+  process_common=$(git -C "$process_cwd" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || return 1
+  expected_common=$(readlink -f "${STATE_ROOT%/agentic-loop}") || return 1
+  [[ $process_common == "$expected_common" ]]
+}
+
 require_command() { command -v "$1" >/dev/null 2>&1 || fail "$1 is required"; }
 
 repo_name() {
