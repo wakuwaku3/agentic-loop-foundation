@@ -16,6 +16,18 @@ recent_lease_since() {
 }
 
 
+# `gh api --paginate --jq` evaluates jq once per response page. Keep the
+# per-comment filter, then fold the page outputs in the shell so the newest
+# lease is selected across the complete response rather than only the last
+# page (Issue #238).
+latest_lease_body() {
+  local issue=$1 since=$2 output
+  # workload-unbounded: Issueに紐づく有限のコメント件数からleaseを全件走査; bound=Issue comment count; track=#238
+  output=$(repo_api "issues/$issue/comments" --method GET -f since="$since" -f per_page=100 --paginate --jq '.[] | .body | select(contains("agentic-loop:lease"))' 2>/dev/null) || return 1
+  awk 'NF { value=$0 } END { if (value != "") print value }' <<< "$output"
+}
+
+
 lease_file() { printf '%s\n' "$STATE_ROOT/workers/$1.lease"; }
 
 worker_started_file() { printf '%s/workers/%s.started' "$STATE_ROOT" "$1"; }
@@ -467,7 +479,10 @@ recover_expired() {
       clear_worker_local "$issue"
     else
       # workload-unbounded: one per-Issue lease lookup per running Issue lacking a local pidfile, no batched multi-Issue endpoint exists; bound=running Issue count
-      body=$(repo_api "issues/$issue/comments" --method GET -f since="$since" -f per_page=100 --paginate --jq '[.[].body | select(contains("agentic-loop:lease"))] | last // ""' 2>/dev/null | tail -n 1 || true)
+      if ! body=$(latest_lease_body "$issue" "$since"); then
+        # An unreadable lease must be honored conservatively; retry next poll.
+        continue
+      fi
       expires=$(printf '%s\n' "$body" | sed -n 's/.*expires=\([0-9][0-9]*\).*/\1/p' | head -n 1)
       [[ -n $expires && $expires -ge $now ]] && continue
     fi
