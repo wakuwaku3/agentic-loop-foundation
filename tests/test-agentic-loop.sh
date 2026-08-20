@@ -990,7 +990,19 @@ if [[ $* == *'Use $diagnose-codebase'* ]]; then
     "$worktree/bin/agentic-loop" sync-issue 99 >/dev/null
   fi
 fi
-if [[ ${FAKE_CODEX_GIT_OPERATIONS:-0} == 1 ]]; then
+# --add-dir is only ever passed on the workspace-write (exec) call (see
+# agent.sh's plan/exec codex_args split); the plan call is --sandbox
+# read-only and cannot perform Git writes in real Codex either. Gate this
+# fixture the same way so a plan-stage call never falsely trips the
+# missing-add-dir check as a plan failure.
+plan_or_exec_workspace_write=0
+for ((gi=1; gi<=$#; gi++)); do
+  if [[ ${!gi} == --sandbox ]] && (( gi < $# )); then
+    gj=$((gi + 1))
+    [[ ${!gj} == workspace-write ]] && plan_or_exec_workspace_write=1
+  fi
+done
+if [[ ${FAKE_CODEX_GIT_OPERATIONS:-0} == 1 ]] && (( plan_or_exec_workspace_write )); then
   expected=$(git -C "$worktree" rev-parse --path-format=absolute --git-common-dir)
   [[ " $add_dirs " == *" $expected "* ]] || { printf 'missing Git add-dir: %s (expected %s)\n' "$add_dirs" "$expected" >&2; exit 3; }
   [[ " $add_dirs " == *" $worktree/.agents "* ]] || { printf 'missing .agents add-dir: %s\n' "$add_dirs" >&2; exit 3; }
