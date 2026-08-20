@@ -3486,6 +3486,13 @@ rm -f "$state_root/scope/issue-260" "$state_root/conflict/issue-261" "$state_roo
 
 # --- Issue dependency gating (Issue #41) ---
 
+# GitHub Web UI/API may return CRLF bodies. Normalize it before parsing so a
+# same-repository dependency is not classified as cross-repository.
+crlf_dependency_body=$(printf 'Blocked by: #300\r\n' | base64 -w0)
+printf '300 completed closed\n305 queued open none 2026-01-01T00:00:00Z none none %s\n' "$crlf_dependency_body" > "$state"
+AGENTIC_LOOP_RUN_ONCE=1 FAKE_CODEX_SLEEP=1 "$target/bin/agentic-loop" _supervise
+grep -Eq '^305 completed closed' "$state" || fail 'CRLF dependency body was not normalized'
+
 write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=3 LEASE_SECONDS=3 STOP_TIMEOUT=10 STALE_DAYS=30
 printf 'unknown_scope = "open"\n' >> "$target/.agentic-loop.toml"
 rm -f "$FAKE_GH_ROOT/$state_key.dep-links"
@@ -3820,6 +3827,12 @@ printf '93 queued open none 2026-01-01T00:00:00Z none none %s\n91 completed clos
 "$target/bin/agentic-loop" postmortem complete 93 || fail 'postmortem complete failed despite all gate conditions being satisfied'
 assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:postmortem-verified' 'postmortem complete did not record its verification comment'
 [[ $(cat "$state_root/postmortem/turn-93" 2>/dev/null) == complete ]] || fail 'postmortem complete did not write the complete turn marker consumed by worker.sh'
+
+# CRLF headings must be recognized by the postmortem completion gate.
+gate_body_crlf=$(printf 'Blocked by: #91\r\n\r\n## 残余リスク\r\n\r\n実施しない項目はない。\r\n' | base64 -w0)
+printf '94 queued open none 2026-01-01T00:00:00Z none none %s\n91 completed closed\n' "$gate_body_crlf" > "$state"
+"$target/bin/agentic-loop" postmortem complete 94 || fail 'postmortem complete did not normalize CRLF headings'
+[[ $(cat "$state_root/postmortem/turn-94" 2>/dev/null) == complete ]] || fail 'CRLF postmortem did not write the complete marker'
 
 rm -rf "$state_root/postmortem" "$state_root/attempts" "$state_root/workers/90.lease"
 write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=2 LEASE_SECONDS=3 STOP_TIMEOUT=10 STALE_DAYS=30
