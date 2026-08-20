@@ -210,7 +210,15 @@ project_reconcile_issue() {
     case $field_id in 'Agent status') desired=$PROJECT_DESIRED_STATE;; Category) desired=$PROJECT_DESIRED_CATEGORY;; *) desired=$note;; esac
     [[ ${PROJECT_ITEM_VALUES["$url:$field_id"]:-} == "$desired" ]] && continue
     if [[ $field_id == 'Blocked by' ]]; then
-      gh project item-edit --id "$item_id" --project-id "$project_id" --field-id "${PROJECT_FIELD_IDS[$field_id]:-}" --text "$desired" >/dev/null 2>&1 || return 1
+      # An empty desired value means "no blocker any more", which is a removal:
+      # `--text ''` is rejected by gh as "no changes to make", so every Issue
+      # whose blocker cleared failed reconciliation forever and stayed in
+      # project-pending (#268).
+      if [[ -n $desired ]]; then
+        gh project item-edit --id "$item_id" --project-id "$project_id" --field-id "${PROJECT_FIELD_IDS[$field_id]:-}" --text "$desired" >/dev/null 2>&1 || return 1
+      else
+        gh project item-edit --id "$item_id" --project-id "$project_id" --field-id "${PROJECT_FIELD_IDS[$field_id]:-}" --clear >/dev/null 2>&1 || return 1
+      fi
     else
       option_id=${PROJECT_OPTION_IDS["$field_id:$desired"]:-}; [[ -n $option_id ]] || return 1
       gh project item-edit --id "$item_id" --project-id "$project_id" --field-id "${PROJECT_FIELD_IDS[$field_id]:-}" --single-select-option-id "$option_id" >/dev/null 2>&1 || return 1
