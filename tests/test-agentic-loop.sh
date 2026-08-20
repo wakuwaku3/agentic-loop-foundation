@@ -1609,6 +1609,21 @@ if [[ -e $pending_project ]] && grep -Fxq '93' "$pending_project"; then
   fail 'recovered reconciliation did not acknowledge the pending entry'
 fi
 
+# Legacy hint lines (issue #268): before #115 the queue held whole events
+# ("conflict 93 <b64>", "state 93 running") instead of bare Issue numbers.
+# Those lines matched nothing, were never acknowledged, and kept
+# project-sync-pending displayed forever even once every real entry drained.
+# A line carrying no Issue at all is unactionable and must not pin the queue
+# either.
+rm -f "$(git -C "$target" rev-parse --absolute-git-dir)/agentic-loop/graphql-rate-limit" "$pending_project"
+printf '93 needs-input open none 2026-01-01T00:00:00Z none improvement\n' > "$FAKE_GH_ROOT/$state_key.state"
+printf 'conflict 93 Cg==\nstate 93 running\nnot-an-issue\n' > "$pending_project"
+AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _supervise
+if [[ -e $pending_project ]]; then
+  cat "$pending_project" >&2
+  fail 'legacy/unactionable Project hints were never acknowledged and pinned project-sync-pending on'
+fi
+
 # API failure is distinct from "not a member" (E4): a GraphQL error performs no
 # item-add/item-edit and the hint is retried, not acknowledged as a no-op.
 rm -f "$(git -C "$target" rev-parse --absolute-git-dir)/agentic-loop/graphql-rate-limit" "$pending_project"
@@ -1895,6 +1910,58 @@ assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'category-reconciled reason=
   [[ $(triage_category_from_text 'ダッシュボードに新機能としてグラフ表示を追加する') == feature ]] || fail 'triage did not classify a 新機能 Issue as feature'
   [[ $(triage_category_from_text '既存の文書の誤字を整理する') == '' ]] || fail 'triage guessed a category for text with no keyword family'
   [[ $(triage_category_from_text '個人情報が漏洩した疑いがある') == '' ]] || fail 'triage guessed an incident category from free text (incidents require verified harm, never a keyword guess)'
+)
+
+# Project membership query structure (issue #268).  `pageInfo` is a field of
+# the projectItems *connection*; selecting it inside nodes{} makes GitHub
+# answer "Field 'pageInfo' doesn't exist on type 'ProjectV2Item'", and an
+# outer if/else without `end` makes the reducer fail to compile.  Either one
+# turns every load_project_content call into rc=1, so project-pending never
+# drains and Agent status/Category/Blocked by stop converging.  Neither is
+# observable through the fake-gh fixture (it answers with rows the real --jq
+# has already reduced), and jq is not part of the pinned toolchain, so the
+# guard has to be on the query/reducer text itself.
+(
+  set -euo pipefail
+  # shellcheck source=/dev/null
+  . "$PROJECT_ROOT/bin/lib/agentic-loop/project.sh"
+
+  # Depth of each selection's parent: the brace nesting immediately before the
+  # named field opens its own selection set (or its arguments).
+  selection_depth_of() {
+    awk -v q="$1" -v field="$2" '
+      BEGIN {
+        depth = 0
+        for (i = 1; i <= length(q); i++) {
+          c = substr(q, i, 1)
+          if (c == "{") { depth++; continue }
+          if (c == "}") { depth--; continue }
+          if (i > 1 && index("{} ", substr(q, i - 1, 1)) == 0) continue
+          if (substr(q, i, length(field)) != field) continue
+          following = substr(q, i + length(field), 1)
+          if (following == "{" || following == "(") print depth
+        }
+      }'
+  }
+
+  content_query=$(project_content_query issue)
+  [[ $content_query == *'content:issue(number:$number)'* ]] || fail 'the Project content query no longer selects the Issue by number'
+  [[ $(project_content_query pullRequest) == *'content:pullRequest(number:$number)'* ]] || fail 'the Project content query no longer supports pull requests'
+  balance=$(awk -v q="$content_query" 'BEGIN { d = 0; for (i = 1; i <= length(q); i++) { c = substr(q, i, 1); if (c == "{") d++; else if (c == "}") d-- } print d }')
+  [[ $balance == 0 ]] || fail "the Project content query has unbalanced braces (depth=$balance)"
+  items_depth=$(selection_depth_of "$content_query" projectItems)
+  page_depth=$(selection_depth_of "$content_query" pageInfo)
+  [[ $items_depth =~ ^[0-9]+$ ]] || fail 'the Project content query no longer selects projectItems'
+  [[ $page_depth =~ ^[0-9]+$ ]] || fail 'the Project content query no longer paginates projectItems (pageInfo is gone)'
+  (( page_depth == items_depth + 1 )) || fail "pageInfo is not a direct child of the projectItems connection (projectItems parent depth=$items_depth, pageInfo parent depth=$page_depth)"
+
+  content_jq=$(project_content_jq PVT_fixture)
+  [[ $content_jq == *'.project.id == "PVT_fixture"'* ]] || fail 'the Project content reducer no longer filters items by the Project id'
+  [[ $content_jq == *'$items.pageInfo.hasNextPage'* && $content_jq == *'$items.pageInfo.endCursor'* ]] || fail 'the Project content reducer no longer reads the connection-level pageInfo the query selects'
+  [[ $content_jq == *'.errors'* ]] || fail 'the Project content reducer no longer turns a GraphQL errors payload into a retryable failure'
+  jq_ifs=$(grep -o '\bif\b' <<< "$content_jq" | wc -l)
+  jq_ends=$(grep -o '\bend\b' <<< "$content_jq" | wc -l)
+  (( jq_ifs > 0 && jq_ifs == jq_ends )) || fail "the Project content reducer has unterminated if statements (if=$jq_ifs end=$jq_ends)"
 )
 
 # triage_issue_content end-to-end via the real fake-gh harness (title, body,
