@@ -3888,6 +3888,18 @@ grep -Eq '^8 failed open$' "$state" || fail 'unexpected merged PR ref was accept
 [[ -e $target-worktrees/issue-8 ]] || fail 'unexpected ref worker worktree was removed'
 git -C "$target" show-ref --verify --quiet refs/heads/agent/issue-8 || fail 'unexpected ref local branch was removed'
 
+# A clean provider exit without a terminal marker can race with GitHub merging
+# the branch. The independently observed merge must enter the normal
+# completion/cleanup path after the single protocol retry.
+printf '9 running open\n' > "$state"
+FAKE_CODEX_EXEC_RESULT_1='実行結果のみ' \
+FAKE_CODEX_EXEC_RESULT_2='実行結果のみ' \
+"$target/bin/agentic-loop" _worker 9 markerless-merged-worker
+grep -Eq '^9 completed closed$' "$state" || fail 'a markerless worker with a merged PR was not completed'
+[[ ! -e $target-worktrees/issue-9 ]] || fail 'a markerless merged worker worktree remained'
+! git -C "$target" show-ref --verify --quiet refs/heads/agent/issue-9 || fail 'a markerless merged worker local branch remained'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:protocol-retry' 'markerless merged worker did not record the protocol retry'
+
 # Closed-loop postmortem worker.sh terminal branch (Issue #132, ADR 0026): a
 # `postmortem link` turn, executed from inside the exec turn's own sandboxed
 # shell (exactly as a real provider would run it), must leave the postmortem

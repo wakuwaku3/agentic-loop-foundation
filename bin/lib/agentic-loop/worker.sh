@@ -868,6 +868,16 @@ worker() {
     return 0
   fi
   project_add_pull_requests "$branch"
+  # A provider can finish cleanly twice without returning a terminal marker
+  # while the PR is merged concurrently (Issue #262). The merge is an
+  # independently observable completion fact, so let the existing completion
+  # path validate traceability and perform its guarded cleanup. If no merged
+  # PR is present, preserve the protocol-failure path below.
+  if [[ $exit_code -eq 0 ]] && ! agent_result_terminal_marker "$result" >/dev/null; then
+    local markerless_merged_pr=''
+    markerless_merged_pr=$(repo_api pulls --method GET -f state=closed -f head="${repository%%/*}:$branch" -f per_page=100 --jq 'map(select(.merged_at != null and .head.ref == "'"$branch"'")) | first | .html_url // empty' 2>/dev/null || true)
+    [[ -n $markerless_merged_pr ]] && printf '\nAGENTIC_LOOP_RESULT=completed\n' >> "$result"
+  fi
   if [[ $exit_code -eq 0 ]] && agent_result_is "$result" completed; then
     # Cleanup + the final Label/close transition is unsafe to interrupt
     # mid-sequence (see docs/decisions/0019); a pause/abort drain waits out
