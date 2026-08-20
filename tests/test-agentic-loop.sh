@@ -2028,6 +2028,10 @@ assert_contains "$FAKE_GH_ROOT/codex-calls" 'GitHubのIssue、PR' 'worker prompt
 assert_contains "$FAKE_GH_ROOT/codex-calls" '実在しない承認コマンド・設定・権限フローを創作して停止してはいけません' 'worker prompt did not forbid fabricating nonexistent approval mechanisms (Issue #191)'
 assert_contains "$FAKE_GH_ROOT/codex-calls" 'devbox.lock' 'worker prompt did not clarify that toolchain lock changes need no worker pre-approval (Issue #191)'
 assert_contains "$FAKE_GH_ROOT/codex-calls" '変更の重大さについての自己判断だけを理由にaxisをhighにしたりapproval.required=trueにしないでください' 'plan prompt did not forbid self-invented approval requirements (Issue #191)'
+assert_contains "$FAKE_GH_ROOT/codex-calls" '影響範囲検証（反復の短縮専用、push/merge gateではない）' 'worker prompt did not expose the declared affected check (Issue #266)'
+assert_contains "$FAKE_GH_ROOT/codex-calls" '影響範囲map: tests/impact-map.toml' 'worker prompt did not expose the declared impact map (Issue #266)'
+assert_contains "$FAKE_GH_ROOT/codex-calls" 'このworkerの実行時間予算: 上限=' 'worker prompt did not expose the observed time budget (Issue #266)'
+assert_contains "$FAKE_GH_ROOT/codex-calls" '本題外のflaky・CI固有失敗を見つけたら' 'worker prompt did not define the out-of-scope failure stop rule (Issue #266)'
 assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'のハートビートです' 'supervisor did not write its Issue comments in Japanese'
 if grep -Eq 'danger-full-access|OPENAI_API_KEY|--add-dir /($| )|--add-dir /home($| )' "$FAKE_GH_ROOT/codex-calls"; then fail 'worker used forbidden Codex configuration or a broad writable path'; fi
 [[ ! -e $state_root/worktrees ]] || fail 'worker worktrees were placed inside Git metadata'
@@ -7074,6 +7078,16 @@ printf 'check:\n\t/bin/true\n' > "$affected_cap_without/Makefile"
 ( source "$PROJECT_ROOT/bin/lib/agentic-loop/common.sh"; source "$PROJECT_ROOT/bin/lib/agentic-loop/capability.sh"; capability_generate "$affected_cap_without" )
 grep -Fxq 'validation.affected_check' <(yq -p toml -r '.undetermined[]' "$affected_cap_without/.agentic-loop/capabilities.toml") || fail 'capability_generate fabricated validation.affected_check without a Makefile affected: target'
 grep -Fxq 'validation.impact_map' <(yq -p toml -r '.undetermined[]' "$affected_cap_without/.agentic-loop/capabilities.toml") || fail 'capability_generate fabricated validation.impact_map without an impact map file'
+
+# Worker prompt capability rendering is declaration-driven: affected details
+# appear only when both values are present in a valid manifest (Issue #266).
+summary_with=$(source "$PROJECT_ROOT/bin/lib/agentic-loop/common.sh"; source "$PROJECT_ROOT/bin/lib/agentic-loop/capability.sh"; capability_summary_block "$affected_cap_with")
+grep -Fq '影響範囲検証（反復の短縮専用、push/merge gateではない）' <<< "$summary_with" || fail 'capability summary omitted a declared affected check'
+grep -Fq '影響範囲map: tests/impact-map.toml' <<< "$summary_with" || fail 'capability summary omitted a declared impact map'
+summary_without=$(source "$PROJECT_ROOT/bin/lib/agentic-loop/common.sh"; source "$PROJECT_ROOT/bin/lib/agentic-loop/capability.sh"; capability_summary_block "$affected_cap_without")
+if grep -Fq '影響範囲検証（反復の短縮専用、push/merge gateではない）' <<< "$summary_without" || grep -Fq '影響範囲map:' <<< "$summary_without"; then
+  fail 'capability summary fabricated undeclared affected details'
+fi
 
 # drift検出: affected_check_secondsがfull_check_seconds以上になると警告する
 # (bin/lib/agentic-loop/doctor.shはdrift:*をwildcardで既に処理する)。
