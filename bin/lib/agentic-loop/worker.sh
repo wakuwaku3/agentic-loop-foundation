@@ -239,22 +239,28 @@ decomposition_validate() {
   (( parent_depth < DECOMPOSITION_MAX_DEPTH )) || return 1
   keys=$(yq -p json -r '.children[].key // ""' <<< "$manifest" 2>/dev/null) || return 1
   [[ $(sort -u <<< "$keys" | sed '/^$/d' | wc -l) -eq $count ]] || return 1
-  local title purpose
+  local title purpose rows all_deps
+  rows=$(yq -p json -r '.children[] | [.key, (.title // ""), (.purpose // ""), (.acceptance_criteria // ""), .scope] | @tsv' <<< "$manifest" 2>/dev/null) || return 1
   while IFS=$'\t' read -r key title purpose child_depth scope; do
     [[ $key =~ ^[a-z0-9][a-z0-9-]*$ && -n $title && -n $purpose && -n $child_depth && -n $scope ]] || return 1
     # Reuse the existing normalizer; a malformed scope never becomes an
     # optimistic empty scope.
     [[ -n $(scope_marker_from_body "<!-- agentic-loop:scope $scope -->") ]] || return 1
-  done < <(yq -p json -r '.children[] | [.key, (.title // ""), (.purpose // ""), (.acceptance_criteria // ""), .scope] | @tsv' <<< "$manifest" 2>/dev/null)
+  done <<< "$rows"
+  all_deps=$(yq -p json -r '.children[].depends_on[]? // ""' <<< "$manifest" 2>/dev/null) || return 1
   while IFS= read -r dep; do
     [[ -z $dep ]] && continue
     grep -Fxq "$dep" <<< "$keys" || return 1
-  done < <(yq -p json -r '.children[].depends_on[]? // ""' <<< "$manifest" 2>/dev/null)
+  done <<< "$all_deps"
   # A dependency can only point to an earlier key: this is both a cheap DAG
-  # proof and makes materialization/retry deterministic.
-  local seen=''
+  # proof and makes materialization/retry deterministic. mikefarah/yq has no
+  # jq-style --arg; env(k) is the supported way to inject a shell value into
+  # the expression, and the exit status of each lookup is checked so a broken
+  # yq call fails validation instead of vacuously skipping it (issue #222).
+  local seen='' deps_for_key
   while IFS= read -r key; do
-    while IFS= read -r dep; do [[ -z $dep ]] || grep -Fxq "$dep" <<< "$seen" || return 1; done < <(yq -p json -r --arg k "$key" '.children[] | select(.key == $k) | .depends_on[]? // ""' <<< "$manifest")
+    deps_for_key=$(k="$key" yq -p json -r '.children[] | select(.key == env(k)) | .depends_on[]? // ""' <<< "$manifest" 2>/dev/null) || return 1
+    while IFS= read -r dep; do [[ -z $dep ]] || grep -Fxq "$dep" <<< "$seen" || return 1; done <<< "$deps_for_key"
     seen+="$key"$'\n'
   done <<< "$keys"
 }
