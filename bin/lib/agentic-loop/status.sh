@@ -92,15 +92,48 @@ status_pool_basis_label() {
   esac
 }
 
+# Epoch of the pool's most recent usage measurement (max across its
+# providers' pools/usage-<provider> cache files, from opencode_go_usage_cached
+# / claude_probe_usage_cached), or empty when none is available (e.g. codex,
+# whose session-log read has no persisted cache file, or an environment where
+# no provider's usage is ever readable). Never touches the network itself --
+# a pure read of the same cache files the pick/exhaustion path already
+# maintains, so status stays a read-only, network-free command.
+status_pool_last_probed() {
+  local pool=$1 provider file fetched latest=''
+  for provider in $(agent_pool_providers "$pool"); do
+    file="$STATE_ROOT/pools/usage-$provider"
+    [[ -r $file ]] || continue
+    IFS=$'\t' read -r fetched _ < "$file" 2>/dev/null || continue
+    [[ $fetched =~ ^[0-9]+$ ]] || continue
+    if [[ -z $latest ]] || (( fetched > latest )); then latest=$fetched; fi
+  done
+  # Always exit 0: callers capture this via a plain `x=$(status_pool_last_probed
+  # ...)` assignment, and under -e a non-zero exit there would abort the whole
+  # status command just because no measurement was found (the normal case for
+  # codex, or any pool before its first probe/telemetry read).
+  [[ -n $latest ]] && printf '%s' "$latest"
+  return 0
+}
+
 # One pool's pause line with its resume ETA and basis, or a bare exhaustion
-# notice when the marker exists but its epoch cannot be parsed.
+# notice when the marker exists but its epoch cannot be parsed. Appends the
+# most recent usage measurement time when one is available (Issue #251
+# completion criterion 6: let an operator tell a real probe/telemetry reading
+# apart from a blind backoff guess).
 status_pool_pause_detail() {
-  local pool=$1 resume='' basis when
+  local pool=$1 resume='' basis when probed probed_when
   read -r resume < "$(agent_pool_marker "$pool")" 2>/dev/null || true
   if [[ $resume =~ ^[0-9]+$ ]]; then
     basis=$(agent_pool_basis_get "$pool")
     when=$(date -d "@$resume" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || printf '%s' "$resume")
-    printf 'pool=%s 枯渇（回復予定=%s, 根拠=%s）' "$pool" "$when" "$(status_pool_basis_label "$basis")"
+    probed=$(status_pool_last_probed "$pool")
+    if [[ -n $probed ]]; then
+      probed_when=$(date -d "@$probed" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || printf '%s' "$probed")
+      printf 'pool=%s 枯渇（回復予定=%s, 根拠=%s, 直近実測=%s）' "$pool" "$when" "$(status_pool_basis_label "$basis")" "$probed_when"
+    else
+      printf 'pool=%s 枯渇（回復予定=%s, 根拠=%s）' "$pool" "$when" "$(status_pool_basis_label "$basis")"
+    fi
   else
     printf 'pool=%s 枯渇（回復待ち）' "$pool"
   fi
@@ -598,16 +631,17 @@ status_render_json() {
 
   printf '"pools":['
   sep=''
-  local pool resume='' basis
+  local pool resume='' basis probed=''
   for pool in $(agent_all_pools); do
     if agent_pool_marker_active "$pool"; then
       resume=''; read -r resume < "$(agent_pool_marker "$pool")" 2>/dev/null || true
       [[ $resume =~ ^[0-9]+$ ]] || resume=''
       basis=$(agent_pool_basis_get "$pool")
-      printf '%s{"pool":"%s","exhausted":true,"resume_at":%s,"basis":"%s"}' \
-        "$sep" "$(json_escape "$pool")" "${resume:-null}" "$(json_escape "$basis")"
+      probed=$(status_pool_last_probed "$pool")
+      printf '%s{"pool":"%s","exhausted":true,"resume_at":%s,"basis":"%s","probed_at":%s}' \
+        "$sep" "$(json_escape "$pool")" "${resume:-null}" "$(json_escape "$basis")" "${probed:-null}"
     else
-      printf '%s{"pool":"%s","exhausted":false,"resume_at":null,"basis":null}' "$sep" "$(json_escape "$pool")"
+      printf '%s{"pool":"%s","exhausted":false,"resume_at":null,"basis":null,"probed_at":null}' "$sep" "$(json_escape "$pool")"
     fi
     sep=','
   done

@@ -1028,6 +1028,23 @@ FAKE_CODEX
 cat > "$FAKE_BIN/claude" <<'FAKE_CLAUDE'
 #!/usr/bin/env bash
 set -euo pipefail
+# claude_probe_usage_percent (Issue #251) sets AGENTIC_LOOP_PROBE=1 to
+# distinguish its zero-side-effect health check from an ordinary plan/exec
+# stage call. Logged separately so it never perturbs the plan/exec
+# claude-json-count sequencing (FAKE_CLAUDE_RESULT_<n>) other tests rely on.
+# Default mode is "unreadable" (empty output, exit 1) so every existing test
+# that does not opt in keeps today's "claude has no working probe" behavior
+# unchanged; a test exercising the new probe sets FAKE_CLAUDE_PROBE_MODE.
+if [[ ${AGENTIC_LOOP_PROBE:-0} == 1 ]]; then
+  printf '%s\n' "$*" >> "$FAKE_GH_ROOT/claude-probe-calls"
+  case ${FAKE_CLAUDE_PROBE_MODE:-unreadable} in
+    ok) printf '{"type":"result","is_error":false,"api_error_status":null,"result":"OK"}\n'; exit 0 ;;
+    exhausted) printf '{"type":"result","is_error":true,"api_error_status":"%s","result":"%s"}\n' \
+        "${FAKE_CLAUDE_PROBE_API_ERROR_STATUS:-429}" "${FAKE_CLAUDE_PROBE_RESULT:-individual spend limit}"
+      exit 0 ;;
+    *) exit 1 ;;
+  esac
+fi
 printf '%s\n' "$*" >> "$FAKE_GH_ROOT/claude-calls"
 [[ ${1:-} == --version || ${1:-} == --help ]] && { printf 'claude 1.0.0\n'; exit 0; }
 [[ $* == *--print* ]] || { printf 'claude worker must run non-interactively\n' >&2; exit 2; }
@@ -2708,13 +2725,16 @@ rm -rf "$state_root/pools" "$codex_home_reset"
 rm -f "$state_root/agent-exhausted" "$state_root/all-pools-paused"
 
 # --- Exponential backoff for a pool no provider can measure (Issue #158) ---
-# claude has no agent_provider_usage_percent case, so its pool can never
-# confirm real recovery via a usage probe after resume_epoch: a repeated
-# re-exhaustion must grow the pause (not repeat the flat
+# claude does have a usage probe (claude_probe_usage_percent, Issue #251), but
+# this fixture leaves FAKE_CLAUDE_PROBE_MODE unset, so the fake CLI reports the
+# probe itself as unreadable (mirrors a real environment where the probe can
+# never get a clean reading, e.g. offline/misconfigured) -- exactly the
+# pre-#251 "no case at all" behavior. With no usage signal either way, a
+# repeated re-exhaustion must grow the pause (not repeat the flat
 # EXHAUSTION_PAUSE_SECONDS forever), capped, and reset by a genuine success.
 write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=3 STOP_TIMEOUT=10 STALE_DAYS=30
 rm -rf "$state_root/pools"
-rm -f "$state_root/all-pools-paused" "$state_root/agent-exhausted" "$FAKE_GH_ROOT/claude-json-count"
+rm -f "$state_root/all-pools-paused" "$state_root/agent-exhausted" "$FAKE_GH_ROOT/claude-json-count" "$FAKE_GH_ROOT/claude-probe-calls"
 printf '330 queued open none 2026-01-01T00:00:00Z\n' > "$state"
 : > "$FAKE_GH_ROOT/$state_key.comments"
 AGENT_PROVIDER=claude AGENTIC_LOOP_RUN_ONCE=1 FAKE_CLAUDE_SLEEP=1 \
@@ -2769,7 +2789,125 @@ AGENT_PROVIDER=claude AGENTIC_LOOP_RUN_ONCE=1 FAKE_CLAUDE_SLEEP=1 \
 grep -Eq '^333 completed closed' "$state" || fail 'claude success did not complete'
 [[ ! -r $state_root/pools/claude/streak ]] || fail 'a genuine success did not clear the backoff streak'
 rm -rf "$state_root/pools"
-rm -f "$state_root/all-pools-paused" "$state_root/agent-exhausted" "$FAKE_GH_ROOT/claude-json-count"
+rm -f "$state_root/all-pools-paused" "$state_root/agent-exhausted" "$FAKE_GH_ROOT/claude-json-count" "$FAKE_GH_ROOT/claude-probe-calls"
+
+# --- Claude pool recovery probe (Issue #251) ---
+# claude has no passive usage telemetry, so recovery can only be confirmed by
+# actually attempting a minimal headless call (claude_probe_usage_percent,
+# fronted by claude_probe_usage_cached). The fake claude CLI models this via
+# AGENTIC_LOOP_PROBE=1 + FAKE_CLAUDE_PROBE_MODE, independent of the ordinary
+# plan/exec stage envelope (FAKE_CLAUDE_IS_ERROR/FAKE_CLAUDE_RESULT).
+
+# 1) A recovered probe ends the pause immediately, even before resume_epoch --
+# this is what actually fixes the reported incident: exponential backoff alone
+# cannot know a spend-limit 429 has already cleared.
+printf '340 queued open none 2026-01-01T00:00:00Z\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+AGENT_PROVIDER=claude AGENTIC_LOOP_RUN_ONCE=1 FAKE_CLAUDE_SLEEP=1 \
+  FAKE_CLAUDE_IS_ERROR=1 FAKE_CLAUDE_API_ERROR_STATUS=429 \
+  FAKE_CLAUDE_RESULT='individual spend limit' \
+  "$target/bin/agentic-loop" _supervise
+[[ -r $state_root/pools/claude/exhausted ]] || fail 'probe-recovery setup: first claude exhaustion did not mark the pool'
+resume_before=$(cat "$state_root/pools/claude/exhausted")
+now_before=$(date +%s)
+(( resume_before > now_before + 1000 )) || fail 'probe-recovery setup: resume_epoch is not safely in the future'
+printf '341 queued open none 2026-01-01T00:00:00Z\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+AGENT_PROVIDER=claude AGENTIC_LOOP_RUN_ONCE=1 FAKE_CLAUDE_SLEEP=1 FAKE_CLAUDE_PROBE_MODE=ok \
+  FAKE_CLAUDE_RESULT='AGENTIC_LOOP_RESULT=completed' \
+  "$target/bin/agentic-loop" _supervise
+grep -Eq '^341 completed closed' "$state" \
+  || fail 'a recovered usage probe did not resume claiming before resume_epoch'
+[[ -r $FAKE_GH_ROOT/claude-probe-calls ]] || fail 'probe-recovery test did not actually invoke the probe'
+[[ ! -r $state_root/pools/claude/exhausted ]] || fail 'a recovered usage probe did not clear the marker before resume_epoch'
+[[ ! -r $state_root/pools/claude/streak ]] || fail 'a recovered usage probe did not clear the backoff streak'
+rm -rf "$state_root/pools"
+rm -f "$FAKE_GH_ROOT/claude-json-count" "$FAKE_GH_ROOT/claude-probe-calls"
+
+# 2) A probe that confirms the pool is still exhausted switches basis to
+# "probe" and leaves the backoff streak frozen (cleared, never bumped): once a
+# real probe exists, exponential backoff must not keep growing.
+printf '342 queued open none 2026-01-01T00:00:00Z\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+AGENT_PROVIDER=claude AGENTIC_LOOP_RUN_ONCE=1 FAKE_CLAUDE_SLEEP=1 \
+  FAKE_CLAUDE_IS_ERROR=1 FAKE_CLAUDE_API_ERROR_STATUS=429 \
+  FAKE_CLAUDE_RESULT='individual spend limit' \
+  "$target/bin/agentic-loop" _supervise
+[[ -r $state_root/pools/claude/exhausted ]] || fail 'probe-frozen-streak setup: first claude exhaustion did not mark the pool'
+[[ $(cat "$state_root/pools/claude/streak") == 1 ]] || fail 'probe-frozen-streak setup: streak did not start at 1'
+# Rewind resume_epoch to the past so the still-exhausted probe path (not the
+# pre-epoch active-probe bypass) is what re-confirms exhaustion.
+printf '%s\n' "$(( $(date +%s) - 10 ))" > "$state_root/pools/claude/exhausted"
+printf '343 queued open none 2026-01-01T00:00:00Z\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+AGENT_PROVIDER=claude AGENTIC_LOOP_RUN_ONCE=1 FAKE_CLAUDE_SLEEP=1 FAKE_CLAUDE_PROBE_MODE=exhausted \
+  "$target/bin/agentic-loop" _supervise
+grep -Eq '^343 queued open' "$state" \
+  || fail 'a probe-confirmed still-exhausted pool must keep claiming paused'
+[[ -r $FAKE_GH_ROOT/claude-probe-calls ]] || fail 'probe-confirmed-exhausted test did not actually invoke the probe'
+[[ $(cat "$state_root/pools/claude/basis") == probe ]] \
+  || fail 'a probe-confirmed still-exhausted pool did not switch basis to probe'
+[[ ! -r $state_root/pools/claude/streak ]] \
+  || fail 'a probe-confirmed still-exhausted pool must not grow (or keep) the backoff streak'
+rm -rf "$state_root/pools"
+rm -f "$FAKE_GH_ROOT/claude-json-count" "$FAKE_GH_ROOT/claude-probe-calls"
+
+# 3) When the probe itself cannot get a reading, the pool falls back exactly
+# to the pre-#251 backoff/blind-retry behavior -- an unreadable probe must
+# never be guessed as recovered or exhausted.
+printf '344 queued open none 2026-01-01T00:00:00Z\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+AGENT_PROVIDER=claude AGENTIC_LOOP_RUN_ONCE=1 FAKE_CLAUDE_SLEEP=1 \
+  FAKE_CLAUDE_IS_ERROR=1 FAKE_CLAUDE_API_ERROR_STATUS=429 \
+  FAKE_CLAUDE_RESULT='individual spend limit' \
+  "$target/bin/agentic-loop" _supervise
+[[ -r $state_root/pools/claude/exhausted ]] || fail 'probe-unreadable setup: first claude exhaustion did not mark the pool'
+resume_before=$(cat "$state_root/pools/claude/exhausted")
+now_before=$(date +%s)
+(( resume_before > now_before + 1000 )) || fail 'probe-unreadable setup: resume_epoch is not safely in the future'
+printf '345 queued open none 2026-01-01T00:00:00Z\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+AGENT_PROVIDER=claude AGENTIC_LOOP_RUN_ONCE=1 FAKE_CLAUDE_SLEEP=1 FAKE_CLAUDE_PROBE_MODE=unreadable \
+  "$target/bin/agentic-loop" _supervise
+grep -Eq '^345 queued open' "$state" \
+  || fail 'an unreadable probe must not end the pause before resume_epoch'
+[[ -r $FAKE_GH_ROOT/claude-probe-calls ]] || fail 'probe-unreadable test did not actually attempt the probe'
+[[ -r $state_root/pools/claude/exhausted ]] || fail 'an unreadable probe must not clear the pre-epoch marker'
+[[ $(cat "$state_root/pools/claude/basis") == backoff ]] \
+  || fail 'an unreadable probe must not change the basis away from backoff'
+rm -rf "$state_root/pools"
+rm -f "$FAKE_GH_ROOT/claude-json-count" "$FAKE_GH_ROOT/claude-probe-calls"
+
+# 4) A pool a real probe keeps confirming as exhausted (no provider-stated
+# reset) escalates once, after PROBE_ESCALATE_AFTER consecutive confirmations,
+# instead of backing off silently forever (Issue #251 completion criterion 5:
+# a spend-limit-type 429 never resolves by elapsed time, so a human must be
+# told). auto_detect defaults to off, so no postmortem Issue is actually
+# created here (covered separately below); the local escalation marker is
+# still written unconditionally once the threshold is crossed.
+printf '346 queued open none 2026-01-01T00:00:00Z\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+AGENT_PROVIDER=claude AGENTIC_LOOP_RUN_ONCE=1 FAKE_CLAUDE_SLEEP=1 \
+  FAKE_CLAUDE_IS_ERROR=1 FAKE_CLAUDE_API_ERROR_STATUS=429 \
+  FAKE_CLAUDE_RESULT='individual spend limit' \
+  "$target/bin/agentic-loop" _supervise
+[[ -r $state_root/pools/claude/exhausted ]] || fail 'escalation setup: first claude exhaustion did not mark the pool'
+[[ ! -e $state_root/pools/claude/probe-escalated ]] || fail 'escalation setup: pool was escalated too early'
+escalate_issue=347
+for _ in 1 2 3; do
+  printf '%s\n' "$(( $(date +%s) - 10 ))" > "$state_root/pools/claude/exhausted"
+  printf '%s queued open none 2026-01-01T00:00:00Z\n' "$escalate_issue" > "$state"
+  : > "$FAKE_GH_ROOT/$state_key.comments"
+  AGENT_PROVIDER=claude AGENTIC_LOOP_RUN_ONCE=1 FAKE_CLAUDE_SLEEP=1 FAKE_CLAUDE_PROBE_MODE=exhausted \
+    "$target/bin/agentic-loop" _supervise
+  escalate_issue=$((escalate_issue + 1))
+done
+[[ -r $state_root/pools/claude/probe-confirmed && $(cat "$state_root/pools/claude/probe-confirmed") == 3 ]] \
+  || fail 'escalation did not count 3 consecutive probe-confirmed re-exhaustions'
+[[ -e $state_root/pools/claude/probe-escalated ]] \
+  || fail 'a pool confirmed exhausted 3 times running did not escalate for human attention'
+rm -rf "$state_root/pools"
+rm -f "$state_root/all-pools-paused" "$state_root/agent-exhausted" "$FAKE_GH_ROOT/claude-json-count" "$FAKE_GH_ROOT/claude-probe-calls"
 
 # --- status shows pool recovery ETA and basis (Issue #158) ---
 write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=30 STOP_TIMEOUT=10 STALE_DAYS=30
@@ -2783,8 +2921,30 @@ status_resume_human=$(date -d "@$status_resume_at" '+%Y-%m-%d %H:%M:%S')
 grep -Fq "pool=codex 枯渇（回復予定=$status_resume_human, 根拠=実測不能のため指数backoff）" <<< "$status_pool_text" \
   || fail 'status text did not show the pool recovery ETA and basis'
 status_pool_json=$("$target/bin/agentic-loop" status --format json)
-grep -Fq "{\"pool\":\"codex\",\"exhausted\":true,\"resume_at\":$status_resume_at,\"basis\":\"backoff\"}" <<< "$status_pool_json" \
+grep -Fq "{\"pool\":\"codex\",\"exhausted\":true,\"resume_at\":$status_resume_at,\"basis\":\"backoff\",\"probed_at\":null}" <<< "$status_pool_json" \
   || fail 'status --format json did not report the pool recovery ETA and basis'
+rm -rf "$state_root/pools"
+
+# --- status also shows the last real usage measurement time, distinguishing a
+# real probe/telemetry reading from a blind backoff guess (Issue #251
+# completion criterion 6). Reuses the already-declared codex pool (see the
+# active USAGE_TOML config above) so agent_all_pools recognizes it; the
+# generic pools/usage-<provider> cache file this reads is the same one
+# opencode_go_usage_cached/claude_probe_usage_cached maintain.
+mkdir -p "$state_root/pools/codex"
+status_resume_at=$(( $(date +%s) + 1800 ))
+status_probed_at=$(( $(date +%s) - 120 ))
+printf '%s\n' "$status_resume_at" > "$state_root/pools/codex/exhausted"
+printf 'probe\n' > "$state_root/pools/codex/basis"
+printf '%s\t100\n' "$status_probed_at" > "$state_root/pools/usage-codex"
+status_pool_text=$("$target/bin/agentic-loop" status)
+status_resume_human=$(date -d "@$status_resume_at" '+%Y-%m-%d %H:%M:%S')
+status_probed_human=$(date -d "@$status_probed_at" '+%Y-%m-%d %H:%M:%S')
+grep -Fq "pool=codex 枯渇（回復予定=$status_resume_human, 根拠=使用率再probeの実測, 直近実測=$status_probed_human）" <<< "$status_pool_text" \
+  || fail 'status text did not show the last usage-probe measurement time'
+status_pool_json=$("$target/bin/agentic-loop" status --format json)
+grep -Fq "{\"pool\":\"codex\",\"exhausted\":true,\"resume_at\":$status_resume_at,\"basis\":\"probe\",\"probed_at\":$status_probed_at}" <<< "$status_pool_json" \
+  || fail 'status --format json did not report the last usage-probe measurement time'
 rm -rf "$state_root/pools"
 
 # --- Change-scope conflict avoidance (Issue #44) ---

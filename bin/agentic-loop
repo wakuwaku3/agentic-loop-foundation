@@ -79,6 +79,13 @@ readonly EXHAUSTION_PAUSE_SECONDS=1800
 # agent_mark_pool_exhausted, Issue #158): 6 hours keeps the safe side (a long
 # pause) without ever fully giving up on retrying.
 readonly EXHAUSTION_BACKOFF_MAX_SECONDS=21600
+# Consecutive probe-confirmed re-exhaustions (basis=probe) before a pool is
+# escalated to a postmortem Issue (Issue #251): a provider-stated reset always
+# resolves by its own deadline, but a probe can only confirm "still spent" --
+# some 429s (e.g. an individual spend limit) never resolve by elapsed time at
+# all, so silently re-checking forever must not be the only signal. See
+# agent_pool_probe_confirm_bump.
+readonly PROBE_ESCALATE_AFTER=3
 # Consecutive dependency-check API failures tolerated before an Issue is
 # actually moved to agent:blocked, so a single poll's transient blip does not
 # flap the label; claiming is still withheld from the first failure onward.
