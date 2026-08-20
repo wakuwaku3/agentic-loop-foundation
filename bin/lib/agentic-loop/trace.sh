@@ -284,8 +284,8 @@ trace_evaluate() {
   if ! trace_validate_schema "$TRACE_MANIFEST" "$issue" || ! trace_validate_coverage "$TRACE_MANIFEST" "$issue_body"; then
     return 1
   fi
-  TRACE_CHECKRUNS=$(repo_api "commits/$head_sha/check-runs" --jq '.check_runs' 2>/dev/null || printf '[]')
-  TRACE_FILES=$(repo_api "pulls/$pr/files" --method GET -f per_page=100 --jq '.[].filename' 2>/dev/null || true)
+  TRACE_CHECKRUNS=$(repo_api "commits/$head_sha/check-runs" -f per_page=100 --paginate --jq '.check_runs' 2>/dev/null || printf '[]')
+  TRACE_FILES=$(repo_api "pulls/$pr/files" --method GET -f per_page=100 --paginate --jq '.[].filename' 2>/dev/null || true)
   if ! trace_reconcile_checks "$TRACE_MANIFEST" "$(trace_checkrun_verdict "$TRACE_CHECKRUNS")" || ! trace_reconcile_paths "$TRACE_MANIFEST" "$TRACE_FILES"; then
     return 1
   fi
@@ -351,7 +351,7 @@ trace_verdict_upsert() {
   # posted the verdict comment for this Issue. Look for it once (one extra
   # REST(core) read, only paid when the file is missing) before creating a
   # second comment.
-  id=$(repo_api "issues/$issue/comments" --method GET -f per_page=100 --jq '[.[] | select(.body | test("<!-- agentic-loop:traceability schema=1"))] | last.id // ""' 2>/dev/null | tr -d '[:space:]' || true)
+  id=$(repo_api "issues/$issue/comments" --method GET -f per_page=100 --paginate --jq '[.[] | select(.body | test("<!-- agentic-loop:traceability schema=1"))] | last.id // ""' 2>/dev/null | tr -d '[:space:]' || true)
   if [[ $id =~ ^[0-9]+$ ]] && comment_patch "$id" "$body" >/dev/null 2>&1; then
     mkdir -p "$STATE_ROOT/workers"; printf '%s\n' "$id" > "$file"
     return 0

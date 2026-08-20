@@ -288,7 +288,7 @@ decomposition_materialize() {
   category=$(repo_api "issues/$parent" --jq '[.labels[].name | select(startswith("category:"))][0] // "category:improvement"' 2>/dev/null) || return 3
   declare -A children=()
   while IFS=$'\t' read -r key title purpose criteria scope deps; do
-    existing=$(repo_api issues --method GET -f state=all -f per_page=100 --jq '.[] | select((.body // "") | contains("agentic-loop:child parent='"$parent"' key='"$key"' plan='"$hash"'")) | .number' 2>/dev/null | head -n1 || true)
+    existing=$(repo_api issues --method GET -f state=all -f per_page=100 --paginate --jq '.[] | select((.body // "") | contains("agentic-loop:child parent='"$parent"' key='"$key"' plan='"$hash"'")) | .number' 2>/dev/null | head -n1 || true)
     if [[ $existing =~ ^[1-9][0-9]*$ ]]; then child=$existing
     else
       body="## 目的\n\n$purpose\n\n## 親Issue\n\n#$parent の共通制約と統合受け入れ条件に従います。\n\n## 個別受け入れ条件\n\n$criteria\n\n<!-- agentic-loop:child parent=$parent key=$key plan=$hash -->\n<!-- agentic-loop:scope $scope -->"
@@ -429,7 +429,7 @@ resume_probe() {
     [$m.number // "", $m.head.sha // "", $m.html_url // "", $o.number // "", $o.html_url // "", $m.merge_commit_sha // "", $m.base.ref // ""] | join("SEP")
   '
   pr_jq=${pr_jq/SEP/$sep}
-  pr_tsv=$(repo_api pulls --method GET -f state=all -f head="${repository%%/*}:$branch" -f per_page=100 --jq "$pr_jq" 2>/dev/null) || true
+  pr_tsv=$(repo_api pulls --method GET -f state=all -f head="${repository%%/*}:$branch" -f per_page=100 --paginate --jq "$pr_jq" 2>/dev/null) || true
   [[ -n $pr_tsv ]] && IFS=$'\x1f' read -r merged_pr merged_sha merged_url open_pr open_url merged_merge_commit merged_base <<< "$pr_tsv"
 
   if [[ $merged_pr =~ ^[0-9]+$ ]]; then
