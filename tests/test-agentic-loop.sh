@@ -1239,6 +1239,11 @@ empty_repository() {
 
 target=$(new_repository installed-project)
 state_key=$(printf '%s' "$target" | tr '/' '_')
+# Give the existing-repository install fixture the declared affected-check
+# inputs so its generated capability manifest can exercise Issue #266.
+cp "$PROJECT_ROOT/Makefile" "$target/Makefile"
+mkdir -p "$target/tests"
+cp "$PROJECT_ROOT/tests/impact-map.toml" "$target/tests/impact-map.toml"
 AGENTIC_LOOP_SOURCE="$PROJECT_ROOT" AGENTIC_LOOP_TARGET="$target" AGENTIC_LOOP_SKIP_START=1 "$PROJECT_ROOT/install.sh"
 [[ -x $target/bin/agentic-loop ]] || fail 'install did not add the queue CLI'
 [[ -x $target/bin/agentic-loop-diagnose ]] || fail 'install did not add the manual diagnosis CLI'
