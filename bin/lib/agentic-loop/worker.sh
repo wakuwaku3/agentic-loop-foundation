@@ -427,9 +427,11 @@ resume_probe() {
 
   if [[ $open_pr =~ ^[0-9]+$ ]]; then
     RESUME_PR=$open_pr; RESUME_PR_URL=$open_url; RESUME_PR_STATE="open"; RESUME_PHASE="pr-open"
-    local pr_detail base_ref='' base_sha='' pr_head='' mergeable='' mergeable_state='' merge_tree_status
-    pr_detail=$(repo_api "pulls/$open_pr" --jq '[.base.ref // "", .base.sha // "", .head.sha // "", (if .mergeable == null then "null" else (.mergeable | tostring) end), .mergeable_state // "unknown"] | join("SEP")' 2>/dev/null) || true
-    [[ -n $pr_detail ]] && IFS=$'\x1f' read -r base_ref base_sha pr_head mergeable mergeable_state <<< "${pr_detail/SEP/$sep}"
+    local pr_detail pr_detail_jq base_ref='' base_sha='' pr_head='' mergeable='' mergeable_state='' merge_tree_status
+    pr_detail_jq='[.base.ref // "", .base.sha // "", .head.sha // "", (if .mergeable == null then "null" else (.mergeable | tostring) end), .mergeable_state // "unknown"] | join("SEP")'
+    pr_detail_jq=${pr_detail_jq/SEP/$sep}
+    pr_detail=$(repo_api "pulls/$open_pr" --jq "$pr_detail_jq" 2>/dev/null) || true
+    [[ -n $pr_detail ]] && IFS=$'\x1f' read -r base_ref base_sha pr_head mergeable mergeable_state <<< "$pr_detail"
     RESUME_BASE_BRANCH=$base_ref
     # The target default branch was fetched by worker() immediately before this
     # probe.  Count only commits present on it but absent from the PR head.
