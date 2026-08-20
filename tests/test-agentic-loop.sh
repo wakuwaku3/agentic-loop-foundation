@@ -2275,7 +2275,9 @@ if grep -Fq 'agentic-loop:replan' "$FAKE_GH_ROOT/$state_key.comments"; then fail
 
 # Two clean exits without a valid terminal marker are deterministic failure;
 # text containing a marker, a trailing non-empty line, and unknown values must
-# receive the same treatment rather than being mistaken for completion.
+# receive the same treatment rather than being mistaken for completion. No PR
+# is merged for this branch (FAKE_PR_MERGED=0), so the markerless-merged
+# rescue (Issue #262) must not turn any of these into a false completion.
 for malformed in \
   $'CI monitorの報告待ちです' \
   $'説明中の AGENTIC_LOOP_RESULT=completed です' \
@@ -2286,7 +2288,7 @@ for malformed in \
   : > "$FAKE_GH_ROOT/$state_key.comments"
   : > "$FAKE_GH_ROOT/codex-calls"
   rm -f "$FAKE_GH_ROOT/codex-exec-count"
-  FAKE_CODEX_EXEC_RESULT_1="$malformed" FAKE_CODEX_EXEC_RESULT_2="$malformed" AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _supervise
+  FAKE_PR_MERGED=0 FAKE_CODEX_EXEC_RESULT_1="$malformed" FAKE_CODEX_EXEC_RESULT_2="$malformed" AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _supervise
   grep -Eq '^202 failed open' "$state" || fail "malformed terminal marker was accepted: $malformed"
   [[ $(grep -c -- '--sandbox read-only' "$FAKE_GH_ROOT/codex-calls") -eq 1 ]] || fail 'malformed terminal marker triggered replan'
   [[ $(grep -c -- '--sandbox workspace-write' "$FAKE_GH_ROOT/codex-calls") -eq 2 ]] || fail 'malformed terminal marker did not stop after one retry'
@@ -3016,7 +3018,7 @@ rm -f "$FAKE_GH_ROOT/codex-exec-count" "$FAKE_GH_ROOT/opencode-auto-count" \
   "$state_root/agent-exhausted" "$state_root/all-pools-paused"
 expected_reset=$(date -d 'Aug 20, 2099 9:27 PM' +%s)
 FAKE_CODEX_EXIT=1 \
-FAKE_CODEX_STDERR="ERROR: You've hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at Aug 20th, 2099 9:27 PM." \
+FAKE_CODEX_STDERR="2026-08-20T05:12:33Z ERROR: You've hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at Aug 20th, 2099 9:27 PM." \
 FAKE_OPENCODE_EXEC_RESULT_1='plan body from gogo
 <!-- agentic-loop:scope paths=bin/agentic-loop -->' \
 FAKE_OPENCODE_EXEC_RESULT_2='AGENTIC_LOOP_RESULT=completed' \
@@ -4009,6 +4011,37 @@ FAKE_PR_HEAD_OID=0000000000000000000000000000000000000000 "$target/bin/agentic-l
 grep -Eq '^8 failed open$' "$state" || fail 'unexpected merged PR ref was accepted'
 [[ -e $target-worktrees/issue-8 ]] || fail 'unexpected ref worker worktree was removed'
 git -C "$target" show-ref --verify --quiet refs/heads/agent/issue-8 || fail 'unexpected ref local branch was removed'
+
+# A clean provider exit without a terminal marker can race with GitHub merging
+# the branch. The independently observed merge must enter the normal
+# completion/cleanup path after the single protocol retry.
+printf '9 running open\n' > "$state"
+: > "$FAKE_GH_ROOT/calls"
+rm -f "$FAKE_GH_ROOT/codex-exec-count"
+FAKE_CODEX_EXEC_RESULT_1='実行結果のみ' \
+FAKE_CODEX_EXEC_RESULT_2='実行結果のみ' \
+"$target/bin/agentic-loop" _worker 9 markerless-merged-worker
+grep -Eq '^9 completed closed$' "$state" || fail 'a markerless worker with a merged PR was not completed'
+[[ ! -e $target-worktrees/issue-9 ]] || fail 'a markerless merged worker worktree remained'
+! git -C "$target" show-ref --verify --quiet refs/heads/agent/issue-9 || fail 'a markerless merged worker local branch remained'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:protocol-retry' 'markerless merged worker did not record the protocol retry'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:markerless-merged' 'markerless merged worker did not record the markerless-merged observation comment'
+merged_pr_queries=$(grep -c '/pulls --method GET.*state=closed.*head=.*issue-9' "$FAKE_GH_ROOT/calls" || true)
+[[ $merged_pr_queries -eq 1 ]] || fail "markerless merged worker queried the branch's merged PR $merged_pr_queries times, expected exactly 1"
+
+# The same markerless clean exit without any independently observed merge
+# (FAKE_PR_MERGED=0) must keep following the ordinary failure path: no false
+# completion, and the worktree/branch preserved for a retried claim.
+printf '23 running open\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+rm -f "$FAKE_GH_ROOT/codex-exec-count"
+FAKE_PR_MERGED=0 FAKE_CODEX_EXEC_RESULT_1='実行結果のみ' \
+FAKE_CODEX_EXEC_RESULT_2='実行結果のみ' \
+"$target/bin/agentic-loop" _worker 23 markerless-unmerged-worker
+grep -Eq '^23 failed open$' "$state" || fail 'a markerless worker without a merged PR was not left failed'
+[[ -e $target-worktrees/issue-23 ]] || fail 'a markerless unmerged worker worktree was removed'
+git -C "$target" show-ref --verify --quiet refs/heads/agent/issue-23 || fail 'a markerless unmerged worker local branch was removed'
+if grep -Fq 'agentic-loop:markerless-merged' "$FAKE_GH_ROOT/$state_key.comments"; then fail 'a markerless worker without a merged PR recorded a markerless-merged observation'; fi
 
 # Closed-loop postmortem worker.sh terminal branch (Issue #132, ADR 0026): a
 # `postmortem link` turn, executed from inside the exec turn's own sandboxed
@@ -7798,6 +7831,18 @@ FAKE_RUNNER_STATE="$run_state1" "$run_e2e_sh" --groups queue --runner "$flaky_fa
   || fail 'run-e2e.sh failed for an always-passing group'
 [[ $(yq -p json -r '.verdicts[0].verdict' "$run_record1") == passed ]] || fail 'run-e2e.sh record did not mark an always-passing group as passed'
 [[ $(yq -p json -r '.verdicts[0].attempts | length' "$run_record1") -eq 1 ]] || fail 'run-e2e.sh retried an always-passing group'
+
+# CI matrixは共通入口を変えず、環境変数でrun-e2e.shの既定群を1群へ絞る。
+# 明示的な--groupsを渡さない経路を固定し、各matrix jobが全4群を重複実行する
+# regressionを防ぐ。
+run_state_env="$TEST_ROOT/run-e2e-state-env"
+mkdir -p "$run_state_env"
+echo pass > "$run_state_env/lifecycle.behavior"
+run_report_env="$TEST_ROOT/run-e2e-report-env.tsv"
+AGENTIC_LOOP_TEST_GROUP=lifecycle FAKE_RUNNER_STATE="$run_state_env" "$run_e2e_sh" --runner "$flaky_fake_runner" --registry "$flaky_empty_registry" --report "$run_report_env" --no-record >/dev/null 2>&1 \
+  || fail 'run-e2e.sh failed for the CI matrix environment-selected group'
+[[ $(wc -l < "$run_report_env") -eq 1 ]] || fail 'run-e2e.sh ran more than one group for the CI matrix environment selection'
+grep -Eq '^lifecycle[[:space:]]+passed[[:space:]]+' "$run_report_env" || fail 'run-e2e.sh did not run the CI matrix environment-selected group'
 
 # 常時失敗: 隔離entryがあっても決定的失敗は非ゼロで終了する。
 run_state2="$TEST_ROOT/run-e2e-state-2"

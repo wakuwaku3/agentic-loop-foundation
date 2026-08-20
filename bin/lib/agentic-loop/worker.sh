@@ -623,6 +623,16 @@ resume_needs_decision_body() {
 }
 
 
+# A single lookup for the branch's merged PR, shared by the markerless-exit
+# rescue and the ordinary completion path so a worker turn queries GitHub for
+# it at most once (Issue #262).
+worker_merged_pr_tsv() {
+  local repository=$1 branch=$2
+  repo_api pulls --method GET -f state=closed -f head="${repository%%/*}:$branch" -f per_page=100 \
+    --jq 'map(select(.merged_at != null and .head.ref == "'"$branch"'")) | first | [.html_url, .head.sha, (.number|tostring), .base.ref, (.merge_commit_sha // .head.sha)] | @tsv' 2>/dev/null || true
+}
+
+
 worker() {
   local issue=$1 worker=$2 repository default_branch branch worktree result git_common_dir agents_dir exit_code=0 heartbeat_pid merged_pr='' merged_oid=''
   worker_confirm_running_label "$issue" || { clear_worker_local "$issue"; return 0; }
@@ -746,7 +756,7 @@ worker() {
     done
   ) & heartbeat_pid=$!
   local plan_usage="$STATE_ROOT/issue-$issue-plan-usage.txt" exec_usage="$STATE_ROOT/issue-$issue-usage.txt"
-  local plan_file="$(preflight_plan_file "$issue")" attempt=0 protocol_retry=0 max_retries started failure_context='' exhausted=0 exec_rc plan_rc
+  local plan_file="$(preflight_plan_file "$issue")" attempt=0 protocol_retry=0 max_retries started failure_context='' exhausted=0 exec_rc plan_rc markerless_clean_exit=0 markerless_merged_tsv=''
   local resume_context; resume_context=$(resume_context_block "$branch")
   max_retries=$(agent_plan_max_retries)
   while :; do
@@ -867,6 +877,7 @@ worker() {
         fi
       fi
       if [[ $exit_code -eq 0 ]] && ! agent_result_terminal_marker "$result" >/dev/null; then
+        markerless_clean_exit=1
         break
       fi
     fi
@@ -903,6 +914,23 @@ worker() {
     return 0
   fi
   project_add_pull_requests "$branch"
+  # A provider can finish cleanly twice without returning a terminal marker
+  # while the PR is merged concurrently (Issue #262). The merge is an
+  # independently observable completion fact, so let the existing completion
+  # path validate traceability and perform its guarded cleanup. This is
+  # narrowly scoped to the protocol-retry loop's own clean-exit-without-marker
+  # break (markerless_clean_exit): a stage failure such as a per-stage cost
+  # ceiling or pool exhaustion also leaves exit_code=0 with no marker (the
+  # provider process itself exits 0 even though STAGE_RC classified it as a
+  # failure) and must keep following the ordinary failure/requeue path below
+  # instead of being mistaken for this rescue.
+  if (( markerless_clean_exit )) && [[ $exit_code -eq 0 ]] && ! agent_result_terminal_marker "$result" >/dev/null; then
+    markerless_merged_tsv=$(worker_merged_pr_tsv "$repository" "$branch")
+    if [[ -n $markerless_merged_tsv ]]; then
+      printf '\nAGENTIC_LOOP_RESULT=completed\n' >> "$result"
+      comment_issue "$issue" "<!-- agentic-loop:markerless-merged worker=$worker -->\nexec段は終了markerなしで正常終了しましたが、branch \`$branch\` にmerge済みPRが存在することをGitHubで確認したため、通常の完了検証（トレーサビリティ・commit一致・cleanup）へ合流します。" || true
+    fi
+  fi
   if [[ $exit_code -eq 0 ]] && agent_result_is "$result" completed; then
     # Cleanup + the final Label/close transition is unsafe to interrupt
     # mid-sequence (see docs/decisions/0019); a pause/abort drain waits out
@@ -934,7 +962,8 @@ worker() {
     else
       [[ $postmortem_marker == complete ]] && postmortem_turn_marker_clear "$issue"
       local merged_number='' merged_base='' merged_commit=''
-      IFS=$'\t' read -r merged_pr merged_oid merged_number merged_base merged_commit < <(repo_api pulls --method GET -f state=closed -f head="${repository%%/*}:$branch" -f per_page=100 --jq 'map(select(.merged_at != null and .head.ref == "'"$branch"'")) | first | [.html_url, .head.sha, (.number|tostring), .base.ref, (.merge_commit_sha // .head.sha)] | @tsv' 2>/dev/null || true) || true
+      [[ -z $markerless_merged_tsv ]] && markerless_merged_tsv=$(worker_merged_pr_tsv "$repository" "$branch")
+      IFS=$'\t' read -r merged_pr merged_oid merged_number merged_base merged_commit <<< "$markerless_merged_tsv"
       progress_touch "$issue" cleanup
       if [[ -n $merged_pr && $merged_oid =~ ^[0-9a-fA-F]{40}$ ]]; then
         if ! preflight_reevaluate_diff "$issue" "$merged_oid" "$default_branch"; then

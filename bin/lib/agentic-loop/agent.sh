@@ -401,17 +401,18 @@ agent_pool_probe_confirm_bump() {
 # Accepts ISO-8601 (…Z) and Codex-style "try again at Aug 20th, 2026 9:27 PM".
 # Returns non-zero when nothing parseable is found.
 agent_parse_reset_epoch() {
-  local text=${1:-} iso human epoch
+  local text=${1:-} iso human epoch now
   [[ -n $text ]] || return 1
+  now=$(date +%s)
   iso=$(grep -oiE '[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]+)?Z?' <<< "$text" | head -n 1 || true)
   if [[ -n $iso ]]; then
     epoch=$(date -d "$iso" +%s 2>/dev/null) || true
-    [[ $epoch =~ ^[0-9]+$ ]] && { printf '%s\n' "$epoch"; return 0; }
+    [[ $epoch =~ ^[0-9]+$ && $epoch -gt $now ]] && { printf '%s\n' "$epoch"; return 0; }
   fi
   human=$(grep -oiE 'try again at[[:space:]]+[^.;\n]+' <<< "$text" | head -n 1 | sed -E 's/^[Tt]ry again at[[:space:]]+//; s/([0-9]+)(st|nd|rd|th)/\1/g' || true)
   if [[ -n $human ]]; then
     epoch=$(date -d "$human" +%s 2>/dev/null) || true
-    [[ $epoch =~ ^[0-9]+$ ]] && { printf '%s\n' "$epoch"; return 0; }
+    [[ $epoch =~ ^[0-9]+$ && $epoch -gt $now ]] && { printf '%s\n' "$epoch"; return 0; }
   fi
   return 1
 }
