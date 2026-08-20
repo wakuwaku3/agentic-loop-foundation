@@ -741,8 +741,11 @@ case "${1:-} ${2:-}" in
     ;;
   'api graphql')
     if [[ $* == *'projectItems(first:20'* ]]; then
-      number=''; cursor=''
+      number=''; cursor=''; jq_expr='.'; read_jq=0
       for arg in "$@"; do [[ $arg == number=* ]] && number=${arg#number=}; [[ $arg == cursor=* ]] && cursor=${arg#cursor=}; done
+      for arg in "$@"; do
+        if (( read_jq )); then jq_expr=$arg; read_jq=0; elif [[ $arg == --jq ]]; then read_jq=1; fi
+      done
       if [[ ${FAKE_PROJECT_CONTENT_FAIL:-0} == 1 || ( -n ${FAKE_PROJECT_CONTENT_FAIL_ISSUE:-} && $number == "$FAKE_PROJECT_CONTENT_FAIL_ISSUE" ) ]]; then
         printf '{"errors":[{"message":"forced GraphQL failure"}]}\n'
         exit 1
@@ -751,17 +754,17 @@ case "${1:-} ${2:-}" in
         # A member is resolved immediately (possibly after one cursor hop when
         # the fixture lists it on the second page).
         if [[ -r $project_page2 ]] && grep -Fxq "$number" "$project_page2" && [[ -z $cursor ]]; then
-          printf 'NEXT\x1fpage2cursor\n'
+          if [[ $jq_expr == . ]]; then printf 'NEXT\x1fpage2cursor\n'; else printf '{"data":{"repository":{"content":{"projectItems":{"nodes":[],"pageInfo":{"hasNextPage":true,"endCursor":"page2cursor"}}}}}}\n' | jq -r "$jq_expr"; fi
         else
           status=''; category=''; blocked_b64=''
           IFS=$'\t' read -r status category blocked_b64 < <(awk -F '\t' -v n="$number" '$1 == n {print $2 "\t" $3 "\t" $4; exit}' "$project_values" 2>/dev/null || true)
           blocked=''; [[ -z $blocked_b64 ]] || blocked=$(base64 -d <<< "$blocked_b64")
-          printf 'PVTI_%s\x1f%s\x1f%s\x1f%s\nEND\n' "$number" "$status" "$category" "$blocked"
+          if [[ $jq_expr == . ]]; then printf 'PVTI_%s\x1f%s\x1f%s\x1f%s\nEND\n' "$number" "$status" "$category" "$blocked"; else printf '{"data":{"repository":{"content":{"projectItems":{"nodes":[{"id":"PVTI_%s","project":{"id":"PVT_fixture"},"fieldValues":{"nodes":[{"name":"%s","field":{"name":"Agent status"}},{"name":"%s","field":{"name":"Category"}},{"text":"%s","field":{"name":"Blocked by"}}]}}],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}\n' "$number" "$status" "$category" "$blocked" | jq -r "$jq_expr"; fi
         fi
       else
         # A confirmed non-member is a successful empty result (END), distinct
         # from the forced failure above.  The real jq always emits this trailer.
-        printf 'END\n'
+        if [[ $jq_expr == . ]]; then printf 'END\n'; else printf '{"data":{"repository":{"content":{"projectItems":{"nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}}\n' | jq -r "$jq_expr"; fi
       fi
     elif [[ $* == *'repositories(first:100)'* ]]; then
       [[ -e $project_link ]] && cat "$project_link"
