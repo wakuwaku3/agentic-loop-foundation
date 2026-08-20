@@ -551,6 +551,12 @@ status_render_text_state_line() {
 
 status_render_text() {
   if pid_alive; then say "running (pid $(cat "$STATE_ROOT/supervisor.pid"), max workers $MAX_WORKERS)"; else say 'stopped'; fi
+  if supervisor_last_exit_read; then
+    printf '前回のSupervisor終了: kind=%s detail=%s pid=%s stage=%s at=%s last_seen=%s\n' \
+      "$SUPERVISOR_EXIT_KIND" "$SUPERVISOR_EXIT_DETAIL" "$SUPERVISOR_EXIT_PID" "$SUPERVISOR_EXIT_STAGE" \
+      "$(date -d "@$SUPERVISOR_EXIT_AT" '+%Y-%m-%d %H:%M:%S %z' 2>/dev/null || printf '%s' "$SUPERVISOR_EXIT_AT")" \
+      "$(date -d "@$SUPERVISOR_EXIT_SEEN" '+%Y-%m-%d %H:%M:%S %z' 2>/dev/null || printf '%s' "$SUPERVISOR_EXIT_SEEN")"
+  fi
 
   local phase
   for phase in plan exec; do
@@ -687,11 +693,17 @@ status_render_json_state_group() {
 status_render_json() {
   local i sep
   printf '{"schema_version":1,"generated_at":%s,"github_available":%s,' "$(date +%s)" "$( ((STATUS_GITHUB_OK)) && printf true || printf false )"
-  if pid_alive; then
-    printf '"supervisor":{"state":"running","pid":%s,"max_workers":%s},' "$(cat "$STATE_ROOT/supervisor.pid")" "$MAX_WORKERS"
+  local supervisor_state=stopped supervisor_pid=null
+  if pid_alive; then supervisor_state=running; supervisor_pid=$(cat "$STATE_ROOT/supervisor.pid"); fi
+  printf '"supervisor":{"state":"%s","pid":%s,"max_workers":%s,"last_exit":' "$supervisor_state" "$supervisor_pid" "$MAX_WORKERS"
+  if supervisor_last_exit_read; then
+    printf '{"at":%s,"kind":"%s","detail":"%s","pid":%s,"started_at":%s,"last_seen_at":%s,"stage":"%s","boot_id":"%s","proc_start_ticks":%s}' \
+      "$SUPERVISOR_EXIT_AT" "$SUPERVISOR_EXIT_KIND" "$SUPERVISOR_EXIT_DETAIL" "$SUPERVISOR_EXIT_PID" \
+      "$SUPERVISOR_EXIT_STARTED" "$SUPERVISOR_EXIT_SEEN" "$SUPERVISOR_EXIT_STAGE" "$SUPERVISOR_EXIT_BOOT" "$SUPERVISOR_EXIT_TICKS"
   else
-    printf '"supervisor":{"state":"stopped","pid":null,"max_workers":%s},' "$MAX_WORKERS"
+    printf 'null'
   fi
+  printf '},'
 
   printf '"next_candidates":{'
   local phase sep=''
