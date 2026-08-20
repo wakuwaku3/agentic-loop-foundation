@@ -82,7 +82,8 @@ dependency_native_refs() {
     fi
   fi
   error="$(dependency_state_dir)/native-error.$$"
-  if out=$(repo_api "issues/$issue/dependencies/blocked_by" --jq '.[].number' 2>"$error"); then
+  # workload-unbounded: native依存一覧はIssueに紐づく有限のblocked_by件数を全件取得; bound=blocked_by count; track=#237
+  if out=$(repo_api "issues/$issue/dependencies/blocked_by" --paginate --jq '.[].number' 2>"$error"); then
     rm -f "$error"
     { printf '%s\t0\n' "$now"; [[ -z $out ]] || printf '%s\n' "$out"; } > "$cache"
     printf '%s\n' "$out"; return 0
