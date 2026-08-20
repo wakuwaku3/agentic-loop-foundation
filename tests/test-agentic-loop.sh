@@ -1162,6 +1162,11 @@ if [[ $* == *'--format json'* ]]; then
 else
   printf '%s\n' "$opencode_result"
 fi
+exit_var=FAKE_OPENCODE_EXIT
+if [[ $* == *--auto* && -v FAKE_OPENCODE_EXEC_EXIT_$auto_count ]]; then
+  exit_var="FAKE_OPENCODE_EXEC_EXIT_$auto_count"
+fi
+exit "${!exit_var:-0}"
 FAKE_OPENCODE
 cat > "$FAKE_BIN/systemctl" <<'FAKE_SYSTEMCTL'
 #!/usr/bin/env bash
@@ -2484,6 +2489,18 @@ grep -Eq '^62 completed closed' "$state" || { echo '---DEBUG STATE---'; cat "$st
 [[ ! -e $state_root/all-pools-paused ]] || fail 'a successful plan mentioning rate limits must not pause the supervisor'
 if grep -Fq 'agentic-loop:exhausted' "$FAKE_GH_ROOT/$state_key.comments"; then fail 'plan-text rate-limit mention was recorded as exhaustion'; fi
 
+# Regression (Issue #226): a successful stage whose output discusses model
+# failures must remain successful. Model-failure matching is gated by the
+# provider exit/error state just like pool-exhaustion matching.
+model_text_result="$TEST_ROOT/model-text-result"
+printf '%s\n' 'The report explains how to detect an invalid model or overloaded provider.' > "$model_text_result"
+if ( source "$PROJECT_ROOT/bin/lib/agentic-loop/agent.sh"; agent_result_is_model_failure "$model_text_result" 0 0 ); then
+  fail 'successful output mentioning model failure was misclassified'
+fi
+if ! ( source "$PROJECT_ROOT/bin/lib/agentic-loop/agent.sh"; agent_result_is_model_failure "$model_text_result" 1 0 ); then
+  fail 'non-zero model failure was not classified'
+fi
+
 # Complement (Issue #158): a genuine Claude usage-limit response -- is_error true
 # with api_error_status set, the way the CLI really reports it under
 # --output-format json -- IS pool exhaustion. The Issue is re-queued (never
@@ -2614,7 +2631,7 @@ printf '303 queued open none 2026-01-01T00:00:00Z\n' > "$state"
 : > "$FAKE_GH_ROOT/$state_key.comments"
 : > "$FAKE_GH_ROOT/opencode-calls"
 rm -f "$FAKE_GH_ROOT/opencode-auto-count" "$FAKE_GH_ROOT/codex-exec-count"
-FAKE_OPENCODE_EXEC_RESULT_1='overloaded' FAKE_OPENCODE_EXEC_RESULT_2='AGENTIC_LOOP_RESULT=completed' AGENTIC_LOOP_RUN_ONCE=1 FAKE_CODEX_SLEEP=1 "$target/bin/agentic-loop" _supervise
+FAKE_OPENCODE_EXEC_RESULT_1='overloaded' FAKE_OPENCODE_EXEC_EXIT_1=1 FAKE_OPENCODE_EXEC_RESULT_2='AGENTIC_LOOP_RESULT=completed' AGENTIC_LOOP_RUN_ONCE=1 FAKE_CODEX_SLEEP=1 "$target/bin/agentic-loop" _supervise
 grep -Eq '^303 completed closed' "$state" || fail 'model-failure fallback Issue did not complete'
 assert_contains "$FAKE_GH_ROOT/opencode-calls" '--model opencode-go/gpt-5.6-luna' 'model-failure retry did not start on the first model'
 assert_contains "$FAKE_GH_ROOT/opencode-calls" '--model opencode-go/deepseek-v4-pro' 'model-failure retry did not switch to the next model'
@@ -3488,6 +3505,13 @@ rm -f "$state_root/scope/issue-260" "$state_root/conflict/issue-261" "$state_roo
 
 # --- Issue dependency gating (Issue #41) ---
 
+# GitHub Web UI/API may return CRLF bodies. Normalize it before parsing so a
+# same-repository dependency is not classified as cross-repository.
+crlf_dependency_body=$(printf 'Blocked by: #300\r\n' | base64 -w0)
+printf '300 completed closed\n305 queued open none 2026-01-01T00:00:00Z none none %s\n' "$crlf_dependency_body" > "$state"
+AGENTIC_LOOP_RUN_ONCE=1 FAKE_CODEX_SLEEP=1 "$target/bin/agentic-loop" _supervise
+grep -Eq '^305 completed closed' "$state" || fail 'CRLF dependency body was not normalized'
+
 write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=3 LEASE_SECONDS=3 STOP_TIMEOUT=10 STALE_DAYS=30
 printf 'unknown_scope = "open"\n' >> "$target/.agentic-loop.toml"
 rm -f "$FAKE_GH_ROOT/$state_key.dep-links"
@@ -3823,6 +3847,12 @@ printf '93 queued open none 2026-01-01T00:00:00Z none none %s\n91 completed clos
 assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:postmortem-verified' 'postmortem complete did not record its verification comment'
 [[ $(cat "$state_root/postmortem/turn-93" 2>/dev/null) == complete ]] || fail 'postmortem complete did not write the complete turn marker consumed by worker.sh'
 
+# CRLF headings must be recognized by the postmortem completion gate.
+gate_body_crlf=$(printf 'Blocked by: #91\r\n\r\n## 残余リスク\r\n\r\n実施しない項目はない。\r\n' | base64 -w0)
+printf '94 queued open none 2026-01-01T00:00:00Z none none %s\n91 completed closed\n' "$gate_body_crlf" > "$state"
+"$target/bin/agentic-loop" postmortem complete 94 || fail 'postmortem complete did not normalize CRLF headings'
+[[ $(cat "$state_root/postmortem/turn-94" 2>/dev/null) == complete ]] || fail 'CRLF postmortem did not write the complete marker'
+
 rm -rf "$state_root/postmortem" "$state_root/attempts" "$state_root/workers/90.lease"
 write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=2 LEASE_SECONDS=3 STOP_TIMEOUT=10 STALE_DAYS=30
 
@@ -4095,6 +4125,24 @@ grep -Eq '^14 completed closed' "$state" || fail 'resuming an already-merged PR 
 ! git -C "$target" show-ref --verify --quiet refs/heads/agent/issue-14 || fail 'resuming an already-merged PR did not remove the local branch'
 assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:completed pr=99' 'resumed merged-PR completion was not recorded'
 assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'resumed=1' 'resumed merged-PR completion did not mark itself as a resume fast path'
+
+# A local branch at an ancestor of the merged PR head is also safe to
+# complete: it has no local-only commits, so exact SHA equality is unnecessary
+# (Issue #283).
+printf '16 running open\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+git -C "$target" worktree add --quiet -b agent/issue-16 "$target-worktrees/issue-16" origin/main
+git -C "$target-worktrees/issue-16" commit --quiet --allow-empty -m 'resume ancestor base'
+git -C "$target-worktrees/issue-16" branch agent/issue-16-merged
+ancestor_head=$(git -C "$target-worktrees/issue-16" rev-parse HEAD)
+git -C "$target-worktrees/issue-16" commit --quiet --allow-empty -m 'merged PR follow-up'
+merged_head=$(git -C "$target-worktrees/issue-16" rev-parse HEAD)
+git -C "$target-worktrees/issue-16" reset --quiet --hard "$ancestor_head"
+FAKE_RESUME_MERGED_PR=100 FAKE_RESUME_MERGED_SHA=$merged_head FAKE_RESUME_MERGED_URL="https://github.example/acme/installed-project/pull/100" \
+  "$target/bin/agentic-loop" _worker 16 resume-ancestor-worker
+grep -Eq '^16 completed closed' "$state" || fail 'a merged PR whose local branch is an ancestor did not complete the Issue'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:completed pr=100' 'ancestor resume completion was not recorded'
+git -C "$target" branch -D agent/issue-16-merged >/dev/null 2>&1 || true
 
 # A branch that has diverged from its remote (both sides carry commits the
 # other lacks) is routed to needs-input; no force-push, reset, or deletion of
@@ -4490,6 +4538,14 @@ wait "$sup_pid" 2>/dev/null || true
 grep -Eq '^15 queued' "$state" || fail 'graceful shutdown did not requeue the in-flight Issue'
 [[ ! -e $state_root/workers/15.pid ]] || fail 'graceful shutdown left a worker pidfile'
 assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:shutdown' 'graceful shutdown was not recorded on the Issue'
+
+# A graceful shutdown marker must not disable the next service boot.  The
+# systemd/manual entrypoint is _service, so exercise that path directly.
+write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=30 STOP_TIMEOUT=10 STALE_DAYS=30
+: > "$state"
+: > "$state_root/stop.requested"
+AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _service
+[[ ! -e $state_root/stop.requested ]] || fail 'service startup did not clear a stale stop.requested marker'
 
 # --- .pid loss must not defeat max_workers or graceful shutdown (Issue #219) ---
 # Root cause 1: worker_count() (and therefore claim_next's `< MAX_WORKERS`
@@ -4963,6 +5019,127 @@ if grep -Fq 'agentic-loop:worker-orphan-reaped' "$FAKE_GH_ROOT/$state_key.commen
 kill -TERM "-$orphan2_worker_pid" 2>/dev/null || true
 wait "$orphan2_worker_pid" 2>/dev/null || true
 rm -f "$state_root/workers/72.pid" "$state_root/workers/72.started" "$state_root/workers/72.progress" "$state_root/workers/72.orphan-since"
+rm -f "$state_root/stop.requested"
+
+# --- a worker whose pidfile records a non-leader pid is still stopped (Issue #292) ---
+# Every worker-stop path signals a process *group* so the provider CLI child
+# goes down with the worker. The pidfile's pid used to be passed straight to
+# `kill -TERM "-$pid"`, which assumes it is its own group leader. That holds for
+# a freshly claimed worker (claim spawns it via setsid) but not after
+# reconcile_worker_pidfiles repairs a lost pidfile from the live /proc scan
+# (Issue #219): it legitimately records a *descendant* of the leader, and
+# `-$pid` then names a nonexistent group, fails with ESRCH, and is swallowed by
+# the call site's `|| true`. The worker survived every reap and held its
+# max_workers slot forever (real incident: #251 was "reaped" once per poll for
+# 8h50m while 46 queued Issues were never claimed).
+#
+# The worker under test is a dedicated session (setsid: leader + child, exactly
+# the shape claim produces) rather than a real claimed worker, and the pidfile
+# records the *child*. A real worker also spawns short-lived helpers whose pids
+# come and go, so picking one of those as "the non-leader pid" would race the
+# reap's own worker_pid_live check; this fixes the process shape the reap must
+# handle without depending on provider-CLI timing at all.
+pgid_of() {
+  local pid=$1 stat_line rest
+  local -a fields
+  [[ -r /proc/$pid/stat ]] || return 1
+  read -r stat_line < "/proc/$pid/stat" || return 1
+  rest=${stat_line##*') '}
+  read -r -a fields <<< "$rest"
+  [[ ${fields[2]:-} =~ ^[0-9]+$ ]] || return 1
+  printf '%s\n' "${fields[2]}"
+}
+write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=300 STOP_TIMEOUT=10 STALE_DAYS=30 MAX_ATTEMPTS=3 RETRY_COOLDOWN_SECONDS=600 WORKER_TIMEOUT_SECONDS=999999 WORKER_ORPHAN_GRACE_SECONDS=30
+# agent:failed, not agent:queued: worker_reassert_running would otherwise
+# self-heal an exactly-agent:queued Issue back to running on its own tick and
+# race this deterministic reap (see the grace-reset scenario above).
+printf '74 failed open none 2026-01-01T00:00:00Z\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+rm -f "$state_root/stop.requested"
+rm -rf "$state_root/workers"; mkdir -p "$state_root/workers"
+nonleader_dir="$state_root/nonleader"; rm -rf "$nonleader_dir"; mkdir -p "$nonleader_dir"
+setsid bash -c '
+  sleep 120 & printf "%s\n" "$!" > "$1/child"
+  printf "%s\n" "$$" > "$1/leader"
+  wait
+' bash "$nonleader_dir" &
+nonleader_session_pid=$!
+nonleader_ready=0
+for _ in $(seq 1 40); do
+  [[ -r $nonleader_dir/child && -r $nonleader_dir/leader ]] && { nonleader_ready=1; break; }
+  sleep 0.25
+done
+[[ $nonleader_ready == 1 ]] || { kill -KILL "$nonleader_session_pid" 2>/dev/null; fail 'non-leader pidfile test: the worker session did not start'; }
+nonleader_leader=$(cat "$nonleader_dir/leader")
+nonleader_child=$(cat "$nonleader_dir/child")
+[[ $(pgid_of "$nonleader_child") == "$nonleader_leader" ]] || { kill -KILL "-$nonleader_leader" 2>/dev/null; fail 'non-leader pidfile test: the child is not in the leader'"'"'s process group'; }
+[[ $(pgid_of "$nonleader_child") != "$nonleader_child" ]] || { kill -KILL "-$nonleader_leader" 2>/dev/null; fail 'non-leader pidfile test: the recorded pid is its own group leader, so the regression would not be exercised'; }
+printf '%s\n' "$nonleader_child" > "$state_root/workers/74.pid"
+printf '%s\n' "$(($(date +%s) - 600))" > "$state_root/workers/74.started"
+"$target/bin/agentic-loop" _reap-orphans
+[[ -r $state_root/workers/74.orphan-since ]] || { kill -KILL "-$nonleader_leader" 2>/dev/null; fail 'non-leader pidfile test: the Label mismatch was not observed'; }
+kill -0 "$nonleader_child" 2>/dev/null || { kill -KILL "-$nonleader_leader" 2>/dev/null; fail 'non-leader pidfile test: the worker was killed on the very first observation instead of waiting out the grace period'; }
+printf '%s\n' "$(($(date +%s) - 31))" > "$state_root/workers/74.orphan-since"
+"$target/bin/agentic-loop" _reap-orphans
+nonleader_child_gone=0
+for _ in $(seq 1 20); do kill -0 "$nonleader_child" 2>/dev/null || { nonleader_child_gone=1; break; }; sleep 0.5; done
+if [[ $nonleader_child_gone != 1 ]]; then kill -KILL "-$nonleader_leader" 2>/dev/null || true; fail 'a worker whose pidfile recorded a non-leader pid survived the orphan reap (its process group was never signalled)'; fi
+nonleader_leader_gone=0
+for _ in $(seq 1 20); do kill -0 "$nonleader_leader" 2>/dev/null || { nonleader_leader_gone=1; break; }; sleep 0.5; done
+if [[ $nonleader_leader_gone != 1 ]]; then kill -KILL "-$nonleader_leader" 2>/dev/null || true; fail 'the reap signalled only the recorded pid, leaving the rest of the worker'"'"'s process group (its provider CLI) running'; fi
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:worker-orphan-reaped' 'the non-leader-pid reap was not audited on the Issue'
+[[ ! -e $state_root/workers/74.pid ]] || fail 'clear_worker_local did not remove the reaped pidfile (non-leader pid)'
+wait "$nonleader_session_pid" 2>/dev/null || true
+rm -rf "$nonleader_dir"
+rm -rf "$state_root/workers"; mkdir -p "$state_root/workers"
+rm -f "$state_root/stop.requested"
+
+# --- the reap never signals its own process group (Issue #292) ---
+# Resolving the real group means a worker that was never setsid'd into its own
+# group (its pidfile pid shares the supervisor's group -- the observed
+# consequence of a relative-path start, Issue #219 root cause 2) would take the
+# supervisor down with it if the group were signalled blindly. signal_process_tree
+# must fall back to signalling the single pid whenever the resolved group is its
+# own. The reap therefore runs inside a dedicated session (setsid) that also
+# holds two sleepers: the one recorded in the pidfile must die, the witness --
+# same group, not the pidfile's pid -- must survive.
+write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=300 STOP_TIMEOUT=10 STALE_DAYS=30 MAX_ATTEMPTS=3 RETRY_COOLDOWN_SECONDS=600 WORKER_TIMEOUT_SECONDS=999999 WORKER_ORPHAN_GRACE_SECONDS=30
+printf '76 failed open none 2026-01-01T00:00:00Z\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+rm -f "$state_root/stop.requested"
+rm -rf "$state_root/workers"; mkdir -p "$state_root/workers"
+selfgroup_dir="$state_root/selfgroup"; rm -rf "$selfgroup_dir"; mkdir -p "$selfgroup_dir"
+setsid bash -c '
+  sleep 120 & printf "%s\n" "$!" > "$1/target"
+  sleep 120 & printf "%s\n" "$!" > "$1/witness"
+  while [[ ! -e $1/go ]]; do sleep 0.1; done
+  "$2" _reap-orphans
+  printf "done\n" > "$1/reaped"
+' bash "$selfgroup_dir" "$target/bin/agentic-loop" &
+selfgroup_sid_pid=$!
+selfgroup_ready=0
+for _ in $(seq 1 40); do
+  [[ -r $selfgroup_dir/target && -r $selfgroup_dir/witness ]] && { selfgroup_ready=1; break; }
+  sleep 0.25
+done
+[[ $selfgroup_ready == 1 ]] || { kill -KILL "$selfgroup_sid_pid" 2>/dev/null; fail 'self-group guard test: the dedicated session did not start its sleepers'; }
+selfgroup_target=$(cat "$selfgroup_dir/target")
+selfgroup_witness=$(cat "$selfgroup_dir/witness")
+printf '%s\n' "$selfgroup_target" > "$state_root/workers/76.pid"
+printf '%s\n' "$(($(date +%s) - 600))" > "$state_root/workers/76.started"
+printf '%s\n' "$(($(date +%s) - 31))" > "$state_root/workers/76.orphan-since"
+: > "$selfgroup_dir/go"
+selfgroup_done=0
+for _ in $(seq 1 60); do [[ -r $selfgroup_dir/reaped ]] && { selfgroup_done=1; break; }; sleep 0.5; done
+[[ $selfgroup_done == 1 ]] || { kill -KILL "-$selfgroup_sid_pid" 2>/dev/null; fail 'self-group guard test: the reap inside the dedicated session never completed (it signalled its own group)'; }
+selfgroup_target_gone=0
+for _ in $(seq 1 20); do kill -0 "$selfgroup_target" 2>/dev/null || { selfgroup_target_gone=1; break; }; sleep 0.5; done
+[[ $selfgroup_target_gone == 1 ]] || { kill -KILL "-$selfgroup_sid_pid" 2>/dev/null; fail 'a worker sharing the reaper'"'"'s process group was not stopped at all (the single-pid fallback did not fire)'; }
+kill -0 "$selfgroup_witness" 2>/dev/null || fail 'the reap signalled its own process group, killing a process it does not own'
+kill -KILL "-$selfgroup_sid_pid" 2>/dev/null || true
+wait "$selfgroup_sid_pid" 2>/dev/null || true
+rm -rf "$selfgroup_dir"
+rm -rf "$state_root/workers"; mkdir -p "$state_root/workers"
 rm -f "$state_root/stop.requested"
 
 # --- worker-orphan: other-host Issues are structurally untouched, and the

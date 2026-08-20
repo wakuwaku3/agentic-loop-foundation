@@ -433,11 +433,17 @@ resume_probe() {
   [[ -n $pr_tsv ]] && IFS=$'\x1f' read -r merged_pr merged_sha merged_url open_pr open_url merged_merge_commit merged_base <<< "$pr_tsv"
 
   if [[ $merged_pr =~ ^[0-9]+$ ]]; then
-    if [[ $merged_sha == "$RESUME_HEAD" && $RESUME_DIVERGED -eq 0 ]]; then
+    local merged_local_only=0
+    if [[ -n $merged_sha ]]; then
+      merged_local_only=$(git -C "$REPO_ROOT" rev-list --count "$merged_sha..$RESUME_HEAD" 2>/dev/null || printf '0')
+    fi
+    # An ancestor local branch has no unique work to lose. Keep dirty
+    # worktrees gated because cleanup would discard uncommitted changes.
+    if [[ -n $merged_sha ]] && git -C "$REPO_ROOT" merge-base --is-ancestor "$RESUME_HEAD" "$merged_sha" 2>/dev/null && [[ $RESUME_DIVERGED -eq 0 && $RESUME_DIRTY -eq 0 ]]; then
       RESUME_PHASE="pr-merged"; RESUME_PR=$merged_pr; RESUME_PR_URL=$merged_url; RESUME_PR_STATE="merged"
       RESUME_MERGE_COMMIT=${merged_merge_commit:-$merged_sha}; RESUME_BASE_BRANCH=${merged_base:-$default_branch}
     else
-      RESUME_PHASE="needs-decision"; RESUME_PR=$merged_pr; RESUME_PR_URL=$merged_url; RESUME_PR_STATE="merged-mismatch"
+      RESUME_PHASE="needs-decision"; RESUME_PR=$merged_pr; RESUME_PR_URL=$merged_url; RESUME_PR_STATE="merged-mismatch:$merged_local_only"
     fi
     return 0
   fi
@@ -605,7 +611,9 @@ EOF
 resume_needs_decision_body() {
   local worker=$1 branch=$2
   case $RESUME_PR_STATE in
-    merged-mismatch)
+    merged-mismatch:*)
+      local local_only=${RESUME_PR_STATE#merged-mismatch:}
+      printf 'ローカルだけに存在するcommit数: %s。 ' "$local_only"
       printf '<!-- agentic-loop:needs-input worker=%s reason=resume-merged-mismatch pr=%s -->\\n再開時の検査で、branch `%s` の現在のcommit（%s）が、merge済みPR #%s のhead commitと一致しませんでした。mergeの後に別途commitが追加されたか、branchが書き換えられた可能性があります。自動ではforce-pushやreset、branch/worktreeの削除を行いません。既存のworktree/branch/remote branchを確認し、次のいずれかを人手で選んでから、このIssueへ返信してください: (1) 追加分を新しいIssueとして切り出す、(2) branchをmerge済みcommitにresetして完了扱いにする、(3) その他の対応方針を指示する。' \
         "$worker" "$RESUME_PR" "$branch" "${RESUME_HEAD:0:12}" "$RESUME_PR" ;;
     *)

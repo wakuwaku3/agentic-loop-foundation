@@ -754,7 +754,11 @@ agent_result_is_pool_exhausted() {
 }
 
 agent_result_is_model_failure() {
-  local result_file=$1
+  local result_file=$1 exit_code=$2 provider_error=${3:-0}
+  # A successful stage may legitimately discuss model errors (for example in
+  # a plan or repair explanation). Classify the text only when the provider
+  # actually failed, matching the pool-exhaustion gate above (Issue #226).
+  (( exit_code != 0 )) || (( provider_error == 1 )) || return 1
   [[ -r $result_file ]] && grep -qiE 'overloaded|model.*not found|unknown model|invalid model|model.*not supported' "$result_file"
 }
 
@@ -1076,7 +1080,7 @@ run_stage_candidates() {
       say "プール枠枯渇のため次の候補へ切り替えます: pool=$CAND_POOL provider=$CAND_PROVIDER model=$CAND_MODEL" >&2
       continue
     fi
-    if agent_result_is_model_failure "$result_file" "$STAGE_EXIT_CODE"; then
+    if agent_result_is_model_failure "$result_file" "$STAGE_EXIT_CODE" "$STAGE_PROVIDER_ERROR"; then
       if (( tries < max_tries )); then
         say "モデル固有の失敗のため次の候補へ切り替えます: pool=$CAND_POOL provider=$CAND_PROVIDER model=$CAND_MODEL" >&2
         continue
