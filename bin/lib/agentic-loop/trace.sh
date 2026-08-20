@@ -286,6 +286,7 @@ trace_evaluate() {
   fi
   # workload-unbounded: PRに紐づく有限のcheck-run件数と変更path件数を全件取得; bound=PR metadata count; track=#237
   TRACE_CHECKRUNS=$(repo_api "commits/$head_sha/check-runs" -f per_page=100 --paginate --jq '.check_runs' 2>/dev/null || printf '[]')
+  # workload-unbounded: PRの有限な変更path件数を全件取得; bound=PR file count; track=#237
   TRACE_FILES=$(repo_api "pulls/$pr/files" --method GET -f per_page=100 --paginate --jq '.[].filename' 2>/dev/null || true)
   if ! trace_reconcile_checks "$TRACE_MANIFEST" "$(trace_checkrun_verdict "$TRACE_CHECKRUNS")" || ! trace_reconcile_paths "$TRACE_MANIFEST" "$TRACE_FILES"; then
     return 1
