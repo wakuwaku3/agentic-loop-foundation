@@ -4492,7 +4492,7 @@ assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:shutdown' 'gra
 # A graceful shutdown marker must not disable the next service boot.  The
 # systemd/manual entrypoint is _service, so exercise that path directly.
 write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=30 STOP_TIMEOUT=10 STALE_DAYS=30
-printf '16 queued open none 2026-01-01T00:00:00Z\n' > "$state"
+: > "$state"
 : > "$state_root/stop.requested"
 AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _service
 [[ ! -e $state_root/stop.requested ]] || fail 'service startup did not clear a stale stop.requested marker'
