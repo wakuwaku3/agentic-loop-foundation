@@ -576,6 +576,44 @@ case "${1:-} ${2:-}" in
       links=$(awk -v n="$issue" '$1 == n {print $2}' "$FAKE_GH_ROOT/$key.dep-links" 2>/dev/null || true)
       [[ -n $links ]] && tr ',' '\n' <<< "$links"
       true
+    elif [[ $endpoint =~ ^issues/([0-9]+)/dependencies/blocked_by$ && $method == POST ]]; then
+      # Issue #252: this endpoint's `issue_id` is a typed-integer property
+      # requiring the blocking Issue's *database id*, not its Issue number.
+      # This fixture's `--jq .id` convention below returns number+900000, so
+      # accepting only that shape here (a) fails a caller that still sends
+      # the raw number or an untyped string, and (b) lets dispose.sh's own
+      # immediate GET-back verification see the transferred dependency by
+      # resolving the id back to a number.
+      issue=${BASH_REMATCH[1]}
+      issue_id_arg=''
+      for arg in "$@"; do [[ $arg == issue_id=* ]] && issue_id_arg=${arg#issue_id=}; done
+      dep_number=$((issue_id_arg - 900000))
+      if [[ ! $issue_id_arg =~ ^[0-9]+$ ]] || (( dep_number < 1 )); then
+        printf 'HTTP 422: Unprocessable Entity\n' >&2; exit 1
+      fi
+      ( flock 9
+        existing_line=$(awk -v n="$issue" '$1 == n {print $2}' "$FAKE_GH_ROOT/$key.dep-links" 2>/dev/null || true)
+        new_line=$dep_number; [[ -z $existing_line ]] || new_line="$existing_line,$dep_number"
+        awk -v n="$issue" '$1 != n' "$FAKE_GH_ROOT/$key.dep-links" 2>/dev/null > "$FAKE_GH_ROOT/$key.dep-links.$$.tmp" || true
+        printf '%s %s\n' "$issue" "$new_line" >> "$FAKE_GH_ROOT/$key.dep-links.$$.tmp"
+        mv "$FAKE_GH_ROOT/$key.dep-links.$$.tmp" "$FAKE_GH_ROOT/$key.dep-links"
+      ) 9> "$FAKE_GH_ROOT/$key.dep-links.lock"
+    elif [[ $endpoint =~ ^issues/([0-9]+)/sub_issues$ && $method == POST ]]; then
+      # Issue #252: sub_issue_id is a typed-integer property; reject a
+      # non-numeric value the way GitHub's 422 would.
+      if [[ ${FAKE_SUB_ISSUES_FAIL:-0} == 1 ]]; then
+        printf '{"message":"Invalid request.\\n\\nInvalid property /sub_issue_id: forced-test-failure","status":"422"}\n' >&2
+        exit 1
+      fi
+      sub_issue_id_arg=''
+      for arg in "$@"; do [[ $arg == sub_issue_id=* ]] && sub_issue_id_arg=${arg#sub_issue_id=}; done
+      [[ $sub_issue_id_arg =~ ^[0-9]+$ ]] || { printf 'HTTP 422: Unprocessable Entity\n' >&2; exit 1; }
+    elif [[ $endpoint =~ ^issues/([0-9]+)$ && $* == *'--jq .id'* ]]; then
+      # This fixture's database id is deliberately distinct from the Issue
+      # number (id = number + 900000) so a test can tell apart a call that
+      # correctly resolved to the database id from one that (Issue #252)
+      # mistakenly passed the Issue number straight through.
+      printf '%s\n' "$((BASH_REMATCH[1] + 900000))"
     elif [[ $endpoint =~ ^issues/([0-9]+)$ ]]; then
       issue=${BASH_REMATCH[1]}
       if [[ $method == PATCH && $form_state == closed ]]; then
@@ -2120,6 +2158,27 @@ grep -Eq '^72 cancelled closed' "$state" || fail 'authorized dispose did not clo
 assert_contains "$closes" $'72\tnot_planned' 'dispose close did not record state_reason=not_planned'
 assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:dispose' 'dispose did not record its audit marker'
 
+# dispose --target transfers the source Issue's native blocked_by
+# dependencies to the consolidation target. Regression guard for Issue #252:
+# issue_id must be the blocking Issue's *database id* (this fixture's
+# id=number+900000), not its Issue number -- `gh api -f` (untyped string) or
+# passing the raw number both 422 against the real endpoint, and here the
+# fixture rejects a raw-number id the same way, so a regression fails the
+# whole dispose instead of silently mis-transferring the dependency.
+printf '73 needs-input open\n74 needs-input open\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+rm -f "$closes"
+printf '73 810,811\n' > "$FAKE_GH_ROOT/$state_key.dep-links"
+calls_before=$(wc -l < "$FAKE_GH_ROOT/calls")
+"$target/bin/agentic-loop" dispose 73 --reason superseded --target 74
+tail -n "+$((calls_before + 1))" "$FAKE_GH_ROOT/calls" > "$TEST_ROOT/dispose-transfer-calls.log"
+grep -Eq '^73 superseded closed' "$state" || fail 'dispose --target did not close the source Issue as superseded'
+assert_contains "$TEST_ROOT/dispose-transfer-calls.log" 'issues/74/dependencies/blocked_by --method POST -F issue_id=900810' 'dependency transfer did not POST the blocking Issue database id (810 -> 900810) as a typed parameter'
+assert_contains "$TEST_ROOT/dispose-transfer-calls.log" 'issues/74/dependencies/blocked_by --method POST -F issue_id=900811' 'dependency transfer did not POST the blocking Issue database id (811 -> 900811) as a typed parameter'
+grep -q -- '-f issue_id=' "$TEST_ROOT/dispose-transfer-calls.log" && fail 'dependency transfer still sends issue_id as an untyped -f string parameter'
+grep -Eq -- 'issue_id=(810|811)([^0-9]|$)' "$TEST_ROOT/dispose-transfer-calls.log" && fail 'dependency transfer sent the blocking Issue number instead of its database id'
+rm -f "$FAKE_GH_ROOT/$state_key.dep-links"
+
 # A token/rate-limit exhaustion re-queues the Issue (never failed) and pauses
 # the supervisor; claiming resumes once the pool's exhaustion clears. The real
 # Codex usage-limit path exits non-zero and reports only on stderr, so drive it
@@ -3143,6 +3202,31 @@ FAKE_CODEX_GIT_RENAME=1 FAKE_CODEX_RESULT='AGENTIC_LOOP_RESULT=completed' "$targ
 grep -Eq '^251 completed closed' "$state" || fail 'rename-diff scope test Issue did not complete'
 assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:scope tokens=path:seed-renamed.txt,structural' 'the worker did not record the renamed path and structural sentinel in its refined scope'
 
+# decomposition_materialize registers each freshly created child Issue as a
+# native sub-issue of the parent and a native blocked_by dependency (parent
+# blocked by child, and a later child blocked by an earlier one it depends
+# on). Regression guard for Issue #252: sub_issue_id/issue_id must be typed
+# integers (`-F`, not `-f`) carrying each child's *database id*
+# (id=number+900000 in this fixture), not its Issue number.
+decomposition_manifest=$(printf '{"schema":1,"mode":"children","integration_acceptance_criteria":"integration ok","children":[{"key":"child-a","title":"Child A","purpose":"purpose a","acceptance_criteria":"crit a","scope":"paths=docs/child-a","depends_on":[]},{"key":"child-b","title":"Child B","purpose":"purpose b","acceptance_criteria":"crit b","scope":"paths=docs/child-b","depends_on":["child-a"]}]}')
+printf '700 running open\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+calls_before=$(wc -l < "$FAKE_GH_ROOT/calls")
+FAKE_CODEX_RESULT=$'計画: 2子への分解\n```agentic-loop:decomposition\n'"$decomposition_manifest"$'\n```' \
+  "$target/bin/agentic-loop" _worker 700 decomposition-worker
+tail -n "+$((calls_before + 1))" "$FAKE_GH_ROOT/calls" > "$TEST_ROOT/decomposition-calls.log"
+grep -Eq '^700 blocked open' "$state" || fail 'decomposition_materialize did not move the parent Issue to agent:blocked'
+child_a=$(awk '$1 > 700 {print $1; exit}' "$state")
+child_b=$(awk -v a="$child_a" '$1 > a {print $1; exit}' "$state")
+[[ $child_a =~ ^[0-9]+$ && $child_b =~ ^[0-9]+$ ]] || fail 'decomposition_materialize did not create two child Issues'
+assert_contains "$TEST_ROOT/decomposition-calls.log" "issues/700/sub_issues --method POST -F sub_issue_id=$((child_a + 900000))" 'decomposition_materialize did not register child A as a native sub-issue with a typed database id'
+assert_contains "$TEST_ROOT/decomposition-calls.log" "issues/700/sub_issues --method POST -F sub_issue_id=$((child_b + 900000))" 'decomposition_materialize did not register child B as a native sub-issue with a typed database id'
+assert_contains "$TEST_ROOT/decomposition-calls.log" "issues/700/dependencies/blocked_by --method POST -F issue_id=$((child_a + 900000))" 'decomposition_materialize did not register the parent as blocked_by child A with a typed database id'
+assert_contains "$TEST_ROOT/decomposition-calls.log" "issues/700/dependencies/blocked_by --method POST -F issue_id=$((child_b + 900000))" 'decomposition_materialize did not register the parent as blocked_by child B with a typed database id'
+assert_contains "$TEST_ROOT/decomposition-calls.log" "issues/$child_b/dependencies/blocked_by --method POST -F issue_id=$((child_a + 900000))" 'decomposition_materialize did not register child B as blocked_by child A (depends_on) with a typed database id'
+grep -q -- '-f sub_issue_id=\|-f issue_id=' "$TEST_ROOT/decomposition-calls.log" && fail 'decomposition_materialize still sends sub_issue_id/issue_id as an untyped -f string parameter'
+grep -Eq -- "issue_id=($child_a|$child_b)([^0-9]|\$)" "$TEST_ROOT/decomposition-calls.log" && fail 'decomposition_materialize sent a child Issue number instead of its database id'
+
 # doctor rejects an invalid unknown_scope value.
 cp "$target/.agentic-loop.toml" "$target/.agentic-loop.toml.valid"
 printf '[queue]\nunknown_scope = "sometimes"\n' > "$target/.agentic-loop.toml"
@@ -3434,6 +3518,27 @@ assert_contains "$TEST_ROOT/postmortem-link-calls.log" 'issues/90/sub_issues' 'p
 assert_contains "$TEST_ROOT/postmortem-link-calls.log" 'issues/90/dependencies/blocked_by' 'postmortem link did not register the native blocked_by dependency'
 assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:postmortem-link action_items=91' 'postmortem link did not record its audit marker'
 [[ ! -r "$state_root/workers/90.lease" ]] || fail 'postmortem link did not release the postmortem Issue lease'
+# Regression guard for Issue #252: `gh api -f` always sends a string, which
+# GitHub 422s for these typed-integer properties, and both endpoints require
+# action item #91's *database id* (this fixture's id=901991... i.e.
+# number+900000, deliberately distinct from the Issue number) rather than its
+# Issue number.
+assert_contains "$TEST_ROOT/postmortem-link-calls.log" 'issues/90/sub_issues --method POST -F sub_issue_id=900091' 'postmortem link did not send sub_issue_id as a typed integer using the action item database id'
+assert_contains "$TEST_ROOT/postmortem-link-calls.log" 'issues/90/dependencies/blocked_by --method POST -F issue_id=900091' 'postmortem link did not send issue_id as a typed integer using the action item database id'
+grep -q -- '-f sub_issue_id=\|-f issue_id=' "$TEST_ROOT/postmortem-link-calls.log" && fail 'postmortem link still sends sub_issue_id/issue_id as an untyped -f string parameter'
+grep -Eq -- 'issue_id=91([^0-9]|$)' "$TEST_ROOT/postmortem-link-calls.log" && fail 'postmortem link sent the action item Issue number instead of its database id'
+
+# When the native sub-issue/dependency POST itself fails (e.g. the 422 this
+# Issue reports), the response body must reach a diagnosable place instead of
+# a silent `return` (Issue #252 completion criterion 4).
+printf '92 running open\n93 queued open\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+printf '92 <!-- agentic-loop:claim worker=postmortem-link-fail-fixture created=%s expires=%s -->\n' "$(date +%s)" "$(($(date +%s) + 3600))" > "$FAKE_GH_ROOT/$state_key.comments"
+link_fail_rc=0
+FAKE_SUB_ISSUES_FAIL=1 "$target/bin/agentic-loop" postmortem link 92 93 > "$TEST_ROOT/postmortem-link-fail.log" 2>&1 || link_fail_rc=$?
+(( link_fail_rc != 0 )) || fail 'postmortem link did not fail when the sub_issues POST was rejected'
+grep -Eq '^92 running open' "$state" || fail 'a failed postmortem link unexpectedly changed the postmortem Issue state'
+assert_contains "$TEST_ROOT/postmortem-link-fail.log" 'forced-test-failure' 'a failed sub_issues POST did not surface its response body for diagnosis'
 
 # Closed loop: once every linked action item Issue closes and verifies
 # (agent:completed), the EXISTING dependency.sh requeue mechanism (no new
