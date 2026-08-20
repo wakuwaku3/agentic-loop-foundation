@@ -18,12 +18,13 @@ queue_project_sync() {
   # This file is deliberately only a wake-up hint.  Desired Project values are
   # never persisted locally: they are derived from a fresh GitHub Issue read
   # immediately before a mutation.
-  local hint=$1 issue occurrences
+  local hint=$1 issue occurrences was_empty=0 appended=0
   if [[ $hint =~ ^([a-z-]+[[:space:]]+)?([1-9][0-9]*) ]]; then issue=${BASH_REMATCH[2]};
   elif [[ $hint =~ /issues/([1-9][0-9]*)$ ]]; then issue=${BASH_REMATCH[1]};
   else return 0; fi
   mkdir -p "$STATE_ROOT"
   ( flock 9
+    [[ -s $STATE_ROOT/project-pending ]] || was_empty=1
     occurrences=$(grep -Fxc -- "$issue" "$STATE_ROOT/project-pending" 2>/dev/null || true); occurrences=${occurrences:-0}
     # An entry being reconciled remains in project-pending.  A second enqueue
     # for it is deliberately retained (but capped at one extra copy, not
@@ -33,10 +34,17 @@ queue_project_sync() {
     if grep -Fxq -- "$issue" "$STATE_ROOT/project-pending.inflight" 2>/dev/null; then
       if (( occurrences < 2 )); then
         printf '%s\n' "$issue" >> "$STATE_ROOT/project-pending"
+        appended=1
       fi
     elif (( occurrences == 0 )); then
       printf '%s\n' "$issue" >> "$STATE_ROOT/project-pending"
+      appended=1
     fi
+    # .since records when the pending queue first became non-empty, not this
+    # entry's own timestamp, so `status` can show elapsed time against the
+    # oldest unresolved retry instead of resetting on every enqueue/ack (see
+    # docs/decisions/0005).
+    if (( appended )) && (( was_empty )); then date +%s > "$STATE_ROOT/project-pending.since"; fi
   ) 9> "$STATE_ROOT/project-pending.lock"
 }
 
@@ -241,7 +249,7 @@ reconcile_pending_project() {
     processed=$((processed + 1))
   done < "$snapshot"
   rm -f "$snapshot"
-  [[ -s $STATE_ROOT/project-pending ]] || rm -f "$STATE_ROOT/project-pending"
+  [[ -s $STATE_ROOT/project-pending ]] || rm -f "$STATE_ROOT/project-pending" "$STATE_ROOT/project-pending.since"
 }
 
 
