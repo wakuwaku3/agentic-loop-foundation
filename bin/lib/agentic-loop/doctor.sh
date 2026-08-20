@@ -122,12 +122,18 @@ doctor_collect() {
   # Tiers schema validation (Issue #155): unknown providers and invalid
   # max_usage_percent are failures; a tier with no models is a warning (it
   # silently contributes no candidates).
-  local tier_phase tier_provider tier_max tier_i tier_empty=0
+  local tier_phase tier_provider tier_effort tier_max tier_i tier_empty=0
   for tier_phase in plan exec diagnose; do
-    while IFS="$CAND_FS" read -r _ _ _ tier_provider _ _ tier_max; do
+    while IFS="$CAND_FS" read -r _ _ _ tier_provider _ tier_effort tier_max; do
       [[ -n $tier_provider ]] || continue
       if ! provider_valid "$tier_provider"; then
         doctor_add failure "tiers設定 ($tier_phase)" "tierのprovider $tier_provider は未対応です。" 'agent.*.tiers[].provider を codex、claude、opencode のいずれかに設定してください。'
+      fi
+      # claude receives the declared effort as `--effort` (Issue #265), so a
+      # level its CLI does not accept is a configuration error rather than a
+      # silently ignored key.
+      if [[ $tier_provider == claude && -n $tier_effort ]] && ! claude_effort_valid "$tier_effort"; then
+        doctor_add failure "tiers設定 ($tier_phase)" "claudeのreasoning_effort $tier_effort は未対応です。" 'reasoning_effort を low、medium、high、xhigh、max のいずれかに設定してください。'
       fi
       if [[ -n $tier_max ]] && { ! [[ $tier_max =~ ^[0-9]+(\.[0-9]+)?$ ]] || ! awk -v m="$tier_max" 'BEGIN { exit !(m >= 0 && m <= 100) }'; }; then
         doctor_add failure "tiers設定 ($tier_phase)" "models[].max_usage_percent は0〜100の数値にしてください（現在: ${tier_max:-空}）。" 'agent.*.tiers[].models[].max_usage_percent を0〜100の数値に修正してください。'
@@ -143,6 +149,11 @@ doctor_collect() {
       fi
     fi
   done
+  local stage_cap
+  stage_cap=$(config_value 'budget.max_stage_cost_usd')
+  if [[ -n $stage_cap ]] && { ! [[ $stage_cap =~ ^[0-9]+(\.[0-9]+)?$ ]] || ! awk -v c="$stage_cap" 'BEGIN { exit !(c > 0) }'; }; then
+    doctor_add failure 'stageコスト上限' "budget.max_stage_cost_usd は正の数値にしてください（現在: $stage_cap）。" 'budget.max_stage_cost_usd を正の数値に修正するか、キー自体を削除してください（削除で上限なし）。'
+  fi
   if agent_used_providers | grep -qx opencode; then
     local go_auth go_has=0
     go_auth="${XDG_DATA_HOME:-$HOME/.local/share}/opencode/auth.json"
