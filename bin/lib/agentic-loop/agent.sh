@@ -826,9 +826,10 @@ exhaustion_note_pause() {
 # --output-last-message file; stderr is folded into result_file when empty so
 # the pool/model matchers still see the text.
 agent_run_stage() {
-  local stage=$1 worktree=$2 git_common_dir=$3 agents_dir=$4 result_file=$5 usage_file=$6 prompt=$7 pool=$8 provider=$9 model=${10} effort=${11} raw_result stderr_file provider_rc=0
+  local stage=$1 worktree=$2 git_common_dir=$3 agents_dir=$4 result_file=$5 usage_file=$6 prompt=$7 pool=$8 provider=$9 model=${10} effort=${11} raw_result stderr_file provider_rc=0 started_ms finished_ms duration_ms stdout_bytes stderr_bytes evidence_dir evidence_id evidence_attempt
   raw_result="${result_file}.raw.$$"
   stderr_file="${result_file}.stderr.$$"
+  started_ms=$(date +%s%3N)
   # Structured "the provider reported a failure" flag, consumed by
   # agent_result_is_pool_exhausted so a SUCCESSFUL stage whose output merely
   # mentions rate limits/quota is never misread as the pool being spent.  A
@@ -898,7 +899,6 @@ agent_run_stage() {
       else
         yq -r '.result // ""' "$raw_result" > "$result_file" 2>/dev/null || cp "$raw_result" "$result_file"
       fi
-      rm -f "$raw_result"
       ;;
     opencode)
       # opencode has no OS sandbox; --dir scopes work to the worktree and --auto
@@ -924,7 +924,6 @@ agent_run_stage() {
         [[ -n $message ]] && printf '%s\n' "$message" > "$result_file"
       done < "$raw_result"
       (( parse_failed == 0 )) || cp "$raw_result" "$result_file"
-      rm -f "$raw_result"
       ;;
     *)
       printf 'reasoning_effort=%s\n' "$effort" >> "$usage_file"
@@ -945,7 +944,28 @@ agent_run_stage() {
   if [[ ! -s $result_file && -s $stderr_file ]]; then
     cp "$stderr_file" "$result_file"
   fi
-  rm -f "$stderr_file"
+  finished_ms=$(date +%s%3N)
+  duration_ms=$((finished_ms - started_ms))
+  stdout_bytes=$(wc -c < "$raw_result")
+  stderr_bytes=$(wc -c < "$stderr_file")
+  printf 'provider_exit=%s\nduration_ms=%s\nstdout_bytes=%s\nstderr_bytes=%s\n' \
+    "$provider_rc" "$duration_ms" "$stdout_bytes" "$stderr_bytes" >> "$usage_file"
+  if (( provider_rc != 0 )) || [[ ! -s $result_file ]]; then
+    evidence_dir="$(dirname "$usage_file")/stage-evidence"
+    mkdir -p "$evidence_dir"
+    evidence_attempt=$(( $(find "$evidence_dir" -maxdepth 1 -type f -name "$(basename "$result_file" .txt)-*.stdout" | wc -l) + 1 ))
+    evidence_id="$(basename "$result_file" .txt)-attempt${evidence_attempt}-$(date +%s)-$$"
+    mv "$raw_result" "$evidence_dir/$evidence_id.stdout" 2>/dev/null || :
+    mv "$stderr_file" "$evidence_dir/$evidence_id.stderr" 2>/dev/null || :
+    # Keep a bounded forensic window; evidence is local-only and never posted.
+    mapfile -t _evidence_files < <(find "$evidence_dir" -maxdepth 1 -type f -printf '%T@ %p\n' | sort -n | awk '{sub(/^[^ ]+ /, ""); print}')
+    while (( ${#_evidence_files[@]} > 40 )); do
+      rm -f -- "${_evidence_files[0]}"
+      _evidence_files=("${_evidence_files[@]:1}")
+    done
+  else
+    rm -f "$raw_result" "$stderr_file"
+  fi
   return "$provider_rc"
 }
 
@@ -1027,6 +1047,10 @@ agent_post_usage() {
   [[ -n ${usage[tokens_cache_read]:-} ]] && summary+=" cache_read=${usage[tokens_cache_read]}tok"
   [[ -n ${usage[tokens_reasoning]:-} ]] && summary+=" 推論=${usage[tokens_reasoning]}tok"
   [[ -n ${usage[cost_usd]:-} ]] && summary+=" cost=\$${usage[cost_usd]}"
+  [[ -n ${usage[provider_exit]:-} ]] && summary+=" provider_exit=${usage[provider_exit]}"
+  [[ -n ${usage[duration_ms]:-} ]] && summary+=" duration_ms=${usage[duration_ms]}"
+  [[ -n ${usage[stdout_bytes]:-} ]] && summary+=" stdout_bytes=${usage[stdout_bytes]}"
+  [[ -n ${usage[stderr_bytes]:-} ]] && summary+=" stderr_bytes=${usage[stderr_bytes]}"
   summary+=" 所要=${seconds}s exit=${exit_code}"
   comment_issue "$issue" "$summary" || true
 }
