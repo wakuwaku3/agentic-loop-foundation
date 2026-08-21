@@ -105,7 +105,7 @@ grep -Fq '[検証ハーネスポリシー](docs/policies/validation-harness.md)'
   printf 'Missing validation harness invariant.\n' >&2
   exit 1
 }
-for requirement in 'local fast check' 'local full check' 'public repository' 'private repository' 'push gate' 'merge gate' 'commit SHA' 'hook bypass' 'AI review'; do
+for requirement in 'local fast check' 'local full check' 'public repository' 'private repository' 'push gate' 'merge gate' 'commit SHA' 'hook bypass' 'AI review' 'make smoke' 'merge gateへ自動的に組み込まない'; do
   grep -Fq "$requirement" docs/policies/validation-harness.md || {
     printf 'Validation harness policy lacks requirement: %s\n' "$requirement" >&2
     exit 1
@@ -113,6 +113,17 @@ for requirement in 'local fast check' 'local full check' 'public repository' 'pr
 done
 grep -Fq 'docs/policies/validation-harness.md' scripts/lib/foundation-files.sh || {
   printf 'Validation harness policy is not distributed.\n' >&2
+  exit 1
+}
+# The explicit smoke check (Issue #279) must exist as a CLI entry point and
+# must never become a merge-gate prerequisite: it touches the real GitHub API
+# and provider CLI, which is non-deterministic and billable.
+grep -Fq 'smoke) cmd_smoke' bin/agentic-loop || {
+  printf 'bin/agentic-loop smoke entry point is missing.\n' >&2
+  exit 1
+}
+awk '/^check:/{print; exit}' Makefile | grep -Fq 'smoke' && {
+  printf 'Makefile check target must not depend on smoke (network/provider quota, not a merge gate).\n' >&2
   exit 1
 }
 grep -Fq 'devbox run --pure check' docs/policies/development-environment.md || {

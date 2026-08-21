@@ -629,6 +629,95 @@
         }
       }
     },
+    "jq@latest": {
+      "last_modified": "2026-08-17T10:51:46Z",
+      "resolved": "github:NixOS/nixpkgs/f4b6996c4e8b9ee06ce147ec344c885f51071b14#jq",
+      "source": "devbox-search",
+      "version": "1.8.2",
+      "systems": {
+        "aarch64-darwin": {
+          "outputs": [
+            {
+              "name": "bin",
+              "path": "/nix/store/0rh3h4zp6zfpyrprc5nhv8fr6fimif20-jq-1.8.2-bin",
+              "default": true
+            },
+            {
+              "name": "man",
+              "path": "/nix/store/mvjwlxlr8jjy0qk6hhbiz7sc4c34qbyp-jq-1.8.2-man",
+              "default": true
+            },
+            {
+              "name": "dev",
+              "path": "/nix/store/n9k1113nhr98lj127dybfjc47ywvwkzq-jq-1.8.2-dev"
+            },
+            {
+              "name": "doc",
+              "path": "/nix/store/c2mfv51inycd1m1h23wrq0xrmqma1n01-jq-1.8.2-doc"
+            },
+            {
+              "name": "out",
+              "path": "/nix/store/kn0zwf9xffzj4j9rf2iw8zqqgp5r81pa-jq-1.8.2"
+            }
+          ],
+          "store_path": "/nix/store/0rh3h4zp6zfpyrprc5nhv8fr6fimif20-jq-1.8.2-bin"
+        },
+        "aarch64-linux": {
+          "outputs": [
+            {
+              "name": "bin",
+              "path": "/nix/store/idak61zxiv384i26xpk1rgq17bwfpk74-jq-1.8.2-bin",
+              "default": true
+            },
+            {
+              "name": "man",
+              "path": "/nix/store/xha52gqb3ghchsgzff2ivn4vzndf1ap9-jq-1.8.2-man",
+              "default": true
+            },
+            {
+              "name": "doc",
+              "path": "/nix/store/i31dp26h347cnzh3bj6spay6kydgg0vp-jq-1.8.2-doc"
+            },
+            {
+              "name": "out",
+              "path": "/nix/store/p6gmwpax6i1pbvcpqxg51swl5zn6lrrw-jq-1.8.2"
+            },
+            {
+              "name": "dev",
+              "path": "/nix/store/r9zn83ni06rdzkns9rya2ajvasvjwg14-jq-1.8.2-dev"
+            }
+          ],
+          "store_path": "/nix/store/idak61zxiv384i26xpk1rgq17bwfpk74-jq-1.8.2-bin"
+        },
+        "x86_64-linux": {
+          "outputs": [
+            {
+              "name": "bin",
+              "path": "/nix/store/25pcd19xk5ff8ybjslsips4g7yv06fxl-jq-1.8.2-bin",
+              "default": true
+            },
+            {
+              "name": "man",
+              "path": "/nix/store/azzak4596lzn8kc48pij8kdjn0b2pwnx-jq-1.8.2-man",
+              "default": true
+            },
+            {
+              "name": "doc",
+              "path": "/nix/store/78aafabrskd5il1l06lhbqi7jzd8pknh-jq-1.8.2-doc"
+            },
+            {
+              "name": "out",
+              "path": "/nix/store/rj3zms0wpcp1q5vcbin93w3jyg2rdj84-jq-1.8.2"
+            },
+            {
+              "name": "dev",
+              "path": "/nix/store/l9wkilihbd6xg5f7dmwzyxjlmaly45ib-jq-1.8.2-dev"
+            }
+          ],
+          "store_path": "/nix/store/25pcd19xk5ff8ybjslsips4g7yv06fxl-jq-1.8.2-bin"
+        }
+      }
+    },
     "shellcheck@latest": {
       "last_modified": "2026-08-01T16:34:20Z",
       "resolved": "github:NixOS/nixpkgs/a5cbcfe954791221bfffe2307f7d1a1bf61a871e#shellcheck",

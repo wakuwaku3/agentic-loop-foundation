@@ -8,7 +8,7 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
   exit 1
 }
 
-for command_name in bash awk find git grep make sed flock yq sha256sum gitleaks; do
+for command_name in bash awk find git grep make sed flock yq jq sha256sum gitleaks; do
   command_path=$(readlink -f "$(command -v "$command_name")")
   [[ $command_path == /nix/store/* ]] || {
     printf 'Unpinned command in development environment: %s=%s\n' "$command_name" "$command_path" >&2

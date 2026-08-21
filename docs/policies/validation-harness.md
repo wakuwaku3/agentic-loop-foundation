@@ -6,24 +6,7 @@
 
 ## 共通入口と検証層
 
-### fake provider と実CLIの契約照合
-
-fake provider は高速で決定的な故障注入を担うが、実CLIの完全な代替では
-ない。境界ごとに、実CLIで観測した成功・失敗の最小入出力契約を記録し、
-fake fixtureと突き合わせる。対象境界は、終了コードとstdout/stderrの搬送、
-ClaudeのJSON envelopeと `is_error`、Codexの最終メッセージファイル、外部
-CLIの終了コード・標準エラーである。
-今回のdecomposition契約では、mikefarah yq固有の引数差分（Issue #222）も
-この照合対象に含める。
-scope tokenの正規化後に空集合となる入力も、拒否fixtureとして維持する。
-契約fixtureの更新理由は対応Issueと同じPR本文に記録する。
-
-突き合わせは通常の完全テストへ課金呼び出しを混ぜず、実CLIの変更時または
-故障形状追加時に、既存のCodex loginと固定開発環境で一度だけ記録した非秘密
-fixtureを更新し、`devbox run --pure check` 内のfake smoke testで再生する。
-実CLIを利用できない環境では契約を推測で拡張せず、観測不能な差分をIssueに
-残す。fixtureにはCLI version、終了コード、stdout/stderrの有無、JSON schema
-上の判定だけを記録し、prompt、秘密、全文ログは保存しない。
+実CLI境界の確認には、明示的な `make smoke`（`bin/agentic-loop smoke`）をhost shellで実行する。`devbox run --pure` の中では実行できない（`gh` とprovider CLIはpinned runtimeの外にあるhost側toolのため）。これは`bin/agentic-loop`が本番で使う`project.sh`の関数（`project_content_query` / `project_content_jq`）をそのまま呼び、実 `gh` のGraphQL（Project contentの接続レベル`pageInfo`によるカーソル継続を含む）1回、読み取り専用REST最大2回、設定済みprovider CLIの構造化応答probe 1回を検証する。対象Issueは既定で最初に見つかった open Issueを使い、`--issue N` で上書きできる。ネットワークとprovider quotaを伴うため、smokeは`check`/CI/merge gateへ自動的に組み込まない（`Makefile`の`check`は`smoke`に依存しない）。Issue完了時には実環境での実行結果（境界ごとの成否行、実行日時、対象commit SHA）をIssueまたはPRへ記録する。
 
 ローカルとCIは、同じリポジトリ内のコード化済み環境と同じ共通入口を使用する。共通入口から呼ぶ処理や依存をCI専用に分岐させてはならず、検証内容の追加・変更は共通入口へ反映する。このリポジトリの完全チェックとCIの共通入口は `devbox run --pure check` とする。
 

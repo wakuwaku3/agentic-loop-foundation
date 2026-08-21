@@ -120,6 +120,15 @@ token、worker log本文、Issue本文・コメント、providerのresult file�
 | `upgrade` | 導入済みFoundationの安全な更新（[運用ドキュメント](upgrade.md)、[ADR 0009](../decisions/0009-foundation-upgrade.md)） | 運用者が明示実行（Supervisor停止中のみ`--apply`可）。既定はdry-runでGitHub書き込み0回 | 承認未済は終了code 3、適用・検証失敗は1、引数不正は2 |
 | GitHub Project View | 人向けのIssue/PR一覧の可視化層（best-effort、障害はキューを止めない） | GitHub UI上で確認 | 判定には使わない |
 
+### smoke: 実物境界の明示的な検証
+
+`bin/agentic-loop smoke`（`make smoke`、[検証ハーネスポリシー](../policies/validation-harness.md)）は、`check`/CI/merge gateには組み込まない、実 `gh` と実providerCLIに触る唯一の入口である。本番の`project.sh`が使う`project_content_query` / `project_content_jq`をそのまま呼ぶため、fake gh越しの単体testでは検出できないGraphQLスキーマの不整合（例: [Issue #268](https://github.com/wakuwaku3/agentic-loop-foundation/issues/268)級の`pageInfo`の入れ子誤り）を検出できる。GraphQL 1回、読み取り専用REST最大2回、providerCLIの構造化応答probe1回だけを実行し、境界ごとに成否を1行出力する（応答本文・token・秘密情報は出力しない）。`devbox run --pure`の中では実行できない（`gh`・providerCLIはpinned runtimeの外にあるhost側tool）。既定の対象Issueは最初に見つかったopen Issueで、`--issue N`で上書きできる。
+
+```sh
+bin/agentic-loop smoke
+bin/agentic-loop smoke --issue 279
+```
+
 ### 事前診断
 
 `bin/agentic-loop doctor` は、`status` の稼働状況表示より広い導入・復旧向けの読み取り専用診断である。GitHub認証とrepository権限、origin/default branch、plan段・exec段・diagnoseが使用する各AI CLI（`codex`／`claude`／`opencode`、tiersを含む全providerをそれぞれ `AI CLI (<provider>)` として個別に検査）、tiersスキーマ（未知provider・空models・不正な `max_usage_percent`）、opencode go usage APIの認証keyの有無（値は表示しない。なければusage実測が使えずcooldownフォールバックになるwarning）、プール枯渇marker、Devbox、hooks、Supervisor、systemd user service/timer、Project設定、設定値、残存worktree/branch/logを検査し、成功・警告・失敗、影響、復旧方法を日本語で出力する。Projectとtimerは任意の可視化・自動運用機能なので利用不能時は警告とし、GitHub Issueキュー、固定検証環境、hooks、Supervisorなど処理に必須の条件は失敗とする。

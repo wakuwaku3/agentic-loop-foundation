@@ -264,6 +264,44 @@ claude_probe_usage_cached() {
 }
 
 
+# One-shot, uncached boundary probe for `bin/agentic-loop smoke` (Issue #279):
+# unlike agent_provider_usage_percent (cached, feeds the pool
+# exhaustion/recovery decision), this always launches the provider CLI so
+# smoke actually exercises the real boundary once per invocation. Reuses
+# claude_probe_usage_percent unchanged (its is_error check already proves a
+# structured response; either 0 or 100 counts as "reached the boundary").
+# codex/opencode get an equivalent minimal read-only probe. Returns 0 on a
+# structured response, 1 otherwise. Never prints response text, tokens, or
+# cost (secret boundary): the caller only sees this exit code.
+agent_provider_probe_once() {
+  local provider=$1 dir=${2:-$PWD}
+  command -v timeout >/dev/null 2>&1 || return 1
+  case $provider in
+    claude)
+      claude_probe_usage_percent >/dev/null
+      ;;
+    codex)
+      command -v codex >/dev/null 2>&1 || return 1
+      local result_file rc=0
+      result_file=$(mktemp)
+      AGENTIC_LOOP_PROBE=1 timeout 30 codex exec --sandbox read-only -c 'approval_policy="never"' \
+        --output-last-message "$result_file" 'say OK' >/dev/null 2>&1 || rc=$?
+      [[ $rc -eq 0 && -s $result_file ]]; rc=$?
+      rm -f "$result_file"
+      return "$rc"
+      ;;
+    opencode)
+      command -v opencode >/dev/null 2>&1 || return 1
+      local response
+      response=$(AGENTIC_LOOP_PROBE=1 timeout 30 opencode run --auto --format json --dir "$dir" 'say OK' 2>/dev/null) || true
+      [[ -n $response ]] || return 1
+      yq -e 'select(.part.type == "text")' - <<< "$response" >/dev/null 2>&1
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+
 # Measure one provider's pool usage: 0-100 on stdout, non-zero when unreadable.
 agent_provider_usage_percent() {
   case $1 in
