@@ -1153,11 +1153,13 @@ fi
 # Stage-level transport failures model provider failures observed in production:
 # empty output, stderr-only non-zero exit, and a successful process that
 # violates the JSON output contract.
-case ${FAKE_CLAUDE_STAGE_MODE:-} in
-  empty-nonzero) : > "$FAKE_GH_ROOT/claude-stage-mode"; exit 1 ;;
-  stderr-nonzero) printf '%s\n' "${FAKE_CLAUDE_STAGE_STDERR:-provider failed}" >&2; : > "$FAKE_GH_ROOT/claude-stage-mode"; exit 1 ;;
-  nonjson-zero) printf '%s\n' "${FAKE_CLAUDE_STAGE_OUTPUT:-not json}"; : > "$FAKE_GH_ROOT/claude-stage-mode"; exit 0 ;;
-esac
+if [[ ! -e "$FAKE_GH_ROOT/claude-stage-mode" ]]; then
+  case ${FAKE_CLAUDE_STAGE_MODE:-} in
+    empty-nonzero) : > "$FAKE_GH_ROOT/claude-stage-mode"; exit 1 ;;
+    stderr-nonzero) printf '%s\n' "${FAKE_CLAUDE_STAGE_STDERR:-provider failed}" >&2; : > "$FAKE_GH_ROOT/claude-stage-mode"; exit 1 ;;
+    nonjson-zero) printf '%s\n' "${FAKE_CLAUDE_STAGE_OUTPUT:-not json}"; : > "$FAKE_GH_ROOT/claude-stage-mode"; exit 0 ;;
+  esac
+fi
 # The Claude worker captures the final message from stdout into the result file.
 # With --output-format json the sentinel stays inside .result and usage fields
 # accompany it for the token analysis record.
@@ -3658,6 +3660,7 @@ done
 for claude_stage_mode in empty-nonzero stderr-nonzero nonjson-zero; do
   printf '780 running open\n' > "$state"
   rm -f "$state_root/pools/claude/exhausted" "$state_root/agent-exhausted"
+  rm -f "$FAKE_GH_ROOT/claude-stage-mode"
   : > "$FAKE_GH_ROOT/$state_key.comments"
   AGENT_PROVIDER=claude AGENT_PLAN_MAX_RETRIES=0 FAKE_CLAUDE_STAGE_MODE="$claude_stage_mode" \
     AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _worker 780 "claude-stage-$claude_stage_mode" >/dev/null 2>&1 || true
