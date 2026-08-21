@@ -1182,6 +1182,14 @@ if [[ $* == *'--output-format json'* ]]; then
   seq_var="FAKE_CLAUDE_RESULT_$claude_count"
   if [[ -v $seq_var ]]; then claude_result=${!seq_var}; fi
 fi
+# Stage-level transport failures model provider failures observed in production:
+# empty output, stderr-only non-zero exit, and a successful process that
+# violates the JSON output contract.
+case ${FAKE_CLAUDE_STAGE_MODE:-} in
+  empty-nonzero) : > "$FAKE_GH_ROOT/claude-stage-mode"; exit 1 ;;
+  stderr-nonzero) printf '%s\n' "${FAKE_CLAUDE_STAGE_STDERR:-provider failed}" >&2; : > "$FAKE_GH_ROOT/claude-stage-mode"; exit 1 ;;
+  nonjson-zero) printf '%s\n' "${FAKE_CLAUDE_STAGE_OUTPUT:-not json}"; : > "$FAKE_GH_ROOT/claude-stage-mode"; exit 0 ;;
+esac
 # The Claude worker captures the final message from stdout into the result file.
 # With --output-format json the sentinel stays inside .result and usage fields
 # accompany it for the token analysis record.
@@ -3651,6 +3659,44 @@ assert_contains "$TEST_ROOT/decomposition-calls.log" "issues/700/dependencies/bl
 assert_contains "$TEST_ROOT/decomposition-calls.log" "issues/$child_b/dependencies/blocked_by --method POST -F issue_id=$((child_a + 900000))" 'decomposition_materialize did not register child B as blocked_by child A (depends_on) with a typed database id'
 grep -q -- '-f sub_issue_id=\|-f issue_id=' "$TEST_ROOT/decomposition-calls.log" && fail 'decomposition_materialize still sends sub_issue_id/issue_id as an untyped -f string parameter'
 grep -Eq -- "issue_id=($child_a|$child_b)([^0-9]|\$)" "$TEST_ROOT/decomposition-calls.log" && fail 'decomposition_materialize sent a child Issue number instead of its database id'
+
+# decomposition_validate is a rejecting validator: every malformed dependency
+# or scope must stop before GitHub child-Issue mutations.  Keep these cases
+# observable through the worker boundary rather than testing an implementation
+# detail by sourcing the module.
+decomposition_case_index=0
+for decomposition_case in cycle self-dependency forward-reference too-few too-many invalid-scope duplicate-key; do
+  decomposition_case_index=$((decomposition_case_index + 1))
+  decomposition_issue=$((780 + decomposition_case_index))
+  case $decomposition_case in
+    cycle) children='[{"key":"a","title":"A","purpose":"p","acceptance_criteria":"c","scope":"paths=docs/a","depends_on":["b"]},{"key":"b","title":"B","purpose":"p","acceptance_criteria":"c","scope":"paths=docs/b","depends_on":["a"]}]' ;;
+    self-dependency) children='[{"key":"a","title":"A","purpose":"p","acceptance_criteria":"c","scope":"paths=docs/a","depends_on":["a"]},{"key":"b","title":"B","purpose":"p","acceptance_criteria":"c","scope":"paths=docs/b","depends_on":[]}]' ;;
+    forward-reference) children='[{"key":"a","title":"A","purpose":"p","acceptance_criteria":"c","scope":"paths=docs/a","depends_on":["b"]},{"key":"b","title":"B","purpose":"p","acceptance_criteria":"c","scope":"paths=docs/b","depends_on":[]}]' ;;
+    too-few) children='[{"key":"a","title":"A","purpose":"p","acceptance_criteria":"c","scope":"paths=docs/a","depends_on":[]}]' ;;
+    too-many) children='[{"key":"a","title":"A","purpose":"p","acceptance_criteria":"c","scope":"paths=docs/a","depends_on":[]},{"key":"b","title":"B","purpose":"p","acceptance_criteria":"c","scope":"paths=docs/b","depends_on":[]},{"key":"c","title":"C","purpose":"p","acceptance_criteria":"c","scope":"paths=docs/c","depends_on":[]},{"key":"d","title":"D","purpose":"p","acceptance_criteria":"c","scope":"paths=docs/d","depends_on":[]},{"key":"e","title":"E","purpose":"p","acceptance_criteria":"c","scope":"paths=docs/e","depends_on":[]},{"key":"f","title":"F","purpose":"p","acceptance_criteria":"c","scope":"paths=docs/f","depends_on":[]},{"key":"g","title":"G","purpose":"p","acceptance_criteria":"c","scope":"paths=docs/g","depends_on":[]}]' ;;
+    invalid-scope) children='[{"key":"a","title":"A","purpose":"p","acceptance_criteria":"c","scope":"paths=bad$path","depends_on":[]},{"key":"b","title":"B","purpose":"p","acceptance_criteria":"c","scope":"paths=docs/b","depends_on":[]}]' ;;
+    duplicate-key) children='[{"key":"a","title":"A","purpose":"p","acceptance_criteria":"c","scope":"paths=docs/a","depends_on":[]},{"key":"a","title":"A2","purpose":"p","acceptance_criteria":"c","scope":"paths=docs/a2","depends_on":[]}]' ;;
+  esac
+  printf '%s running open\n' "$decomposition_issue" > "$state"
+  : > "$FAKE_GH_ROOT/$state_key.comments"
+  bad_manifest=$(printf '{"schema":1,"mode":"children","integration_acceptance_criteria":"integration","children":%s}' "$children")
+  FAKE_CODEX_RESULT=$'```agentic-loop:decomposition\n'"$bad_manifest"$'\n```' "$target/bin/agentic-loop" _worker "$decomposition_issue" "decomposition-$decomposition_case" >/dev/null 2>&1 || true
+  grep -Eq "^$decomposition_issue needs-input open" "$state" || fail "decomposition $decomposition_case was not rejected"
+  [[ ! -s $FAKE_GH_ROOT/issues-created ]] || fail "decomposition $decomposition_case created a child before rejection"
+done
+
+# Claude transport failures must remain provider-stage failures. In particular,
+# empty non-zero output is not quota evidence and must not create a pool marker.
+for claude_stage_mode in empty-nonzero stderr-nonzero nonjson-zero; do
+  printf '780 running open\n' > "$state"
+  rm -f "$state_root/pools/claude/exhausted" "$state_root/agent-exhausted"
+  rm -f "$FAKE_GH_ROOT/claude-stage-mode"
+  : > "$FAKE_GH_ROOT/$state_key.comments"
+  AGENT_PROVIDER=claude AGENT_PLAN_MAX_RETRIES=0 FAKE_CLAUDE_STAGE_MODE="$claude_stage_mode" \
+    AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _worker 780 "claude-stage-$claude_stage_mode" >/dev/null 2>&1 || true
+  [[ ! -e "$state_root/pools/claude/exhausted" ]] || fail "Claude $claude_stage_mode was misclassified as pool exhaustion"
+  grep -Eq '^780 failed' "$state" || fail "Claude $claude_stage_mode did not produce a terminal stage failure"
+done
 
 # doctor rejects an invalid unknown_scope value.
 cp "$target/.agentic-loop.toml" "$target/.agentic-loop.toml.valid"
