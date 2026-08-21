@@ -87,6 +87,41 @@ progress_write() {
 progress_touch() { progress_write "$1" "$2" || true; }
 
 
+# --- stall-threshold calibration against real stage durations (Issue #280,
+# ADR 0032) -- host-local read of the shared events.log, zero GitHub calls.
+# For each subject, the gap between two consecutive `progress` rows is the
+# duration status's stall detection measures for the *departing* stage (its
+# last progress marker's age at the moment of the next transition). Bounded
+# to the newest EVENTS_CALIBRATION_MAX_LINES lines. A subject's final observed
+# stage is never sampled (it has no next transition, so its duration is
+# unknown -- still running or the log rotated mid-attempt). A gap exceeding
+# worker_timeout_seconds is dropped: it is host/timeout-attributable, not a
+# stage's natural duration, and would otherwise corrupt p90. Prints
+# band<TAB>seconds, one row per sample; band is "provider" for the stages
+# status_stall_threshold widens (plan/exec/replan), "non-provider" otherwise.
+events_stage_duration_samples() {
+  [[ -r $EVENTS_LOG ]] || return 0
+  local epoch subject code stage band delta
+  local -A last_epoch=() last_stage=()
+  while IFS=$'\t' read -r epoch subject code stage; do
+    [[ $code == progress ]] || continue
+    [[ $epoch =~ ^[0-9]+$ ]] || continue
+    if [[ -n ${last_epoch[$subject]:-} ]]; then
+      delta=$((epoch - last_epoch[$subject]))
+      if (( delta > 0 )) && { (( WORKER_TIMEOUT_SECONDS == 0 )) || (( delta <= WORKER_TIMEOUT_SECONDS )); }; then
+        case ${last_stage[$subject]} in
+          plan | exec | replan) band=provider ;;
+          *) band=non-provider ;;
+        esac
+        printf '%s\t%s\n' "$band" "$delta"
+      fi
+    fi
+    last_epoch[$subject]=$epoch
+    last_stage[$subject]=$stage
+  done < <(tail -n "$EVENTS_CALIBRATION_MAX_LINES" "$EVENTS_LOG")
+}
+
+
 # Read the local progress marker into PROGRESS_EPOCH / PROGRESS_STAGE. Returns
 # 1 (leaving both empty) when absent or corrupt.
 progress_read() {

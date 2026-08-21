@@ -5237,6 +5237,138 @@ doctor_band_inverted=$("$target/bin/agentic-loop" doctor || true)
 grep -Fq '[警告] 設定値: PROVIDER_STALL_SECONDS' <<< "$doctor_band_inverted" || fail 'doctor did not warn when provider_stall_seconds is smaller than stall_seconds'
 mv "$target/.agentic-loop.toml.valid" "$target/.agentic-loop.toml"
 
+# --- time constant invariants (Issue #280, ADR 0032) ------------------------
+# timing_invariant_violations is the single source of truth for both the two
+# doctor warnings above and scripts/lint.sh's hard `_timing-check --committed`
+# gate; exercise the CLI boundary directly (not just doctor's warning text).
+timing_pristine="$TEST_ROOT/agentic-loop.toml.timing-pristine"
+# $target/.agentic-loop.toml has accumulated write_queue_config overrides from
+# earlier sections in this suite (several intentionally left unrestored, e.g.
+# the worker_timeout_seconds=0 disabled-timeout scenario above), so it is not
+# the genuine installed default at this point -- reconstruct it from the
+# source repository's own .agentic-loop.toml instead.
+cp "$PROJECT_ROOT/.agentic-loop.toml" "$timing_pristine"
+cp "$timing_pristine" "$target/.agentic-loop.toml"
+"$target/bin/agentic-loop" _timing-check --committed || fail '_timing-check --committed rejected the installed default configuration'
+
+assert_timing_violation() {
+  local expect_name=$1; shift
+  cp "$timing_pristine" "$target/.agentic-loop.toml"
+  write_queue_config "$target/.agentic-loop.toml" "$@"
+  local out rc
+  if out=$("$target/bin/agentic-loop" _timing-check --committed 2>&1); then rc=0; else rc=$?; fi
+  [[ $rc -eq 1 ]] || fail "_timing-check --committed did not fail for $expect_name (rc=$rc): $out"
+  grep -Fq "[違反] $expect_name" <<< "$out" || fail "_timing-check --committed output was missing $expect_name: $out"
+}
+
+assert_timing_violation stall-before-timeout STALL_SECONDS=20000 WORKER_TIMEOUT_SECONDS=100
+assert_timing_violation provider-stall-before-timeout PROVIDER_STALL_SECONDS=20000 WORKER_TIMEOUT_SECONDS=100
+assert_timing_violation stall-band-order STALL_SECONDS=1000 PROVIDER_STALL_SECONDS=500
+assert_timing_violation worker-timeout-too-low WORKER_TIMEOUT_SECONDS=60
+assert_timing_violation heartbeat-lease-margin LEASE_SECONDS=2
+assert_timing_violation pause-grace-before-timeout PAUSE_GRACE_SECONDS=20000 WORKER_TIMEOUT_SECONDS=100
+assert_timing_violation poll-backoff-order POLL_SECONDS=200 POLL_MAX_SECONDS=100
+assert_timing_violation orphan-grace-before-timeout WORKER_ORPHAN_GRACE_SECONDS=20000 WORKER_TIMEOUT_SECONDS=100
+
+# EXHAUSTION_PAUSE_SECONDS/EXHAUSTION_BACKOFF_MAX_SECONDS are bin/agentic-loop
+# constants, not .agentic-loop.toml keys, so this relation cannot be driven
+# through write_queue_config -- call timing_invariant_violations directly.
+exhaustion_violation=$(EXHAUSTION_PAUSE_SECONDS=99999 EXHAUSTION_BACKOFF_MAX_SECONDS=100 bash -c \
+  'source "$0/bin/lib/agentic-loop/common.sh"; source "$0/bin/lib/agentic-loop/config.sh"; timing_invariant_violations 300 3600 14400 300 120 30 120 120' "$PROJECT_ROOT")
+grep -Fq 'exhaustion-backoff-order' <<< "$exhaustion_violation" || fail 'timing_invariant_violations did not detect an inverted exhaustion backoff order'
+exhaustion_ok=$(EXHAUSTION_PAUSE_SECONDS=1800 EXHAUSTION_BACKOFF_MAX_SECONDS=21600 bash -c \
+  'source "$0/bin/lib/agentic-loop/common.sh"; source "$0/bin/lib/agentic-loop/config.sh"; timing_invariant_violations 300 3600 14400 300 120 30 120 120' "$PROJECT_ROOT")
+[[ -z $exhaustion_ok ]] || fail 'timing_invariant_violations reported a violation for the healthy exhaustion backoff order'
+
+# bash-fallback-vs-toml drift (acceptance criterion 3): editing only the
+# committed toml value, leaving bin/agentic-loop's own fallback constant
+# behind, must also fail the gate -- this is a distinct failure mode from any
+# single-source invariant above.
+cp "$timing_pristine" "$target/.agentic-loop.toml"
+sed -i 's/^provider_stall_seconds = 3600$/provider_stall_seconds = 100/' "$target/.agentic-loop.toml"
+if mismatch_out=$("$target/bin/agentic-loop" _timing-check --committed 2>&1); then mismatch_rc=0; else mismatch_rc=$?; fi
+[[ $mismatch_rc -eq 1 ]] || fail '_timing-check --committed did not fail when the toml diverges from the bin/agentic-loop fallback default'
+grep -Fq 'fallback-mismatch:PROVIDER_STALL_SECONDS' <<< "$mismatch_out" || fail '_timing-check --committed did not report the fallback/toml mismatch by name'
+
+cp "$timing_pristine" "$target/.agentic-loop.toml"
+"$target/bin/agentic-loop" _timing-check --committed || fail 'restoring the pristine config did not clear _timing-check violations'
+
+# --- stall閾値の実測整合 (Issue #280, ADR 0032) -----------------------------
+# doctor cross-checks the currently applied stall threshold against real
+# stage-duration samples reconstructed from events.log (host-local, zero
+# GitHub calls) -- not a fabricated progress epoch.
+write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=30 STOP_TIMEOUT=10 STALE_DAYS=30
+: > "$state_root/events.log"
+calib_t=1700000000
+for calib_i in $(seq 0 4); do
+  printf '%s\t9991\tprogress\tplan\n' "$((calib_t + calib_i * 100))" >> "$state_root/events.log"
+done
+doctor_calib_sparse=$("$target/bin/agentic-loop" doctor || true)
+grep -Fq '[成功] stall閾値の実測整合（provider stage）' <<< "$doctor_calib_sparse" || fail 'doctor treated fewer than CALIBRATION_MIN_SAMPLES provider samples as calibrated'
+grep -Fq 'sampleが20件未満' <<< "$doctor_calib_sparse" || fail 'doctor did not explain the insufficient-sample verdict'
+
+: > "$state_root/events.log"
+for calib_i in $(seq 0 21); do
+  printf '%s\t9992\tprogress\tplan\n' "$((calib_t + calib_i * 5000))" >> "$state_root/events.log"
+done
+write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=30 STOP_TIMEOUT=10 STALE_DAYS=30 STALL_SECONDS=100 PROVIDER_STALL_SECONDS=100
+doctor_calib_under=$("$target/bin/agentic-loop" doctor || true)
+grep -Fq '[警告] stall閾値の実測整合（provider stage）' <<< "$doctor_calib_under" || fail 'doctor did not warn when the real p90 exceeds provider_stall_seconds'
+grep -Eq 'p90=5000s' <<< "$doctor_calib_under" || fail 'doctor calibration warning did not include the observed p90'
+
+write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=30 STOP_TIMEOUT=10 STALE_DAYS=30 STALL_SECONDS=6000 PROVIDER_STALL_SECONDS=6000
+doctor_calib_ok=$("$target/bin/agentic-loop" doctor || true)
+grep -Fq '[成功] stall閾値の実測整合（provider stage）' <<< "$doctor_calib_ok" || fail 'doctor did not report calibration success once the threshold exceeds the observed p90'
+
+: > "$state_root/events.log"
+cp "$timing_pristine" "$target/.agentic-loop.toml"
+write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=3 STOP_TIMEOUT=10 STALE_DAYS=30
+
+# --- real (not fabricated-epoch) stall transition (Issue #280 acceptance
+# criterion 8) -- a live worker whose fake provider CLI actually sleeps past
+# provider_stall_seconds must be observed as stalled through its own real
+# progress markers; raising the threshold above the sleep keeps it healthy.
+rm -rf "$state_root/workers"
+printf '921 queued open none 2026-01-01T00:00:00Z none feature\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=30 STOP_TIMEOUT=10 STALE_DAYS=30 STALL_SECONDS=1 PROVIDER_STALL_SECONDS=1
+AGENTIC_LOOP_RUN_ONCE=1 FAKE_CODEX_SLEEP=2 "$target/bin/agentic-loop" _supervise &
+real_stall_sup_pid=$!
+real_stall_seen=0
+for _ in $(seq 1 60); do
+  real_status_json=$("$target/bin/agentic-loop" status --format json 2>/dev/null) || true
+  if [[ $(yq -p json '.workers[] | select(.issue == 921) | .health' <<< "$real_status_json" 2>/dev/null) == stalled ]]; then
+    real_stall_seen=1
+    break
+  fi
+  kill -0 "$real_stall_sup_pid" 2>/dev/null || break
+  sleep 0.2
+done
+wait "$real_stall_sup_pid" 2>/dev/null || true
+[[ $real_stall_seen == 1 ]] || fail 'a real fake-provider worker exceeding provider_stall_seconds was not observed as stalled without a fabricated progress epoch'
+
+rm -rf "$state_root/workers"
+printf '922 queued open none 2026-01-01T00:00:00Z none feature\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=30 STOP_TIMEOUT=10 STALE_DAYS=30 STALL_SECONDS=1 PROVIDER_STALL_SECONDS=60
+AGENTIC_LOOP_RUN_ONCE=1 FAKE_CODEX_SLEEP=2 "$target/bin/agentic-loop" _supervise &
+ctrl_stall_sup_pid=$!
+ctrl_stall_seen=0
+for _ in $(seq 1 60); do
+  ctrl_status_json=$("$target/bin/agentic-loop" status --format json 2>/dev/null) || true
+  if [[ $(yq -p json '.workers[] | select(.issue == 922) | .health' <<< "$ctrl_status_json" 2>/dev/null) == stalled ]]; then ctrl_stall_seen=1; fi
+  kill -0 "$ctrl_stall_sup_pid" 2>/dev/null || break
+  sleep 0.2
+done
+wait "$ctrl_stall_sup_pid" 2>/dev/null || true
+[[ $ctrl_stall_seen == 0 ]] || fail 'raising provider_stall_seconds above the fake providers sleep time still misclassified a real worker as stalled'
+
+rm -rf "$state_root/workers"
+: > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+cp "$timing_pristine" "$target/.agentic-loop.toml"
+write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=3 STOP_TIMEOUT=10 STALE_DAYS=30
+
 # --- worker-orphan grace-based reap (Issue #193, ADR 0029) ---
 # A worker-orphan (this host's live pidfile whose Issue GitHub no longer
 # reports as agent:running, e.g. reverted to queued while the local provider
@@ -7775,6 +7907,40 @@ drift_findings=$(
 )
 grep -Fxq 'drift:affected_check_seconds' <<< "$drift_findings" || fail 'capability_validate did not warn when affected_check_seconds >= full_check_seconds'
 
+# --- stall calibration primitives (Issue #280, ADR 0032) -------------------
+# metrics_calibration_verdict is a pure function; test it directly rather than
+# only indirectly through a fleet-wide fixture below.
+calib_verdict_ok=$(CALIBRATION_MIN_SAMPLES=20 bash -c \
+  'source "$0/bin/lib/agentic-loop/common.sh"; source "$0/bin/lib/agentic-loop/metrics.sh"; metrics_calibration_verdict "$1" "$2"' \
+  "$PROJECT_ROOT" $'25\t100\t100\t100\t200' 300)
+[[ $calib_verdict_ok == ok ]] || fail 'metrics_calibration_verdict misclassified a healthy distribution as not ok'
+calib_verdict_under=$(CALIBRATION_MIN_SAMPLES=20 bash -c \
+  'source "$0/bin/lib/agentic-loop/common.sh"; source "$0/bin/lib/agentic-loop/metrics.sh"; metrics_calibration_verdict "$1" "$2"' \
+  "$PROJECT_ROOT" $'25\t3600\t3600\t4000\t5000' 3600)
+[[ $calib_verdict_under == undersized ]] || fail 'metrics_calibration_verdict did not flag a threshold at or below the observed p90 as undersized'
+calib_verdict_sparse=$(CALIBRATION_MIN_SAMPLES=20 bash -c \
+  'source "$0/bin/lib/agentic-loop/common.sh"; source "$0/bin/lib/agentic-loop/metrics.sh"; metrics_calibration_verdict "$1" "$2"' \
+  "$PROJECT_ROOT" $'5\t100\t100\t100\t100' 300)
+[[ $calib_verdict_sparse == insufficient-samples ]] || fail 'metrics_calibration_verdict did not flag too few samples as insufficient-samples'
+calib_verdict_disabled=$(CALIBRATION_MIN_SAMPLES=20 bash -c \
+  'source "$0/bin/lib/agentic-loop/common.sh"; source "$0/bin/lib/agentic-loop/metrics.sh"; metrics_calibration_verdict "$1" "$2"' \
+  "$PROJECT_ROOT" $'25\t9999\t9999\t9999\t9999' 0)
+[[ $calib_verdict_disabled == ok ]] || fail 'metrics_calibration_verdict did not treat threshold=0 (disabled band) as ok'
+
+# events_stage_duration_samples reconstructs stage durations from real
+# progress transitions (no fabricated epoch): the departing stage of each
+# consecutive same-subject progress pair is sampled, the final stage of a
+# subject is never sampled, and a gap beyond worker_timeout_seconds is
+# dropped as host/timeout-attributable rather than a natural stage duration.
+events_calib_log="$TEST_ROOT/events-calibration.log"
+printf '1000\t42\tprogress\tplan\n2000\t42\tprogress\texec\n2100\t42\tprogress\tchecks\n20000\t42\tprogress\tdone\n' > "$events_calib_log"
+events_calib_out=$(EVENTS_LOG="$events_calib_log" EVENTS_CALIBRATION_MAX_LINES=2000 WORKER_TIMEOUT_SECONDS=5000 bash -c \
+  'source "$0/bin/lib/agentic-loop/common.sh"; source "$0/bin/lib/agentic-loop/worker_state.sh"; events_stage_duration_samples' "$PROJECT_ROOT")
+[[ $(grep -c '^provider	' <<< "$events_calib_out") -eq 2 ]] || fail 'events_stage_duration_samples did not attribute the plan/exec departures to the provider band'
+grep -Fxq $'provider\t1000' <<< "$events_calib_out" || fail 'events_stage_duration_samples miscalculated the plan-stage duration'
+grep -Fxq $'provider\t100' <<< "$events_calib_out" || fail 'events_stage_duration_samples miscalculated the exec-stage duration'
+[[ $(grep -c '^non-provider	' <<< "$events_calib_out") -eq 0 ]] || fail 'events_stage_duration_samples produced a sample for a gap beyond worker_timeout_seconds'
+
 # --- bin/agentic-loop metrics (see docs/decisions/0007, docs/operations/loop-metrics.md) ---
 write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=2 LEASE_SECONDS=30 STOP_TIMEOUT=10 STALE_DAYS=30
 metrics_issues="$FAKE_GH_ROOT/$state_key.metrics-issues"
@@ -7901,6 +8067,13 @@ mj() { printf '%s' "$metrics_json" | yq -p json "$1"; }
 [[ $(mj '.durations.needs_input_wait.n') -eq 1 && $(mj '.durations.needs_input_wait.max') -eq 7200 ]] || fail 'metrics computed the wrong closed needs_input_wait sample (511: 7200s)'
 [[ $(mj '.durations.plan_seconds.n') -eq 1 && $(mj '.durations.plan_seconds.max') -eq 50 ]] || fail 'metrics did not read plan_seconds from the enriched usage marker'
 [[ $(mj '.durations.exec_seconds.n') -eq 1 && $(mj '.durations.exec_seconds.max') -eq 120 ]] || fail 'metrics did not read exec_seconds from the enriched usage marker'
+
+# stall_calibration (Issue #280, ADR 0032): this fixture's plan/exec sample
+# counts (1 each) are far below CALIBRATION_MIN_SAMPLES, so the verdict must
+# stay insufficient-samples rather than fabricate a judgement from one point.
+[[ $(mj '.stall_calibration.verdict') == insufficient-samples ]] || fail 'metrics did not report insufficient-samples when plan/exec sample counts are below CALIBRATION_MIN_SAMPLES'
+[[ $(mj '.stall_calibration.plan_p90') -eq 50 && $(mj '.stall_calibration.exec_p90') -eq 120 ]] || fail 'metrics stall_calibration did not surface the observed p90s'
+[[ $(mj '.stall_calibration.provider_stall_seconds') -eq 3600 ]] || fail 'metrics stall_calibration did not echo the applied provider_stall_seconds'
 [[ $(mj '.durations.pr_review_wait.n') -eq 2 && $(mj '.durations.pr_review_wait.max') -eq 7280 ]] || fail 'metrics computed the wrong pr_review_wait distribution (PR 9: 400-120=280, PR 11: 7300-20=7280; PR 10 is unmerged and excluded)'
 [[ $(mj '.durations.lead_time.n') -eq 3 && $(mj '.durations.lead_time.max') -eq 7300 ]] || fail 'metrics computed the wrong lead_time distribution (505 is excluded: no completed marker despite the label)'
 
@@ -7969,6 +8142,23 @@ degraded_json=$(FAKE_METRICS_EVENTS_FAIL=1 "$target/bin/agentic-loop" metrics --
 metrics_text=$("$target/bin/agentic-loop" metrics --days "$days" --as-of "$as_of")
 [[ $metrics_text == *'転帰:'* ]] || fail 'metrics text format did not render a summary'
 [[ $metrics_text != *'Fake issue'* && $metrics_text != *'worker=w'* ]] || fail 'metrics text format leaked private data'
+
+# stall_calibration undersized: append 25 exec_seconds samples at 4000s (>=
+# the fixture's provider_stall_seconds=3600) so the real-execution p90 is at
+# or above the applied threshold and metrics must report verdict=undersized
+# with a matching warning. Appended after every assertion above that depends
+# on this fixture's exact counts/reproducibility, since this mutates the
+# shared metrics_issues/metrics_events files those assertions already read.
+calib_undersized_issues="" calib_undersized_events=""
+for calib_n in $(seq 601 625); do
+  calib_undersized_issues+="$calib_n	$((window_start + 5000))	0	open	category:improvement	25	agent:running"$'\n'
+  calib_undersized_events+="$calib_n	$((window_start + 5010))	usage worker=w stage=exec provider=codex seconds=4000 exit=0"$'\n'
+done
+printf '%s' "$calib_undersized_issues" >> "$metrics_issues"
+printf '%s' "$calib_undersized_events" >> "$metrics_events"
+metrics_json_undersized=$("$target/bin/agentic-loop" metrics --format json --days "$days" --as-of "$as_of")
+[[ $(printf '%s' "$metrics_json_undersized" | yq -p json '.stall_calibration.verdict') == undersized ]] || fail 'metrics did not report undersized once exec_seconds p90 reached provider_stall_seconds'
+[[ $(printf '%s' "$metrics_json_undersized" | yq -p json '.warnings[]') == *stall_calibration* ]] || fail 'metrics did not emit a stall_calibration warning when undersized'
 
 # --- flaky test detection and quarantine (Issue #60, ADR 0022, docs/operations/flaky-tests.md) ---
 flaky_sh="$PROJECT_ROOT/scripts/flaky.sh"
