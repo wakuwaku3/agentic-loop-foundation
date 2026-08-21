@@ -218,6 +218,8 @@ postmortem_status() {
 # actually replaced, never to parse anything trusted as structured data.
 postmortem_section_body() {
   local body=$1 heading=$2
+  # GitHub本文のCRLFを正規化してからawkの完全一致で見出しを解析する。
+  body=${body//$'\r'/}
   awk -v h="## $heading" '
     $0 == h { found=1; next }
     found && /^## / { exit }

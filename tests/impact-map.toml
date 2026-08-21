@@ -36,8 +36,8 @@ reason = "supervisorのpoll/claim/restart挙動はqueueとlifecycle群にまた�
 
 [[rule]]
 path = "bin/lib/agentic-loop/worker.sh"
-units = ["e2e:lifecycle"]
-reason = "worker実行のresume/timeout/handoffはlifecycle群が覆う"
+units = ["e2e:queue", "e2e:lifecycle"]
+reason = "worker実行のresume/timeout/handoffはlifecycle群が覆うが、終端のmerge検証・cleanupのfixtureはqueue群にある"
 
 [[rule]]
 path = "bin/lib/agentic-loop/worker_state.sh"

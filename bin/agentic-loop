@@ -119,6 +119,10 @@ readonly TAIL_MAX_LINES=100
 # smuggled into local state or the events stream (secret boundary).
 readonly PROGRESS_STAGES=(claim resume worktree plan preflight exec replan checks review merge cleanup 'done' failed needs-input queued blocked stopped)
 readonly EVENTS_LOG="$STATE_ROOT/events.log"
+readonly SUPERVISOR_CONTEXT_FILE="$STATE_ROOT/supervisor.context"
+readonly SUPERVISOR_LAST_EXIT_FILE="$STATE_ROOT/supervisor.last-exit"
+readonly SUPERVISOR_TERMINATIONS_LOG="$STATE_ROOT/supervisor-terminations.log"
+readonly SUPERVISOR_TERMINATIONS_MAX_LINES=100
 readonly PROJECT_OPERATION_BUDGET=25
 readonly PROJECT_RECONCILE_BATCH=10
 

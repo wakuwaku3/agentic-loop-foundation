@@ -61,6 +61,8 @@ CLIの公開入口は変更後も `bin/agentic-loop` のままである（[ADR 0
 
 `bin/agentic-loop tail [--issue N] [--follow]`は、`$STATE_ROOT/events.log`（append-only。`epoch<TAB>issue番号|supervisor<TAB>code<TAB>stage-or-`、codeは`progress`/`claim`/`recover`/`timeout`/`stop`/`start`のenum）を時刻整形して流す読み取り専用コマンドである。REST(core)読み取りは0回で、GitHub・作業ツリーへ書き込まない。`--issue N`で特定Issueだけに絞り込み、`--follow`で追尾（ログのinode回転にも追従）。`status --watch`は全Issueの`tail --follow`のショートカットであり、`tail`は`--issue`絞り込みや非followの履歴表示も担う。worker log本文・Issue本文・コメントは一切読まない・出さない。
 
+Supervisorは開始epoch、PID、Linux boot ID、`/proc`のprocess開始tick、最終観測epoch、固定enumのstageを`$STATE_ROOT/supervisor.context`へ原子的に記録する。正常exitおよびTERM/INTは`supervisor.last-exit`と最大100行の`supervisor-terminations.log`へ確定する。SIGKILL、OOM kill、host/session teardownなどtrap不能な終了ではcontextが残り、次回`start`が生存しないPIDを検証して`kind=abrupt detail=unknown`として確定する。`status`と`status --format json`の`supervisor.last_exit`は前回終了の分類、直前stage、終了記録時刻、最終観測時刻を表示する。固定enumと数値だけを保存し、command line、Issue本文、provider出力、環境変数は記録しない。`abrupt`は捕捉不能終了を証明するがsignal送信者までは識別できないため、同時刻のkernel/systemd journalとboot IDを相関して調査する。
+
 ### 認可済みの終了・統合
 
 `dispose ISSUE --reason cancelled|superseded|duplicate|merged [--target ISSUE]` は唯一の終了入口である。実行者はGitHub認証済みで対象repositoryのwrite/maintain/admin権限を持つ必要がある。`cancelled` は要求撤回、`superseded` は後続Issueへの置換、`duplicate` は同一成果の重複、`merged` は異なる要求の統合を表す。後三者はopenで未終了の同一repository Issueを `--target` として必要とし、自己参照を拒否する。
@@ -188,6 +190,8 @@ Supervisor停止中でも、キューのファイル、対象repositoryとIssue�
 ### plan段・exec段の2段実行
 
 各Issueは2段で処理する。まず調査と計画だけを行う高品質な**plan段**（Codexは `--sandbox read-only` で実行し、書き込みを行わない）、続いて計画に従って実装・検証・PR・mergeまで行う低コストな**exec段**である。高コストな推論を計画に集中させ、実作業は安価に回す。exec段が完了条件を満たせない場合は、`[agent.retry].plan_max`（既定1回）まで、より高いreasoning effortでplanを見直して再実行する。中断後の再開時は既存のworktree・branch・commit・PR・merge状態をGit/GitHub APIから観測してphaseを判定し、既存の成果物を再利用する（[中断からの再開](#中断からの再開)、[ADR 0004](../decisions/0004-worker-resume-and-handoff.md)）。
+
+plan段の全候補が失敗した場合、空計画のままexec段へは進まない（scope精緻化・preflight・workload・decompositionの各gateを同時に迂回してしまうため）。まず同じturn内で`agent.retry.plan_max`回まで（既存のreplan予算を再利用し、新しい設定キーは追加しない）plan段だけを再試行する。それでも失敗が続く場合、いずれかの宣言済みprovider poolが枯渇markerを持っていれば環境要因の相関とみなし、試行回数を消費せず`queued`へ戻す（`agentic-loop:exhausted reason=plan-failure`）。枯渇markerがなければ通常のタスク失敗として`agent:failed`（`agentic-loop:failed reason=plan-failure`）へ遷移し、既存の`retry_failed`（`max_attempts`・`retry_cooldown_seconds`）を経て上限到達時は`agent:parked`へ移る。これにより、planが恒常的に失敗するIssueが無限にclaim・requeueを繰り返してprovider予算を消費し続けることはない。
 
 **局面ごとにprovider・model・reasoning effortを指定できる。** 例えばplanはCodexのフラグシップを高effortで、execはopencodeで、のように混在させられる。段がproviderを省略すると `[agent].provider` を継承する。`reasoning_effort` はCodex（`-c model_reasoning_effort`）とClaude（`--effort`、水準は `low|medium|high|xhigh|max`）へ実際に渡る。宣言しない場合はprovider CLIの既定に委ね、Codexだけは従来の既定（plan=`high` / exec=`low`）を維持する。Claudeで水準外の値を宣言した場合は設定不正として`doctor`が失敗を報告し、その値はCLIへ渡さない。opencodeは`run`に相当するflagを持たないため渡さない（modelの選択で表現する）。適用されたeffortはIssueの`agentic-loop:usage`コメントに`reasoning_effort=`として記録される。opencodeのmodelは `provider/model` 形式である。
 
@@ -341,9 +345,9 @@ workerが `AGENTIC_LOOP_RESULT=completed` を返しても、それだけでは�
 
 ### exec終了プロトコルと外部待機
 
-workerはCI、required checks、AI review、mergeなどの外部完了を同一turn内の前景処理で待つ。`gh pr checks --watch` 等は有限のtimeout単位で実行し、timeout後もpendingなら状態を再確認して繰り返す。background process、別agent、別sessionへの待機委譲、または「待機中です」だけの終了は許可しない。checks未確定、review feedback未対応、merge未実施、default branch検証未完了のいずれかでは最終応答を書かない。この待機は `[queue].worker_timeout_seconds` のworker全体上限の内側で行われ、上限を延長または無効化しない。
+workerはCI、required checks、AI review、mergeなどの外部完了を同一turn内の前景処理で待つ。`gh pr checks --watch` 等は有限のtimeout単位で実行し、timeout後もpendingなら状態を再確認して繰り返す。background process、別agent、別sessionへの待機委譲、または「待機中です」だけの終了は許可しない。checks未確定、review feedback未対応、merge未実施、default branch検証未完了のいずれかでは最終応答を書かない。この待機は `[queue].worker_timeout_seconds` のworker全体上限の内側で行われ、上限を延長または無効化しない。`worker_timeout_seconds`が正の値のとき、exec promptには`worker`開始時刻(epoch)からの観測に基づく上限・経過・残りが渡される（0のときは何も渡されない。providerの自己申告ではなく、開始markerからの実測値のみを使う）。上限が逼迫した場合の畳み方の優先順位は、達成済みの受け入れ条件をPRとして成立させる、未達分と本題外の不具合は別Issueとして切り出す、`needs-input`は人の判断が本当に必要な場合だけ使う、の順である。本題と無関係なflaky・CI固有失敗を発見した場合は、その場でこのIssueの反復を止め、本題の受け入れ条件に戻ってから別Issueへ切り出す。
 
-正当な終了時、providerは最後の非空行に `AGENTIC_LOOP_RESULT=completed`、`AGENTIC_LOOP_RESULT=failed`、`AGENTIC_LOOP_RESULT=needs-input`、`AGENTIC_LOOP_RESULT=declined` のいずれか一つだけを返す。provider processが正常終了しても有効なmarkerがない場合は、正常な失敗やCI待ちをreplan理由にせず、同一計画に「前景待機を完遂しmarkerを返す」補足を加えてexecを1回だけ即時再実行する。再実行もmarkerなしなら無限再試行・高コストなreplanへ進まず `failed` に遷移する。一方、providerの異常終了、明示的な `AGENTIC_LOOP_RESULT=failed`、token/rate-limit枯渇は既存のbounded replanまたはexhausted復旧処理をそのまま使う。GitHub設定の変更、新規外部service、追加課金は導入しない。
+正当な終了時、providerは最後の非空行に `AGENTIC_LOOP_RESULT=completed`、`AGENTIC_LOOP_RESULT=failed`、`AGENTIC_LOOP_RESULT=needs-input`、`AGENTIC_LOOP_RESULT=declined` のいずれか一つだけを返す。provider processが正常終了しても有効なmarkerがない場合は、正常な失敗やCI待ちをreplan理由にせず、同一計画に「前景待機を完遂しmarkerを返す」補足を加えてexecを1回だけ即時再実行する。再実行もmarkerなしの場合、Issue専用branchのmerge済みPRをGitHub APIで独立に観測できたときだけ、通常の完了経路（`headRefOid`一致検証・トレーサビリティ検証・worktree/branch cleanup）へ合流する（Issue #262。exec終了時の提供物の書き換えはこの合流判定のみに限り、無限再試行や高コストなreplanへは進まない）。observeできなければ `failed` に遷移する。この救済は、exec processが実際に正常終了して有効markerを返さなかった場合だけに適用され、per-stageコスト上限停止・プール枯渇など、provider processが0で終了してもstageが失敗と分類されたケースには適用しない（それらは既存のbounded replanまたはexhausted復旧処理へそのまま流れる）。一方、providerの異常終了、明示的な `AGENTIC_LOOP_RESULT=failed`、token/rate-limit枯渇は既存のbounded replanまたはexhausted復旧処理をそのまま使う。GitHub設定の変更、新規外部service、追加課金は導入しない。
 
 remote branchは復旧可能性を残し、GitHubのPR merge時branch削除設定と責務を分離するため、Supervisorからは削除しない。remote branchの保持または削除はrepositoryのコード化されたGitHub設定に従い、このcleanupの成功条件には含めない。
 
