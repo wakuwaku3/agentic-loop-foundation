@@ -238,6 +238,7 @@ supervise() {
       enforce_worker_timeout || true
       reap_orphan_workers || true
       prune_residual_worktrees || true
+      reconcile_project_probes || true
       reconcile_pending_project || true
       reconcile_queued_categories || true
       triage_stale_queued || true

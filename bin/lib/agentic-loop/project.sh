@@ -49,6 +49,20 @@ queue_project_sync() {
 }
 
 
+# A probe is a best-effort drift check, not a retry.  Keeping it separate from
+# project-pending prevents the normal open-Issue drift scan from making status
+# report a permanently non-empty retry queue.
+queue_project_probe() {
+  local issue=$1
+  [[ $issue =~ ^[1-9][0-9]*$ ]] || return 0
+  mkdir -p "$STATE_ROOT"
+  ( flock 9
+    grep -Fxq -- "$issue" "$STATE_ROOT/project-probes" 2>/dev/null ||
+      printf '%s\n' "$issue" >> "$STATE_ROOT/project-probes"
+  ) 9> "$STATE_ROOT/project-pending.lock"
+}
+
+
 PROJECT_METADATA_LOADED=0
 
 PROJECT_ID=''
@@ -299,6 +313,22 @@ reconcile_pending_project() {
 }
 
 
+reconcile_project_probes() {
+  [[ -s $STATE_ROOT/project-probes ]] || return 0
+  local issue rc probes="$STATE_ROOT/project-probes" snapshot="$STATE_ROOT/project-probes.snapshot.$$"
+  ( flock 9; cp "$probes" "$snapshot"; : > "$probes" ) 9> "$STATE_ROOT/project-pending.lock"
+  while IFS= read -r issue; do
+    [[ $issue =~ ^[1-9][0-9]*$ ]] || continue
+    rc=0
+    project_reconcile_issue "$issue" || rc=$?
+    # A failed probe becomes a real retry; a successful probe is simply
+    # acknowledged and will be scheduled again by the next poll.
+    (( rc == 1 )) && queue_project_sync "issue $issue"
+  done < "$snapshot"
+  rm -f "$snapshot"
+}
+
+
 # All field call-sites use one reconciliation path.  The former arguments are
 # retained only for call-site compatibility; Label state is read afresh.  The
 # explicit legacy membership conduit remains separate from the field
@@ -319,7 +349,13 @@ rebuild_project_hints() {
   # also projected when they are already Project members.
   if [[ $source == open ]]; then
     [[ -n $SUPERVISOR_SNAPSHOT && -r $SUPERVISOR_SNAPSHOT ]] || return 1
-    while IFS=$'\t' read -r issue _; do [[ $issue =~ ^[1-9][0-9]*$ ]] && queue_project_sync "issue $issue"; done < "$SUPERVISOR_SNAPSHOT"
+    local probes_next="$STATE_ROOT/project-probes.next.$$"
+    : > "$probes_next"
+    while IFS=$'\t' read -r issue _; do
+      [[ $issue =~ ^[1-9][0-9]*$ ]] && printf '%s\n' "$issue" >> "$probes_next"
+    done < "$SUPERVISOR_SNAPSHOT"
+    sort -un "$probes_next" -o "$probes_next"
+    mv "$probes_next" "$STATE_ROOT/project-probes"
     return 0
   fi
   local rows
