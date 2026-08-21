@@ -11,6 +11,8 @@ Turn the user's short request into a verified, merged change without making them
 
 For an ordinary build or change request received in an interactive session, use the repository Issue queue instead of starting implementation when the queue is configured and GitHub Issue read/write access and the resulting Issue state can be verified. Supervisor health controls when work is claimed, not whether a request can be persisted:
 
+Before applying queue-first intake, classify repository-local configuration overlays. A request that explicitly changes only a git-ignored, repository-local overlay such as `.agentic-loop.local.toml`, while leaving tracked files unchanged, is a local configuration operation rather than an ordinary build/change request. Verify the target is untracked with `git ls-files --error-unmatch PATH` and verify the effective overlay precedence from the repository's configuration loader before editing. Apply only the requested minimal overlay change directly; do not create an Issue. If the target is tracked, the precedence is unclear, or code/documentation/shared configuration also changes, continue with queue-first intake.
+
 1. Exclude read-only questions, diagnosis, status checks, and operational commands such as `start` and `stop`. Also skip intake when the user explicitly requests synchronous or direct implementation.
 2. Verify `.agentic-loop.toml`, executable `bin/agentic-loop`, GitHub repository access, and GitHub Issue read/write access. Run `bin/agentic-loop status` to observe whether the Supervisor is running, but do not require it to be running for intake.
 3. Choose the duplicate-check path before making API calls:

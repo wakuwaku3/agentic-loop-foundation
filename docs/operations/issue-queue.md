@@ -165,6 +165,10 @@ bin/agentic-loop capabilities --format json
 
 ### 対話要求の受付
 
+#### repository-local設定overlayの扱い
+
+queue-first intakeは、通常のbuild・変更要求に適用する。利用者が明示した変更が、repository-localでgit管理外の実行時overlay（例: `.agentic-loop.local.toml`）だけに限定される場合は、Issueを作成せずローカル設定操作として扱う。編集前に `git ls-files --error-unmatch PATH` で追跡対象でないことと、設定loaderの実際のoverlay解決順を確認する。tracked file、解決順が不明な場合、またはコード・文書・共有設定を伴う場合は通常どおりqueue-first intakeへ送る。
+
 通常のbuild・変更要求を受けた対話中のAgentは、次の順序で経路を決める。
 
 1. 読み取り専用の質問、診断、status確認、`start`・`stop`などの運用操作はIssue化しない。同期実行または直接実装を利用者が明示した場合も受付を省略する。
