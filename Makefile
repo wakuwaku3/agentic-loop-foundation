@@ -17,7 +17,7 @@ test:
 check: environment lint test
 
 smoke:
-	./scripts/smoke.sh
+	./bin/agentic-loop smoke
 
 # local affected check: gateではない。編集中のfeedback短縮専用（docs/policies/
 # validation-harness.md、docs/decisions/0021-affected-check-selection.md）。
