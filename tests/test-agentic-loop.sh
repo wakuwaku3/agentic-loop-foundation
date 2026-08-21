@@ -719,7 +719,10 @@ case "${1:-} ${2:-}" in
       else awk -v n="$issue" '$1 == n {print "agent:" $2}' "$state"; fi
     elif [[ $endpoint =~ ^commits/.+/check-runs$ ]]; then
       jqarg=''
-      for ((i = 1; i <= $#; i++)); do [[ ${!i} == --jq ]] && { j=$((i + 1)); jqarg=${!j}; }; done
+      for ((i = 1; i <= $#; i++)); do
+        if [[ ${!i} == --jq ]]; then j=$((i + 1)); jqarg=${!j};
+        elif [[ ${!i} == --jq=* ]]; then jqarg=${!i#--jq=}; fi
+      done
       if [[ $jqarg == '.check_runs' ]]; then
         # trace.sh's trace_evaluate (Issue #53): distinct from resume_probe's
         # multi-line check-status jq matched in the else branch below.
