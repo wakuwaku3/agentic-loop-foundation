@@ -54,4 +54,17 @@ cmd_smoke() {
     printf 'smoke: provider(%s): failed\n' "$provider" >&2
     return 1
   fi
+
+  # claude-only real-CLI boundary (Issue #273, docs/decisions/0031): confirms
+  # the installed claude binary still accepts stream-json/--verbose and
+  # terminates the stream with a `{"type":"result",...}` event -- a contract
+  # no fake CLI can validate. Not part of `make check`.
+  if [[ $provider == claude ]]; then
+    if claude_stream_json_boundary_check; then
+      printf 'stream-json boundary: ok\n'
+    else
+      printf 'smoke: stream-json boundary: failed\n' >&2
+      return 1
+    fi
+  fi
 }

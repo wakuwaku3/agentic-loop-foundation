@@ -1162,13 +1162,20 @@ printf '%s\n' "$*" >> "$FAKE_GH_ROOT/claude-calls"
 [[ ${1:-} == --version || ${1:-} == --help ]] && { printf 'claude 1.0.0\n'; exit 0; }
 [[ $* == *--print* ]] || { printf 'claude worker must run non-interactively\n' >&2; exit 2; }
 [[ $* == *--dangerously-skip-permissions* ]] || { printf 'claude worker must not block on permissions\n' >&2; exit 2; }
+# Real claude CLI contract (measured directly, Issue #273): stream-json under
+# --print requires --verbose, and fails fast with no stdout otherwise.
+if [[ $* == *'--output-format stream-json'* && $* != *--verbose* ]]; then
+  printf 'Error: When using --print, --output-format=stream-json requires --verbose\n' >&2
+  exit 1
+fi
 sleep "${FAKE_CLAUDE_SLEEP:-0}"
 # Per-invocation result override so a test can give the plan stage and the exec
 # stage different outputs (e.g. a plan that discusses rate limits, then an exec
-# that completes). Each --output-format json call increments a counter and
-# prefers FAKE_CLAUDE_RESULT_<n>, falling back to the scalar FAKE_CLAUDE_RESULT.
+# that completes). Each --output-format stream-json call increments a counter
+# and prefers FAKE_CLAUDE_RESULT_<n>, falling back to the scalar
+# FAKE_CLAUDE_RESULT.
 claude_result=${FAKE_CLAUDE_RESULT:-AGENTIC_LOOP_RESULT=completed}
-if [[ $* == *'--output-format json'* ]]; then
+if [[ $* == *'--output-format stream-json'* ]]; then
   claude_count_file="$FAKE_GH_ROOT/claude-json-count"
   claude_count=$(($(cat "$claude_count_file" 2>/dev/null || printf 0) + 1))
   printf '%s\n' "$claude_count" > "$claude_count_file"
@@ -1184,15 +1191,33 @@ case ${FAKE_CLAUDE_STAGE_MODE:-} in
   nonjson-zero) printf '%s\n' "${FAKE_CLAUDE_STAGE_OUTPUT:-not json}"; : > "$FAKE_GH_ROOT/claude-stage-mode"; exit 0 ;;
 esac
 # The Claude worker captures the final message from stdout into the result file.
-# With --output-format json the sentinel stays inside .result and usage fields
-# accompany it for the token analysis record.
+# With --output-format stream-json the sentinel stays inside the terminal
+# event's .result and usage fields accompany it for the token analysis record.
 #
 # Real Claude usage-limit path: the CLI still exits zero under --print
-# --output-format json but sets is_error true and reports the limit through
-# api_error_status plus the message in .result. FAKE_CLAUDE_IS_ERROR=1 models
-# that envelope so tests exercise the structured-error classification instead of
-# substring-matching the plan text.
-if [[ $* == *'--output-format json'* ]]; then
+# --output-format stream-json but sets is_error true on the terminal event and
+# reports the limit through api_error_status plus the message in .result.
+# FAKE_CLAUDE_IS_ERROR=1 models that envelope so tests exercise the
+# structured-error classification instead of substring-matching the plan text.
+if [[ $* == *'--output-format stream-json'* ]]; then
+  # Model the real stream shape (measured directly, Issue #273): an init
+  # event, an assistant event, a rate_limit_event whose text would trip the
+  # pool-exhaustion regex if ever copied whole into result_file, a non-JSON
+  # noise line (observed in practice from MCP tool logging), then the
+  # terminal result event -- the only line the worker must parse.
+  printf '{"type":"system","subtype":"init"}\n'
+  printf '{"type":"assistant","message":{"content":[{"type":"text","text":"working"}]}}\n'
+  printf '{"type":"rate_limit_event","rate_limit_info":{"status":"allowed"}}\n'
+  printf 'Client.listTools() called but server is not initialized\n'
+  # FAKE_CLAUDE_OMIT_TERMINAL=1 models a stream killed mid-run (or a CLI that
+  # never emits a terminal event): stdout has only non-terminal lines, and the
+  # failure surfaces on stderr instead, exercising agent_run_stage's existing
+  # empty-result_file-falls-back-to-stderr path with no raw stream ever
+  # entering result_file (Issue #273).
+  if [[ ${FAKE_CLAUDE_OMIT_TERMINAL:-0} == 1 ]]; then
+    printf 'stage killed before completion\n' >&2
+    exit 1
+  fi
   if [[ ${FAKE_CLAUDE_IS_ERROR:-0} == 1 ]]; then
     printf '{"type":"result","is_error":true,"api_error_status":"%s","result":"%s","usage":{"input_tokens":123,"output_tokens":45,"cache_read_input_tokens":10},"total_cost_usd":0.0123}\n' "${FAKE_CLAUDE_API_ERROR_STATUS:-429}" "$claude_result"
   else
@@ -2167,11 +2192,56 @@ assert_contains "$FAKE_GH_ROOT/claude-calls" '--print' 'claude worker did not ru
 assert_contains "$FAKE_GH_ROOT/claude-calls" '--dangerously-skip-permissions' 'claude worker did not skip permission prompts'
 assert_contains "$FAKE_GH_ROOT/claude-calls" "--add-dir $target/.git" 'claude worker did not grant its exact Git common directory'
 assert_contains "$FAKE_GH_ROOT/claude-calls" "--add-dir $target-worktrees/issue-7/.agents" 'claude worker did not grant its exact protected .agents directory'
-assert_contains "$FAKE_GH_ROOT/claude-calls" '--output-format json' 'claude worker did not request a machine-readable usage payload'
+assert_contains "$FAKE_GH_ROOT/claude-calls" '--output-format stream-json' 'claude worker did not request a machine-readable streaming usage payload'
+assert_contains "$FAKE_GH_ROOT/claude-calls" '--verbose' 'claude worker did not pass --verbose, required by --print --output-format stream-json'
 assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'Token使用量（分析用）: provider=claude' 'claude worker did not record its token usage on the Issue'
 assert_contains "$FAKE_GH_ROOT/$state_key.comments" '入力=123tok' 'claude usage record lacked input token count'
 # shellcheck disable=SC2016 # The dollar sign is a literal currency prefix in the recorded usage line.
 assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'cost=$0.0123' 'claude usage record lacked the reported cost'
+
+# Residual `.raw.*`/`.final.*` stage output from a killed prior run of the
+# same stage (e.g. a worker_timeout kill mid-stream, before agent_run_stage's
+# own cleanup could run) must be cleared at the next run of that stage,
+# keeping disk usage bounded to the stage currently in flight (Issue #273).
+write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=3 STOP_TIMEOUT=10 STALE_DAYS=30
+printf '270 queued open none 2026-01-01T00:00:00Z\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+: > "$FAKE_GH_ROOT/claude-calls"
+rm -f "$FAKE_GH_ROOT/claude-json-count"
+printf 'stale raw content with rate limit\n' > "$state_root/issue-270-result.txt.raw.999999"
+printf '{"type":"result"}\n' > "$state_root/issue-270-result.txt.final.999999"
+AGENT_PROVIDER=claude AGENTIC_LOOP_RUN_ONCE=1 FAKE_CLAUDE_SLEEP=1 "$target/bin/agentic-loop" _supervise
+grep -Eq '^270 completed closed' "$state" || fail 'claude provider with stale stage output residue did not complete'
+[[ ! -e $state_root/issue-270-result.txt.raw.999999 ]] || fail 'stale .raw output from a prior killed stage run was not cleared at stage start'
+[[ ! -e $state_root/issue-270-result.txt.final.999999 ]] || fail 'stale .final output from a prior killed stage run was not cleared at stage start'
+
+# The fake claude CLI mirrors the real CLI's measured contract (Issue #273):
+# --print --output-format stream-json requires --verbose and fails fast with
+# no stdout otherwise. Exercised directly against the harness so a future
+# change to agent.sh's claude_args cannot silently drop --verbose without a
+# test noticing (the worker-level test above only proves --verbose is present
+# when the fake CLI already accepts stream-json).
+if "$FAKE_BIN/claude" --print --output-format stream-json --dangerously-skip-permissions 'hi' >"$TEST_ROOT/claude-no-verbose.out" 2>&1; then
+  fail 'fake claude accepted --output-format stream-json without --verbose'
+fi
+[[ ! -s $TEST_ROOT/claude-no-verbose.out ]] || grep -Fq 'requires --verbose' "$TEST_ROOT/claude-no-verbose.out" || fail 'fake claude rejection did not mention the --verbose requirement'
+rm -f "$TEST_ROOT/claude-no-verbose.out"
+
+# A stream with no terminal `{"type":"result",...}` event (killed mid-run, or
+# a CLI exiting before ever emitting one) must not be re-parsed as a whole:
+# the extraction leaves final_result empty, and agent_run_stage's existing
+# empty-result_file fallback copies stderr in instead (Issue #273) -- the
+# Issue is retried through the ordinary transient-failure path, not
+# misclassified as pool exhaustion (no rate-limit/quota text on stderr here).
+write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=3 STOP_TIMEOUT=10 STALE_DAYS=30 MAX_ATTEMPTS=3 RETRY_COOLDOWN_SECONDS=0
+printf '271 queued open none 2026-01-01T00:00:00Z\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+rm -f "$state_root/pools/claude/exhausted" "$FAKE_GH_ROOT/claude-json-count"
+AGENT_PROVIDER=claude AGENTIC_LOOP_RUN_ONCE=1 FAKE_CLAUDE_SLEEP=1 FAKE_CLAUDE_OMIT_TERMINAL=1 "$target/bin/agentic-loop" _supervise
+grep -Eq '^271 (queued open|failed)' "$state" || fail 'a claude stream with no terminal event was not treated as an ordinary stage failure'
+[[ ! -r $state_root/pools/claude/exhausted ]] || fail 'a claude stream with no terminal event must not mark the claude pool exhausted'
+assert_contains "$state_root/issue-271-plan.txt" 'stage killed before completion' 'the missing-terminal-event fallback did not surface the stderr content'
+rm -f "$state_root/pools/claude/exhausted"
 
 # --- Declared reasoning effort and per-stage cost ceiling reach claude (Issue #265) ---
 # A declared reasoning_effort must arrive as the claude CLI's --effort (it was
@@ -2324,8 +2394,17 @@ write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEA
 printf '20 queued open none 2026-01-01T00:00:00Z\n' > "$state"
 : > "$FAKE_GH_ROOT/$state_key.comments"
 : > "$FAKE_GH_ROOT/codex-calls"
+: > "$state_root/events.log"
 AGENT_PLAN_MAX_RETRIES=1 FAKE_CODEX_EXIT=1 AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _supervise
 grep -Eq '^20 failed' "$state" || fail 'a plan failure exhausting its in-turn retries did not fail the Issue'
+# A terminal plan failure records its own progress stage (Issue #273): before
+# `plan-failed` joined PROGRESS_STAGES, progress_write silently discarded this
+# marker (the stage failed its enum validation, per progress_stage_valid), so
+# neither the events.log row nor the workers/<issue>.progress marker was ever
+# written for it -- the worker's own eventual clear_worker_local removes the
+# marker file itself, but the append-only events.log survives and is the
+# observable proof here.
+grep -Eq $'\t20\tprogress\tplan-failed$' "$state_root/events.log" || fail 'a terminal plan failure did not record a plan-failed progress event'
 plan_passes=$(grep -c -- '--sandbox read-only' "$FAKE_GH_ROOT/codex-calls" || true)
 [[ $plan_passes -eq 2 ]] || fail "expected the initial planning pass plus one in-turn retry, got $plan_passes"
 exec_passes=$(grep -c -- '--sandbox workspace-write' "$FAKE_GH_ROOT/codex-calls" || true)
@@ -5169,6 +5248,21 @@ grep -Fq '[警告] 設定値: WORKER_TIMEOUT_SECONDS' <<< "$doctor_small_timeout
 if grep -Fq '[失敗] 設定値: WORKER_TIMEOUT_SECONDS' <<< "$doctor_small_timeout"; then fail 'an unsafely small worker_timeout_seconds was misclassified as a failure'; fi
 mv "$target/.agentic-loop.toml.valid" "$target/.agentic-loop.toml"
 
+# doctor cross-checks the new stage-stall config keys (Issue #273): a band
+# inversion against worker_timeout_seconds or against the other stall band is
+# a warning (never a failure -- both bands stay independently tunable).
+cp "$target/.agentic-loop.toml" "$target/.agentic-loop.toml.valid"
+write_queue_config "$target/.agentic-loop.toml" WORKER_TIMEOUT_SECONDS=1800 PROVIDER_STALL_SECONDS=1800
+doctor_band_timeout=$("$target/bin/agentic-loop" doctor || true)
+grep -Fq '[警告] 設定値: PROVIDER_STALL_SECONDS' <<< "$doctor_band_timeout" || fail 'doctor did not warn when provider_stall_seconds reaches worker_timeout_seconds'
+mv "$target/.agentic-loop.toml.valid" "$target/.agentic-loop.toml"
+
+cp "$target/.agentic-loop.toml" "$target/.agentic-loop.toml.valid"
+write_queue_config "$target/.agentic-loop.toml" STALL_SECONDS=1000 PROVIDER_STALL_SECONDS=500
+doctor_band_inverted=$("$target/bin/agentic-loop" doctor || true)
+grep -Fq '[警告] 設定値: PROVIDER_STALL_SECONDS' <<< "$doctor_band_inverted" || fail 'doctor did not warn when provider_stall_seconds is smaller than stall_seconds'
+mv "$target/.agentic-loop.toml.valid" "$target/.agentic-loop.toml"
+
 # --- worker-orphan grace-based reap (Issue #193, ADR 0029) ---
 # A worker-orphan (this host's live pidfile whose Issue GitHub no longer
 # reports as agent:running, e.g. reverted to queued while the local provider
@@ -6804,7 +6898,10 @@ now=$(date +%s)
 printf '%s\n' "$((now - 60))" > "$state_root/workers/80.started"
 printf '%s\tplan\t5\n' "$((now - 10))" > "$state_root/workers/80.progress"
 printf '%s\n' "$((now - 100))" > "$state_root/workers/81.started"
-printf '%s\texec\t9\n' "$((now - 400))" > "$state_root/workers/81.progress"
+# stage=checks is a non-provider stage, so it uses the narrower STALL_SECONDS
+# band (default 300s) rather than PROVIDER_STALL_SECONDS -- see the dedicated
+# stage-band tests below for exec/plan/replan using the wider band.
+printf '%s\tchecks\t9\n' "$((now - 400))" > "$state_root/workers/81.progress"
 printf '%s\n' "$((now - 20000))" > "$state_root/workers/82.started"
 # Issue 83 intentionally has no local state at all (other-host scenario).
 progress_status_before=$(git -C "$target" status --porcelain)
@@ -6838,6 +6935,63 @@ printf '%s' "$progress_json" | yq -p json -o json >/dev/null || fail 'progress s
 [[ $(printf '%s' "$progress_json" | yq -p json '.workers[] | select(.issue == 83) | .health') == unknown ]] || fail 'progress status JSON did not leave the stateless Issue unknown'
 [[ $(printf '%s' "$progress_json" | yq -p json '.anomalies[] | select(.code == "worker-stalled") | .subject') == '#81' ]] || fail 'progress status JSON did not report the worker-stalled anomaly'
 [[ $(printf '%s' "$progress_json" | yq -p json '.workers[] | select(.issue == 80) | .phase') == '' ]] || fail 'progress status JSON changed the existing phase field contract'
+
+# --- stage-based, configurable stall thresholds (Issue #273) ---
+# Provider stages (plan/exec/replan) block on one long CLI call and must not
+# flag as stalled within ordinary reasoning/exec time; other stages keep the
+# narrower default. Both bands are separately configurable, and status
+# reports which threshold it actually applied.
+write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=3 STOP_TIMEOUT=10 STALE_DAYS=30 STALL_SECONDS=300 PROVIDER_STALL_SECONDS=3600
+printf '84 running open\n85 running open\n86 running open\n' > "$state"
+mkdir -p "$state_root/workers" "$state_root/logs"
+now=$(date +%s)
+printf '%s\n' "$((now - 5000))" > "$state_root/workers/84.started"
+printf '%s\texec\t1\n' "$((now - 1000))" > "$state_root/workers/84.progress"
+printf '%s\n' "$((now - 5000))" > "$state_root/workers/85.started"
+printf '%s\texec\t1\n' "$((now - 4000))" > "$state_root/workers/85.progress"
+printf '%s\n' "$((now - 5000))" > "$state_root/workers/86.started"
+printf '%s\tplan\t1\n' "$((now - 500))" > "$state_root/workers/86.progress"
+band_json=$("$target/bin/agentic-loop" status --format json)
+[[ $(printf '%s' "$band_json" | yq -p json '.workers[] | select(.issue == 84) | .health') == healthy ]] || fail 'exec stage within provider_stall_seconds was misclassified as stalled'
+[[ $(printf '%s' "$band_json" | yq -p json '.workers[] | select(.issue == 84) | .stall_threshold_seconds') == 3600 ]] || fail 'status JSON did not report the applied provider stall threshold'
+[[ $(printf '%s' "$band_json" | yq -p json '.workers[] | select(.issue == 85) | .health') == stalled ]] || fail 'exec stage beyond provider_stall_seconds was not detected as a genuine stall'
+[[ $(printf '%s' "$band_json" | yq -p json '.workers[] | select(.issue == 86) | .health') == healthy ]] || fail 'plan stage within provider_stall_seconds was misclassified as stalled'
+[[ $(printf '%s' "$band_json" | yq -p json '.workers[] | select(.issue == 86) | .stall_threshold_seconds') == 3600 ]] || fail 'plan stage did not report the provider stall threshold'
+band_text=$("$target/bin/agentic-loop" status)
+grep -Fq 'stage=exec' <<< "$band_text" || fail 'worker-stalled anomaly text did not include the stage'
+grep -Eq '適用閾値 3600秒' <<< "$band_text" || fail 'worker-stalled anomaly text did not include the applied threshold'
+
+# Configurability: lowering provider_stall_seconds makes the same 1000s-old
+# exec worker stall, and setting it to 0 disables the band entirely.
+write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=3 STOP_TIMEOUT=10 STALE_DAYS=30 STALL_SECONDS=300 PROVIDER_STALL_SECONDS=500
+tuned_json=$("$target/bin/agentic-loop" status --format json)
+[[ $(printf '%s' "$tuned_json" | yq -p json '.workers[] | select(.issue == 84) | .health') == stalled ]] || fail 'lowering queue.provider_stall_seconds via config did not take effect'
+write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=3 STOP_TIMEOUT=10 STALE_DAYS=30 STALL_SECONDS=300 PROVIDER_STALL_SECONDS=0
+disabled_json=$("$target/bin/agentic-loop" status --format json)
+[[ $(printf '%s' "$disabled_json" | yq -p json '.workers[] | select(.issue == 85) | .health') == healthy ]] || fail 'queue.provider_stall_seconds=0 did not disable stall detection for provider stages'
+rm -rf "$state_root/workers"
+: > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=3 STOP_TIMEOUT=10 STALE_DAYS=30
+
+# A stage output file's mtime (agent_run_stage's plan/result file, including
+# its transient `.raw.*`/`.final.*` siblings while streaming) is a secondary
+# progress signal independent of the progress marker (Issue #273): a worker
+# whose marker looks old but is still visibly writing output must stay
+# healthy.
+printf '87 running open\n' > "$state"
+mkdir -p "$state_root/workers" "$state_root/logs"
+now=$(date +%s)
+printf '%s\n' "$((now - 5000))" > "$state_root/workers/87.started"
+printf '%s\texec\t1\n' "$((now - 4000))" > "$state_root/workers/87.progress"
+: > "$state_root/issue-87-result.txt"
+touch -d "@$((now - 10))" "$state_root/issue-87-result.txt"
+output_json=$("$target/bin/agentic-loop" status --format json)
+[[ $(printf '%s' "$output_json" | yq -p json '.workers[] | select(.issue == 87) | .health') == healthy ]] || fail 'a fresh stage output file mtime did not keep an old-progress-marker worker healthy'
+rm -f "$state_root/issue-87-result.txt"
+rm -rf "$state_root/workers"
+: > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
 
 # `status --watch` on a non-TTY (pipe/redirect) prints the recent events once
 # and exits without a follow loop: later appends are not streamed, and the run
@@ -8425,10 +8579,19 @@ AGENT_PROVIDER=claude FAKE_CLAUDE_PROBE_MODE=ok "$target/bin/agentic-loop" smoke
 assert_contains "$smoke_out" 'github-graphql: ok' 'smoke did not report the GraphQL boundary as ok'
 assert_contains "$smoke_out" 'github-rest: ok' 'smoke did not report the REST boundary as ok'
 assert_contains "$smoke_out" 'provider(claude): ok' 'smoke did not report the provider boundary as ok'
+# Issue #273: smoke also runs a claude-only real-CLI stream-json boundary
+# check (docs/decisions/0031), a second billable probe call distinct from the
+# usage-percent probe above -- so claude-probe-calls now holds exactly two
+# lines (one --output-format json, one --output-format stream-json) instead
+# of one.
+assert_contains "$smoke_out" 'stream-json boundary: ok' 'smoke did not report the claude stream-json boundary as ok'
 tail -n "+$((calls_before + 1))" "$FAKE_GH_ROOT/calls" > "$TEST_ROOT/smoke-calls.log"
 [[ $(grep -c 'projectItems(first:20' "$TEST_ROOT/smoke-calls.log" || true) -le 1 ]] || fail 'smoke issued more than one projectItems query for one Issue'
 [[ $(grep -Ec $'\tissues/[0-9]+ ' "$TEST_ROOT/smoke-calls.log" || true) -le 2 ]] || fail 'smoke issued more than two read-only REST reads'
-[[ $(wc -l < "$FAKE_GH_ROOT/claude-probe-calls" 2>/dev/null || printf 0) -eq 1 ]] || fail 'smoke did not launch the provider probe exactly once'
+[[ $(wc -l < "$FAKE_GH_ROOT/claude-probe-calls" 2>/dev/null || printf 0) -eq 2 ]] || fail 'smoke did not launch exactly the usage probe and the stream-json boundary probe'
+assert_contains "$FAKE_GH_ROOT/claude-probe-calls" '--output-format json' 'smoke did not run the usage-percent probe with --output-format json'
+assert_contains "$FAKE_GH_ROOT/claude-probe-calls" '--output-format stream-json' 'smoke did not run the stream-json boundary probe with --output-format stream-json'
+assert_contains "$FAKE_GH_ROOT/claude-probe-calls" '--verbose' 'smoke did not pass --verbose to the stream-json boundary probe'
 
 # A GraphQL boundary failure is reported before the (billable) provider probe
 # ever launches.

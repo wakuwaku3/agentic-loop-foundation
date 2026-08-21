@@ -109,6 +109,35 @@ worker_log_mtime() {
 }
 
 
+# Secondary progress signal (see docs/decisions/0031): the newest mtime among
+# this Issue's stage output files -- the worker log plus the plan/result
+# files agent_run_stage writes, including their in-flight `.raw.*`/`.final.*`
+# siblings written while a provider CLI is still streaming a stage. Only
+# mtimes are read, never content, so a provider's in-progress output can never
+# leak into status/tail (secret boundary, same as worker_log_mtime). Returns
+# failure only when none of these paths exist yet.
+worker_stage_output_mtime() {
+  local issue=$1 latest='' mtime path
+  shopt -s nullglob
+  local -a paths=(
+    "$STATE_ROOT/logs/issue-$issue.log"
+    "$STATE_ROOT/issue-$issue-plan.txt"
+    "$STATE_ROOT/issue-$issue-result.txt"
+    "$STATE_ROOT/issue-$issue-plan.txt".raw.*
+    "$STATE_ROOT/issue-$issue-plan.txt".final.*
+    "$STATE_ROOT/issue-$issue-result.txt".raw.*
+    "$STATE_ROOT/issue-$issue-result.txt".final.*
+  )
+  shopt -u nullglob
+  for path in "${paths[@]}"; do
+    mtime=$(stat -c %Y "$path" 2>/dev/null) || continue
+    if [[ -z $latest ]] || (( mtime > latest )); then latest=$mtime; fi
+  done
+  [[ -n $latest ]] || return 1
+  printf '%s\n' "$latest"
+}
+
+
 # Seconds since this Issue's local worker began: prefers the .started marker
 # (written right after claim), falling back to the pidfile's mtime when
 # .started is missing or corrupt so a worker claimed moments ago is never
