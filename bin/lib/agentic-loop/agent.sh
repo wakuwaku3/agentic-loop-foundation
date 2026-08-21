@@ -928,6 +928,12 @@ agent_run_stage() {
       if [[ $claude_is_error == true || ( -n $claude_api_error && $claude_api_error != null ) ]]; then
         STAGE_PROVIDER_ERROR=1
       fi
+      # A successful process that emits non-JSON violates Claude's transport
+      # contract and must remain a provider-stage failure, rather than being
+      # treated as a clean markerless response.
+      if ! yq -e '.' "$raw_result" >/dev/null 2>&1; then
+        STAGE_PROVIDER_ERROR=1
+      fi
       # Claude's final assistant response is the JSON result field, not the
       # surrounding transport object.  On a provider error keep the whole
       # envelope so the classifier's quota signatures see api_error_status and
