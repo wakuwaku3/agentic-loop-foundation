@@ -6,6 +6,8 @@
 
 ## 共通入口と検証層
 
+実CLI境界の確認には、明示的な `make smoke`（`bin/agentic-loop smoke`）をhost shellで実行する。`devbox run --pure` の中では実行できない（`gh` とprovider CLIはpinned runtimeの外にあるhost側toolのため）。これは`bin/agentic-loop`が本番で使う`project.sh`の関数（`project_content_query` / `project_content_jq`）をそのまま呼び、実 `gh` のGraphQL（Project contentの接続レベル`pageInfo`によるカーソル継続を含む）1回、読み取り専用REST最大2回、設定済みprovider CLIの構造化応答probe 1回を検証する。対象Issueは既定で最初に見つかった open Issueを使い、`--issue N` で上書きできる。ネットワークとprovider quotaを伴うため、smokeは`check`/CI/merge gateへ自動的に組み込まない（`Makefile`の`check`は`smoke`に依存しない）。Issue完了時には実環境での実行結果（境界ごとの成否行、実行日時、対象commit SHA）をIssueまたはPRへ記録する。
+
 ローカルとCIは、同じリポジトリ内のコード化済み環境と同じ共通入口を使用する。共通入口から呼ぶ処理や依存をCI専用に分岐させてはならず、検証内容の追加・変更は共通入口へ反映する。このリポジトリの完全チェックとCIの共通入口は `devbox run --pure check` とする。
 
 検証を次の層に分ける。

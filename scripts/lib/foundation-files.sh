@@ -31,6 +31,7 @@ readonly SHARED_FILES=(
   bin/lib/agentic-loop/supervisor.sh bin/lib/agentic-loop/worker.sh bin/lib/agentic-loop/trace.sh
   bin/lib/agentic-loop/capability.sh bin/lib/agentic-loop/control.sh bin/lib/agentic-loop/preflight.sh
   bin/lib/agentic-loop/flaky.sh bin/lib/agentic-loop/workload.sh bin/lib/agentic-loop/postmortem.sh
+  bin/lib/agentic-loop/smoke.sh
 )
 readonly INIT_FILES=(
   README.md docs/development.md .editorconfig .gitignore Makefile install.sh devbox.json devbox.lock

@@ -765,8 +765,11 @@ case "${1:-} ${2:-}" in
     ;;
   'api graphql')
     if [[ $* == *'projectItems(first:20'* ]]; then
-      number=''; cursor=''
+      number=''; cursor=''; jq_expr='.'; read_jq=0
       for arg in "$@"; do [[ $arg == number=* ]] && number=${arg#number=}; [[ $arg == cursor=* ]] && cursor=${arg#cursor=}; done
+      for arg in "$@"; do
+        if (( read_jq )); then jq_expr=$arg; read_jq=0; elif [[ $arg == --jq ]]; then read_jq=1; fi
+      done
       if [[ ${FAKE_PROJECT_CONTENT_FAIL:-0} == 1 || ( -n ${FAKE_PROJECT_CONTENT_FAIL_ISSUE:-} && $number == "$FAKE_PROJECT_CONTENT_FAIL_ISSUE" ) ]]; then
         printf '{"errors":[{"message":"forced GraphQL failure"}]}\n'
         exit 1
@@ -775,17 +778,18 @@ case "${1:-} ${2:-}" in
         # A member is resolved immediately (possibly after one cursor hop when
         # the fixture lists it on the second page).
         if [[ -r $project_page2 ]] && grep -Fxq "$number" "$project_page2" && [[ -z $cursor ]]; then
-          printf 'NEXT\x1fpage2cursor\n'
+          printf '{"data":{"repository":{"content":{"projectItems":{"nodes":[],"pageInfo":{"hasNextPage":true,"endCursor":"page2cursor"}}}}}}\n' | jq -r "$jq_expr"
         else
           status=''; category=''; blocked_b64=''
           IFS=$'\t' read -r status category blocked_b64 < <(awk -F '\t' -v n="$number" '$1 == n {print $2 "\t" $3 "\t" $4; exit}' "$project_values" 2>/dev/null || true)
           blocked=''; [[ -z $blocked_b64 ]] || blocked=$(base64 -d <<< "$blocked_b64")
-          printf 'PVTI_%s\x1f%s\x1f%s\x1f%s\nEND\n' "$number" "$status" "$category" "$blocked"
+          printf '{"data":{"repository":{"content":{"projectItems":{"nodes":[{"id":"PVTI_%s","project":{"id":"PVT_fake"},"fieldValues":{"nodes":[{},{"name":"%s","field":{"name":"Title"}},{"name":"%s","field":{"name":"Agent status"}},{"name":"%s","field":{"name":"Category"}},{"text":"%s","field":{"name":"Blocked by"}}]}}],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}}\n' \
+            "$number" "issue $number" "$status" "$category" "$blocked" | jq -r "$jq_expr"
         fi
       else
         # A confirmed non-member is a successful empty result (END), distinct
         # from the forced failure above.  The real jq always emits this trailer.
-        printf 'END\n'
+        printf '{"data":{"repository":{"content":{"projectItems":{"nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}}\n' | jq -r "$jq_expr"
       fi
     elif [[ $* == *'repositories(first:100)'* ]]; then
       [[ -e $project_link ]] && cat "$project_link"
@@ -1984,10 +1988,12 @@ assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'category-reconciled reason=
 # answer "Field 'pageInfo' doesn't exist on type 'ProjectV2Item'", and an
 # outer if/else without `end` makes the reducer fail to compile.  Either one
 # turns every load_project_content call into rc=1, so project-pending never
-# drains and Agent status/Category/Blocked by stop converging.  Neither is
-# observable through the fake-gh fixture (it answers with rows the real --jq
-# has already reduced), and jq is not part of the pinned toolchain, so the
-# guard has to be on the query/reducer text itself.
+# drains and Agent status/Category/Blocked by stop converging.  jq is now
+# pinned and the fake-gh fixture below evaluates the real --jq reducer against
+# a schema-shaped fixture, but the fake still cannot validate GitHub's actual
+# GraphQL schema (e.g. that pageInfo really is unavailable inside nodes{}), so
+# this structural guard on the query/reducer text stays as a second,
+# fake-independent layer alongside `bin/agentic-loop smoke`'s real boundary.
 (
   set -euo pipefail
   # shellcheck source=/dev/null
@@ -8285,6 +8291,40 @@ if grep -Fq 'set 77 running' "$reassert_state/calls"; then fail 'worker_reassert
 reassert_run 'agent:running'
 if grep -Fq 'set 77 running' "$reassert_state/calls"; then fail 'worker_reassert_running wrote redundantly while already agent:running'; fi
 rm -rf "$reassert_state"
+
+# --- bin/agentic-loop smoke (Issue #279) ---
+# This only proves the CLI's wiring to the real-boundary entry points (right
+# functions, right order, bounded call counts) using the fake gh/claude test
+# doubles; it is not a substitute for the real GraphQL/provider boundary,
+# which only `make smoke` against genuine `gh`/provider CLIs exercises (see
+# docs/policies/validation-harness.md).
+printf '279 needs-input open none 2026-01-01T00:00:00Z none improvement\n' >> "$FAKE_GH_ROOT/$state_key.state"
+printf 'https://github.com/acme/installed-project/issues/279\n' >> "$FAKE_GH_ROOT/$state_key.project-items"
+printf '279\tNeeds input\tImprovement\t\n' >> "$FAKE_GH_ROOT/$state_key.project-values"
+rm -f "$FAKE_GH_ROOT/claude-probe-calls"
+calls_before=$(wc -l < "$FAKE_GH_ROOT/calls")
+smoke_out="$TEST_ROOT/smoke-success.out"
+AGENT_PROVIDER=claude FAKE_CLAUDE_PROBE_MODE=ok "$target/bin/agentic-loop" smoke --issue 279 > "$smoke_out" 2>&1 \
+  || fail "smoke did not exit 0 on a healthy boundary: $(cat "$smoke_out")"
+assert_contains "$smoke_out" 'github-graphql: ok' 'smoke did not report the GraphQL boundary as ok'
+assert_contains "$smoke_out" 'github-rest: ok' 'smoke did not report the REST boundary as ok'
+assert_contains "$smoke_out" 'provider(claude): ok' 'smoke did not report the provider boundary as ok'
+tail -n "+$((calls_before + 1))" "$FAKE_GH_ROOT/calls" > "$TEST_ROOT/smoke-calls.log"
+[[ $(grep -c 'projectItems(first:20' "$TEST_ROOT/smoke-calls.log" || true) -le 1 ]] || fail 'smoke issued more than one projectItems query for one Issue'
+[[ $(grep -Ec $'\tissues/[0-9]+ ' "$TEST_ROOT/smoke-calls.log" || true) -le 2 ]] || fail 'smoke issued more than two read-only REST reads'
+[[ $(wc -l < "$FAKE_GH_ROOT/claude-probe-calls" 2>/dev/null || printf 0) -eq 1 ]] || fail 'smoke did not launch the provider probe exactly once'
+
+# A GraphQL boundary failure is reported before the (billable) provider probe
+# ever launches.
+rm -f "$FAKE_GH_ROOT/claude-probe-calls"
+smoke_fail_out="$TEST_ROOT/smoke-failure.out"
+if FAKE_PROJECT_CONTENT_FAIL_ISSUE=279 AGENT_PROVIDER=claude FAKE_CLAUDE_PROBE_MODE=ok \
+  "$target/bin/agentic-loop" smoke --issue 279 > "$smoke_fail_out" 2>&1; then
+  fail 'smoke exited 0 despite a forced GraphQL boundary failure'
+fi
+assert_contains "$smoke_fail_out" 'github-graphql: failed' 'smoke did not report the GraphQL boundary failure'
+[[ -s $FAKE_GH_ROOT/claude-probe-calls ]] && fail 'smoke launched the provider probe after a GitHub boundary failure'
+true
 
 fi
 
