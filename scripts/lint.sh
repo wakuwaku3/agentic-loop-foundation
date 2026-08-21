@@ -210,6 +210,14 @@ while IFS= read -r -d '' file; do
 done < <(find bin scripts tests .agentic-loop .githooks -type f \( -name '*.sh' -o -perm -u+x \) -print0)
 bash -n bin/agentic-loop
 shellcheck bin/agentic-loop bin/agentic-loop-diagnose .agentic-loop/diagnose-codebase.sh tests/test-agentic-loop.sh "${AGENTIC_LOOP_SOURCES[@]}"
+# Issue #327: a fixed `for _ in $(seq ...)` iteration-count wait loop is a
+# false-negative risk on a busy CI runner (the awaited condition is CPU-bound,
+# not the loop's own sleep). Use wait_for/wait_gone/wait_polls instead, which
+# poll against a wall-clock deadline.
+if grep -Fq 'for _ in $(seq' tests/test-agentic-loop.sh; then
+  printf 'tests/test-agentic-loop.sh uses a fixed-iteration-count wait loop (for _ in $(seq ...)); use wait_for/wait_gone/wait_polls instead (Issue #327).\n' >&2
+  exit 1
+fi
 grep -Eq '^max_workers[[:space:]]*=[[:space:]]*4$' .agentic-loop.toml || { printf 'Unsafe worker default.\n' >&2; exit 1; }
 grep -Fq -- '--sandbox workspace-write' "${AGENTIC_LOOP_SOURCES[@]}" || { printf 'Unsafe Codex sandbox.\n' >&2; exit 1; }
 grep -Fq 'AGENT_PROVIDER' "${AGENTIC_LOOP_SOURCES[@]}" || { printf 'AI provider is not selectable.\n' >&2; exit 1; }
