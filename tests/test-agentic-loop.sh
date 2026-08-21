@@ -1807,7 +1807,7 @@ AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _supervise
 tail -n "+$((calls_before + 1))" "$FAKE_GH_ROOT/calls" > "$TEST_ROOT/hints-rebuild-calls.log"
 [[ $(grep -c $'\tproject item-edit ' "$TEST_ROOT/hints-rebuild-calls.log" || true) -ge 1 ]] || fail 'deleted hint was not rebuilt and reconverged'
 [[ ! -e "$pending_project" ]] || fail 'a converged open-Issue drift probe leaked into project-pending'
-[[ ! -e "$(git -C "$target" rev-parse --absolute-git-dir)/agentic-loop/project-probes" ]] || fail 'a completed drift probe was not acknowledged'
+[[ ! -s "$(git -C "$target" rev-parse --absolute-git-dir)/agentic-loop/project-probes" ]] || fail 'a completed drift probe was not acknowledged'
 
 # Bounded degradation (issue #195): while one Issue's Projects reconciliation
 # fails permanently, project-pending must stay bounded (not grow every poll),
