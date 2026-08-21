@@ -4553,6 +4553,27 @@ assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'checks=in_progress' 'an ope
 git -C "$target" worktree remove --force "$target-worktrees/issue-17" 2>/dev/null || true
 git -C "$target" branch -D agent/issue-17 >/dev/null 2>&1 || true
 
+# Check conclusion and status are evaluated independently at the real jq
+# boundary: completed success is green, queued/in-progress is pending,
+# terminal failures are failed, and empty conclusions are unknown.
+resume_check_case() {
+  local issue=$1 fixture=$2 expected=$3
+  printf '%s running open\n' "$issue" > "$state"
+  : > "$FAKE_GH_ROOT/$state_key.comments"
+  : > "$FAKE_GH_ROOT/codex-calls"
+  git -C "$target" worktree add --quiet -b "agent/issue-$issue" "$target-worktrees/issue-$issue" origin/main
+  git -C "$target-worktrees/issue-$issue" commit --quiet --allow-empty -m "resume check $issue"
+  FAKE_RESUME_OPEN_PR=$((100 + issue)) FAKE_RESUME_OPEN_URL="https://github.example/acme/installed-project/pull/$((100 + issue))" \
+    FAKE_RESUME_CHECK_RUNS="$fixture" "$target/bin/agentic-loop" _worker "$issue" "resume-check-$issue"
+  assert_contains "$FAKE_GH_ROOT/$state_key.comments" "checks=$expected" "resume check fixture $issue was classified incorrectly"
+  git -C "$target-worktrees/issue-$issue" worktree remove --force "$target-worktrees/issue-$issue" 2>/dev/null || true
+  git -C "$target" branch -D "agent/issue-$issue" >/dev/null 2>&1 || true
+}
+resume_check_case 1701 '{"check_runs":[{"status":"completed","conclusion":"success"}]}' success
+resume_check_case 1702 '{"check_runs":[{"status":"queued","conclusion":null}]}' in_progress
+resume_check_case 1703 '{"check_runs":[{"status":"completed","conclusion":"timed_out"}]}' failure
+resume_check_case 1704 '{"check_runs":[]}' unknown
+
 # An open PR that is behind the fetched default branch must be distinguished
 # from an ahead-only PR even if its checks are already green.  The provider is
 # instructed to merge (not rebase) the default branch, resolve conflicts,
