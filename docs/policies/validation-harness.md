@@ -16,6 +16,7 @@ CLIの終了コード・標準エラーである。
 今回のdecomposition契約では、mikefarah yq固有の引数差分（Issue #222）も
 この照合対象に含める。
 scope tokenの正規化後に空集合となる入力も、拒否fixtureとして維持する。
+契約fixtureの更新理由は対応Issueと同じPR本文に記録する。
 
 突き合わせは通常の完全テストへ課金呼び出しを混ぜず、実CLIの変更時または
 故障形状追加時に、既存のCodex loginと固定開発環境で一度だけ記録した非秘密
