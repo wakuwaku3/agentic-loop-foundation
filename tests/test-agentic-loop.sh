@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# shellcheck disable=SC2155,SC2209,SC2016
+# shellcheck disable=SC2155,SC2209,SC2016,SC2030,SC2031
 set -euo pipefail
 
 readonly PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -8044,6 +8044,7 @@ exit 1
 GHFAKE
 chmod +x "$retry_ceiling_dir/bin/gh"
 (
+  # shellcheck disable=SC2030,SC2031 # intentionally subshell-local retry fixture environment
   export PATH="$retry_ceiling_dir/bin:$TEST_HOST_PATH"
   # shellcheck disable=SC2030 # intentionally subshell-local: read by the api.sh sourced just below, within this same subshell
   export STATE_ROOT="$retry_ceiling_dir/state"
@@ -8059,6 +8060,38 @@ chmod +x "$retry_ceiling_dir/bin/gh"
 ) || true
 retry_ceiling_calls=$(wc -l < "$retry_ceiling_calls_log")
 [[ $retry_ceiling_calls -eq 3 ]] || fail "repo_api made $retry_ceiling_calls underlying calls for API_RETRY_ATTEMPTS=3 against a persistently failing endpoint (expected exactly 3, no unbounded retry amplification)"
+
+# A timeout is ambiguous for writes: the server may have committed the
+# request before the client lost its response. Do not blindly resend POST,
+# while preserving timeout retry for idempotent GET reads.
+timeout_method_dir="$TEST_ROOT/timeout-method"
+timeout_method_calls_log="$TEST_ROOT/timeout-method-calls.log"
+mkdir -p "$timeout_method_dir/bin" "$timeout_method_dir/state"
+: > "$timeout_method_calls_log"
+printf 'acme/example\n' > "$timeout_method_dir/state/repository"
+cat > "$timeout_method_dir/bin/gh" <<GHFAKE
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$timeout_method_calls_log"
+printf 'curl: (28) Operation timed out\n' >&2
+exit 1
+GHFAKE
+chmod +x "$timeout_method_dir/bin/gh"
+(
+  # shellcheck disable=SC2030,SC2031 # intentionally subshell-local timeout fixture environment
+  export PATH="$timeout_method_dir/bin:$TEST_HOST_PATH"
+  export STATE_ROOT="$timeout_method_dir/state" PROGRAM_NAME=timeout-method-test
+  export API_RETRY_ATTEMPTS=3 API_RETRY_BASE_SECONDS=0
+  # shellcheck source=bin/lib/agentic-loop/common.sh
+  source "$PROJECT_ROOT/bin/lib/agentic-loop/common.sh"
+  # shellcheck source=bin/lib/agentic-loop/api.sh
+  source "$PROJECT_ROOT/bin/lib/agentic-loop/api.sh"
+  repo_api issues --method POST >/dev/null 2>&1 || true
+  repo_api issues --method GET >/dev/null 2>&1 || true
+)
+timeout_post_calls=$(grep -c -- '--method POST' "$timeout_method_calls_log" || true)
+timeout_get_calls=$(grep -c -- '--method GET' "$timeout_method_calls_log" || true)
+[[ $timeout_post_calls -eq 1 ]] || fail "timeout POST was retried $timeout_post_calls times (expected exactly once)"
+[[ $timeout_get_calls -eq 3 ]] || fail "timeout GET was retried $timeout_get_calls times (expected API_RETRY_ATTEMPTS=3)"
 
 # --- bin/agentic-loop workload static scan (Issue #130, ADR 0025 T7) -------
 # The scanner itself is local-only (zero GitHub calls) and detects each of
