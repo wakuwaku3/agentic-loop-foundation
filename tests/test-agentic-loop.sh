@@ -729,17 +729,9 @@ case "${1:-} ${2:-}" in
         if [[ -n ${FAKE_CHECK_RUNS_FILE:-} ]]; then cat "$FAKE_CHECK_RUNS_FILE"; else printf '[]\n'; fi
       else
         if [[ -n ${FAKE_RESUME_CHECK_RUNS:-} ]]; then
-          # Keep the production JSON boundary: evaluate the caller's jq
-          # program, while retaining a deterministic fallback for gh versions
-          # that serialize --jq arguments differently in the fake API.
-          printf '%s\n' "$FAKE_RESUME_CHECK_RUNS" | jq -r '
-              ([.check_runs[].conclusion] | map(select(. != null))) as $conclusions |
-              ([.check_runs[].status] | map(select(. != null))) as $statuses |
-              if ($conclusions | any(. == "failure" or . == "timed_out" or . == "cancelled")) then "failure"
-              elif ($statuses | any(. == "in_progress" or . == "queued")) then "in_progress"
-              elif (($conclusions | length) > 0 and ($conclusions | all(. == "success" or . == "neutral" or . == "skipped"))) then "success"
-              else "unknown" end
-            '
+          # Keep the production JSON boundary: evaluate the exact jq program
+          # received from the caller instead of duplicating its logic here.
+          printf '%s\n' "$FAKE_RESUME_CHECK_RUNS" | jq -r "$jqarg"
         elif [[ -n ${FAKE_RESUME_CHECKS:-} ]]; then
           printf '%s\n' "$FAKE_RESUME_CHECKS"
         fi
