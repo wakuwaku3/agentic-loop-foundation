@@ -15,6 +15,24 @@ EOF
 }
 
 
+# A bounded, observed time budget for the exec prompt.  The started marker is
+# written before provider invocation, so this never depends on provider claims.
+worker_time_budget_block() {
+  local issue=$1 started now elapsed remaining timeout
+  timeout=${WORKER_TIMEOUT_SECONDS:-0}
+  [[ $timeout =~ ^[0-9]+$ && $timeout -gt 0 ]] || return 0
+  [[ -r $(worker_started_file "$issue") ]] || return 0
+  read -r started < "$(worker_started_file "$issue")" || return 0
+  [[ $started =~ ^[0-9]+$ ]] || return 0
+  now=$(date +%s)
+  elapsed=$(( now - started )); (( elapsed < 0 )) && elapsed=0
+  remaining=$(( timeout - elapsed )); (( remaining < 0 )) && remaining=0
+  printf 'このworkerの実行時間予算: 上限=%s秒、開始時刻(epoch)=%s、観測時点の経過=%s秒、残り=%s秒。\n' "$timeout" "$started" "$elapsed" "$remaining"
+  printf '時間予算が尽きかけたら、受け入れ条件の達成済み範囲をPRとして成立させ、未達分と本題外の不具合は分割Issueとして残してください。needs-inputは人の判断が本当に必要な場合だけ使用し、時間切れを理由に条件を黙って縮小しないでください。\n'
+  printf '本題外のflaky・CI固有失敗を見つけたら、このIssueの反復を止めて別Issueへ切り出し、本題の受け入れ条件へ戻ってください。\n'
+}
+
+
 # plan stage prompt: investigate only and emit a concrete plan. On a retry the
 # previous exec failure is appended so the plan can address the root cause. If
 # resume_context is non-empty (a resumed Issue whose branch already carries
@@ -46,6 +64,7 @@ exec_prompt() {
   local issue=$1 repository=$2 plan_file=$3 resume_context=${4:-}
   [[ -n $resume_context ]] && printf '%s\n' "$resume_context"
   issue_prompt "$issue" "$repository"
+  worker_time_budget_block "$issue"
   if [[ -n ${PREFLIGHT_VERDICT:-} && ${PREFLIGHT:-off} != off ]]; then
     printf '変更影響とリスクのpreflight判定: %s（detail=%s）%s。実装中に、宣言した変更scope・外部操作・リスク水準を超える破壊的・不可逆・重大costまたはsecurity上のリスクを新たに発見した場合は、実装や変更を進めず、最終応答を AGENTIC_LOOP_RESULT=needs-input で終えてください。\n' \
       "$PREFLIGHT_VERDICT" "${PREFLIGHT_DETAIL:-}" "${PREFLIGHT_APPROVAL_TOKEN:+ (承認済みenvelope token=$PREFLIGHT_APPROVAL_TOKEN)}"
@@ -269,7 +288,8 @@ decomposition_materialize() {
   category=$(repo_api "issues/$parent" --jq '[.labels[].name | select(startswith("category:"))][0] // "category:improvement"' 2>/dev/null) || return 3
   declare -A children=()
   while IFS=$'\t' read -r key title purpose criteria scope deps; do
-    existing=$(repo_api issues --method GET -f state=all -f per_page=100 --jq '.[] | select((.body // "") | contains("agentic-loop:child parent='"$parent"' key='"$key"' plan='"$hash"'")) | .number' 2>/dev/null | head -n1 || true)
+    # workload-unbounded: 親Issueの有限なIssue一覧を子Issue照合のため全件取得; bound=repository Issue count; track=#237
+    existing=$(repo_api issues --method GET -f state=all -f per_page=100 --paginate --jq '.[] | select((.body // "") | contains("agentic-loop:child parent='"$parent"' key='"$key"' plan='"$hash"'")) | .number' 2>/dev/null | head -n1 || true)
     if [[ $existing =~ ^[1-9][0-9]*$ ]]; then child=$existing
     else
       body="## 目的\n\n$purpose\n\n## 親Issue\n\n#$parent の共通制約と統合受け入れ条件に従います。\n\n## 個別受け入れ条件\n\n$criteria\n\n<!-- agentic-loop:child parent=$parent key=$key plan=$hash -->\n<!-- agentic-loop:scope $scope -->"
@@ -410,15 +430,21 @@ resume_probe() {
     [$m.number // "", $m.head.sha // "", $m.html_url // "", $o.number // "", $o.html_url // "", $m.merge_commit_sha // "", $m.base.ref // ""] | join("SEP")
   '
   pr_jq=${pr_jq/SEP/$sep}
-  pr_tsv=$(repo_api pulls --method GET -f state=all -f head="${repository%%/*}:$branch" -f per_page=100 --jq "$pr_jq" 2>/dev/null) || true
+  pr_tsv=$(repo_api pulls --method GET -f state=all -f head="${repository%%/*}:$branch" -f per_page=100 --paginate --jq "$pr_jq" 2>/dev/null) || true
   [[ -n $pr_tsv ]] && IFS=$'\x1f' read -r merged_pr merged_sha merged_url open_pr open_url merged_merge_commit merged_base <<< "$pr_tsv"
 
   if [[ $merged_pr =~ ^[0-9]+$ ]]; then
-    if [[ $merged_sha == "$RESUME_HEAD" && $RESUME_DIVERGED -eq 0 ]]; then
+    local merged_local_only=0
+    if [[ -n $merged_sha ]]; then
+      merged_local_only=$(git -C "$REPO_ROOT" rev-list --count "$merged_sha..$RESUME_HEAD" 2>/dev/null || printf '0')
+    fi
+    # An ancestor local branch has no unique work to lose. Keep dirty
+    # worktrees gated because cleanup would discard uncommitted changes.
+    if [[ -n $merged_sha ]] && git -C "$REPO_ROOT" merge-base --is-ancestor "$RESUME_HEAD" "$merged_sha" 2>/dev/null && [[ $RESUME_DIVERGED -eq 0 && $RESUME_DIRTY -eq 0 ]]; then
       RESUME_PHASE="pr-merged"; RESUME_PR=$merged_pr; RESUME_PR_URL=$merged_url; RESUME_PR_STATE="merged"
       RESUME_MERGE_COMMIT=${merged_merge_commit:-$merged_sha}; RESUME_BASE_BRANCH=${merged_base:-$default_branch}
     else
-      RESUME_PHASE="needs-decision"; RESUME_PR=$merged_pr; RESUME_PR_URL=$merged_url; RESUME_PR_STATE="merged-mismatch"
+      RESUME_PHASE="needs-decision"; RESUME_PR=$merged_pr; RESUME_PR_URL=$merged_url; RESUME_PR_STATE="merged-mismatch:$merged_local_only"
     fi
     return 0
   fi
@@ -427,9 +453,11 @@ resume_probe() {
 
   if [[ $open_pr =~ ^[0-9]+$ ]]; then
     RESUME_PR=$open_pr; RESUME_PR_URL=$open_url; RESUME_PR_STATE="open"; RESUME_PHASE="pr-open"
-    local pr_detail base_ref='' base_sha='' pr_head='' mergeable='' mergeable_state='' merge_tree_status
-    pr_detail=$(repo_api "pulls/$open_pr" --jq '[.base.ref // "", .base.sha // "", .head.sha // "", (if .mergeable == null then "null" else (.mergeable | tostring) end), .mergeable_state // "unknown"] | join("SEP")' 2>/dev/null) || true
-    [[ -n $pr_detail ]] && IFS=$'\x1f' read -r base_ref base_sha pr_head mergeable mergeable_state <<< "${pr_detail/SEP/$sep}"
+    local pr_detail pr_detail_jq base_ref='' base_sha='' pr_head='' mergeable='' mergeable_state='' merge_tree_status
+    pr_detail_jq='[.base.ref // "", .base.sha // "", .head.sha // "", (if .mergeable == null then "null" else (.mergeable | tostring) end), .mergeable_state // "unknown"] | join("SEP")'
+    pr_detail_jq=${pr_detail_jq/SEP/$sep}
+    pr_detail=$(repo_api "pulls/$open_pr" --jq "$pr_detail_jq" 2>/dev/null) || true
+    [[ -n $pr_detail ]] && IFS=$'\x1f' read -r base_ref base_sha pr_head mergeable mergeable_state <<< "$pr_detail"
     RESUME_BASE_BRANCH=$base_ref
     # The target default branch was fetched by worker() immediately before this
     # probe.  Count only commits present on it but absent from the PR head.
@@ -585,13 +613,25 @@ EOF
 resume_needs_decision_body() {
   local worker=$1 branch=$2
   case $RESUME_PR_STATE in
-    merged-mismatch)
+    merged-mismatch:*)
+      local local_only=${RESUME_PR_STATE#merged-mismatch:}
+      printf 'ローカルだけに存在するcommit数: %s。 ' "$local_only"
       printf '<!-- agentic-loop:needs-input worker=%s reason=resume-merged-mismatch pr=%s -->\\n再開時の検査で、branch `%s` の現在のcommit（%s）が、merge済みPR #%s のhead commitと一致しませんでした。mergeの後に別途commitが追加されたか、branchが書き換えられた可能性があります。自動ではforce-pushやreset、branch/worktreeの削除を行いません。既存のworktree/branch/remote branchを確認し、次のいずれかを人手で選んでから、このIssueへ返信してください: (1) 追加分を新しいIssueとして切り出す、(2) branchをmerge済みcommitにresetして完了扱いにする、(3) その他の対応方針を指示する。' \
         "$worker" "$RESUME_PR" "$branch" "${RESUME_HEAD:0:12}" "$RESUME_PR" ;;
     *)
       printf '<!-- agentic-loop:needs-input worker=%s reason=resume-diverged -->\\n再開時の検査で、branch `%s` のlocal commit（%s）とremote commit（%s）が分岐していることを検出しました（双方に相手の持たない独自commitがあります）。自動でのforce-pushやmergeは行いません。どちらのcommitを正とするか人手で判断し、このIssueへ返信してください。既存のworktree/local branch/remote branchは変更していません。' \
         "$worker" "$branch" "${RESUME_HEAD:0:12}" "${RESUME_REMOTE:0:12}" ;;
   esac
+}
+
+
+# A single lookup for the branch's merged PR, shared by the markerless-exit
+# rescue and the ordinary completion path so a worker turn queries GitHub for
+# it at most once (Issue #262).
+worker_merged_pr_tsv() {
+  local repository=$1 branch=$2
+  repo_api pulls --method GET -f state=closed -f head="${repository%%/*}:$branch" -f per_page=100 \
+    --jq 'map(select(.merged_at != null and .head.ref == "'"$branch"'")) | first | [.html_url, .head.sha, (.number|tostring), .base.ref, (.merge_commit_sha // .head.sha)] | @tsv' 2>/dev/null || true
 }
 
 
@@ -718,9 +758,11 @@ worker() {
     done
   ) & heartbeat_pid=$!
   local plan_usage="$STATE_ROOT/issue-$issue-plan-usage.txt" exec_usage="$STATE_ROOT/issue-$issue-usage.txt"
-  local plan_file="$(preflight_plan_file "$issue")" attempt=0 protocol_retry=0 max_retries started failure_context='' exhausted=0 exec_rc plan_rc
+  local plan_file="$(preflight_plan_file "$issue")" attempt=0 protocol_retry=0 max_retries started failure_context='' exhausted=0 exec_rc plan_rc markerless_clean_exit=0 markerless_merged_tsv=''
+  local plan_stage_retry=0 plan_stage_max plan_failed=0 plan_failed_exhaustion=0
   local resume_context; resume_context=$(resume_context_block "$branch")
   max_retries=$(agent_plan_max_retries)
+  plan_stage_max=$max_retries
   while :; do
     # A pause/abort's cooperative stop request is checked only at this stage
     # boundary (never mid-provider-call): an authorized operator's own
@@ -747,9 +789,23 @@ worker() {
       break
     fi
     if (( plan_rc != 0 )); then
-      : > "$plan_file"
-      say 'plan段の全候補が失敗したため、plan結果なしでexecへ進みます。' >&2
+      # A plan failure must never fall through to exec with an empty plan --
+      # that would bypass scope refinement, preflight, workload, and
+      # decomposition simultaneously. Retry the plan stage itself in-turn
+      # (bounded by plan_stage_max, reusing the replan retry budget so no new
+      # config key is introduced) before treating it as terminal.
+      if (( plan_stage_retry < plan_stage_max )); then
+        plan_stage_retry=$((plan_stage_retry + 1))
+        say "plan段が失敗したため、同turn内で再試行します（$plan_stage_retry/$plan_stage_max）。" >&2
+        continue
+      fi
+      plan_failed=1
+      agent_any_pool_marker_active && plan_failed_exhaustion=1
+      exit_code=$STAGE_EXIT_CODE
+      progress_touch "$issue" plan-failed
+      break
     fi
+    plan_stage_retry=0
     worker_refine_scope_from_plan "$issue" "$plan_file"
     progress_touch "$issue" preflight
     if ! preflight_gate "$issue" "$plan_file"; then
@@ -831,6 +887,7 @@ worker() {
         fi
       fi
       if [[ $exit_code -eq 0 ]] && ! agent_result_terminal_marker "$result" >/dev/null; then
+        markerless_clean_exit=1
         break
       fi
     fi
@@ -867,6 +924,23 @@ worker() {
     return 0
   fi
   project_add_pull_requests "$branch"
+  # A provider can finish cleanly twice without returning a terminal marker
+  # while the PR is merged concurrently (Issue #262). The merge is an
+  # independently observable completion fact, so let the existing completion
+  # path validate traceability and perform its guarded cleanup. This is
+  # narrowly scoped to the protocol-retry loop's own clean-exit-without-marker
+  # break (markerless_clean_exit): a stage failure such as a per-stage cost
+  # ceiling or pool exhaustion also leaves exit_code=0 with no marker (the
+  # provider process itself exits 0 even though STAGE_RC classified it as a
+  # failure) and must keep following the ordinary failure/requeue path below
+  # instead of being mistaken for this rescue.
+  if (( markerless_clean_exit )) && [[ $exit_code -eq 0 ]] && ! agent_result_terminal_marker "$result" >/dev/null; then
+    markerless_merged_tsv=$(worker_merged_pr_tsv "$repository" "$branch")
+    if [[ -n $markerless_merged_tsv ]]; then
+      printf '\nAGENTIC_LOOP_RESULT=completed\n' >> "$result"
+      comment_issue "$issue" "<!-- agentic-loop:markerless-merged worker=$worker -->\nexec段は終了markerなしで正常終了しましたが、branch \`$branch\` にmerge済みPRが存在することをGitHubで確認したため、通常の完了検証（トレーサビリティ・commit一致・cleanup）へ合流します。" || true
+    fi
+  fi
   if [[ $exit_code -eq 0 ]] && agent_result_is "$result" completed; then
     # Cleanup + the final Label/close transition is unsafe to interrupt
     # mid-sequence (see docs/decisions/0019); a pause/abort drain waits out
@@ -898,7 +972,8 @@ worker() {
     else
       [[ $postmortem_marker == complete ]] && postmortem_turn_marker_clear "$issue"
       local merged_number='' merged_base='' merged_commit=''
-      IFS=$'\t' read -r merged_pr merged_oid merged_number merged_base merged_commit < <(repo_api pulls --method GET -f state=closed -f head="${repository%%/*}:$branch" -f per_page=100 --jq 'map(select(.merged_at != null and .head.ref == "'"$branch"'")) | first | [.html_url, .head.sha, (.number|tostring), .base.ref, (.merge_commit_sha // .head.sha)] | @tsv' 2>/dev/null || true) || true
+      [[ -z $markerless_merged_tsv ]] && markerless_merged_tsv=$(worker_merged_pr_tsv "$repository" "$branch")
+      IFS=$'\t' read -r merged_pr merged_oid merged_number merged_base merged_commit <<< "$markerless_merged_tsv"
       progress_touch "$issue" cleanup
       if [[ -n $merged_pr && $merged_oid =~ ^[0-9a-fA-F]{40}$ ]]; then
         if ! preflight_reevaluate_diff "$issue" "$merged_oid" "$default_branch"; then
@@ -945,6 +1020,19 @@ worker() {
     set_issue_state "$issue" needs-input
     project_sync_state "$issue" needs-input
     comment_issue "$issue" "<!-- agentic-loop:declined worker=$worker -->\nWorkerはこのIssueを実施不要または実施不能と提案しました（理由は直前のcommentを参照）。worker自身はcloseしません。認可済みの運用者が確認し、必要なら \`bin/agentic-loop dispose $issue --reason cancelled\` 等で終了してください。"
+  elif (( plan_failed )); then
+    if (( plan_failed_exhaustion )); then
+      clear_attempts "$issue"
+      progress_touch "$issue" queued
+      set_issue_state "$issue" queued
+      project_sync_state "$issue" queued
+      comment_issue "$issue" "<!-- agentic-loop:exhausted worker=$worker pool=${LAST_EXHAUSTED_POOL:-} reason=plan-failure -->\nplan段が $plan_stage_max 回連続で失敗しましたが、provider poolの枯渇markerが有効なため試行回数を消費せずIssueを再キューします。空計画でexecへは進んでいません。preflight/workload/decomposition/scope精緻化はplan成功後に評価します。全プールが利用不可の間だけSupervisorのclaimを一時停止し、枠回復後に自動再開します。"
+    else
+      progress_touch "$issue" failed
+      set_issue_state "$issue" failed
+      project_sync_state "$issue" failed
+      comment_issue "$issue" "<!-- agentic-loop:failed worker=$worker reason=plan-failure exit=$exit_code -->\nplan段が $plan_stage_max 回連続で失敗したため、空計画でexecへは進まずこのturnを終了しました。preflight/workload/decomposition/scope精緻化はplan成功後にのみ評価されます。Supervisorが自動的に再試行し、上限回数に達してもcloseせず \`agent:parked\`（人間トリアージ待ち）へ移します。"
+    fi
   elif (( exhausted )); then
     clear_attempts "$issue"
     progress_touch "$issue" queued

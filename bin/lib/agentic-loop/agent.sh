@@ -19,10 +19,18 @@ agent_phase_provider() {
 
 agent_phase_model() { config_value "agent.$1.model"; }
 
+# Resolved reasoning effort for a phase. $2 is the provider the effort will be
+# handed to (resolved by the caller when it already knows it). A declared value
+# always wins; the plan=high / exec=low fallback is a Codex-era default and is
+# applied only for Codex, so any other provider keeps its own CLI default when
+# the phase declares no effort (Issue #265: an undeclared effort must not
+# synthesize a `--effort` argument).
 agent_phase_effort() {
-  local effort
+  local effort provider=${2:-}
   effort=$(config_value "agent.$1.reasoning_effort")
   [[ -n $effort ]] && { printf '%s' "$effort"; return; }
+  [[ -n $provider ]] || provider=$(agent_phase_provider "$1")
+  [[ $provider == codex ]] || return 0
   case $1 in plan) printf 'high' ;; exec) printf 'low' ;; esac
 }
 
@@ -33,6 +41,12 @@ agent_plan_max_retries() {
 }
 
 provider_valid() { case $1 in codex | claude | opencode) return 0 ;; *) return 1 ;; esac; }
+
+# Effort levels the claude CLI accepts for `--effort` (measured from
+# `claude --help`). Anything else is a configuration error: `doctor` reports it
+# and agent_run_stage refuses to pass it through rather than letting the CLI
+# fail the stage.
+claude_effort_valid() { case $1 in low | medium | high | xhigh | max) return 0 ;; *) return 1 ;; esac; }
 
 provider_command() { case $1 in claude) printf 'claude' ;; opencode) printf 'opencode' ;; *) printf 'codex' ;; esac; }
 
@@ -88,7 +102,7 @@ agent_phase_tiers() {
       [[ -n $provider ]] || provider=$(agent_default_provider)
       [[ -n $pool ]] || pool=$provider
       effort=$(config_value "agent.$phase.tiers.$tier.reasoning_effort")
-      [[ -n $effort ]] || effort=$(agent_phase_effort "$phase")
+      [[ -n $effort ]] || effort=$(agent_phase_effort "$phase" "$provider")
       for mi in $(agent_model_indices "$phase" "$tier"); do
         model=$(config_value "agent.$phase.tiers.$tier.models.$mi.model")
         max=$(config_value "agent.$phase.tiers.$tier.models.$mi.max_usage_percent")
@@ -97,7 +111,7 @@ agent_phase_tiers() {
     done
   else
     provider=$(agent_phase_provider "$phase")
-    printf '%s%s%s%s%s%s%s%s%s%s%s%s%s\n' "0" "$CAND_FS" "0" "$CAND_FS" "$provider" "$CAND_FS" "$provider" "$CAND_FS" "$(agent_phase_model "$phase")" "$CAND_FS" "$(agent_phase_effort "$phase")" "$CAND_FS" ""
+    printf '%s%s%s%s%s%s%s%s%s%s%s%s%s\n' "0" "$CAND_FS" "0" "$CAND_FS" "$provider" "$CAND_FS" "$provider" "$CAND_FS" "$(agent_phase_model "$phase")" "$CAND_FS" "$(agent_phase_effort "$phase" "$provider")" "$CAND_FS" ""
   fi
 }
 
@@ -250,6 +264,44 @@ claude_probe_usage_cached() {
 }
 
 
+# One-shot, uncached boundary probe for `bin/agentic-loop smoke` (Issue #279):
+# unlike agent_provider_usage_percent (cached, feeds the pool
+# exhaustion/recovery decision), this always launches the provider CLI so
+# smoke actually exercises the real boundary once per invocation. Reuses
+# claude_probe_usage_percent unchanged (its is_error check already proves a
+# structured response; either 0 or 100 counts as "reached the boundary").
+# codex/opencode get an equivalent minimal read-only probe. Returns 0 on a
+# structured response, 1 otherwise. Never prints response text, tokens, or
+# cost (secret boundary): the caller only sees this exit code.
+agent_provider_probe_once() {
+  local provider=$1 dir=${2:-$PWD}
+  command -v timeout >/dev/null 2>&1 || return 1
+  case $provider in
+    claude)
+      claude_probe_usage_percent >/dev/null
+      ;;
+    codex)
+      command -v codex >/dev/null 2>&1 || return 1
+      local result_file rc=0
+      result_file=$(mktemp)
+      AGENTIC_LOOP_PROBE=1 timeout 30 codex exec --sandbox read-only -c 'approval_policy="never"' \
+        --output-last-message "$result_file" 'say OK' >/dev/null 2>&1 || rc=$?
+      [[ $rc -eq 0 && -s $result_file ]]; rc=$?
+      rm -f "$result_file"
+      return "$rc"
+      ;;
+    opencode)
+      command -v opencode >/dev/null 2>&1 || return 1
+      local response
+      response=$(AGENTIC_LOOP_PROBE=1 timeout 30 opencode run --auto --format json --dir "$dir" 'say OK' 2>/dev/null) || true
+      [[ -n $response ]] || return 1
+      yq -e 'select(.part.type == "text")' - <<< "$response" >/dev/null 2>&1
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+
 # Measure one provider's pool usage: 0-100 on stdout, non-zero when unreadable.
 agent_provider_usage_percent() {
   case $1 in
@@ -387,17 +439,18 @@ agent_pool_probe_confirm_bump() {
 # Accepts ISO-8601 (…Z) and Codex-style "try again at Aug 20th, 2026 9:27 PM".
 # Returns non-zero when nothing parseable is found.
 agent_parse_reset_epoch() {
-  local text=${1:-} iso human epoch
+  local text=${1:-} iso human epoch now
   [[ -n $text ]] || return 1
+  now=$(date +%s)
   iso=$(grep -oiE '[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]+)?Z?' <<< "$text" | head -n 1 || true)
   if [[ -n $iso ]]; then
     epoch=$(date -d "$iso" +%s 2>/dev/null) || true
-    [[ $epoch =~ ^[0-9]+$ ]] && { printf '%s\n' "$epoch"; return 0; }
+    [[ $epoch =~ ^[0-9]+$ && $epoch -gt $now ]] && { printf '%s\n' "$epoch"; return 0; }
   fi
   human=$(grep -oiE 'try again at[[:space:]]+[^.;\n]+' <<< "$text" | head -n 1 | sed -E 's/^[Tt]ry again at[[:space:]]+//; s/([0-9]+)(st|nd|rd|th)/\1/g' || true)
   if [[ -n $human ]]; then
     epoch=$(date -d "$human" +%s 2>/dev/null) || true
-    [[ $epoch =~ ^[0-9]+$ ]] && { printf '%s\n' "$epoch"; return 0; }
+    [[ $epoch =~ ^[0-9]+$ && $epoch -gt $now ]] && { printf '%s\n' "$epoch"; return 0; }
   fi
   return 1
 }
@@ -645,6 +698,18 @@ agent_next_candidate_nominal() {
 }
 
 
+# Optional cost ceiling for a single stage execution, in USD
+# (`budget.max_stage_cost_usd`). Unset, non-numeric, or non-positive means "no
+# ceiling" and emits nothing, so no provider argument is added.
+agent_stage_max_cost_usd() {
+  local cap
+  cap=$(config_value 'budget.max_stage_cost_usd')
+  [[ $cap =~ ^[0-9]+(\.[0-9]+)?$ ]] || return 0
+  awk -v c="$cap" 'BEGIN { exit !(c > 0) }' || return 0
+  printf '%s' "$cap"
+}
+
+
 # Decide whether a new Issue may be claimed while leaving an emergency reserve.
 # Only Codex exposes usage headlessly; for other providers, or when telemetry is
 # unreadable, claiming continues (fail open). budget.weekly_reserve_percent <= 0
@@ -690,6 +755,17 @@ core_budget_note_pause() {
 }
 
 
+# A stage the provider stopped because it hit the configured per-stage cost
+# ceiling (`budget.max_stage_cost_usd` -> claude `--max-budget-usd`, Issue
+# #265). The subscription pool is NOT spent -- the operator's own cap ended this
+# one call -- so this must never mark the pool exhausted or pause claiming; it is
+# an ordinary, safely retryable stage failure. Matched only on cap-specific
+# wording, never on the quota/spend-limit signatures that mean a real pool.
+agent_result_is_budget_stop() {
+  local result_file=$1
+  [[ -r $result_file ]] && grep -qiE 'max.?budget|budget (limit|cap|exceeded)|exceeded .{0,20}budget' "$result_file"
+}
+
 # Classify a stage result: pool-quota exhaustion vs model-specific failure.
 # Pool exhaustion (quota / 429 / usage limit / insufficient_quota / credit
 # balance, or a non-zero exit with no output -- the latter kept for backward
@@ -710,13 +786,18 @@ core_budget_note_pause() {
 agent_result_is_pool_exhausted() {
   local result_file=$1 exit_code=$2 provider_error=${3:-0}
   (( exit_code != 0 )) || (( provider_error == 1 )) || return 1
+  agent_result_is_budget_stop "$result_file" && return 1
   [[ -r $result_file ]] && grep -qiE 'usage limit|rate.?limit|too many requests|(^|[^0-9])429([^0-9]|$)|insufficient_quota|quota exceeded|credit balance' "$result_file" && return 0
   (( exit_code != 0 )) && [[ ! -s $result_file ]] && return 0
   return 1
 }
 
 agent_result_is_model_failure() {
-  local result_file=$1
+  local result_file=$1 exit_code=$2 provider_error=${3:-0}
+  # A successful stage may legitimately discuss model errors (for example in
+  # a plan or repair explanation). Classify the text only when the provider
+  # actually failed, matching the pool-exhaustion gate above (Issue #226).
+  (( exit_code != 0 )) || (( provider_error == 1 )) || return 1
   [[ -r $result_file ]] && grep -qiE 'overloaded|model.*not found|unknown model|invalid model|model.*not supported' "$result_file"
 }
 
@@ -814,6 +895,26 @@ agent_run_stage() {
       # no OS sandbox, so the plan stage relies on the prompt to avoid writes.
       local -a claude_args=(--print --output-format json --dangerously-skip-permissions --add-dir "$git_common_dir" --add-dir "$agents_dir")
       [[ -n $model ]] && claude_args+=(--model "$model")
+      # A declared reasoning effort must actually reach the provider (Issue
+      # #265): claude takes it as `--effort`. An undeclared effort adds no
+      # argument so the CLI default stands, and a level the CLI does not accept
+      # is a configuration error reported by `doctor` -- never passed through,
+      # which would fail the whole stage. The applied level is recorded on the
+      # usage line so the Issue's `agentic-loop:usage` comment shows it.
+      if [[ -n $effort ]]; then
+        if claude_effort_valid "$effort"; then
+          claude_args+=(--effort "$effort")
+          printf 'reasoning_effort=%s\n' "$effort" >> "$usage_file"
+        else
+          say "reasoning_effort=$effort はclaude CLIの水準ではないため適用しません（low|medium|high|xhigh|max）。" >&2
+        fi
+      fi
+      local claude_cost_cap
+      claude_cost_cap=$(agent_stage_max_cost_usd)
+      if [[ -n $claude_cost_cap ]]; then
+        claude_args+=(--max-budget-usd "$claude_cost_cap")
+        printf 'max_cost_usd=%s\n' "$claude_cost_cap" >> "$usage_file"
+      fi
       (cd "$worktree" && AGENTIC_LOOP_AGENT=1 claude "${claude_args[@]}" "$prompt") > "$raw_result" 2>"$stderr_file" || provider_rc=$?
       agent_usage_from_claude_json "$raw_result" >> "$usage_file" || true
       # Claude exits zero even on an API failure under --output-format json and
@@ -844,6 +945,11 @@ agent_run_stage() {
       # writes. --format json streams events; the final message (plan text or the
       # AGENTIC_LOOP_RESULT sentinel) stays in a text part and is matched as a
       # substring, and step-finish parts carry token/cost telemetry.
+      # Reasoning effort is deliberately NOT forwarded here (Issue #265): the
+      # installed `opencode run` exposes no effort/thinking argument to measure
+      # against, and inventing one would fail the stage on an unknown flag.
+      # opencode users express the same intent by choosing the model. Revisit
+      # when an opencode release documents an equivalent flag.
       local -a opencode_args=(run --auto --format json --dir "$worktree")
       [[ -n $model ]] && opencode_args+=(--model "$model")
       AGENTIC_LOOP_AGENT=1 opencode "${opencode_args[@]}" "$prompt" > "$raw_result" 2>"$stderr_file" || provider_rc=$?
@@ -954,6 +1060,7 @@ agent_post_usage() {
   [[ -n ${usage[pool]:-} ]] && summary+=" pool=${usage[pool]}"
   [[ -n ${usage[model]:-} ]] && summary+=" model=${usage[model]}"
   [[ -n ${usage[reasoning_effort]:-} ]] && summary+=" reasoning_effort=${usage[reasoning_effort]}"
+  [[ -n ${usage[max_cost_usd]:-} ]] && summary+=" max_cost_usd=\$${usage[max_cost_usd]}"
   [[ -n ${usage[tokens_input]:-} ]] && summary+=" 入力=${usage[tokens_input]}tok"
   [[ -n ${usage[tokens_output]:-} ]] && summary+=" 出力=${usage[tokens_output]}tok"
   [[ -n ${usage[tokens_cache_read]:-} ]] && summary+=" cache_read=${usage[tokens_cache_read]}tok"
@@ -996,6 +1103,15 @@ run_stage_candidates() {
     STAGE_PROVIDER_ERROR=0
     agent_run_stage "$phase" "$worktree" "$git_common_dir" "$agents_dir" "$result_file" "$usage_file" "$prompt" \
       "$CAND_POOL" "$CAND_PROVIDER" "$CAND_MODEL" "$CAND_EFFORT" || STAGE_EXIT_CODE=$?
+    # The cost ceiling is a per-stage limit that applies to every candidate
+    # equally, so retrying the next tier would just spend another ceiling's
+    # worth. End the stage as a failure and let the worker's bounded
+    # replan/attempt budget decide what happens next.
+    if { (( STAGE_EXIT_CODE != 0 )) || (( STAGE_PROVIDER_ERROR == 1 )); } && agent_result_is_budget_stop "$result_file"; then
+      say "stageのコスト上限に達したため、この候補で打ち切ります: pool=$CAND_POOL provider=$CAND_PROVIDER model=$CAND_MODEL" >&2
+      STAGE_RC=3
+      return 3
+    fi
     if agent_result_is_pool_exhausted "$result_file" "$STAGE_EXIT_CODE" "$STAGE_PROVIDER_ERROR"; then
       LAST_EXHAUSTED_POOL=$CAND_POOL
       agent_mark_pool_exhausted "$CAND_POOL" "$result_file"
@@ -1003,7 +1119,7 @@ run_stage_candidates() {
       say "プール枠枯渇のため次の候補へ切り替えます: pool=$CAND_POOL provider=$CAND_PROVIDER model=$CAND_MODEL" >&2
       continue
     fi
-    if agent_result_is_model_failure "$result_file" "$STAGE_EXIT_CODE"; then
+    if agent_result_is_model_failure "$result_file" "$STAGE_EXIT_CODE" "$STAGE_PROVIDER_ERROR"; then
       if (( tries < max_tries )); then
         say "モデル固有の失敗のため次の候補へ切り替えます: pool=$CAND_POOL provider=$CAND_PROVIDER model=$CAND_MODEL" >&2
         continue

@@ -119,6 +119,10 @@ readonly TAIL_MAX_LINES=100
 # smuggled into local state or the events stream (secret boundary).
 readonly PROGRESS_STAGES=(claim resume worktree plan preflight exec replan checks review merge cleanup 'done' failed needs-input queued blocked stopped)
 readonly EVENTS_LOG="$STATE_ROOT/events.log"
+readonly SUPERVISOR_CONTEXT_FILE="$STATE_ROOT/supervisor.context"
+readonly SUPERVISOR_LAST_EXIT_FILE="$STATE_ROOT/supervisor.last-exit"
+readonly SUPERVISOR_TERMINATIONS_LOG="$STATE_ROOT/supervisor-terminations.log"
+readonly SUPERVISOR_TERMINATIONS_MAX_LINES=100
 readonly PROJECT_OPERATION_BUDGET=25
 readonly PROJECT_RECONCILE_BATCH=10
 
@@ -202,6 +206,8 @@ source "$SCRIPT_ROOT/bin/lib/agentic-loop/trace.sh"
 source "$SCRIPT_ROOT/bin/lib/agentic-loop/supervisor.sh"
 # shellcheck source=lib/agentic-loop/worker.sh
 source "$SCRIPT_ROOT/bin/lib/agentic-loop/worker.sh"
+# shellcheck source=lib/agentic-loop/smoke.sh
+source "$SCRIPT_ROOT/bin/lib/agentic-loop/smoke.sh"
 
 # Resolve configuration once, up front, for every command. doctor tolerates
 # an unreadable config so it can diagnose the very environment that broke it.
@@ -209,7 +215,7 @@ load_config || { [[ ${1:-} == doctor ]] || fail "$CONFIG_ERROR"; }
 
 usage() {
   cat >&2 <<EOF
-Usage: $PROGRAM_NAME {setup|sync-issue ISSUE|dispose ISSUE --reason cancelled|superseded|duplicate|merged [--target ISSUE]|resume ISSUE|pause ISSUE [--reason TEXT]|abort ISSUE [--reason TEXT]|priority ISSUE N|start|stop|status [--format json] [--watch [N]]|doctor [--format json]|metrics [--days N] [--as-of EPOCH] [--format json]|tail [--issue N] [--follow]|trace ISSUE [--format json]|trace --audit [--days N] [--format json]|capabilities [--format json]|preflight ISSUE [--format json]|preflight ISSUE --approve --token TOKEN [--note TEXT]|workload [--format json]|flaky [--format json]|flaky report [--record PATH]|postmortem create --kind K --subject S --title T [--summary S] [--evidence-file PATH] [--category C]|postmortem link ISSUE ACTION_ISSUE...|postmortem status ISSUE|postmortem complete ISSUE|upgrade [--source PATH|--revision SHA] [--apply] [--approve] [--rollback] [--skip-verify] [--overwrite PATH]... [--format json]}
+Usage: $PROGRAM_NAME {setup|sync-issue ISSUE|dispose ISSUE --reason cancelled|superseded|duplicate|merged [--target ISSUE]|resume ISSUE|pause ISSUE [--reason TEXT]|abort ISSUE [--reason TEXT]|priority ISSUE N|start|stop|status [--format json] [--watch [N]]|doctor [--format json]|metrics [--days N] [--as-of EPOCH] [--format json]|tail [--issue N] [--follow]|trace ISSUE [--format json]|trace --audit [--days N] [--format json]|capabilities [--format json]|preflight ISSUE [--format json]|preflight ISSUE --approve --token TOKEN [--note TEXT]|workload [--format json]|flaky [--format json]|flaky report [--record PATH]|postmortem create --kind K --subject S --title T [--summary S] [--evidence-file PATH] [--category C]|postmortem link ISSUE ACTION_ISSUE...|postmortem status ISSUE|postmortem complete ISSUE|upgrade [--source PATH|--revision SHA] [--apply] [--approve] [--rollback] [--skip-verify] [--overwrite PATH]... [--format json]|smoke [--issue N]}
 
   setup   Create or reuse this repository's labels and Project
   sync-issue  Add one Issue to the Project now, or queue a retry
@@ -233,6 +239,7 @@ Usage: $PROGRAM_NAME {setup|sync-issue ISSUE|dispose ISSUE --reason cancelled|su
   flaky   Read-only flaky-test registry status (exit 1 on an expired or invalid tests/flaky-registry.toml entry); flaky report creates/reuses repair Issues from the last run-e2e.sh record
   postmortem  Closed-loop postmortem learning (see docs/policies/postmortem.md, docs/decisions/0026-postmortem-closed-loop.md): create (dedup-checked, explicit request), link (native sub-issue + dependency to action items, moves to agent:blocked), status (read-only action-item completion report), complete (gate: all action items verified + body filled in; marks the Issue ready for worker.sh's terminal close)
   upgrade Preview (default) or apply a Foundation update; see docs/operations/upgrade.md
+  smoke   Host-shell-only check against the real GitHub API and provider CLI (never part of check/CI/merge gate; see docs/policies/validation-harness.md); [--issue N] overrides the default target
 EOF
 }
 
@@ -258,6 +265,7 @@ main() {
     flaky) cmd_flaky "${@:2}" ;;
     postmortem) cmd_postmortem "${@:2}" ;;
     upgrade) cmd_upgrade "$@" ;;
+    smoke) cmd_smoke "${@:2}" ;;
     _service) [[ $# -eq 1 ]] || exit 2; cmd_service ;;
     _supervise) supervise ;;
     # A single synchronous reap_orphan_workers pass, with no polling loop

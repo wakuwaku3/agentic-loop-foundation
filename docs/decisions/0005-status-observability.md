@@ -22,7 +22,7 @@
 
 - **running Issueの詳細**（開始時刻・経過時間・最終heartbeat・lease期限・worktree・PR情報）は、`workers/<issue>.started`（`worker()`起動直後に書く）、`workers/<issue>.lease`（`id\texpires\theartbeat`のTSVへ拡張。旧形式（idのみ）も読める後方互換）、`workers/<issue>.resume`（`resume_handoff_write()`が`resume_probe()`の観測結果をそのままTSVで書く。既存の`agentic-loop:handoff`コメントと同じ実体で、定義上secretを含みえない）から読む。GitHub呼び出しは0回。
 - **queuedの件数・次のclaim候補・needs-input/failed/in-review/blocked/staleの件数**は、1回の`status_snapshot_fetch()`（open Issue全件を`agent:*`ラベルで分類し、`queue_rank_jq`（`claim_next`と共有するpriority値・category rank式）も同時に計算する）と、1回の`status_stale_fetch()`（closedな`agent:stale`を最大100件、`--paginate`なし）で得る。1回の実行での REST(core)読み取りは最大2回。GraphQL・Projects APIは呼ばない。
-- **異常検知**（staleなsupervisor pid/lock、期限切れlease、residualなworktree/branch、破損local state、Project同期の再試行待ち、claim一時停止）は、Supervisor自身が既に読み書きしているmarker file（`supervisor.pid`/`.lock`、`budget-paused`、`core-budget-paused`、`agent-exhausted`、`stop.requested`、`project-pending`）とGit local操作（`git worktree list`、`git for-each-ref`）だけで判定する。`gh api rate_limit` は呼ばない。
+- **通知分類**は、各recordに`action`・`elapsed`（秒）・`classification`を持たせる。`worker-timeout`、`lease-expired`、`paused-worker-live`、`worker-orphan`、`project-sync-pending`、`claim-paused`は**自動回復中**として、経過時間と次pollで行う処理を示す。`supervisor-stale-pid`、`local-state-corrupt`、`worker-stalled`は**要対応**として、具体的な運用アクションを示す。別ホストが担当し得る`worker-missing`と、Issue #211 がpruneを担当する`residual-worktree`/`residual-branch`は通知しない。いずれもSupervisor自身が既に読むlocal state（`supervisor.pid`/`.lock`、worker state、pause marker、`project-pending`）だけで判定し、`status`は追加のGitHub読み取りも状態変更もしない。`gh api rate_limit` は呼ばない。`project-sync-pending`の経過は`project-pending`自身のmtimeではなく、pending queueが空から非空へ最初に遷移した時刻を記録する`project-pending.since`（`queue_project_sync()`が同じflock区間内で書き、`reconcile_pending_project()`が空になった時点で削除する）から求める。単純なmtimeでは、再試行のたびのenqueueやack時のawk+mvによるファイル差し替えで経過が0にリセットされ、「伸び続ければスタック」という運用者の判断材料が失われるためである。
 
 queued候補の順序が`claim_next`と食い違うと運用者を誤誘導するため、priority値・category rankのjq式を`queue_rank_jq()`として1箇所に抽出し、`claim_next`と`status`の双方から呼ぶ（sort/awkパイプラインは各呼び出し側に残すが、rank式そのものはdriftしない）。priority値は本文marker（[0015](0015-numeric-priority-marker.md)）から導出する。
 
@@ -66,6 +66,6 @@ lease heartbeatは「プロセス生存」しか証明せず、API待ち・無�
 - running workerの強制停止・再開（別Issue）。
 - **web/TUI dashboardや本格的な継続監視UI**。`status --watch`は単一ホストのevents.log追尾（TTY）または1回出力（pipe）に限定し、別マシン集約・時系列DB・リモート表示はしない。
 - 履歴の永続化やメトリクス出力（`tail`のevents.logはaudit用途のappend-onlyであり、時系列メトリクス集計は[0007](0007-loop-metrics.md)の責務）。
-- 他端末が担当するleaseをGitHubから読み直すremote参照モード（`worker-missing`は「不明」と表示するに留める。他ホストのprogressはGitHub共有しない）。
+- 他端末が担当するleaseをGitHubから読み直すremote参照モード（local stateのない他host所有Issueのhealthは「不明」と表示するに留める。他ホストのprogressはGitHub共有しない）。
 - stall検出に基づく自動停止・自動再queue（[0006](0006-worker-hang-timeout.md)の時間上限のみ。stallは観測警告に留める）。
 - AIによるscope・優先度の推定。

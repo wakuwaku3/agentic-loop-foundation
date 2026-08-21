@@ -79,10 +79,10 @@ control_drain_local_worker() {
     waited=0
     while kill -0 "$pid" 2>/dev/null && (( waited < PAUSE_GRACE_SECONDS )); do sleep 1; waited=$((waited + 1)); done
     if kill -0 "$pid" 2>/dev/null; then
-      kill -TERM "-$pid" 2>/dev/null || true
+      signal_process_tree "$pid" TERM
       waited=0
       while kill -0 "$pid" 2>/dev/null && (( waited < 5 )); do sleep 1; waited=$((waited + 1)); done
-      kill -0 "$pid" 2>/dev/null && kill -KILL "-$pid" 2>/dev/null || true
+      kill -0 "$pid" 2>/dev/null && signal_process_tree "$pid" KILL || true
     fi
   fi
   lease_release "$issue" stopping
