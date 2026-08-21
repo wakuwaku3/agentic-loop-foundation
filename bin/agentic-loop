@@ -116,6 +116,14 @@ readonly WORKER_TIMEOUT_MIN_SAFE_SECONDS=1800
 readonly STATUS_WATCH_DEFAULT_SECONDS=2
 readonly STATUS_GITHUB_TTL_SECONDS=60
 readonly TAIL_MAX_LINES=100
+# Calibration of stall thresholds against locally-observed stage durations
+# (Issue #280, ADR 0032): events_stage_duration_samples reads at most this
+# many of the newest events.log lines (host-local, zero GitHub calls -- see
+# docs/policies/resource-scalability.md's bound requirement).
+readonly EVENTS_CALIBRATION_MAX_LINES=2000
+# Below this many samples for a band, doctor and metrics report the band as
+# unmeasured rather than risk a p90 estimate from too few points.
+readonly CALIBRATION_MIN_SAMPLES=20
 # Only enum stages are persisted, so a provider's free-form text can never be
 # smuggled into local state or the events stream (secret boundary).
 readonly PROGRESS_STAGES=(claim resume worktree plan plan-failed preflight exec replan checks review merge cleanup 'done' failed needs-input queued blocked stopped)
@@ -291,6 +299,7 @@ main() {
     # live poll loop's wall-clock cadence.
     _prune-worktrees) prune_residual_worktrees ;;
     _pick-tier) [[ $# -eq 2 ]] || exit 2; agent_pick_tier "$2" || exit $? ;;
+    _timing-check) cmd_timing_check "$@" ;;
     _worker) [[ $# -eq 3 ]] || exit 2; worker "$2" "$3" ;;
     *) usage; exit 2 ;;
   esac

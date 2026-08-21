@@ -54,3 +54,5 @@
 - `.raw.*`/`.final.*`の残骸はstage開始時に削除され、disk占有は実行中stage1本ぶんに固定される。
 - plan失敗時に`plan-failed`のprogress markerとeventが実際に記録される。
 - キー未記載の既存installは既定値（300秒/3600秒）で動作し、upgrade migrationは不要（[0029](0029-worker-orphan-reap.md)の`worker_orphan_grace_seconds`と同様、既定値付きkeyの追加のみのため）。
+
+追補（Issue #280、[0032](0032-time-constant-invariants-and-calibration.md)）: この`stall_seconds`/`provider_stall_seconds`と`worker_timeout_seconds`等の関係は、当初この文書のdoctor警告3件だけで検査されていたが、既定値そのもの・他の時間定数（lease/heartbeat、pause_grace、poll backoff、枯渇backoff、orphan grace）・実測分布との整合は未検査だった。0032でlint hard gateと実測calibrationに拡張した。
