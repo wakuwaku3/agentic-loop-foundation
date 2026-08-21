@@ -123,6 +123,16 @@ worker_timeout_seconds = 14400
 # window between a normal completion's Label update and process exit) is the
 # worker actually reaped. Zero disables it.
 worker_orphan_grace_seconds = 120
+# Stall observability thresholds (see docs/decisions/0031, observation only --
+# automatic termination is worker_timeout_seconds above). Non-provider stages
+# (claim/worktree/checks/merge/...) compare their last progress marker against
+# stall_seconds. The provider stages (plan/exec/replan) block on one long CLI
+# call and use the wider provider_stall_seconds instead, so normal reasoning
+# time is never misreported as a stall. Tune both from each Issue's
+# agentic-loop:usage comment (所要=Ns); zero disables stall detection for that
+# band.
+stall_seconds = 300
+provider_stall_seconds = 3600
 # Change-scope conflict avoidance: an Issue may declare the paths/environments
 # it touches with an `agentic-loop:scope` marker (see docs/operations/issue-queue.md).
 # Only hard conflicts serialize: structural changes (rename/move, declared with
