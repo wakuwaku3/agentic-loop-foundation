@@ -1135,6 +1135,13 @@ run_stage_candidates() {
       STAGE_RC=3
       return 3
     fi
+    # A structured transport failure may have exit code 0 (Claude's JSON
+    # protocol uses this for some failures). It is not a successful stage and
+    # must not fall through to the markerless-success path.
+    if (( STAGE_PROVIDER_ERROR == 1 )); then
+      STAGE_RC=3
+      return 3
+    fi
     # Non-zero exit that is neither pool exhaustion nor a model-specific
     # failure is still a stage failure: keep trying remaining candidates so a
     # transient provider crash does not skip the fallback chain, and only give
