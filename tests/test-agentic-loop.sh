@@ -185,6 +185,9 @@ printf '%s\n' 'email@example.test and @path are literal text'
 ```sh
 gh issue create --body "@path"
 ```
+gh issue create --body="@x.md"
+gh pr comment 1 -b "@x.md"
+gh issue comment 1 --body "こんにちは、これは正当な本文です"
 EOF
 cli_contract_output=$("$PROJECT_ROOT/scripts/lint-cli-contracts.sh" "$cli_contract_fixture")
 grep -Fq 'yq flag --arg' <<< "$cli_contract_output" || fail 'CLI contract lint missed yq --arg fixture'
@@ -195,6 +198,11 @@ if grep -Fq "$cli_contract_fixture:5:" <<< "$cli_contract_output"; then
 fi
 if grep -Fq "$cli_contract_fixture:7:" <<< "$cli_contract_output"; then
   fail 'CLI contract lint falsely flagged Markdown code block'
+fi
+grep -Fq "$cli_contract_fixture:9:" <<< "$cli_contract_output" || fail 'CLI contract lint missed gh --body=@path (no space)'
+grep -Fq "$cli_contract_fixture:10:" <<< "$cli_contract_output" || fail 'CLI contract lint missed gh -b "@path"'
+if grep -Fq "$cli_contract_fixture:11:" <<< "$cli_contract_output"; then
+  fail 'CLI contract lint falsely flagged an ordinary --body value'
 fi
 
 # Disable git auto-maintenance globally for the whole harness: commit, push,
@@ -343,6 +351,12 @@ case "${1:-} ${2:-}" in
       # collection B's repo-wide comments read matched just below (this
       # branch must come first, since both share the issues/comments endpoint).
       [[ -n ${FAKE_TRACE_AUDIT_EVENTS:-} ]] && cat "$FAKE_TRACE_AUDIT_EVENTS" 2>/dev/null || true
+    elif [[ $endpoint == issues/comments && $* == *'(.body // "" | @base64)'* ]]; then
+      # bin/agentic-loop doctor's repo-wide, single-page (no --paginate)
+      # body_unexpanded_file_reference comment scan (Issue #272): distinct
+      # from metrics collection B matched just below, which shares the
+      # issues/comments endpoint but uses a different --jq shape.
+      [[ -n ${FAKE_DOCTOR_COMMENTS:-} ]] && cat "$FAKE_DOCTOR_COMMENTS" 2>/dev/null || true
     elif [[ $endpoint == issues/comments ]]; then
       # bin/agentic-loop metrics collection B (repo-wide comments): distinct
       # from the per-Issue issues/N/comments endpoint matched further below.
@@ -434,7 +448,8 @@ case "${1:-} ${2:-}" in
         else if ($2 == "parked") state="parked"
         else if ($2 == "in-review") state="in-review"
         else if ($2 == "blocked") state="blocked"
-        print $1 "\t" "Fake issue " $1 "\t" state "\t" priority "\t" category "\t" created
+        body_b64=($8 == "" ? "-" : $8)
+        print $1 "\t" "Fake issue " $1 "\t" state "\t" priority "\t" category "\t" created "\t" body_b64
       }' "$state" 2>/dev/null || true
     elif [[ $endpoint == issues && $method == GET ]]; then
       case $wanted in
@@ -3785,6 +3800,35 @@ grep -Fq '#500' <<< "$status_output" || fail 'status did not name the dependency
 grep -Fq 'incomplete' <<< "$status_output" || fail 'status did not show the dependency-block reason code'
 rm -f "$state_root/dependency/blocked-500"
 rm -f "$FAKE_GH_ROOT/$state_key.dep-links"
+
+# --- gh --body "@path" silent-loss detection and pre-claim diversion (Issue #272, ADR 0030) ---
+
+# claim_next diverts a queued Issue whose whole body is nothing but an
+# unexpanded `gh --body "@path"` reference to agent:needs-input before ever
+# handing it to a worker, so no exec is spent on a lost requirement. A
+# sibling Issue with an ordinary body claims normally in the same poll.
+unexpanded_body_b64=$(printf '@/tmp/issue_body.md' | base64 -w0)
+ordinary_body_b64=$(printf 'これは正当な要求本文です。' | base64 -w0)
+printf '910 queued open none 2026-01-01T00:00:00Z none none %s\n911 queued open none 2026-01-02T00:00:00Z none none %s\n' \
+  "$unexpanded_body_b64" "$ordinary_body_b64" > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+: > "$FAKE_GH_ROOT/codex-calls"
+AGENTIC_LOOP_RUN_ONCE=1 FAKE_CODEX_SLEEP=1 "$target/bin/agentic-loop" _supervise
+grep -Eq '^910 needs-input open' "$state" || fail 'a lost-requirement Issue was not diverted to agent:needs-input before claim'
+grep -Eq '^911 completed closed' "$state" || fail 'a sibling Issue with an ordinary body was not claimed in the same poll'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:body-unexpanded' 'the diversion did not leave an explanatory comment'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" '--body-file' 'the diversion comment did not point at --body-file recovery'
+if grep -q ' 910 ' "$FAKE_GH_ROOT/codex-calls"; then fail 'a worker was started for a lost-requirement Issue'; fi
+
+# The diversion is idempotent: a second poll does not repost the comment or
+# touch the Label again (queued->needs-input already moved it out of the
+# queued bucket, so claim_next never re-evaluates it, but this also guards
+# any future direct re-check of a still-needs-input Issue).
+comments_before=$(wc -l < "$FAKE_GH_ROOT/$state_key.comments")
+AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _supervise
+comments_after=$(wc -l < "$FAKE_GH_ROOT/$state_key.comments")
+[[ $comments_before == "$comments_after" ]] || fail 'a second poll reposted the body-unexpanded comment'
+grep -Eq '^910 needs-input open' "$state" || fail 'a second poll changed the diverted Issue state'
 
 # --- Closed-loop postmortem learning (Issue #132, ADR 0026, docs/policies/postmortem.md) ---
 
@@ -8326,6 +8370,52 @@ assert_contains "$smoke_fail_out" 'github-graphql: failed' 'smoke did not report
 [[ -s $FAKE_GH_ROOT/claude-probe-calls ]] && fail 'smoke launched the provider probe after a GitHub boundary failure'
 true
 
+# --- gh --body "@path" silent-loss observability: status/doctor (Issue #272, ADR 0030) ---
+
+unexpanded_body_b64=$(printf '@/tmp/issue_body.md' | base64 -w0)
+multiline_body_b64=$(printf '@/tmp/issue_body.md にも触れています。\n続きの行です。' | base64 -w0)
+mention_no_path_b64=$(printf '@wakuwaku3' | base64 -w0)
+mention_with_space_b64=$(printf '@wakuwaku3 ご確認ください' | base64 -w0)
+fenced_path_b64=$(printf '説明:\n```\n@/tmp/issue_body.md\n```\n' | base64 -w0)
+printf '920 queued open none 2026-01-01T00:00:00Z none none %s\n921 queued open none 2026-01-02T00:00:00Z none none %s\n922 queued open none 2026-01-03T00:00:00Z none none %s\n923 queued open none 2026-01-04T00:00:00Z none none %s\n924 queued open none 2026-01-05T00:00:00Z none none %s\n' \
+  "$unexpanded_body_b64" "$multiline_body_b64" "$mention_no_path_b64" "$mention_with_space_b64" "$fenced_path_b64" > "$FAKE_GH_ROOT/$state_key.state"
+calls_before_status=$(wc -l < "$FAKE_GH_ROOT/calls")
+status_body_output=$("$target/bin/agentic-loop" status)
+calls_after_status=$(wc -l < "$FAKE_GH_ROOT/calls")
+[[ $calls_after_status -gt $calls_before_status ]] || fail 'status made no GitHub call while checking body-unexpanded'
+grep -Fq '要対応:' <<< "$status_body_output" || fail 'status did not show a needs-attention section for the lost-requirement Issue'
+grep -Fq 'issue-body-unexpanded #920:' <<< "$status_body_output" || fail 'status did not report the issue-body-unexpanded anomaly for the lost-requirement Issue'
+if grep -Fq '/tmp/issue_body.md' <<< "$status_body_output"; then fail 'status printed the Issue body content instead of a fixed anomaly message'; fi
+for negative_issue in 921 922 923 924; do
+  grep -Fq "issue-body-unexpanded #$negative_issue:" <<< "$status_body_output" && fail "status false-positived a legitimate body as issue-body-unexpanded (#$negative_issue)"
+done
+status_body_json=$("$target/bin/agentic-loop" status --format json)
+grep -Fq '"code":"issue-body-unexpanded"' <<< "$status_body_json" || fail 'status --format json did not report the issue-body-unexpanded anomaly'
+grep -Fq '"subject":"#920"' <<< "$status_body_json" || fail 'status --format json did not name the lost-requirement Issue'
+
+# doctor reuses the same open-Issue snapshot (no extra open-Issue list call)
+# and additionally does a single, unpaginated repo-wide recent-comments scan.
+calls_before_doctor=$(wc -l < "$FAKE_GH_ROOT/calls")
+: > "$FAKE_GH_ROOT/doctor-comments"
+export FAKE_DOCTOR_COMMENTS="$FAKE_GH_ROOT/doctor-comments"
+doctor_body_out=$("$target/bin/agentic-loop" doctor || true)
+open_issue_list_call_count=$(tail -n "+$((calls_before_doctor + 1))" "$FAKE_GH_ROOT/calls" | grep -Fc 'issues --method GET -f state=open' || true)
+[[ $open_issue_list_call_count -eq 1 ]] || fail "doctor issued $open_issue_list_call_count open-Issue list calls, expected exactly 1"
+grep -Fq '要求本文の欠落' <<< "$doctor_body_out" || fail 'doctor did not warn about the lost-requirement Issue body'
+if grep -Fq '/tmp/issue_body.md' <<< "$doctor_body_out"; then fail 'doctor printed the Issue body content instead of a fixed warning message'; fi
+
+# A broken comment (repo-wide, best-effort, single page) is reported distinctly.
+printf '%s\n' "$unexpanded_body_b64" > "$FAKE_GH_ROOT/doctor-comments"
+doctor_comment_out=$("$target/bin/agentic-loop" doctor || true)
+grep -Fq '要求コメントの欠落' <<< "$doctor_comment_out" || fail 'doctor did not warn about the lost-requirement comment'
+: > "$FAKE_GH_ROOT/doctor-comments"
+doctor_clean_out=$("$target/bin/agentic-loop" doctor || true)
+if grep -Fq '要求コメントの欠落' <<< "$doctor_clean_out"; then
+  grep -Fq '対応は不要です。' <<< "$doctor_clean_out" || fail 'doctor did not report success once the lost-requirement comment was fixed'
+fi
+unset FAKE_DOCTOR_COMMENTS
+printf '279 needs-input open none 2026-01-01T00:00:00Z none improvement\n' > "$FAKE_GH_ROOT/$state_key.state"
+
 fi
 
 if [[ $TEST_GROUP == all || $TEST_GROUP == upgrade ]]; then
@@ -8410,6 +8500,61 @@ hook_result=$(run_edit_hook Edit "$hook_outside/main-link/tracked file.txt" "$ho
 hook_result=$(printf '{"tool_name":"Edit","tool_input":{},"cwd":"%s"}' "$hook_main" | env -u AGENTIC_LOOP_AGENT "$PROJECT_ROOT/.claude/hooks/confirm-main-worktree-edit.sh")
 [[ $hook_result == *'"permissionDecision":"deny"'* ]] || fail 'malformed edit input did not fail safely'
 
+# --- gh --body "@path" Bash PreToolUse hook (Issue #272, ADR 0030) ---------
+# Fail-open by design: only a Bash tool_input.command containing an unexpanded
+# `gh --body "@path"`-shaped value is denied; everything else (including a
+# broken payload) passes through unchanged, since Bash is this loop's most
+# common tool and a fail-closed gate here would stall it entirely.
+run_body_hook() { # COMMAND
+  local cmd=$1 escaped
+  escaped=${cmd//\\/\\\\}
+  escaped=${escaped//\"/\\\"}
+  printf '{"tool_name":"Bash","tool_input":{"command":"%s"},"cwd":"%s"}' "$escaped" "$PROJECT_ROOT" \
+    | "$PROJECT_ROOT/.claude/hooks/require-gh-body-file.sh"
+}
+positive_body_commands=(
+  'gh issue create --title x --body "@/tmp/issue_body.md"'
+  'gh issue create --title x --body=@/tmp/issue_body.md'
+  'gh pr comment 12 -b "@/tmp/a/b.md"'
+  'gh pr create --title x --body "@notes.md"'
+)
+for cmd in "${positive_body_commands[@]}"; do
+  hook_result=$(run_body_hook "$cmd")
+  [[ $hook_result == *'"permissionDecision":"deny"'* ]] || fail "gh --body hook did not deny: $cmd"
+  [[ $hook_result == *'--body-file'* ]] || fail "gh --body hook deny did not point at --body-file: $cmd"
+done
+negative_body_commands=(
+  'gh issue create --title x --body-file /tmp/issue_body.md'
+  'gh issue create --title x --body "通常の本文です"'
+  'gh issue comment 1 --body "@wakuwaku3 ご確認ください"'
+  'gh api repos/o/r/issues -f body=@x.md'
+  'ls -la /tmp'
+)
+for cmd in "${negative_body_commands[@]}"; do
+  [[ -z $(run_body_hook "$cmd") ]] || fail "gh --body hook wrongly denied: $cmd"
+done
+# Non-Bash tool calls are never inspected, even if the command text matches.
+non_bash_result=$(printf '{"tool_name":"Edit","tool_input":{"command":"gh issue create --body \\"@x.md\\""},"cwd":"%s"}' "$PROJECT_ROOT" | "$PROJECT_ROOT/.claude/hooks/require-gh-body-file.sh")
+[[ -z $non_bash_result ]] || fail 'gh --body hook inspected a non-Bash tool call'
+# yq missing from PATH: fall back to the raw-payload string scan rather than
+# fail-closed (a Bash tool call must not be blanket-denied just because the
+# JSON parser is unavailable).
+[[ -z $(printf '{"tool_name":"Bash","tool_input":{"command":"ls -la"},"cwd":"%s"}' "$PROJECT_ROOT" | PATH=/usr/bin:/bin "$PROJECT_ROOT/.claude/hooks/require-gh-body-file.sh") ]] \
+  || fail 'gh --body hook denied an unrelated Bash command with yq unavailable'
+hook_result=$(printf '{"tool_name":"Bash","tool_input":{"command":"gh issue create --title x --body \\"@/tmp/issue_body.md\\""},"cwd":"%s"}' "$PROJECT_ROOT" | PATH=/usr/bin:/bin "$PROJECT_ROOT/.claude/hooks/require-gh-body-file.sh")
+[[ $hook_result == *'"permissionDecision":"deny"'* ]] || fail 'gh --body hook did not deny with yq unavailable (raw fallback)'
+# body_unexpanded_file_reference in the hook must agree with the shell
+# common.sh implementation for the same fixture table, so the two cannot
+# drift. common.sh is sourced in an isolated subshell (it defines its own
+# fail/say, which must not clobber this test script's own).
+common_predicate() { ( source "$PROJECT_ROOT/bin/lib/agentic-loop/common.sh" >/dev/null 2>&1; body_unexpanded_file_reference "$1" ); }
+for cmd_body in '@/tmp/issue_body.md' '通常の本文です' '@wakuwaku3 ご確認ください' '@x.md'; do
+  common_verdict=1; common_predicate "$cmd_body" && common_verdict=0
+  hook_verdict=1
+  [[ $(run_body_hook "gh issue create --body \"$cmd_body\"") == *'"deny"'* ]] && hook_verdict=0
+  [[ $common_verdict == "$hook_verdict" ]] || fail "common.sh and the Bash hook disagree on: $cmd_body"
+done
+
 # Regression (Issue #160 + linked-worktree PATH restore): the hook must resolve
 # its JSON parser (yq) from the recorded runtime.path even when invoked with a
 # PATH that omits the Nix-pinned bins -- Claude Code PreToolUse and login shells
@@ -8470,6 +8615,9 @@ AGENTIC_LOOP_SOURCE="$PROJECT_ROOT" AGENTIC_LOOP_TARGET="$upgrade_target" AGENTI
 [[ -x $upgrade_target/.claude/hooks/confirm-main-worktree-edit.sh ]] || fail 'install did not distribute an executable Claude edit hook'
 [[ $(yq -p json -r '.hooks.PreToolUse[0].matcher' "$upgrade_target/.claude/settings.json") == 'Edit|Write|NotebookEdit' ]] || fail 'install did not distribute Claude hook settings'
 [[ $(yq -p json -r '.files[] | select(.path == ".claude/hooks/confirm-main-worktree-edit.sh") | .class' "$upgrade_target/.agentic-loop/manifest.json") == shared ]] || fail 'manifest did not classify the Claude edit hook as shared'
+[[ -x $upgrade_target/.claude/hooks/require-gh-body-file.sh ]] || fail 'install did not distribute an executable gh --body Bash hook'
+[[ $(yq -p json -r '.hooks.PreToolUse[1].matcher' "$upgrade_target/.claude/settings.json") == Bash ]] || fail 'install did not distribute the gh --body Bash hook settings'
+[[ $(yq -p json -r '.files[] | select(.path == ".claude/hooks/require-gh-body-file.sh") | .class' "$upgrade_target/.agentic-loop/manifest.json") == shared ]] || fail 'manifest did not classify the gh --body Bash hook as shared'
 [[ -f $upgrade_target/.agentic-loop/manifest.json ]] || fail 'install did not write a Foundation manifest'
 [[ $(yq -p json -o yaml '.mode' "$upgrade_target/.agentic-loop/manifest.json") == install ]] || fail 'manifest recorded the wrong install mode'
 [[ $(yq -p json -o yaml '.source.repository' "$upgrade_target/.agentic-loop/manifest.json") == 'wakuwaku3/agentic-loop-foundation' ]] || fail 'manifest recorded the wrong source repository'

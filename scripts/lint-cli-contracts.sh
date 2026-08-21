@@ -20,7 +20,7 @@ report() { printf 'CLI contract warning: %s:%s: %s\n' "$1" "$2" "$3"; warnings=$
 # remains line-oriented: it is a lint aid, not a shell parser.
 scan_file() {
   local file=$1 line_no=0 in_fence=0 line
-  local help flags token
+  local help flags token body_token body_rest
   help=$(yq --help 2>/dev/null || true)
   flags=$(printf '%s\n' "$help" | sed -nE 's/^[[:space:]]+(-[A-Za-z0-9], )?--([a-z0-9-]+).*/--\2/p' | sort -u)
   while IFS= read -r line || [[ -n $line ]]; do
@@ -42,8 +42,24 @@ scan_file() {
         [[ $line == *'< <(yq '* || $line == *'$(yq '* ]] && report "$file" "$line_no" 'yq失敗が呼び出し元へ伝播しない可能性がある'
     fi
     if [[ $line =~ gh[[:space:]] ]]; then
-      if [[ $line =~ --body[[:space:]]+[@\"\047] ]]; then
-        report "$file" "$line_no" 'gh --body の @path は展開されないため --body-file を使用する'
+      # Extract the value token following --body/--body=/-b (quotes
+      # stripped) and only warn when it looks like an unexpanded `gh
+      # --body "@path"` reference: starts with `@`, has no embedded
+      # whitespace after `@`, and looks path-shaped (contains `/` or ends
+      # in `.extension`). This mirrors body_unexpanded_file_reference
+      # (common.sh) closely enough to avoid false positives on an ordinary
+      # body such as `--body "こんにちは"`, while still catching
+      # `--body=@x.md` and `-b "@x.md"` that the old bare regex missed.
+      body_token=''
+      if [[ $line =~ (--body=|-b[[:space:]]+|--body[[:space:]]+)([@\"\047][^[:space:]]*|[^[:space:]\"\047]+) ]]; then
+        body_token=${BASH_REMATCH[2]}
+      fi
+      body_token=${body_token#\"}; body_token=${body_token#\'}
+      if [[ $body_token == @* ]]; then
+        body_rest=${body_token#@}
+        if [[ -n $body_rest && $body_rest != *[[:space:]]* && ( $body_rest == */* || $body_rest =~ \.[A-Za-z0-9]+[\"\047]?$ ) ]]; then
+          report "$file" "$line_no" 'gh --body の @path は展開されないため --body-file を使用する'
+        fi
       fi
       if [[ $line =~ gh[[:space:]]+api && $line =~ -f[[:space:]][^[:space:]]+=(-?[0-9]+|true|false)([[:space:]]|$) ]]; then
         report "$file" "$line_no" 'gh api の型付き値に -f ではなく -F を使用する'

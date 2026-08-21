@@ -36,3 +36,4 @@
 - [文書ポリシー](docs/policies/documentation.md)に従い、文書の対象読者と責務境界を守り、同じ事実を複数の文書へ重複させない。
 - [有限資源とスケーラビリティのポリシー](docs/policies/resource-scalability.md)に従い、処理量・外部I/O量・入力規模に対する増加率を設計と検証の対象にする。
 - [ポストモーテムポリシー](docs/policies/postmortem.md)に従い、重大な事故・near miss・反復失敗・資源枯渇から学び、非難せず、action itemが検証済みになるまでポストモーテムを未完了として追跡する。
+- GitHubのIssue本文・commentをfileから渡す場合は `gh --body-file PATH` を使う。`gh --body "@path"` は展開されず内容が失われる（[ADR 0030](docs/decisions/0030-lost-requirement-detection.md)）。`gh api` の型付き値には `-f` ではなく `-F` を使う。
