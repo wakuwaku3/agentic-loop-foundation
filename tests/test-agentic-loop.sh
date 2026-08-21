@@ -15,6 +15,111 @@ case "$TEST_GROUP" in all|queue|lifecycle|auxiliary|upgrade) ;; *) printf 'Unkno
 fail() { printf 'FAIL: %s\n' "$1" >&2; exit 1; }
 assert_contains() { grep -Fq -- "$2" "$1" || fail "$3"; }
 
+# Wait-for-condition helpers (Issue #327): E2E assertions about supervisor/
+# worker state can't use a fixed sleep budget, because the state transition
+# being awaited (e.g. a poll that forks/execs a fake gh and fake provider many
+# times) takes CPU-bound wall-clock time that a busy CI runner can inflate far
+# past what a quiet workstation needs. All non-negative-assertion waits below
+# poll on a wall-clock deadline instead of a fixed iteration count, so a slow
+# machine gets more polls rather than a premature "did not happen" failure.
+# scripts/lint.sh forbids reintroducing fixed-iteration-count `seq`-based wait
+# loops in this file; use wait_for/wait_gone/wait_polls instead.
+readonly WAIT_TIMEOUT_SECONDS=60
+
+# wait_for DESC [--timeout N] CMD... -> poll CMD (a command or function name,
+# args allowed) until it exits 0 or the deadline elapses. Runs in the current
+# shell (no subshell), so a predicate function that assigns a variable leaves
+# that assignment visible to the caller. Returns 0/1; never calls fail itself,
+# so callers keep their own cleanup-then-fail (e.g. killing a supervisor pid)
+# on timeout. On timeout, diagnostics go to stderr *before* any caller's fail
+# message, so scripts/flaky.sh's sha256-of-first-line fingerprint (see
+# docs/operations/flaky-tests.md) stays keyed on the unchanged `fail` text.
+wait_for() {
+  local desc=$1 budget=$WAIT_TIMEOUT_SECONDS
+  shift
+  if [[ ${1:-} == --timeout ]]; then budget=$2; shift 2; fi
+  local start=$EPOCHSECONDS elapsed=0 interval
+  while :; do
+    if "$@" >/dev/null 2>&1; then
+      [[ -z ${AGENTIC_LOOP_TEST_WAIT_TRACE:-} ]] || printf 'wait: %s %ds\n' "$desc" "$elapsed" >&2
+      return 0
+    fi
+    elapsed=$(( EPOCHSECONDS - start ))
+    (( elapsed < budget )) || break
+    interval=0.1; (( elapsed < 5 )) || interval=0.5
+    sleep "$interval"
+  done
+  {
+    printf 'timed out after %ds waiting for: %s\n' "$budget" "$desc"
+    printf 'predicate: %s\n' "$*"
+    "$@" || true
+    printf -- '--- state ---\n'; tail -n 20 "${state:-/dev/null}" 2>/dev/null || true
+    printf -- '--- workers ---\n'; ls -l "${state_root:-}/workers" 2>/dev/null || true
+    printf -- '--- poll-interval ---\n'; cat "${state_root:-}/poll-interval" 2>/dev/null || true
+    printf -- '--- recent logs ---\n'; tail -n 20 "${state_root:-}"/logs/issue-*.log 2>/dev/null || true
+    printf -- '--- load ---\n'; nproc 2>/dev/null || true; cat /proc/loadavg 2>/dev/null || true
+  } >&2
+  return 1
+}
+
+# wait_gone DESC PID [--timeout N] -> poll until PID no longer answers `kill -0`.
+__wait_gone_check() { ! kill -0 "$1" 2>/dev/null; }
+wait_gone() {
+  local desc=$1 pid=$2
+  shift 2
+  wait_for "$desc" "$@" __wait_gone_check "$pid"
+}
+
+# wait_polls DESC [N=2] -> wait for N full supervisor poll cycles to complete,
+# using the poll-interval marker supervisor.sh writes at the tail of every
+# poll (after any claim attempt). Deleting it and waiting for it to reappear N
+# times (default 2, since the first reappearance may belong to a poll that was
+# already underway before the delete) proves N complete poll bodies ran,
+# without relying on a fixed sleep to "probably" cover that many polls.
+wait_polls() {
+  local desc=$1 n=${2:-2} i
+  for (( i = 0; i < n; i++ )); do
+    rm -f "$state_root/poll-interval"
+    wait_for "$desc (poll $((i + 1))/$n)" test -e "$state_root/poll-interval" || return 1
+  done
+  return 0
+}
+
+# --- wait_for/wait_gone/wait_polls self-test (Issue #327), runs in every group ---
+{
+  __selftest_flag="$TEST_ROOT/selftest-wait-flag"
+  rm -f "$__selftest_flag"
+  ( sleep 0.3; : > "$__selftest_flag" ) &
+  __selftest_bg=$!
+  __selftest_flag_check() { [[ -e $__selftest_flag ]]; }
+  wait_for 'self-test: delayed condition' --timeout 5 __selftest_flag_check \
+    || fail 'wait_for self-test: a condition satisfied after a short delay was not observed within its budget'
+  wait "$__selftest_bg" 2>/dev/null || true
+
+  __selftest_capture=''
+  __selftest_capture_check() { __selftest_capture=ok; return 0; }
+  wait_for 'self-test: predicate side effect visibility' --timeout 5 __selftest_capture_check \
+    || fail 'wait_for self-test: predicate did not run'
+  [[ $__selftest_capture == ok ]] || fail 'wait_for self-test: a predicate function'"'"'s variable assignment did not persist to the caller (it ran in a subshell)'
+
+  __selftest_never() { return 1; }
+  if wait_for 'self-test: condition that never becomes true' --timeout 1 __selftest_never; then
+    fail 'wait_for self-test: a predicate that never succeeds returned success'
+  fi
+
+  setsid sleep 60 & __selftest_alive_pid=$!
+  if wait_gone 'self-test: alive pid falsely reported gone' "$__selftest_alive_pid" --timeout 1; then
+    fail 'wait_gone self-test: a live pid was reported as gone'
+  fi
+  kill -TERM "-$__selftest_alive_pid" 2>/dev/null || true
+  wait "$__selftest_alive_pid" 2>/dev/null || true
+
+  ( exit 0 ) & __selftest_gone_pid=$!
+  wait "$__selftest_gone_pid" 2>/dev/null || true
+  wait_gone 'self-test: exited pid observed as gone' "$__selftest_gone_pid" --timeout 5 \
+    || fail 'wait_gone self-test: an already-exited pid was not observed as gone'
+}
+
 # write_queue_config FILE KEY=VAL ... -> render a [queue] TOML config. A
 # purely numeric VAL is emitted bare (existing numeric queue.* keys); any
 # other VAL (e.g. TRACEABILITY=require) is TOML-quoted as a string, since
@@ -3545,13 +3650,13 @@ rm -f "$state_root/conflict/issue-91" "$state_root/stop.requested"
 "$target/bin/agentic-loop" _supervise &
 scope_supervisor_pid=$!
 scope_wait_seen=0
-for _ in $(seq 1 40); do [[ -r $state_root/conflict/issue-70 ]] && { scope_wait_seen=1; break; }; sleep 0.1; done
+wait_for 'scope wait seen' test -r "$state_root/conflict/issue-70" && scope_wait_seen=1
 (( scope_wait_seen == 1 )) || fail 'multi-host fixture did not first persist the legitimate structural scope conflict'
 printf '54 completed closed none 2026-01-01T00:00:00Z none none %s\n70 queued open none 2026-01-02T00:00:00Z none none %s\n' \
   "$(scope_field 'paths=bin/agentic-loop')" "$(scope_field 'paths=bin/agentic-loop')" > "$state.transition"
 mv "$state.transition" "$state"
 scope_claimed=0
-for _ in $(seq 1 80); do grep -Eq '^70 completed closed' "$state" && { scope_claimed=1; break; }; sleep 0.1; done
+wait_for 'scope claimed' grep -Eq '^70 completed closed' "$state" && scope_claimed=1
 : > "$state_root/stop.requested"
 wait "$scope_supervisor_pid"
 (( scope_claimed == 1 )) || fail 'queued Issue stayed blocked after the remote blocker completed'
@@ -4756,11 +4861,8 @@ git -C "$target" worktree add --quiet -b agent/issue-19 "$target-worktrees/issue
 FAKE_CODEX_SLEEP=2 "$target/bin/agentic-loop" _worker 19 phase-status-worker &
 worker_bg_pid=$!
 status_output=''
-for _ in 1 2 3 4 5 6 7 8 9 10; do
-  status_output=$("$target/bin/agentic-loop" status)
-  grep -Fq 'phase:' <<< "$status_output" && break
-  sleep 0.3
-done
+__phase_status_check() { status_output=$("$target/bin/agentic-loop" status); grep -Fq 'phase:' <<< "$status_output"; }
+wait_for 'status displayed the observed resume phase' __phase_status_check || true
 wait "$worker_bg_pid"
 grep -Fq '#19' <<< "$status_output" || fail 'status did not list the running Issue'
 grep -Fq 'phase: worktree-ready' <<< "$status_output" || fail 'status did not display the observed resume phase'
@@ -4880,7 +4982,7 @@ rm -f "$state_root/stop.requested"
 FAKE_CODEX_SLEEP=30 "$target/bin/agentic-loop" _supervise &
 sup_pid=$!
 graceful_claimed=0
-for _ in $(seq 1 40); do [[ -e $state_root/workers/15.pid ]] && { graceful_claimed=1; break; }; sleep 0.5; done
+wait_for 'graceful claimed' test -e "$state_root/workers/15.pid" && graceful_claimed=1
 [[ $graceful_claimed == 1 ]] || { kill "$sup_pid" 2>/dev/null; fail 'worker was not claimed before the shutdown test'; }
 kill -TERM "$sup_pid" 2>/dev/null
 wait "$sup_pid" 2>/dev/null || true
@@ -4911,14 +5013,15 @@ rm -f "$state_root/stop.requested"
 FAKE_CODEX_SLEEP=30 "$target/bin/agentic-loop" _supervise &
 pidloss_sup_pid=$!
 pidloss_claimed=0
-for _ in $(seq 1 40); do [[ -r $state_root/workers/2190.pid ]] && { pidloss_claimed=1; break; }; sleep 0.25; done
+wait_for 'pidloss claimed' test -r "$state_root/workers/2190.pid" && pidloss_claimed=1
 [[ $pidloss_claimed == 1 ]] || { kill "$pidloss_sup_pid" 2>/dev/null; wait "$pidloss_sup_pid" 2>/dev/null; fail 'a worker was not claimed before the pidfile-loss max_workers test'; }
 pidloss_worker_pid=$(cat "$state_root/workers/2190.pid")
 rm -f "$state_root/workers/2190.pid"
-# Give the supervisor several polls (poll_seconds=1) to reconcile the lost
-# pidfile from its live /proc scan and to (incorrectly, if the fix regressed)
-# claim the second queued Issue.
-sleep 3
+# Give the supervisor several full poll cycles to reconcile the lost pidfile
+# from its live /proc scan and to (incorrectly, if the fix regressed) claim
+# the second queued Issue. wait_polls proves N complete poll bodies ran
+# instead of hoping a fixed sleep covered that many at poll_seconds=1.
+wait_polls 'pidfile-loss reconcile polls'
 pidloss_second_claimed=0
 grep -Eq '^2191 running' "$state" && pidloss_second_claimed=1
 pidloss_reconciled=0
@@ -4943,7 +5046,7 @@ rm -f "$state_root/stop.requested"
 FAKE_CODEX_SLEEP=30 "$target/bin/agentic-loop" _supervise &
 shutpid_sup_pid=$!
 shutpid_claimed=0
-for _ in $(seq 1 40); do [[ -r $state_root/workers/2192.pid ]] && { shutpid_claimed=1; break; }; sleep 0.25; done
+wait_for 'shutpid claimed' test -r "$state_root/workers/2192.pid" && shutpid_claimed=1
 [[ $shutpid_claimed == 1 ]] || { kill "$shutpid_sup_pid" 2>/dev/null; wait "$shutpid_sup_pid" 2>/dev/null; fail 'a worker was not claimed before the pidfile-loss shutdown test'; }
 shutpid_worker_pid=$(cat "$state_root/workers/2192.pid")
 rm -f "$state_root/workers/2192.pid"
@@ -4953,7 +5056,7 @@ rm -f "$state_root/stop.requested"
 grep -Eq '^2192 queued' "$state" || fail 'a worker whose pidfile was lost was not requeued by shutdown (Issue #219 requirement 3)'
 [[ ! -e $state_root/workers/2192.pid ]] || fail 'shutdown left a pidfile behind for the pidfile-loss scenario'
 shutpid_worker_gone=0
-for _ in $(seq 1 20); do kill -0 "$shutpid_worker_pid" 2>/dev/null || { shutpid_worker_gone=1; break; }; sleep 0.5; done
+wait_gone 'shutpid worker gone' "$shutpid_worker_pid" && shutpid_worker_gone=1
 [[ $shutpid_worker_gone == 1 ]] || fail 'a worker whose pidfile was lost was left running after shutdown (orphaned process)'
 assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:shutdown' 'graceful shutdown was not recorded on the Issue for the pidfile-loss scenario'
 
@@ -4971,7 +5074,7 @@ rm -f "$state_root/stop.requested" "$state_root/supervisor.pid"
 ( cd "$target" && exec ./bin/agentic-loop _supervise ) &
 relpath_sup_pid=$!
 relpath_seen=0
-for _ in $(seq 1 40); do [[ -r $state_root/supervisor.pid ]] && { relpath_seen=1; break; }; sleep 0.25; done
+wait_for 'relpath seen' test -r "$state_root/supervisor.pid" && relpath_seen=1
 [[ $relpath_seen == 1 ]] || { kill "$relpath_sup_pid" 2>/dev/null; wait "$relpath_sup_pid" 2>/dev/null; fail 'a supervisor started via a relative path did not publish its pid'; }
 relpath_status=$("$target/bin/agentic-loop" status)
 if grep -Fq 'supervisor-stale-pid' <<< "$relpath_status"; then fail 'a supervisor started via a relative path was misreported as having a stale pid'; fi
@@ -5042,11 +5145,8 @@ rm -f "$state_root/stop.requested" "$state_root/poll-interval"
 "$target/bin/agentic-loop" _supervise &
 backoff_sup=$!
 backoff_val=0
-for _ in $(seq 1 20); do
-  backoff_val=$(cat "$state_root/poll-interval" 2>/dev/null || printf '0')
-  [[ $backoff_val =~ ^[0-9]+$ ]] && (( backoff_val > 1 )) && break
-  sleep 0.5
-done
+__backoff_check() { backoff_val=$(cat "$state_root/poll-interval" 2>/dev/null || printf '0'); [[ $backoff_val =~ ^[0-9]+$ ]] && (( backoff_val > 1 )); }
+wait_for 'idle backoff lengthened' __backoff_check || true
 kill -TERM "$backoff_sup" 2>/dev/null || true
 wait "$backoff_sup" 2>/dev/null || true
 rm -f "$state_root/stop.requested"
@@ -5066,29 +5166,21 @@ rm -f "$state_root/stop.requested"
 FAKE_CODEX_SLEEP=60 FAKE_CODEX_SLEEP_ISSUE_51=1 "$target/bin/agentic-loop" _supervise &
 hang_sup_pid=$!
 hang_worker_pid=''
-for _ in $(seq 1 40); do
-  if [[ -r $state_root/workers/50.pid ]]; then hang_worker_pid=$(cat "$state_root/workers/50.pid"); break; fi
-  sleep 0.5
-done
+__hang_worker_pid_check() { [[ -r $state_root/workers/50.pid ]] && hang_worker_pid=$(cat "$state_root/workers/50.pid"); }
+wait_for 'hung worker claimed' __hang_worker_pid_check
 [[ -n $hang_worker_pid ]] || { kill "$hang_sup_pid" 2>/dev/null; wait "$hang_sup_pid" 2>/dev/null; fail 'hung worker was not claimed before the timeout test'; }
 # Drive the elapsed-time boundary through its persisted clock input instead of
 # waiting eight wall-clock seconds. The next supervisor poll must enforce the
 # same configured timeout against this already-expired start timestamp.
 printf '%s\n' "$(($(date +%s) - 9))" > "$state_root/workers/50.started"
 hang_timed_out=0
-for _ in $(seq 1 40); do
-  grep -Eq '^50 failed' "$state" && { hang_timed_out=1; break; }
-  sleep 0.5
-done
+wait_for 'hung worker timed out' grep -Eq '^50 failed' "$state" && hang_timed_out=1
 [[ $hang_timed_out == 1 ]] || { kill "$hang_sup_pid" 2>/dev/null; wait "$hang_sup_pid" 2>/dev/null; fail 'a hung worker was not detected and failed within the configured timeout'; }
 [[ ! -e $state_root/workers/50.pid ]] || fail 'a timed-out worker pidfile was not cleared'
 # kill -0 also succeeds against a not-yet-reaped zombie, so poll briefly
 # instead of asserting on a single sample right after the state flip.
 hang_worker_gone=0
-for _ in $(seq 1 20); do
-  kill -0 "$hang_worker_pid" 2>/dev/null || { hang_worker_gone=1; break; }
-  sleep 0.5
-done
+wait_gone 'hung worker process group gone' "$hang_worker_pid" && hang_worker_gone=1
 [[ $hang_worker_gone == 1 ]] || { kill "$hang_sup_pid" 2>/dev/null; wait "$hang_sup_pid" 2>/dev/null; fail 'a timed-out worker process group left an orphan process behind'; }
 assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:worker-timeout' 'the worker-timeout disposition was not audited on the Issue'
 # lease_release's PATCH body (Issue #110): the claim/lease markers and the
@@ -5097,10 +5189,7 @@ assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:worker-timeout
 # encode_comment_body).
 assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'expires=0 -->\n<!-- agentic-loop:lease' 'lease_release did not render a real newline between its claim/lease markers'
 hang_queue_progressed=0
-for _ in $(seq 1 40); do
-  grep -Eq '^51 completed closed' "$state" && { hang_queue_progressed=1; break; }
-  sleep 0.5
-done
+wait_for 'queue progressed past the hung worker' grep -Eq '^51 completed closed' "$state" && hang_queue_progressed=1
 kill -TERM "$hang_sup_pid" 2>/dev/null || true
 wait "$hang_sup_pid" 2>/dev/null || true
 rm -f "$state_root/stop.requested"
@@ -5130,19 +5219,13 @@ pool_timeout_sup_pid=$!
 # setup and let the plan stage's OWN (already-correct, Issue #155) pool-pick
 # see it first, never actually exercising the crash/timeout path under test.
 pool_timeout_call_seen=0
-for _ in $(seq 1 60); do
-  grep -Fq -- '--sandbox read-only' "$FAKE_GH_ROOT/codex-calls" 2>/dev/null && { pool_timeout_call_seen=1; break; }
-  sleep 0.5
-done
+wait_for 'plan stage provider call started' grep -Fq -- '--sandbox read-only' "$FAKE_GH_ROOT/codex-calls" && pool_timeout_call_seen=1
 [[ $pool_timeout_call_seen == 1 ]] || { kill "$pool_timeout_sup_pid" 2>/dev/null; wait "$pool_timeout_sup_pid" 2>/dev/null; fail 'the plan stage never reached its (now sleeping) provider call before the pool-exhaustion timeout test'; }
 mkdir -p "$state_root/pools/codex"
 printf '%s\n' "$(( $(date +%s) + 1800 ))" > "$state_root/pools/codex/exhausted"
 printf '%s\n' "$(($(date +%s) - 9))" > "$state_root/workers/54.started"
 pool_timeout_requeued=0
-for _ in $(seq 1 40); do
-  grep -Eq '^54 queued open' "$state" && { pool_timeout_requeued=1; break; }
-  sleep 0.5
-done
+wait_for 'pool-exhaustion-correlated hang requeued' grep -Eq '^54 queued open' "$state" && pool_timeout_requeued=1
 kill -TERM "$pool_timeout_sup_pid" 2>/dev/null || true
 wait "$pool_timeout_sup_pid" 2>/dev/null || true
 rm -f "$state_root/stop.requested"
@@ -5186,7 +5269,7 @@ mkdir -p "$state_root/workers"
 FAKE_CODEX_SLEEP=30 setsid "$target/bin/agentic-loop" _worker 53 disabled-timeout-worker &
 disabled_worker_pid=$!
 disabled_started_seen=0
-for _ in $(seq 1 40); do [[ -r $state_root/workers/53.started ]] && { disabled_started_seen=1; break; }; sleep 0.2; done
+wait_for 'disabled started seen' test -r "$state_root/workers/53.started" && disabled_started_seen=1
 [[ $disabled_started_seen == 1 ]] || { kill -TERM "-$disabled_worker_pid" 2>/dev/null; wait "$disabled_worker_pid" 2>/dev/null; fail 'test setup did not observe the worker start marker'; }
 printf '%s\n' "$disabled_worker_pid" > "$state_root/workers/53.pid"
 printf '%s\n' "$(($(date +%s) - 100000))" > "$state_root/workers/53.started"
@@ -5194,10 +5277,7 @@ rm -f "$state_root/poll-interval"
 "$target/bin/agentic-loop" _supervise &
 disabled_sup_pid=$!
 disabled_poll_seen=0
-for _ in $(seq 1 50); do
-  [[ -r $state_root/poll-interval ]] && { disabled_poll_seen=1; break; }
-  sleep 0.1
-done
+wait_for 'disabled-timeout supervisor poll seen' test -r "$state_root/poll-interval" && disabled_poll_seen=1
 [[ $disabled_poll_seen == 1 ]] || { kill -TERM "$disabled_sup_pid" 2>/dev/null; wait "$disabled_sup_pid" 2>/dev/null; fail 'disabled-timeout supervisor did not complete a poll'; }
 disabled_still_alive=0
 kill -0 "$disabled_worker_pid" 2>/dev/null && disabled_still_alive=1
@@ -5340,15 +5420,16 @@ write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEA
 AGENTIC_LOOP_RUN_ONCE=1 FAKE_CODEX_SLEEP=2 "$target/bin/agentic-loop" _supervise &
 real_stall_sup_pid=$!
 real_stall_seen=0
-for _ in $(seq 1 60); do
+__real_stall_check() {
   real_status_json=$("$target/bin/agentic-loop" status --format json 2>/dev/null) || true
   if [[ $(yq -p json '.workers[] | select(.issue == 921) | .health' <<< "$real_status_json" 2>/dev/null) == stalled ]]; then
     real_stall_seen=1
-    break
+    return 0
   fi
-  kill -0 "$real_stall_sup_pid" 2>/dev/null || break
-  sleep 0.2
-done
+  kill -0 "$real_stall_sup_pid" 2>/dev/null || return 0
+  return 1
+}
+wait_for 'real fake-provider worker stalled, or supervisor exited' __real_stall_check
 wait "$real_stall_sup_pid" 2>/dev/null || true
 [[ $real_stall_seen == 1 ]] || fail 'a real fake-provider worker exceeding provider_stall_seconds was not observed as stalled without a fabricated progress epoch'
 
@@ -5359,12 +5440,16 @@ write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEA
 AGENTIC_LOOP_RUN_ONCE=1 FAKE_CODEX_SLEEP=2 "$target/bin/agentic-loop" _supervise &
 ctrl_stall_sup_pid=$!
 ctrl_stall_seen=0
-for _ in $(seq 1 60); do
+__ctrl_stall_check() {
   ctrl_status_json=$("$target/bin/agentic-loop" status --format json 2>/dev/null) || true
-  if [[ $(yq -p json '.workers[] | select(.issue == 922) | .health' <<< "$ctrl_status_json" 2>/dev/null) == stalled ]]; then ctrl_stall_seen=1; fi
-  kill -0 "$ctrl_stall_sup_pid" 2>/dev/null || break
-  sleep 0.2
-done
+  if [[ $(yq -p json '.workers[] | select(.issue == 922) | .health' <<< "$ctrl_status_json" 2>/dev/null) == stalled ]]; then
+    ctrl_stall_seen=1
+    return 0
+  fi
+  kill -0 "$ctrl_stall_sup_pid" 2>/dev/null || return 0
+  return 1
+}
+wait_for 'control worker never observed as stalled, or supervisor exited' __ctrl_stall_check
 wait "$ctrl_stall_sup_pid" 2>/dev/null || true
 [[ $ctrl_stall_seen == 0 ]] || fail 'raising provider_stall_seconds above the fake providers sleep time still misclassified a real worker as stalled'
 
@@ -5391,10 +5476,8 @@ rm -f "$state_root/stop.requested"
 FAKE_CODEX_SLEEP=60 "$target/bin/agentic-loop" _supervise &
 orphan_sup_pid=$!
 orphan_worker_pid=''
-for _ in $(seq 1 40); do
-  if [[ -r $state_root/workers/70.pid ]]; then orphan_worker_pid=$(cat "$state_root/workers/70.pid"); break; fi
-  sleep 0.5
-done
+__orphan_worker_pid_check() { [[ -r $state_root/workers/70.pid ]] && orphan_worker_pid=$(cat "$state_root/workers/70.pid"); }
+wait_for 'worker-orphan test worker claimed' __orphan_worker_pid_check
 [[ -n $orphan_worker_pid ]] || { kill "$orphan_sup_pid" 2>/dev/null; wait "$orphan_sup_pid" 2>/dev/null; fail 'worker-orphan test: the worker was not claimed before the Label was reverted'; }
 grep -Eq '^70 running' "$state" || { kill "$orphan_sup_pid" 2>/dev/null; wait "$orphan_sup_pid" 2>/dev/null; fail 'worker-orphan test: claim did not set agent:running before the Label was reverted'; }
 # worker() re-confirms the running Label exactly once, at its very start
@@ -5409,10 +5492,7 @@ grep -Eq '^70 running' "$state" || { kill "$orphan_sup_pid" 2>/dev/null; wait "$
 # catch, matching the real Issue #132 race where the Label diverges from an
 # already-running provider CLI process.
 orphan_claimed_seen=0
-for _ in $(seq 1 40); do
-  [[ -r $state_root/workers/70.progress ]] && { orphan_claimed_seen=1; break; }
-  sleep 0.5
-done
+wait_for 'worker-orphan test running-Label check passed' test -r "$state_root/workers/70.progress" && orphan_claimed_seen=1
 [[ $orphan_claimed_seen == 1 ]] || { kill "$orphan_sup_pid" 2>/dev/null; wait "$orphan_sup_pid" 2>/dev/null; fail 'worker-orphan test: the worker never passed its startup running-Label check before the Label was reverted'; }
 # Simulate the Issue #132 scenario: the Label diverges from the still-live
 # local worker (e.g. reverted to failed through another path -- failed rather
@@ -5422,10 +5502,7 @@ done
 # (600s here), far past this test's budget).
 sed -i 's/^70 running/70 failed/' "$state"
 orphan_since_seen=0
-for _ in $(seq 1 40); do
-  [[ -r $state_root/workers/70.orphan-since ]] && { orphan_since_seen=1; break; }
-  sleep 0.5
-done
+wait_for 'worker-orphan Label mismatch observed' test -r "$state_root/workers/70.orphan-since" && orphan_since_seen=1
 [[ $orphan_since_seen == 1 ]] || { kill "$orphan_sup_pid" 2>/dev/null; wait "$orphan_sup_pid" 2>/dev/null; fail 'worker-orphan test: the Label mismatch was never observed (orphan-since marker missing)'; }
 kill -0 "$orphan_worker_pid" 2>/dev/null || { kill "$orphan_sup_pid" 2>/dev/null; wait "$orphan_sup_pid" 2>/dev/null; fail 'worker-orphan test: the worker was killed on the very first observation instead of waiting out the grace period'; }
 # Drive the grace boundary through its persisted clock input instead of
@@ -5437,16 +5514,11 @@ printf '%s\n' "$(($(date +%s) - 6))" > "$state_root/workers/70.orphan-since"
 # original pid dying (not "the pidfile is now empty") is the right completion
 # signal.
 orphan_reaped=0
-for _ in $(seq 1 40); do
-  kill -0 "$orphan_worker_pid" 2>/dev/null || { orphan_reaped=1; break; }
-  sleep 0.5
-done
+wait_gone 'worker-orphan reaped past grace period' "$orphan_worker_pid" && orphan_reaped=1
 [[ $orphan_reaped == 1 ]] || { kill "$orphan_sup_pid" 2>/dev/null; wait "$orphan_sup_pid" 2>/dev/null; fail 'a worker-orphan persisting past worker_orphan_grace_seconds was not reaped'; }
 orphan_pidfile_cleared=0
-for _ in $(seq 1 20); do
-  [[ ! -e $state_root/workers/70.pid ]] && { orphan_pidfile_cleared=1; break; }
-  sleep 0.5
-done
+__orphan_pidfile_gone() { [[ ! -e $state_root/workers/70.pid ]]; }
+wait_for 'reaped pidfile removed' __orphan_pidfile_gone && orphan_pidfile_cleared=1
 [[ $orphan_pidfile_cleared == 1 ]] || fail 'clear_worker_local did not remove the reaped pidfile'
 [[ ! -e $state_root/workers/70.orphan-since ]] || fail 'clear_worker_local did not remove the orphan-since marker'
 [[ ! -e $state_root/workers/70.lease ]] || fail 'clear_worker_local did not remove the lease file'
@@ -5479,20 +5551,15 @@ rm -f "$state_root/stop.requested"
 FAKE_CODEX_SLEEP=60 "$target/bin/agentic-loop" _supervise &
 orphan2_sup_pid=$!
 orphan2_worker_pid=''
-for _ in $(seq 1 40); do
-  if [[ -r $state_root/workers/72.pid ]]; then orphan2_worker_pid=$(cat "$state_root/workers/72.pid"); break; fi
-  sleep 0.5
-done
+__orphan2_worker_pid_check() { [[ -r $state_root/workers/72.pid ]] && orphan2_worker_pid=$(cat "$state_root/workers/72.pid"); }
+wait_for 'worker-orphan grace-reset test worker claimed' __orphan2_worker_pid_check
 [[ -n $orphan2_worker_pid ]] || { kill "$orphan2_sup_pid" 2>/dev/null; wait "$orphan2_sup_pid" 2>/dev/null; fail 'worker-orphan grace-reset test: the worker was not claimed'; }
 # See the matching wait above: the Label must not flip until the worker's
 # one-time startup confirm-running-label check has already passed, or the
 # worker exits on its own (silently, no reap) instead of exercising the
 # grace-reset path under test.
 orphan2_claimed_seen=0
-for _ in $(seq 1 40); do
-  [[ -r $state_root/workers/72.progress ]] && { orphan2_claimed_seen=1; break; }
-  sleep 0.5
-done
+wait_for 'worker-orphan grace-reset test running-Label check passed' test -r "$state_root/workers/72.progress" && orphan2_claimed_seen=1
 [[ $orphan2_claimed_seen == 1 ]] || { kill "$orphan2_sup_pid" 2>/dev/null; wait "$orphan2_sup_pid" 2>/dev/null; fail 'worker-orphan grace-reset test: the worker never passed its startup running-Label check before the Label was reverted'; }
 # The claim is done; hand control of the reap cadence over to _reap-orphans
 # below (SIGKILL so supervisor_graceful_shutdown never runs against the
@@ -5569,10 +5636,8 @@ setsid bash -c '
 ' bash "$nonleader_dir" &
 nonleader_session_pid=$!
 nonleader_ready=0
-for _ in $(seq 1 40); do
-  [[ -r $nonleader_dir/child && -r $nonleader_dir/leader ]] && { nonleader_ready=1; break; }
-  sleep 0.25
-done
+__nonleader_ready_check() { [[ -r $nonleader_dir/child && -r $nonleader_dir/leader ]]; }
+wait_for 'non-leader pidfile test worker session started' __nonleader_ready_check && nonleader_ready=1
 [[ $nonleader_ready == 1 ]] || { kill -KILL "$nonleader_session_pid" 2>/dev/null; fail 'non-leader pidfile test: the worker session did not start'; }
 nonleader_leader=$(cat "$nonleader_dir/leader")
 nonleader_child=$(cat "$nonleader_dir/child")
@@ -5586,10 +5651,10 @@ kill -0 "$nonleader_child" 2>/dev/null || { kill -KILL "-$nonleader_leader" 2>/d
 printf '%s\n' "$(($(date +%s) - 31))" > "$state_root/workers/74.orphan-since"
 "$target/bin/agentic-loop" _reap-orphans
 nonleader_child_gone=0
-for _ in $(seq 1 20); do kill -0 "$nonleader_child" 2>/dev/null || { nonleader_child_gone=1; break; }; sleep 0.5; done
+wait_gone 'nonleader child gone' "$nonleader_child" && nonleader_child_gone=1
 if [[ $nonleader_child_gone != 1 ]]; then kill -KILL "-$nonleader_leader" 2>/dev/null || true; fail 'a worker whose pidfile recorded a non-leader pid survived the orphan reap (its process group was never signalled)'; fi
 nonleader_leader_gone=0
-for _ in $(seq 1 20); do kill -0 "$nonleader_leader" 2>/dev/null || { nonleader_leader_gone=1; break; }; sleep 0.5; done
+wait_gone 'nonleader leader gone' "$nonleader_leader" && nonleader_leader_gone=1
 if [[ $nonleader_leader_gone != 1 ]]; then kill -KILL "-$nonleader_leader" 2>/dev/null || true; fail 'the reap signalled only the recorded pid, leaving the rest of the worker'"'"'s process group (its provider CLI) running'; fi
 assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:worker-orphan-reaped' 'the non-leader-pid reap was not audited on the Issue'
 [[ ! -e $state_root/workers/74.pid ]] || fail 'clear_worker_local did not remove the reaped pidfile (non-leader pid)'
@@ -5622,10 +5687,8 @@ setsid bash -c '
 ' bash "$selfgroup_dir" "$target/bin/agentic-loop" &
 selfgroup_sid_pid=$!
 selfgroup_ready=0
-for _ in $(seq 1 40); do
-  [[ -r $selfgroup_dir/target && -r $selfgroup_dir/witness ]] && { selfgroup_ready=1; break; }
-  sleep 0.25
-done
+__selfgroup_ready_check() { [[ -r $selfgroup_dir/target && -r $selfgroup_dir/witness ]]; }
+wait_for 'self-group guard test sleepers started' __selfgroup_ready_check && selfgroup_ready=1
 [[ $selfgroup_ready == 1 ]] || { kill -KILL "$selfgroup_sid_pid" 2>/dev/null; fail 'self-group guard test: the dedicated session did not start its sleepers'; }
 selfgroup_target=$(cat "$selfgroup_dir/target")
 selfgroup_witness=$(cat "$selfgroup_dir/witness")
@@ -5634,10 +5697,10 @@ printf '%s\n' "$(($(date +%s) - 600))" > "$state_root/workers/76.started"
 printf '%s\n' "$(($(date +%s) - 31))" > "$state_root/workers/76.orphan-since"
 : > "$selfgroup_dir/go"
 selfgroup_done=0
-for _ in $(seq 1 60); do [[ -r $selfgroup_dir/reaped ]] && { selfgroup_done=1; break; }; sleep 0.5; done
+wait_for 'selfgroup done' test -r "$selfgroup_dir/reaped" && selfgroup_done=1
 [[ $selfgroup_done == 1 ]] || { kill -KILL "-$selfgroup_sid_pid" 2>/dev/null; fail 'self-group guard test: the reap inside the dedicated session never completed (it signalled its own group)'; }
 selfgroup_target_gone=0
-for _ in $(seq 1 20); do kill -0 "$selfgroup_target" 2>/dev/null || { selfgroup_target_gone=1; break; }; sleep 0.5; done
+wait_gone 'selfgroup target gone' "$selfgroup_target" && selfgroup_target_gone=1
 [[ $selfgroup_target_gone == 1 ]] || { kill -KILL "-$selfgroup_sid_pid" 2>/dev/null; fail 'a worker sharing the reaper'"'"'s process group was not stopped at all (the single-pid fallback did not fire)'; }
 kill -0 "$selfgroup_witness" 2>/dev/null || fail 'the reap signalled its own process group, killing a process it does not own'
 kill -KILL "-$selfgroup_sid_pid" 2>/dev/null || true
@@ -5719,21 +5782,21 @@ rm -f "$state_root/poll-interval"
 "$target/bin/agentic-loop" _supervise &
 critguard_sup_pid=$!
 critguard_poll_seen=0
-for _ in $(seq 1 50); do [[ -r $state_root/poll-interval ]] && { critguard_poll_seen=1; break; }; sleep 0.1; done
+wait_for 'critguard poll seen' test -r "$state_root/poll-interval" && critguard_poll_seen=1
 [[ $critguard_poll_seen == 1 ]] || { kill -TERM "$critguard_sup_pid" 2>/dev/null; wait "$critguard_sup_pid" 2>/dev/null; kill -TERM "-$critguard_pid" 2>/dev/null; fail 'critical-section guard test: the supervisor did not complete a poll'; }
 kill -0 "$critguard_pid" 2>/dev/null || { kill -TERM "$critguard_sup_pid" 2>/dev/null; wait "$critguard_sup_pid" 2>/dev/null; fail 'reap_orphan_workers killed a worker with an active critical section despite grace already having elapsed'; }
 [[ -e $state_root/workers/85.orphan-since ]] || { kill -TERM "$critguard_sup_pid" 2>/dev/null; wait "$critguard_sup_pid" 2>/dev/null; kill -TERM "-$critguard_pid" 2>/dev/null; fail 'the orphan-since marker was cleared while the critical-section guard was active'; }
 if grep -Fq 'agentic-loop:worker-orphan-reaped' "$FAKE_GH_ROOT/$state_key.comments"; then kill -TERM "$critguard_sup_pid" 2>/dev/null; wait "$critguard_sup_pid" 2>/dev/null; kill -TERM "-$critguard_pid" 2>/dev/null; fail 'a worker-orphan reap was audited despite an active critical section'; fi
 rm -f "$state_root/workers/85.critical"
 critguard_reaped=0
-for _ in $(seq 1 40); do kill -0 "$critguard_pid" 2>/dev/null || { critguard_reaped=1; break; }; sleep 0.5; done
+wait_gone 'critguard reaped' "$critguard_pid" && critguard_reaped=1
 # The process dying (kill -0 failing) only proves reap_orphan_workers reached
 # its kill; clear_worker_local/comment_issue still run afterward in the same
 # function body. Give the still-live supervisor a brief window to finish that
 # tail before it is terminated, or the audit-comment assertion below races
 # against its own cleanup.
 if [[ $critguard_reaped == 1 ]]; then
-  for _ in $(seq 1 20); do grep -Fq 'agentic-loop:worker-orphan-reaped' "$FAKE_GH_ROOT/$state_key.comments" 2>/dev/null && break; sleep 0.5; done
+  wait_for 'orphan-reaped comment recorded' --timeout 10 grep -Fq 'agentic-loop:worker-orphan-reaped' "$FAKE_GH_ROOT/$state_key.comments" || true
 fi
 kill -TERM "$critguard_sup_pid" 2>/dev/null || true
 wait "$critguard_sup_pid" 2>/dev/null || true
@@ -5767,16 +5830,16 @@ rm -f "$state_root/poll-interval"
 "$target/bin/agentic-loop" _supervise &
 stopguard_sup_pid=$!
 stopguard_poll_seen=0
-for _ in $(seq 1 50); do [[ -r $state_root/poll-interval ]] && { stopguard_poll_seen=1; break; }; sleep 0.1; done
+wait_for 'stopguard poll seen' test -r "$state_root/poll-interval" && stopguard_poll_seen=1
 [[ $stopguard_poll_seen == 1 ]] || { kill -TERM "$stopguard_sup_pid" 2>/dev/null; wait "$stopguard_sup_pid" 2>/dev/null; kill -TERM "-$stopguard_pid" 2>/dev/null; fail 'stop-request guard test: the supervisor did not complete a poll'; }
 kill -0 "$stopguard_pid" 2>/dev/null || { kill -TERM "$stopguard_sup_pid" 2>/dev/null; wait "$stopguard_sup_pid" 2>/dev/null; fail 'reap_orphan_workers killed a worker with a pending stop-request despite grace already having elapsed'; }
 [[ -e $state_root/workers/86.orphan-since ]] || { kill -TERM "$stopguard_sup_pid" 2>/dev/null; wait "$stopguard_sup_pid" 2>/dev/null; kill -TERM "-$stopguard_pid" 2>/dev/null; fail 'the orphan-since marker was cleared while the stop-request guard was active'; }
 if grep -Fq 'agentic-loop:worker-orphan-reaped' "$FAKE_GH_ROOT/$state_key.comments"; then kill -TERM "$stopguard_sup_pid" 2>/dev/null; wait "$stopguard_sup_pid" 2>/dev/null; kill -TERM "-$stopguard_pid" 2>/dev/null; fail 'a worker-orphan reap was audited despite a pending stop-request'; fi
 rm -f "$state_root/workers/86.stop-requested"
 stopguard_reaped=0
-for _ in $(seq 1 40); do kill -0 "$stopguard_pid" 2>/dev/null || { stopguard_reaped=1; break; }; sleep 0.5; done
+wait_gone 'stopguard reaped' "$stopguard_pid" && stopguard_reaped=1
 if [[ $stopguard_reaped == 1 ]]; then
-  for _ in $(seq 1 20); do grep -Fq 'agentic-loop:worker-orphan-reaped' "$FAKE_GH_ROOT/$state_key.comments" 2>/dev/null && break; sleep 0.5; done
+  wait_for 'orphan-reaped comment recorded' --timeout 10 grep -Fq 'agentic-loop:worker-orphan-reaped' "$FAKE_GH_ROOT/$state_key.comments" || true
 fi
 kill -TERM "$stopguard_sup_pid" 2>/dev/null || true
 wait "$stopguard_sup_pid" 2>/dev/null || true
@@ -5813,7 +5876,7 @@ rm -f "$state_root/poll-interval"
 "$target/bin/agentic-loop" _supervise &
 stale_sup_pid=$!
 stale_poll_seen=0
-for _ in $(seq 1 50); do [[ -r $state_root/poll-interval ]] && { stale_poll_seen=1; break; }; sleep 0.1; done
+wait_for 'stale poll seen' test -r "$state_root/poll-interval" && stale_poll_seen=1
 [[ $stale_poll_seen == 1 ]] || { kill -TERM "$stale_sup_pid" 2>/dev/null; wait "$stale_sup_pid" 2>/dev/null; kill -TERM "-$stale_pid" 2>/dev/null; fail 'stale-marker test: the supervisor did not complete a poll'; }
 kill -0 "$stale_pid" 2>/dev/null || { kill -TERM "$stale_sup_pid" 2>/dev/null; wait "$stale_sup_pid" 2>/dev/null; fail 'a stale orphan-since marker predating the current worker triggered an immediate kill'; }
 stale_since_after=''
@@ -5826,9 +5889,9 @@ if grep -Fq 'agentic-loop:worker-orphan-reaped' "$FAKE_GH_ROOT/$state_key.commen
 # (rather than permanently disables) the grace countdown.
 printf '%s\n' "$(($(date +%s) - 6))" > "$state_root/workers/87.orphan-since"
 stale_reaped=0
-for _ in $(seq 1 40); do kill -0 "$stale_pid" 2>/dev/null || { stale_reaped=1; break; }; sleep 0.5; done
+wait_gone 'stale reaped' "$stale_pid" && stale_reaped=1
 if [[ $stale_reaped == 1 ]]; then
-  for _ in $(seq 1 20); do grep -Fq 'agentic-loop:worker-orphan-reaped' "$FAKE_GH_ROOT/$state_key.comments" 2>/dev/null && break; sleep 0.5; done
+  wait_for 'orphan-reaped comment recorded' --timeout 10 grep -Fq 'agentic-loop:worker-orphan-reaped' "$FAKE_GH_ROOT/$state_key.comments" || true
 fi
 kill -TERM "$stale_sup_pid" 2>/dev/null || true
 wait "$stale_sup_pid" 2>/dev/null || true
@@ -7118,11 +7181,9 @@ grep -Fq 'plan' "$TEST_ROOT/watch-once.out" || fail 'status --watch did not prin
 grep -Fq 'supervisor' "$TEST_ROOT/watch-once.out" || fail 'status --watch did not print all existing events once'
 "$target/bin/agentic-loop" status --watch > "$TEST_ROOT/watch-once.out" 2>&1 &
 watch_once_pid=$!
-sleep 0.5
+wait_gone 'status --watch (non-TTY) exited without following' "$watch_once_pid" \
+  || { kill -TERM "$watch_once_pid" 2>/dev/null || true; wait "$watch_once_pid" 2>/dev/null || true; fail 'status --watch kept following on a non-TTY'; }
 printf '%s\t84\tprogress\tmerge\n' "$((now))" >> "$state_root/events.log"
-sleep 1
-if kill -0 "$watch_once_pid" 2>/dev/null; then kill -TERM "$watch_once_pid" 2>/dev/null || true; wait "$watch_once_pid" 2>/dev/null || true; fail 'status --watch kept following on a non-TTY'; fi
-wait "$watch_once_pid" 2>/dev/null || true
 ! grep -Fq 'merge' "$TEST_ROOT/watch-once.out" || fail 'status --watch streamed an event appended after its non-TTY exit'
 watch_once_delta=$(tail -n +"$((watch_once_calls_before + 1))" "$FAKE_GH_ROOT/calls")
 [[ -z $watch_once_delta ]] || fail 'status --watch made a GitHub call'
@@ -7136,9 +7197,9 @@ watch_tty_status_before=$(git -C "$target" status --porcelain)
 watch_tty_calls_before=$(wc -l < "$FAKE_GH_ROOT/calls")
 script -q -c "$target/bin/agentic-loop status --watch" /dev/null > "$TEST_ROOT/watch-tty.out" 2>&1 &
 watch_tty_pid=$!
-sleep 1
+wait_for 'status --watch (TTY) printed existing events' grep -Fq 'plan' "$TEST_ROOT/watch-tty.out" || true
 printf '%s\t85\tprogress\tcleanup\n' "$((now))" >> "$state_root/events.log"
-sleep 1
+wait_for 'status --watch (TTY) streamed the appended event' grep -Fq 'cleanup' "$TEST_ROOT/watch-tty.out" || true
 kill -TERM "$watch_tty_pid" 2>/dev/null || true
 wait "$watch_tty_pid" 2>/dev/null || true; watch_tty_rc=$?
 (( watch_tty_rc == 0 )) || fail 'status --watch (TTY) did not exit 0 on SIGTERM'
@@ -7187,9 +7248,9 @@ if "$target/bin/agentic-loop" tail --bogus >/dev/null 2>&1; then fail 'tail acce
 tail_follow_calls_before=$(wc -l < "$FAKE_GH_ROOT/calls")
 "$target/bin/agentic-loop" tail --follow > "$TEST_ROOT/tail-follow.out" 2>&1 &
 tail_follow_pid=$!
-sleep 1
+wait_for 'tail --follow printed existing events' grep -Fq 'progress' "$TEST_ROOT/tail-follow.out" || true
 printf '%s\t84\tprogress\tmerge\n' "$((now))" >> "$state_root/events.log"
-sleep 1
+wait_for 'tail --follow streamed the appended event' grep -Fq 'merge' "$TEST_ROOT/tail-follow.out" || true
 kill -TERM "$tail_follow_pid" 2>/dev/null || true
 wait "$tail_follow_pid" 2>/dev/null || true
 grep -Fq 'progress' "$TEST_ROOT/tail-follow.out" || fail 'tail --follow did not print existing events'
@@ -7258,7 +7319,7 @@ rm -f "$state_root/stop.requested"
 FAKE_CODEX_SLEEP=30 "$target/bin/agentic-loop" _supervise &
 pause_sup_pid=$!
 pause_claimed=0
-for _ in $(seq 1 40); do [[ -e $state_root/workers/192.pid ]] && { pause_claimed=1; break; }; sleep 0.5; done
+wait_for 'pause claimed' test -e "$state_root/workers/192.pid" && pause_claimed=1
 [[ $pause_claimed == 1 ]] || { kill "$pause_sup_pid" 2>/dev/null; wait "$pause_sup_pid" 2>/dev/null; fail 'worker was not claimed before the running-pause test'; }
 "$target/bin/agentic-loop" pause 192 --reason 'incident freeze'
 kill "$pause_sup_pid" 2>/dev/null; wait "$pause_sup_pid" 2>/dev/null || true
