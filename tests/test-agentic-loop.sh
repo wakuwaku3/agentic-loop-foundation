@@ -4562,6 +4562,7 @@ printf '171 running open\n' > "$state"
 git -C "$target" worktree add --quiet -b agent/issue-171 "$target-worktrees/issue-171" origin/main
 git -C "$target-worktrees/issue-171" commit --quiet --allow-empty -m 'completed successful checks'
 FAKE_RESUME_OPEN_PR=421 FAKE_RESUME_OPEN_URL="https://github.example/acme/installed-project/pull/421" \
+  FAKE_RESUME_HEAD_SHA=$(git -C "$target-worktrees/issue-171" rev-parse HEAD) \
   FAKE_RESUME_CHECK_RUNS='{"check_runs":[{"conclusion":"success","status":"completed"},{"conclusion":"neutral","status":"completed"},{"conclusion":"skipped","status":"completed"}]}' \
   "$target/bin/agentic-loop" _worker 171 resume-completed-success-worker
 assert_contains "$FAKE_GH_ROOT/codex-calls" 'checks: success' 'completed successful check-runs were not classified as success'
