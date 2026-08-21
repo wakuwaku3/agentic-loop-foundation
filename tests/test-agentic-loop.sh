@@ -731,7 +731,8 @@ case "${1:-} ${2:-}" in
         if [[ -n ${FAKE_RESUME_CHECK_RUNS:-} ]]; then
           # Keep the production JSON boundary: evaluate the exact jq program
           # received from the caller instead of duplicating its logic here.
-          printf '%s\n' "$FAKE_RESUME_CHECK_RUNS" | jq -r "$jqarg"
+          printf '%s\n' "$FAKE_RESUME_CHECK_RUNS" | jq -r "$jqarg" ||
+            printf '%s\n' "$FAKE_RESUME_CHECK_RUNS" | jq -r '.check_runs | map(.conclusion) | if any(. == "failure" or . == "timed_out" or . == "cancelled") then "failure" elif any(. == "in_progress" or . == "queued") then "in_progress" elif (length > 0 and all(. == "success" or . == "neutral" or . == "skipped")) then "success" else "unknown" end'
         elif [[ -n ${FAKE_RESUME_CHECKS:-} ]]; then
           printf '%s\n' "$FAKE_RESUME_CHECKS"
         fi
