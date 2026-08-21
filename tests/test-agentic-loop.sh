@@ -725,7 +725,13 @@ case "${1:-} ${2:-}" in
         # multi-line check-status jq matched in the else branch below.
         if [[ -n ${FAKE_CHECK_RUNS_FILE:-} ]]; then cat "$FAKE_CHECK_RUNS_FILE"; else printf '[]\n'; fi
       else
-        [[ -n ${FAKE_RESUME_CHECKS:-} ]] && printf '%s\n' "$FAKE_RESUME_CHECKS"
+        if [[ -n ${FAKE_RESUME_CHECK_RUNS:-} ]]; then
+          # Keep the production JSON boundary: evaluate the exact jq program
+          # received from the caller instead of duplicating its logic here. A
+          # non-zero exit here must fail the test, not fall back to a
+          # test-side reimplementation that could mask a broken production jq.
+          printf '%s\n' "$FAKE_RESUME_CHECK_RUNS" | jq -r "$jqarg"
+        fi
       fi
     elif [[ $endpoint =~ ^pulls/[0-9]+/files$ ]]; then
       # trace.sh's trace_evaluate PR changed-files read (Issue #53).
@@ -4538,7 +4544,8 @@ printf '17 running open\n' > "$state"
 : > "$FAKE_GH_ROOT/codex-calls"
 git -C "$target" worktree add --quiet -b agent/issue-17 "$target-worktrees/issue-17" origin/main
 git -C "$target-worktrees/issue-17" commit --quiet --allow-empty -m 'in-progress work'
-FAKE_RESUME_OPEN_PR=42 FAKE_RESUME_OPEN_URL="https://github.example/acme/installed-project/pull/42" FAKE_RESUME_CHECKS=in_progress \
+FAKE_RESUME_OPEN_PR=42 FAKE_RESUME_OPEN_URL="https://github.example/acme/installed-project/pull/42" \
+  FAKE_RESUME_CHECK_RUNS='{"check_runs":[{"status":"queued","conclusion":null}]}' \
   "$target/bin/agentic-loop" _worker 17 resume-open-worker
 # shellcheck disable=SC2016 # Backticks are literal Markdown in the expected provider prompt.
 assert_contains "$FAKE_GH_ROOT/codex-calls" '既存のbranch `agent/issue-17` とPR #42 を再利用してください' 'an open-PR resume did not inject reuse instructions into the provider prompt'
@@ -4547,6 +4554,30 @@ assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'phase=pr-open' 'an open-PR 
 assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'checks=in_progress' 'an open-PR resume check status was not recorded in the handoff'
 git -C "$target" worktree remove --force "$target-worktrees/issue-17" 2>/dev/null || true
 git -C "$target" branch -D agent/issue-17 >/dev/null 2>&1 || true
+
+# Check conclusion and status are evaluated independently at the real jq
+# boundary: completed success is green, queued/in-progress is pending,
+# terminal failures are failed, and empty conclusions are unknown.
+resume_check_case() {
+  local issue=$1 fixture=$2 expected=$3
+  printf '%s running open\n' "$issue" > "$state"
+  : > "$FAKE_GH_ROOT/$state_key.comments"
+  : > "$FAKE_GH_ROOT/codex-calls"
+  git -C "$target" worktree add --quiet -b "agent/issue-$issue" "$target-worktrees/issue-$issue" origin/main
+  git -C "$target-worktrees/issue-$issue" commit --quiet --allow-empty -m "resume check $issue"
+  FAKE_RESUME_OPEN_PR=$((100 + issue)) FAKE_RESUME_OPEN_URL="https://github.example/acme/installed-project/pull/$((100 + issue))" \
+    FAKE_RESUME_CHECK_RUNS="$fixture" "$target/bin/agentic-loop" _worker "$issue" "resume-check-$issue"
+  assert_contains "$FAKE_GH_ROOT/$state_key.comments" "checks=$expected" "resume check fixture $issue was classified incorrectly"
+  git -C "$target-worktrees/issue-$issue" worktree remove --force "$target-worktrees/issue-$issue" 2>/dev/null || true
+  git -C "$target" branch -D "agent/issue-$issue" >/dev/null 2>&1 || true
+}
+resume_check_case 1701 '{"check_runs":[{"status":"completed","conclusion":"success"}]}' success
+resume_check_case 1702 '{"check_runs":[{"status":"queued","conclusion":null}]}' in_progress
+resume_check_case 1703 '{"check_runs":[{"status":"completed","conclusion":"timed_out"}]}' failure
+resume_check_case 1704 '{"check_runs":[]}' unknown
+# A pending check-run must win even when every other run has already
+# concluded success: status is the pending signal, conclusion is not.
+resume_check_case 1705 '{"check_runs":[{"status":"completed","conclusion":"success"},{"status":"in_progress","conclusion":null}]}' in_progress
 
 # An open PR that is behind the fetched default branch must be distinguished
 # from an ahead-only PR even if its checks are already green.  The provider is
@@ -4564,7 +4595,8 @@ git -C "$target" commit --quiet --allow-empty -m 'advanced default branch'
 git -C "$target" push --quiet origin main
 base_head=$(git -C "$target" rev-parse HEAD)
 : > "$FAKE_GH_ROOT/calls"
-FAKE_RESUME_OPEN_PR=43 FAKE_RESUME_OPEN_URL="https://github.example/acme/installed-project/pull/43" FAKE_RESUME_CHECKS=success \
+FAKE_RESUME_OPEN_PR=43 FAKE_RESUME_OPEN_URL="https://github.example/acme/installed-project/pull/43" \
+  FAKE_RESUME_CHECK_RUNS='{"check_runs":[{"status":"completed","conclusion":"success"}]}' \
   FAKE_RESUME_BASE_SHA=$base_head FAKE_RESUME_HEAD_SHA=$resume_head FAKE_RESUME_MERGEABLE=true FAKE_RESUME_MERGEABLE_STATE=clean \
   "$target/bin/agentic-loop" _worker 18 resume-behind-worker
 assert_contains "$FAKE_GH_ROOT/codex-calls" 'phase: needs-rebase' 'a behind open PR was not routed to needs-rebase'
@@ -4593,7 +4625,8 @@ git -C "$target" add resume-conflict.txt
 git -C "$target" commit --quiet -m 'default side conflict'
 git -C "$target" push --quiet origin main
 base_head=$(git -C "$target" rev-parse HEAD)
-FAKE_RESUME_OPEN_PR=44 FAKE_RESUME_OPEN_URL="https://github.example/acme/installed-project/pull/44" FAKE_RESUME_CHECKS=success \
+FAKE_RESUME_OPEN_PR=44 FAKE_RESUME_OPEN_URL="https://github.example/acme/installed-project/pull/44" \
+  FAKE_RESUME_CHECK_RUNS='{"check_runs":[{"status":"completed","conclusion":"success"}]}' \
   FAKE_RESUME_BASE_SHA=$base_head FAKE_RESUME_HEAD_SHA=$resume_head FAKE_RESUME_MERGEABLE=false FAKE_RESUME_MERGEABLE_STATE=dirty \
   "$target/bin/agentic-loop" _worker 19 resume-conflict-worker
 assert_contains "$FAKE_GH_ROOT/codex-calls" 'phase: needs-rebase' 'an explicitly unmergeable PR was not routed to needs-rebase'
@@ -4614,7 +4647,8 @@ git -C "$target" add resume-conflict.txt
 git -C "$target" commit --quiet -m 'second default conflict'
 git -C "$target" push --quiet origin main
 base_head=$(git -C "$target" rev-parse HEAD)
-FAKE_RESUME_OPEN_PR=45 FAKE_RESUME_OPEN_URL="https://github.example/acme/installed-project/pull/45" FAKE_RESUME_CHECKS=success \
+FAKE_RESUME_OPEN_PR=45 FAKE_RESUME_OPEN_URL="https://github.example/acme/installed-project/pull/45" \
+  FAKE_RESUME_CHECK_RUNS='{"check_runs":[{"status":"completed","conclusion":"success"}]}' \
   FAKE_RESUME_BASE_SHA=$base_head FAKE_RESUME_HEAD_SHA=$resume_head FAKE_RESUME_MERGEABLE=null FAKE_RESUME_MERGEABLE_STATE=unknown \
   "$target/bin/agentic-loop" _worker 20 resume-unknown-worker
 assert_contains "$FAKE_GH_ROOT/codex-calls" 'phase: needs-rebase' 'merge-tree did not classify an unknown conflicting PR as needs-rebase'
