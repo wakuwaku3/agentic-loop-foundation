@@ -931,7 +931,9 @@ agent_run_stage() {
       # A successful process that emits non-JSON violates Claude's transport
       # contract and must remain a provider-stage failure, rather than being
       # treated as a clean markerless response.
-      if ! yq -e '.' "$raw_result" >/dev/null 2>&1; then
+      # yq accepts YAML scalars (for example, `not json`), while Claude's
+      # --output-format json contract requires a JSON object envelope.
+      if ! jq -e 'type == "object"' "$raw_result" >/dev/null 2>&1; then
         STAGE_PROVIDER_ERROR=1
       fi
       # Claude's final assistant response is the JSON result field, not the
