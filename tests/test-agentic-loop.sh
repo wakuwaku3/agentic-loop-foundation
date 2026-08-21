@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# shellcheck disable=SC2155,SC2209,SC2016
+# shellcheck disable=SC2155,SC2209,SC2016,SC2030,SC2031
 set -euo pipefail
 
 readonly PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -173,6 +173,38 @@ workload_plan_body() { printf '## 計画\n\n```agentic-loop:workload\n%s\n```\n\
 
 mkdir -p "$FAKE_BIN" "$FAKE_GH_ROOT"
 
+# External CLI contract lint: detect known-invalid forms while allowing
+# typed flags, body files, literal @ text, and Markdown examples.
+cli_contract_fixture="$TEST_ROOT/cli-contracts.sh"
+cat > "$cli_contract_fixture" <<'EOF'
+yq --arg k a '.children[]'
+gh issue create --body "@/tmp/issue_body.md"
+gh api -f count=3
+gh issue create --body-file body.txt
+printf '%s\n' 'email@example.test and @path are literal text'
+```sh
+gh issue create --body "@path"
+```
+gh issue create --body="@x.md"
+gh pr comment 1 -b "@x.md"
+gh issue comment 1 --body "こんにちは、これは正当な本文です"
+EOF
+cli_contract_output=$("$PROJECT_ROOT/scripts/lint-cli-contracts.sh" "$cli_contract_fixture")
+grep -Fq 'yq flag --arg' <<< "$cli_contract_output" || fail 'CLI contract lint missed yq --arg fixture'
+grep -Fq 'gh --body の @path' <<< "$cli_contract_output" || fail 'CLI contract lint missed gh --body @path fixture'
+grep -Fq 'gh api の型付き値' <<< "$cli_contract_output" || fail 'CLI contract lint missed gh api -f typed value fixture'
+if grep -Fq "$cli_contract_fixture:5:" <<< "$cli_contract_output"; then
+  fail 'CLI contract lint falsely flagged valid @ text or body-file'
+fi
+if grep -Fq "$cli_contract_fixture:7:" <<< "$cli_contract_output"; then
+  fail 'CLI contract lint falsely flagged Markdown code block'
+fi
+grep -Fq "$cli_contract_fixture:9:" <<< "$cli_contract_output" || fail 'CLI contract lint missed gh --body=@path (no space)'
+grep -Fq "$cli_contract_fixture:10:" <<< "$cli_contract_output" || fail 'CLI contract lint missed gh -b "@path"'
+if grep -Fq "$cli_contract_fixture:11:" <<< "$cli_contract_output"; then
+  fail 'CLI contract lint falsely flagged an ordinary --body value'
+fi
+
 # Disable git auto-maintenance globally for the whole harness: commit, push,
 # and receive-pack spawn `git maintenance run --auto --detach` in the
 # background, which repacks fixture repos while a later step clones them and
@@ -319,6 +351,12 @@ case "${1:-} ${2:-}" in
       # collection B's repo-wide comments read matched just below (this
       # branch must come first, since both share the issues/comments endpoint).
       [[ -n ${FAKE_TRACE_AUDIT_EVENTS:-} ]] && cat "$FAKE_TRACE_AUDIT_EVENTS" 2>/dev/null || true
+    elif [[ $endpoint == issues/comments && $* == *'(.body // "" | @base64)'* ]]; then
+      # bin/agentic-loop doctor's repo-wide, single-page (no --paginate)
+      # body_unexpanded_file_reference comment scan (Issue #272): distinct
+      # from metrics collection B matched just below, which shares the
+      # issues/comments endpoint but uses a different --jq shape.
+      [[ -n ${FAKE_DOCTOR_COMMENTS:-} ]] && cat "$FAKE_DOCTOR_COMMENTS" 2>/dev/null || true
     elif [[ $endpoint == issues/comments ]]; then
       # bin/agentic-loop metrics collection B (repo-wide comments): distinct
       # from the per-Issue issues/N/comments endpoint matched further below.
@@ -410,7 +448,8 @@ case "${1:-} ${2:-}" in
         else if ($2 == "parked") state="parked"
         else if ($2 == "in-review") state="in-review"
         else if ($2 == "blocked") state="blocked"
-        print $1 "\t" "Fake issue " $1 "\t" state "\t" priority "\t" category "\t" created
+        body_b64=($8 == "" ? "-" : $8)
+        print $1 "\t" "Fake issue " $1 "\t" state "\t" priority "\t" category "\t" created "\t" body_b64
       }' "$state" 2>/dev/null || true
     elif [[ $endpoint == issues && $method == GET ]]; then
       case $wanted in
@@ -741,8 +780,11 @@ case "${1:-} ${2:-}" in
     ;;
   'api graphql')
     if [[ $* == *'projectItems(first:20'* ]]; then
-      number=''; cursor=''
+      number=''; cursor=''; jq_expr='.'; read_jq=0
       for arg in "$@"; do [[ $arg == number=* ]] && number=${arg#number=}; [[ $arg == cursor=* ]] && cursor=${arg#cursor=}; done
+      for arg in "$@"; do
+        if (( read_jq )); then jq_expr=$arg; read_jq=0; elif [[ $arg == --jq ]]; then read_jq=1; fi
+      done
       if [[ ${FAKE_PROJECT_CONTENT_FAIL:-0} == 1 || ( -n ${FAKE_PROJECT_CONTENT_FAIL_ISSUE:-} && $number == "$FAKE_PROJECT_CONTENT_FAIL_ISSUE" ) ]]; then
         printf '{"errors":[{"message":"forced GraphQL failure"}]}\n'
         exit 1
@@ -751,17 +793,18 @@ case "${1:-} ${2:-}" in
         # A member is resolved immediately (possibly after one cursor hop when
         # the fixture lists it on the second page).
         if [[ -r $project_page2 ]] && grep -Fxq "$number" "$project_page2" && [[ -z $cursor ]]; then
-          printf 'NEXT\x1fpage2cursor\n'
+          printf '{"data":{"repository":{"content":{"projectItems":{"nodes":[],"pageInfo":{"hasNextPage":true,"endCursor":"page2cursor"}}}}}}\n' | jq -r "$jq_expr"
         else
           status=''; category=''; blocked_b64=''
           IFS=$'\t' read -r status category blocked_b64 < <(awk -F '\t' -v n="$number" '$1 == n {print $2 "\t" $3 "\t" $4; exit}' "$project_values" 2>/dev/null || true)
           blocked=''; [[ -z $blocked_b64 ]] || blocked=$(base64 -d <<< "$blocked_b64")
-          printf 'PVTI_%s\x1f%s\x1f%s\x1f%s\nEND\n' "$number" "$status" "$category" "$blocked"
+          printf '{"data":{"repository":{"content":{"projectItems":{"nodes":[{"id":"PVTI_%s","project":{"id":"PVT_fake"},"fieldValues":{"nodes":[{},{"name":"%s","field":{"name":"Title"}},{"name":"%s","field":{"name":"Agent status"}},{"name":"%s","field":{"name":"Category"}},{"text":"%s","field":{"name":"Blocked by"}}]}}],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}}\n' \
+            "$number" "issue $number" "$status" "$category" "$blocked" | jq -r "$jq_expr"
         fi
       else
         # A confirmed non-member is a successful empty result (END), distinct
         # from the forced failure above.  The real jq always emits this trailer.
-        printf 'END\n'
+        printf '{"data":{"repository":{"content":{"projectItems":{"nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}}\n' | jq -r "$jq_expr"
       fi
     elif [[ $* == *'repositories(first:100)'* ]]; then
       [[ -e $project_link ]] && cat "$project_link"
@@ -990,7 +1033,19 @@ if [[ $* == *'Use $diagnose-codebase'* ]]; then
     "$worktree/bin/agentic-loop" sync-issue 99 >/dev/null
   fi
 fi
-if [[ ${FAKE_CODEX_GIT_OPERATIONS:-0} == 1 ]]; then
+# --add-dir is only ever passed on the workspace-write (exec) call (see
+# agent.sh's plan/exec codex_args split); the plan call is --sandbox
+# read-only and cannot perform Git writes in real Codex either. Gate this
+# fixture the same way so a plan-stage call never falsely trips the
+# missing-add-dir check as a plan failure.
+plan_or_exec_workspace_write=0
+for ((gi=1; gi<=$#; gi++)); do
+  if [[ ${!gi} == --sandbox ]] && (( gi < $# )); then
+    gj=$((gi + 1))
+    [[ ${!gj} == workspace-write ]] && plan_or_exec_workspace_write=1
+  fi
+done
+if [[ ${FAKE_CODEX_GIT_OPERATIONS:-0} == 1 ]] && (( plan_or_exec_workspace_write )); then
   expected=$(git -C "$worktree" rev-parse --path-format=absolute --git-common-dir)
   [[ " $add_dirs " == *" $expected "* ]] || { printf 'missing Git add-dir: %s (expected %s)\n' "$add_dirs" "$expected" >&2; exit 3; }
   [[ " $add_dirs " == *" $worktree/.agents "* ]] || { printf 'missing .agents add-dir: %s\n' "$add_dirs" >&2; exit 3; }
@@ -1097,29 +1152,62 @@ printf '%s\n' "$*" >> "$FAKE_GH_ROOT/claude-calls"
 [[ ${1:-} == --version || ${1:-} == --help ]] && { printf 'claude 1.0.0\n'; exit 0; }
 [[ $* == *--print* ]] || { printf 'claude worker must run non-interactively\n' >&2; exit 2; }
 [[ $* == *--dangerously-skip-permissions* ]] || { printf 'claude worker must not block on permissions\n' >&2; exit 2; }
+# Real claude CLI contract (measured directly, Issue #273): stream-json under
+# --print requires --verbose, and fails fast with no stdout otherwise.
+if [[ $* == *'--output-format stream-json'* && $* != *--verbose* ]]; then
+  printf 'Error: When using --print, --output-format=stream-json requires --verbose\n' >&2
+  exit 1
+fi
 sleep "${FAKE_CLAUDE_SLEEP:-0}"
 # Per-invocation result override so a test can give the plan stage and the exec
 # stage different outputs (e.g. a plan that discusses rate limits, then an exec
-# that completes). Each --output-format json call increments a counter and
-# prefers FAKE_CLAUDE_RESULT_<n>, falling back to the scalar FAKE_CLAUDE_RESULT.
+# that completes). Each --output-format stream-json call increments a counter
+# and prefers FAKE_CLAUDE_RESULT_<n>, falling back to the scalar
+# FAKE_CLAUDE_RESULT.
 claude_result=${FAKE_CLAUDE_RESULT:-AGENTIC_LOOP_RESULT=completed}
-if [[ $* == *'--output-format json'* ]]; then
+if [[ $* == *'--output-format stream-json'* ]]; then
   claude_count_file="$FAKE_GH_ROOT/claude-json-count"
   claude_count=$(($(cat "$claude_count_file" 2>/dev/null || printf 0) + 1))
   printf '%s\n' "$claude_count" > "$claude_count_file"
   seq_var="FAKE_CLAUDE_RESULT_$claude_count"
   if [[ -v $seq_var ]]; then claude_result=${!seq_var}; fi
 fi
+# Stage-level transport failures model provider failures observed in production:
+# empty output, stderr-only non-zero exit, and a successful process that
+# violates the JSON output contract.
+case ${FAKE_CLAUDE_STAGE_MODE:-} in
+  empty-nonzero) : > "$FAKE_GH_ROOT/claude-stage-mode"; exit 1 ;;
+  stderr-nonzero) printf '%s\n' "${FAKE_CLAUDE_STAGE_STDERR:-provider failed}" >&2; : > "$FAKE_GH_ROOT/claude-stage-mode"; exit 1 ;;
+  nonjson-zero) printf '%s\n' "${FAKE_CLAUDE_STAGE_OUTPUT:-not json}"; : > "$FAKE_GH_ROOT/claude-stage-mode"; exit 0 ;;
+esac
 # The Claude worker captures the final message from stdout into the result file.
-# With --output-format json the sentinel stays inside .result and usage fields
-# accompany it for the token analysis record.
+# With --output-format stream-json the sentinel stays inside the terminal
+# event's .result and usage fields accompany it for the token analysis record.
 #
 # Real Claude usage-limit path: the CLI still exits zero under --print
-# --output-format json but sets is_error true and reports the limit through
-# api_error_status plus the message in .result. FAKE_CLAUDE_IS_ERROR=1 models
-# that envelope so tests exercise the structured-error classification instead of
-# substring-matching the plan text.
-if [[ $* == *'--output-format json'* ]]; then
+# --output-format stream-json but sets is_error true on the terminal event and
+# reports the limit through api_error_status plus the message in .result.
+# FAKE_CLAUDE_IS_ERROR=1 models that envelope so tests exercise the
+# structured-error classification instead of substring-matching the plan text.
+if [[ $* == *'--output-format stream-json'* ]]; then
+  # Model the real stream shape (measured directly, Issue #273): an init
+  # event, an assistant event, a rate_limit_event whose text would trip the
+  # pool-exhaustion regex if ever copied whole into result_file, a non-JSON
+  # noise line (observed in practice from MCP tool logging), then the
+  # terminal result event -- the only line the worker must parse.
+  printf '{"type":"system","subtype":"init"}\n'
+  printf '{"type":"assistant","message":{"content":[{"type":"text","text":"working"}]}}\n'
+  printf '{"type":"rate_limit_event","rate_limit_info":{"status":"allowed"}}\n'
+  printf 'Client.listTools() called but server is not initialized\n'
+  # FAKE_CLAUDE_OMIT_TERMINAL=1 models a stream killed mid-run (or a CLI that
+  # never emits a terminal event): stdout has only non-terminal lines, and the
+  # failure surfaces on stderr instead, exercising agent_run_stage's existing
+  # empty-result_file-falls-back-to-stderr path with no raw stream ever
+  # entering result_file (Issue #273).
+  if [[ ${FAKE_CLAUDE_OMIT_TERMINAL:-0} == 1 ]]; then
+    printf 'stage killed before completion\n' >&2
+    exit 1
+  fi
   if [[ ${FAKE_CLAUDE_IS_ERROR:-0} == 1 ]]; then
     printf '{"type":"result","is_error":true,"api_error_status":"%s","result":"%s","usage":{"input_tokens":123,"output_tokens":45,"cache_read_input_tokens":10},"total_cost_usd":0.0123}\n' "${FAKE_CLAUDE_API_ERROR_STATUS:-429}" "$claude_result"
   else
@@ -1299,8 +1387,10 @@ done
 assert_contains "$target/.agents/skills/submit-requirement/SKILL.md" 'in Japanese' 'installed submission skill did not require Japanese GitHub content'
 assert_contains "$target/.agents/skills/diagnose-codebase/SKILL.md" 'without modifying' 'diagnosis skill did not prohibit code changes'
 assert_contains "$target/AGENTS.md" '通常のbuild・変更要求' 'installed AGENTS.md lacks queue-first routing'
+assert_contains "$target/AGENTS.md" 'git管理外（gitignore対象）' 'installed AGENTS.md lacks the local overlay intake exception'
 assert_contains "$target/AGENTS.md" 'agent:running' 'installed AGENTS.md lacks the worker exception'
 assert_contains "$target/.agents/skills/submit-requirement/SKILL.md" 'Queue-first intake' 'installed skill lacks queue-first routing'
+assert_contains "$target/.agents/skills/submit-requirement/SKILL.md" 'git-ignored, repository-local overlay' 'installed submission skill lacks the local overlay intake exception'
 assert_contains "$target/.agents/skills/submit-requirement/SKILL.md" 'Non-recursive worker exception' 'installed skill lacks the worker exception'
 assert_contains "$target/AGENTS.md" '新規Issue作成を明示した場合は重複検索を省略' 'installed AGENTS.md does not bypass duplicate search for explicit Issue creation'
 assert_contains "$target/.agents/skills/submit-requirement/SKILL.md" 'do not search for duplicates and create a new Issue' 'installed skill does not bypass duplicate search for explicit Issue creation'
@@ -1314,6 +1404,7 @@ assert_contains "$target/docs/operations/issue-queue.md" 'open・closed Issueを
 assert_contains "$target/docs/operations/issue-queue.md" 'Supervisorが停止中であること' 'installed docs do not require stopped-Supervisor reporting'
 assert_contains "$target/docs/operations/issue-queue.md" 'Supervisor停止はこのfallbackと区別する' 'installed docs conflate a stopped Supervisor with GitHub verification failure'
 assert_contains "$target/docs/operations/issue-queue.md" '安全なfallback' 'installed docs lack safe fallback'
+assert_contains "$target/docs/operations/issue-queue.md" 'repository-local設定overlayの扱い' 'installed docs lack local overlay routing guidance'
 timer="$XDG_CONFIG_HOME/systemd/user/agentic-loop-main-sync-$(printf '%s' "${target#/}" | tr '/' '-').timer"
 service=${timer%.timer}.service
 [[ -f $timer && -f $service ]] || fail 'install did not create the periodic main update units'
@@ -1715,6 +1806,8 @@ calls_before=$(wc -l < "$FAKE_GH_ROOT/calls")
 AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _supervise
 tail -n "+$((calls_before + 1))" "$FAKE_GH_ROOT/calls" > "$TEST_ROOT/hints-rebuild-calls.log"
 [[ $(grep -c $'\tproject item-edit ' "$TEST_ROOT/hints-rebuild-calls.log" || true) -ge 1 ]] || fail 'deleted hint was not rebuilt and reconverged'
+[[ ! -e "$pending_project" ]] || fail 'a converged open-Issue drift probe leaked into project-pending'
+[[ ! -s "$(git -C "$target" rev-parse --absolute-git-dir)/agentic-loop/project-probes" ]] || fail 'a completed drift probe was not acknowledged'
 
 # Bounded degradation (issue #195): while one Issue's Projects reconciliation
 # fails permanently, project-pending must stay bounded (not grow every poll),
@@ -1948,10 +2041,12 @@ assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'category-reconciled reason=
 # answer "Field 'pageInfo' doesn't exist on type 'ProjectV2Item'", and an
 # outer if/else without `end` makes the reducer fail to compile.  Either one
 # turns every load_project_content call into rc=1, so project-pending never
-# drains and Agent status/Category/Blocked by stop converging.  Neither is
-# observable through the fake-gh fixture (it answers with rows the real --jq
-# has already reduced), and jq is not part of the pinned toolchain, so the
-# guard has to be on the query/reducer text itself.
+# drains and Agent status/Category/Blocked by stop converging.  jq is now
+# pinned and the fake-gh fixture below evaluates the real --jq reducer against
+# a schema-shaped fixture, but the fake still cannot validate GitHub's actual
+# GraphQL schema (e.g. that pageInfo really is unavailable inside nodes{}), so
+# this structural guard on the query/reducer text stays as a second,
+# fake-independent layer alongside `bin/agentic-loop smoke`'s real boundary.
 (
   set -euo pipefail
   # shellcheck source=/dev/null
@@ -2092,11 +2187,56 @@ assert_contains "$FAKE_GH_ROOT/claude-calls" '--print' 'claude worker did not ru
 assert_contains "$FAKE_GH_ROOT/claude-calls" '--dangerously-skip-permissions' 'claude worker did not skip permission prompts'
 assert_contains "$FAKE_GH_ROOT/claude-calls" "--add-dir $target/.git" 'claude worker did not grant its exact Git common directory'
 assert_contains "$FAKE_GH_ROOT/claude-calls" "--add-dir $target-worktrees/issue-7/.agents" 'claude worker did not grant its exact protected .agents directory'
-assert_contains "$FAKE_GH_ROOT/claude-calls" '--output-format json' 'claude worker did not request a machine-readable usage payload'
+assert_contains "$FAKE_GH_ROOT/claude-calls" '--output-format stream-json' 'claude worker did not request a machine-readable streaming usage payload'
+assert_contains "$FAKE_GH_ROOT/claude-calls" '--verbose' 'claude worker did not pass --verbose, required by --print --output-format stream-json'
 assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'Token使用量（分析用）: provider=claude' 'claude worker did not record its token usage on the Issue'
 assert_contains "$FAKE_GH_ROOT/$state_key.comments" '入力=123tok' 'claude usage record lacked input token count'
 # shellcheck disable=SC2016 # The dollar sign is a literal currency prefix in the recorded usage line.
 assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'cost=$0.0123' 'claude usage record lacked the reported cost'
+
+# Residual `.raw.*`/`.final.*` stage output from a killed prior run of the
+# same stage (e.g. a worker_timeout kill mid-stream, before agent_run_stage's
+# own cleanup could run) must be cleared at the next run of that stage,
+# keeping disk usage bounded to the stage currently in flight (Issue #273).
+write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=3 STOP_TIMEOUT=10 STALE_DAYS=30
+printf '270 queued open none 2026-01-01T00:00:00Z\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+: > "$FAKE_GH_ROOT/claude-calls"
+rm -f "$FAKE_GH_ROOT/claude-json-count"
+printf 'stale raw content with rate limit\n' > "$state_root/issue-270-result.txt.raw.999999"
+printf '{"type":"result"}\n' > "$state_root/issue-270-result.txt.final.999999"
+AGENT_PROVIDER=claude AGENTIC_LOOP_RUN_ONCE=1 FAKE_CLAUDE_SLEEP=1 "$target/bin/agentic-loop" _supervise
+grep -Eq '^270 completed closed' "$state" || fail 'claude provider with stale stage output residue did not complete'
+[[ ! -e $state_root/issue-270-result.txt.raw.999999 ]] || fail 'stale .raw output from a prior killed stage run was not cleared at stage start'
+[[ ! -e $state_root/issue-270-result.txt.final.999999 ]] || fail 'stale .final output from a prior killed stage run was not cleared at stage start'
+
+# The fake claude CLI mirrors the real CLI's measured contract (Issue #273):
+# --print --output-format stream-json requires --verbose and fails fast with
+# no stdout otherwise. Exercised directly against the harness so a future
+# change to agent.sh's claude_args cannot silently drop --verbose without a
+# test noticing (the worker-level test above only proves --verbose is present
+# when the fake CLI already accepts stream-json).
+if "$FAKE_BIN/claude" --print --output-format stream-json --dangerously-skip-permissions 'hi' >"$TEST_ROOT/claude-no-verbose.out" 2>&1; then
+  fail 'fake claude accepted --output-format stream-json without --verbose'
+fi
+[[ ! -s $TEST_ROOT/claude-no-verbose.out ]] || grep -Fq 'requires --verbose' "$TEST_ROOT/claude-no-verbose.out" || fail 'fake claude rejection did not mention the --verbose requirement'
+rm -f "$TEST_ROOT/claude-no-verbose.out"
+
+# A stream with no terminal `{"type":"result",...}` event (killed mid-run, or
+# a CLI exiting before ever emitting one) must not be re-parsed as a whole:
+# the extraction leaves final_result empty, and agent_run_stage's existing
+# empty-result_file fallback copies stderr in instead (Issue #273) -- the
+# Issue is retried through the ordinary transient-failure path, not
+# misclassified as pool exhaustion (no rate-limit/quota text on stderr here).
+write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=3 STOP_TIMEOUT=10 STALE_DAYS=30 MAX_ATTEMPTS=3 RETRY_COOLDOWN_SECONDS=0
+printf '271 queued open none 2026-01-01T00:00:00Z\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+rm -f "$state_root/pools/claude/exhausted" "$FAKE_GH_ROOT/claude-json-count"
+AGENT_PROVIDER=claude AGENTIC_LOOP_RUN_ONCE=1 FAKE_CLAUDE_SLEEP=1 FAKE_CLAUDE_OMIT_TERMINAL=1 "$target/bin/agentic-loop" _supervise
+grep -Eq '^271 (queued open|failed)' "$state" || fail 'a claude stream with no terminal event was not treated as an ordinary stage failure'
+[[ ! -r $state_root/pools/claude/exhausted ]] || fail 'a claude stream with no terminal event must not mark the claude pool exhausted'
+assert_contains "$state_root/issue-271-plan.txt" 'stage killed before completion' 'the missing-terminal-event fallback did not surface the stderr content'
+rm -f "$state_root/pools/claude/exhausted"
 
 # --- Declared reasoning effort and per-stage cost ceiling reach claude (Issue #265) ---
 # A declared reasoning_effort must arrive as the claude CLI's --effort (it was
@@ -2239,23 +2379,85 @@ assert_contains "$FAKE_GH_ROOT/opencode-calls" 'run --auto' 'exec phase did not 
 [[ $(grep -c -- '--sandbox workspace-write' "$FAKE_GH_ROOT/codex-calls") -eq 0 ]] || fail 'exec phase unexpectedly ran on codex'
 assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'provider=codex stage=plan' 'plan usage did not record the codex provider'
 
-# Each Issue runs a read-only plan stage before the workspace-write exec stage,
-# and an exec that never satisfies completion triggers bounded re-planning.
-write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=30 STOP_TIMEOUT=10 STALE_DAYS=30
+# Each Issue runs a read-only plan stage before the workspace-write exec stage.
+# A plan whose every candidate fails must never fall through to exec with an
+# empty plan (that would bypass scope refinement, preflight, workload, and
+# decomposition simultaneously). It is retried in-turn (bounded by
+# agent.retry.plan_max) before being treated as a genuine task failure, so the
+# preflight/workload gate markers are never emitted for this turn.
+write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=30 STOP_TIMEOUT=10 STALE_DAYS=30 MAX_ATTEMPTS=3 RETRY_COOLDOWN_SECONDS=0
 printf '20 queued open none 2026-01-01T00:00:00Z\n' > "$state"
 : > "$FAKE_GH_ROOT/$state_key.comments"
 : > "$FAKE_GH_ROOT/codex-calls"
-AGENT_PLAN_MAX_RETRIES=1 FAKE_CODEX_RESULT='AGENTIC_LOOP_RESULT=failed' AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _supervise
-grep -Eq '^20 failed' "$state" || fail 'exhausted re-planning did not fail the Issue'
-plan_passes=$(grep -c -- '--sandbox read-only' "$FAKE_GH_ROOT/codex-calls")
-[[ $plan_passes -eq 2 ]] || fail "expected 2 planning passes (initial + 1 retry), got $plan_passes"
-exec_passes=$(grep -c -- '--sandbox workspace-write' "$FAKE_GH_ROOT/codex-calls")
-[[ $exec_passes -eq 2 ]] || fail "expected 2 exec passes (initial + 1 retry), got $exec_passes"
-assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'flagshipモデルで計画を見直して再実行' 're-planning was not announced on the Issue'
+: > "$state_root/events.log"
+AGENT_PLAN_MAX_RETRIES=1 FAKE_CODEX_EXIT=1 AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _supervise
+grep -Eq '^20 failed' "$state" || fail 'a plan failure exhausting its in-turn retries did not fail the Issue'
+# A terminal plan failure records its own progress stage (Issue #273): before
+# `plan-failed` joined PROGRESS_STAGES, progress_write silently discarded this
+# marker (the stage failed its enum validation, per progress_stage_valid), so
+# neither the events.log row nor the workers/<issue>.progress marker was ever
+# written for it -- the worker's own eventual clear_worker_local removes the
+# marker file itself, but the append-only events.log survives and is the
+# observable proof here.
+grep -Eq $'\t20\tprogress\tplan-failed$' "$state_root/events.log" || fail 'a terminal plan failure did not record a plan-failed progress event'
+plan_passes=$(grep -c -- '--sandbox read-only' "$FAKE_GH_ROOT/codex-calls" || true)
+[[ $plan_passes -eq 2 ]] || fail "expected the initial planning pass plus one in-turn retry, got $plan_passes"
+exec_passes=$(grep -c -- '--sandbox workspace-write' "$FAKE_GH_ROOT/codex-calls" || true)
+[[ $exec_passes -eq 0 ]] || fail 'plan failure unexpectedly started an empty-plan exec'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'reason=plan-failure' 'plan failure was not observable on the Issue'
 assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'stage=plan' 'plan stage usage was not recorded'
-assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'stage=exec' 'exec stage usage was not recorded'
+if grep -Fq 'agentic-loop:preflight' "$FAKE_GH_ROOT/$state_key.comments"; then fail 'a plan failure unexpectedly reached the preflight gate'; fi
+if grep -Fq 'agentic-loop:workload' "$FAKE_GH_ROOT/$state_key.comments"; then fail 'a plan failure unexpectedly reached the workload gate'; fi
 git -C "$target" worktree remove "$target-worktrees/issue-20" --force 2>/dev/null || true
 git -C "$target" branch -D agent/issue-20 >/dev/null 2>&1 || true
+
+# Repeated plan failures still converge on the ordinary retry_failed/parked
+# path (no new state and no infinite requeue loop): with MAX_ATTEMPTS=1 the
+# single claim already used the whole retry budget, so the next poll parks
+# the Issue directly instead of reclaiming it for another plan attempt.
+write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=30 STOP_TIMEOUT=10 STALE_DAYS=30 MAX_ATTEMPTS=1 RETRY_COOLDOWN_SECONDS=0
+printf '21 queued open none 2026-01-01T00:00:00Z\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+: > "$FAKE_GH_ROOT/codex-calls"
+rm -f "$closes"
+AGENT_PLAN_MAX_RETRIES=1 FAKE_CODEX_EXIT=1 AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _supervise
+grep -Eq '^21 failed' "$state" || fail 'a plan failure with no retry budget left did not fail the Issue'
+calls_before_park=$(wc -l < "$FAKE_GH_ROOT/codex-calls")
+AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _supervise
+grep -Eq '^21 parked open' "$state" || fail 'a plan failure at MAX_ATTEMPTS was not parked instead of requeued indefinitely'
+[[ ! -r "$closes" ]] || ! grep -Fq $'^21\t' "$closes" || fail 'a plan-failure Issue reaching MAX_ATTEMPTS must never be closed'
+calls_after_park=$(wc -l < "$FAKE_GH_ROOT/codex-calls")
+[[ $calls_after_park -eq $calls_before_park ]] || fail 'parking a retry-exhausted Issue unexpectedly reclaimed it for another plan attempt'
+git -C "$target" worktree remove "$target-worktrees/issue-21" --force 2>/dev/null || true
+git -C "$target" branch -D agent/issue-21 >/dev/null 2>&1 || true
+
+# A plan failure while a DIFFERENT declared pool is marked exhausted is
+# treated like pool exhaustion (requeued without consuming an Issue attempt),
+# not like a genuine task failure -- even though the plan stage itself
+# reported an ordinary per-candidate error (STAGE_RC=3) rather than
+# STAGE_RC=1/2, and even though the exhausted pool is not the one plan itself
+# used (agent_any_pool_marker_active is a weaker, correlation-only signal;
+# only marking every declared pool would also block a fresh claim).
+{
+  printf '[agent.plan]\nprovider = "codex"\n'
+  printf '[agent.exec]\nprovider = "opencode"\n'
+  printf '[queue]\npoll_seconds = 1\nmax_workers = 1\nlease_seconds = 30\nstop_timeout = 10\nstale_days = 30\nmax_attempts = 1\nretry_cooldown_seconds = 0\n'
+} > "$target/.agentic-loop.toml"
+printf '22 queued open none 2026-01-01T00:00:00Z\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+: > "$FAKE_GH_ROOT/codex-calls"
+rm -rf "$state_root/pools"
+mkdir -p "$state_root/pools/opencode"
+printf '%s\n' "$(( $(date +%s) + 1800 ))" > "$state_root/pools/opencode/exhausted"
+AGENT_PLAN_MAX_RETRIES=1 FAKE_CODEX_EXIT=1 AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _supervise
+grep -Eq '^22 queued' "$state" || fail 'a plan failure correlated with another pool exhaustion was not requeued'
+if grep -Eq '^22 failed' "$state"; then fail 'a plan failure correlated with pool exhaustion must not fail the Issue'; fi
+[[ ! -e "$state_root/attempts/issue-22" ]] || fail 'a plan failure correlated with pool exhaustion consumed an Issue attempt'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:exhausted' 'pool-exhaustion-correlated plan failure was not recorded as exhausted'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'reason=plan-failure' 'pool-exhaustion-correlated plan failure did not record its origin'
+rm -rf "$state_root/pools"
+git -C "$target" worktree remove "$target-worktrees/issue-22" --force 2>/dev/null || true
+git -C "$target" branch -D agent/issue-22 >/dev/null 2>&1 || true
 
 # A clean exec exit without a terminal marker is a protocol retry, not a
 # flagship replan. The second response uses the same plan and completes.
@@ -2273,7 +2475,9 @@ if grep -Fq 'agentic-loop:replan' "$FAKE_GH_ROOT/$state_key.comments"; then fail
 
 # Two clean exits without a valid terminal marker are deterministic failure;
 # text containing a marker, a trailing non-empty line, and unknown values must
-# receive the same treatment rather than being mistaken for completion.
+# receive the same treatment rather than being mistaken for completion. No PR
+# is merged for this branch (FAKE_PR_MERGED=0), so the markerless-merged
+# rescue (Issue #262) must not turn any of these into a false completion.
 for malformed in \
   $'CI monitorの報告待ちです' \
   $'説明中の AGENTIC_LOOP_RESULT=completed です' \
@@ -2284,7 +2488,7 @@ for malformed in \
   : > "$FAKE_GH_ROOT/$state_key.comments"
   : > "$FAKE_GH_ROOT/codex-calls"
   rm -f "$FAKE_GH_ROOT/codex-exec-count"
-  FAKE_CODEX_EXEC_RESULT_1="$malformed" FAKE_CODEX_EXEC_RESULT_2="$malformed" AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _supervise
+  FAKE_PR_MERGED=0 FAKE_CODEX_EXEC_RESULT_1="$malformed" FAKE_CODEX_EXEC_RESULT_2="$malformed" AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _supervise
   grep -Eq '^202 failed open' "$state" || fail "malformed terminal marker was accepted: $malformed"
   [[ $(grep -c -- '--sandbox read-only' "$FAKE_GH_ROOT/codex-calls") -eq 1 ]] || fail 'malformed terminal marker triggered replan'
   [[ $(grep -c -- '--sandbox workspace-write' "$FAKE_GH_ROOT/codex-calls") -eq 2 ]] || fail 'malformed terminal marker did not stop after one retry'
@@ -3014,7 +3218,7 @@ rm -f "$FAKE_GH_ROOT/codex-exec-count" "$FAKE_GH_ROOT/opencode-auto-count" \
   "$state_root/agent-exhausted" "$state_root/all-pools-paused"
 expected_reset=$(date -d 'Aug 20, 2099 9:27 PM' +%s)
 FAKE_CODEX_EXIT=1 \
-FAKE_CODEX_STDERR="ERROR: You've hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at Aug 20th, 2099 9:27 PM." \
+FAKE_CODEX_STDERR="2026-08-20T05:12:33Z ERROR: You've hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at Aug 20th, 2099 9:27 PM." \
 FAKE_OPENCODE_EXEC_RESULT_1='plan body from gogo
 <!-- agentic-loop:scope paths=bin/agentic-loop -->' \
 FAKE_OPENCODE_EXEC_RESULT_2='AGENTIC_LOOP_RESULT=completed' \
@@ -3523,6 +3727,44 @@ assert_contains "$TEST_ROOT/decomposition-calls.log" "issues/$child_b/dependenci
 grep -q -- '-f sub_issue_id=\|-f issue_id=' "$TEST_ROOT/decomposition-calls.log" && fail 'decomposition_materialize still sends sub_issue_id/issue_id as an untyped -f string parameter'
 grep -Eq -- "issue_id=($child_a|$child_b)([^0-9]|\$)" "$TEST_ROOT/decomposition-calls.log" && fail 'decomposition_materialize sent a child Issue number instead of its database id'
 
+# decomposition_validate is a rejecting validator: every malformed dependency
+# or scope must stop before GitHub child-Issue mutations.  Keep these cases
+# observable through the worker boundary rather than testing an implementation
+# detail by sourcing the module.
+decomposition_case_index=0
+for decomposition_case in cycle self-dependency forward-reference too-few too-many invalid-scope duplicate-key; do
+  decomposition_case_index=$((decomposition_case_index + 1))
+  decomposition_issue=$((780 + decomposition_case_index))
+  case $decomposition_case in
+    cycle) children='[{"key":"a","title":"A","purpose":"p","acceptance_criteria":"c","scope":"paths=docs/a","depends_on":["b"]},{"key":"b","title":"B","purpose":"p","acceptance_criteria":"c","scope":"paths=docs/b","depends_on":["a"]}]' ;;
+    self-dependency) children='[{"key":"a","title":"A","purpose":"p","acceptance_criteria":"c","scope":"paths=docs/a","depends_on":["a"]},{"key":"b","title":"B","purpose":"p","acceptance_criteria":"c","scope":"paths=docs/b","depends_on":[]}]' ;;
+    forward-reference) children='[{"key":"a","title":"A","purpose":"p","acceptance_criteria":"c","scope":"paths=docs/a","depends_on":["b"]},{"key":"b","title":"B","purpose":"p","acceptance_criteria":"c","scope":"paths=docs/b","depends_on":[]}]' ;;
+    too-few) children='[{"key":"a","title":"A","purpose":"p","acceptance_criteria":"c","scope":"paths=docs/a","depends_on":[]}]' ;;
+    too-many) children='[{"key":"a","title":"A","purpose":"p","acceptance_criteria":"c","scope":"paths=docs/a","depends_on":[]},{"key":"b","title":"B","purpose":"p","acceptance_criteria":"c","scope":"paths=docs/b","depends_on":[]},{"key":"c","title":"C","purpose":"p","acceptance_criteria":"c","scope":"paths=docs/c","depends_on":[]},{"key":"d","title":"D","purpose":"p","acceptance_criteria":"c","scope":"paths=docs/d","depends_on":[]},{"key":"e","title":"E","purpose":"p","acceptance_criteria":"c","scope":"paths=docs/e","depends_on":[]},{"key":"f","title":"F","purpose":"p","acceptance_criteria":"c","scope":"paths=docs/f","depends_on":[]},{"key":"g","title":"G","purpose":"p","acceptance_criteria":"c","scope":"paths=docs/g","depends_on":[]}]' ;;
+    invalid-scope) children='[{"key":"a","title":"A","purpose":"p","acceptance_criteria":"c","scope":"paths=bad$path","depends_on":[]},{"key":"b","title":"B","purpose":"p","acceptance_criteria":"c","scope":"paths=docs/b","depends_on":[]}]' ;;
+    duplicate-key) children='[{"key":"a","title":"A","purpose":"p","acceptance_criteria":"c","scope":"paths=docs/a","depends_on":[]},{"key":"a","title":"A2","purpose":"p","acceptance_criteria":"c","scope":"paths=docs/a2","depends_on":[]}]' ;;
+  esac
+  printf '%s running open\n' "$decomposition_issue" > "$state"
+  : > "$FAKE_GH_ROOT/$state_key.comments"
+  bad_manifest=$(printf '{"schema":1,"mode":"children","integration_acceptance_criteria":"integration","children":%s}' "$children")
+  FAKE_CODEX_RESULT=$'```agentic-loop:decomposition\n'"$bad_manifest"$'\n```' "$target/bin/agentic-loop" _worker "$decomposition_issue" "decomposition-$decomposition_case" >/dev/null 2>&1 || true
+  grep -Eq "^$decomposition_issue needs-input open" "$state" || fail "decomposition $decomposition_case was not rejected"
+  [[ ! -s $FAKE_GH_ROOT/issues-created ]] || fail "decomposition $decomposition_case created a child before rejection"
+done
+
+# Claude transport failures must remain provider-stage failures. In particular,
+# empty non-zero output is not quota evidence and must not create a pool marker.
+for claude_stage_mode in empty-nonzero stderr-nonzero nonjson-zero; do
+  printf '780 running open\n' > "$state"
+  rm -f "$state_root/pools/claude/exhausted" "$state_root/agent-exhausted"
+  rm -f "$FAKE_GH_ROOT/claude-stage-mode"
+  : > "$FAKE_GH_ROOT/$state_key.comments"
+  AGENT_PROVIDER=claude AGENT_PLAN_MAX_RETRIES=0 FAKE_CLAUDE_STAGE_MODE="$claude_stage_mode" \
+    AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _worker 780 "claude-stage-$claude_stage_mode" >/dev/null 2>&1 || true
+  [[ ! -e "$state_root/pools/claude/exhausted" ]] || fail "Claude $claude_stage_mode was misclassified as pool exhaustion"
+  grep -Eq '^780 failed' "$state" || fail "Claude $claude_stage_mode did not produce a terminal stage failure"
+done
+
 # doctor rejects an invalid unknown_scope value.
 cp "$target/.agentic-loop.toml" "$target/.agentic-loop.toml.valid"
 printf '[queue]\nunknown_scope = "sometimes"\n' > "$target/.agentic-loop.toml"
@@ -3688,6 +3930,35 @@ grep -Fq '#500' <<< "$status_output" || fail 'status did not name the dependency
 grep -Fq 'incomplete' <<< "$status_output" || fail 'status did not show the dependency-block reason code'
 rm -f "$state_root/dependency/blocked-500"
 rm -f "$FAKE_GH_ROOT/$state_key.dep-links"
+
+# --- gh --body "@path" silent-loss detection and pre-claim diversion (Issue #272, ADR 0030) ---
+
+# claim_next diverts a queued Issue whose whole body is nothing but an
+# unexpanded `gh --body "@path"` reference to agent:needs-input before ever
+# handing it to a worker, so no exec is spent on a lost requirement. A
+# sibling Issue with an ordinary body claims normally in the same poll.
+unexpanded_body_b64=$(printf '@/tmp/issue_body.md' | base64 -w0)
+ordinary_body_b64=$(printf 'これは正当な要求本文です。' | base64 -w0)
+printf '910 queued open none 2026-01-01T00:00:00Z none none %s\n911 queued open none 2026-01-02T00:00:00Z none none %s\n' \
+  "$unexpanded_body_b64" "$ordinary_body_b64" > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+: > "$FAKE_GH_ROOT/codex-calls"
+AGENTIC_LOOP_RUN_ONCE=1 FAKE_CODEX_SLEEP=1 "$target/bin/agentic-loop" _supervise
+grep -Eq '^910 needs-input open' "$state" || fail 'a lost-requirement Issue was not diverted to agent:needs-input before claim'
+grep -Eq '^911 completed closed' "$state" || fail 'a sibling Issue with an ordinary body was not claimed in the same poll'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:body-unexpanded' 'the diversion did not leave an explanatory comment'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" '--body-file' 'the diversion comment did not point at --body-file recovery'
+if grep -q ' 910 ' "$FAKE_GH_ROOT/codex-calls"; then fail 'a worker was started for a lost-requirement Issue'; fi
+
+# The diversion is idempotent: a second poll does not repost the comment or
+# touch the Label again (queued->needs-input already moved it out of the
+# queued bucket, so claim_next never re-evaluates it, but this also guards
+# any future direct re-check of a still-needs-input Issue).
+comments_before=$(wc -l < "$FAKE_GH_ROOT/$state_key.comments")
+AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _supervise
+comments_after=$(wc -l < "$FAKE_GH_ROOT/$state_key.comments")
+[[ $comments_before == "$comments_after" ]] || fail 'a second poll reposted the body-unexpanded comment'
+grep -Eq '^910 needs-input open' "$state" || fail 'a second poll changed the diverted Issue state'
 
 # --- Closed-loop postmortem learning (Issue #132, ADR 0026, docs/policies/postmortem.md) ---
 
@@ -4007,6 +4278,37 @@ FAKE_PR_HEAD_OID=0000000000000000000000000000000000000000 "$target/bin/agentic-l
 grep -Eq '^8 failed open$' "$state" || fail 'unexpected merged PR ref was accepted'
 [[ -e $target-worktrees/issue-8 ]] || fail 'unexpected ref worker worktree was removed'
 git -C "$target" show-ref --verify --quiet refs/heads/agent/issue-8 || fail 'unexpected ref local branch was removed'
+
+# A clean provider exit without a terminal marker can race with GitHub merging
+# the branch. The independently observed merge must enter the normal
+# completion/cleanup path after the single protocol retry.
+printf '9 running open\n' > "$state"
+: > "$FAKE_GH_ROOT/calls"
+rm -f "$FAKE_GH_ROOT/codex-exec-count"
+FAKE_CODEX_EXEC_RESULT_1='実行結果のみ' \
+FAKE_CODEX_EXEC_RESULT_2='実行結果のみ' \
+"$target/bin/agentic-loop" _worker 9 markerless-merged-worker
+grep -Eq '^9 completed closed$' "$state" || fail 'a markerless worker with a merged PR was not completed'
+[[ ! -e $target-worktrees/issue-9 ]] || fail 'a markerless merged worker worktree remained'
+! git -C "$target" show-ref --verify --quiet refs/heads/agent/issue-9 || fail 'a markerless merged worker local branch remained'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:protocol-retry' 'markerless merged worker did not record the protocol retry'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:markerless-merged' 'markerless merged worker did not record the markerless-merged observation comment'
+merged_pr_queries=$(grep -c '/pulls --method GET.*state=closed.*head=.*issue-9' "$FAKE_GH_ROOT/calls" || true)
+[[ $merged_pr_queries -eq 1 ]] || fail "markerless merged worker queried the branch's merged PR $merged_pr_queries times, expected exactly 1"
+
+# The same markerless clean exit without any independently observed merge
+# (FAKE_PR_MERGED=0) must keep following the ordinary failure path: no false
+# completion, and the worktree/branch preserved for a retried claim.
+printf '23 running open\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+rm -f "$FAKE_GH_ROOT/codex-exec-count"
+FAKE_PR_MERGED=0 FAKE_CODEX_EXEC_RESULT_1='実行結果のみ' \
+FAKE_CODEX_EXEC_RESULT_2='実行結果のみ' \
+"$target/bin/agentic-loop" _worker 23 markerless-unmerged-worker
+grep -Eq '^23 failed open$' "$state" || fail 'a markerless worker without a merged PR was not left failed'
+[[ -e $target-worktrees/issue-23 ]] || fail 'a markerless unmerged worker worktree was removed'
+git -C "$target" show-ref --verify --quiet refs/heads/agent/issue-23 || fail 'a markerless unmerged worker local branch was removed'
+if grep -Fq 'agentic-loop:markerless-merged' "$FAKE_GH_ROOT/$state_key.comments"; then fail 'a markerless worker without a merged PR recorded a markerless-merged observation'; fi
 
 # Closed-loop postmortem worker.sh terminal branch (Issue #132, ADR 0026): a
 # `postmortem link` turn, executed from inside the exec turn's own sandboxed
@@ -4924,6 +5226,153 @@ doctor_small_timeout=$("$target/bin/agentic-loop" doctor || true)
 grep -Fq '[警告] 設定値: WORKER_TIMEOUT_SECONDS' <<< "$doctor_small_timeout" || fail 'doctor did not warn about an unsafely small worker_timeout_seconds'
 if grep -Fq '[失敗] 設定値: WORKER_TIMEOUT_SECONDS' <<< "$doctor_small_timeout"; then fail 'an unsafely small worker_timeout_seconds was misclassified as a failure'; fi
 mv "$target/.agentic-loop.toml.valid" "$target/.agentic-loop.toml"
+
+# doctor cross-checks the new stage-stall config keys (Issue #273): a band
+# inversion against worker_timeout_seconds or against the other stall band is
+# a warning (never a failure -- both bands stay independently tunable).
+cp "$target/.agentic-loop.toml" "$target/.agentic-loop.toml.valid"
+write_queue_config "$target/.agentic-loop.toml" WORKER_TIMEOUT_SECONDS=1800 PROVIDER_STALL_SECONDS=1800
+doctor_band_timeout=$("$target/bin/agentic-loop" doctor || true)
+grep -Fq '[警告] 設定値: PROVIDER_STALL_SECONDS' <<< "$doctor_band_timeout" || fail 'doctor did not warn when provider_stall_seconds reaches worker_timeout_seconds'
+mv "$target/.agentic-loop.toml.valid" "$target/.agentic-loop.toml"
+
+cp "$target/.agentic-loop.toml" "$target/.agentic-loop.toml.valid"
+write_queue_config "$target/.agentic-loop.toml" STALL_SECONDS=1000 PROVIDER_STALL_SECONDS=500
+doctor_band_inverted=$("$target/bin/agentic-loop" doctor || true)
+grep -Fq '[警告] 設定値: PROVIDER_STALL_SECONDS' <<< "$doctor_band_inverted" || fail 'doctor did not warn when provider_stall_seconds is smaller than stall_seconds'
+mv "$target/.agentic-loop.toml.valid" "$target/.agentic-loop.toml"
+
+# --- time constant invariants (Issue #280, ADR 0032) ------------------------
+# timing_invariant_violations is the single source of truth for both the two
+# doctor warnings above and scripts/lint.sh's hard `_timing-check --committed`
+# gate; exercise the CLI boundary directly (not just doctor's warning text).
+timing_pristine="$TEST_ROOT/agentic-loop.toml.timing-pristine"
+# $target/.agentic-loop.toml has accumulated write_queue_config overrides from
+# earlier sections in this suite (several intentionally left unrestored, e.g.
+# the worker_timeout_seconds=0 disabled-timeout scenario above), so it is not
+# the genuine installed default at this point -- reconstruct it from the
+# source repository's own .agentic-loop.toml instead.
+cp "$PROJECT_ROOT/.agentic-loop.toml" "$timing_pristine"
+cp "$timing_pristine" "$target/.agentic-loop.toml"
+"$target/bin/agentic-loop" _timing-check --committed || fail '_timing-check --committed rejected the installed default configuration'
+
+assert_timing_violation() {
+  local expect_name=$1; shift
+  cp "$timing_pristine" "$target/.agentic-loop.toml"
+  write_queue_config "$target/.agentic-loop.toml" "$@"
+  local out rc
+  if out=$("$target/bin/agentic-loop" _timing-check --committed 2>&1); then rc=0; else rc=$?; fi
+  [[ $rc -eq 1 ]] || fail "_timing-check --committed did not fail for $expect_name (rc=$rc): $out"
+  grep -Fq "[違反] $expect_name" <<< "$out" || fail "_timing-check --committed output was missing $expect_name: $out"
+}
+
+assert_timing_violation stall-before-timeout STALL_SECONDS=20000 WORKER_TIMEOUT_SECONDS=100
+assert_timing_violation provider-stall-before-timeout PROVIDER_STALL_SECONDS=20000 WORKER_TIMEOUT_SECONDS=100
+assert_timing_violation stall-band-order STALL_SECONDS=1000 PROVIDER_STALL_SECONDS=500
+assert_timing_violation worker-timeout-too-low WORKER_TIMEOUT_SECONDS=60
+assert_timing_violation heartbeat-lease-margin LEASE_SECONDS=2
+assert_timing_violation pause-grace-before-timeout PAUSE_GRACE_SECONDS=20000 WORKER_TIMEOUT_SECONDS=100
+assert_timing_violation poll-backoff-order POLL_SECONDS=200 POLL_MAX_SECONDS=100
+assert_timing_violation orphan-grace-before-timeout WORKER_ORPHAN_GRACE_SECONDS=20000 WORKER_TIMEOUT_SECONDS=100
+
+# EXHAUSTION_PAUSE_SECONDS/EXHAUSTION_BACKOFF_MAX_SECONDS are bin/agentic-loop
+# constants, not .agentic-loop.toml keys, so this relation cannot be driven
+# through write_queue_config -- call timing_invariant_violations directly.
+exhaustion_violation=$(EXHAUSTION_PAUSE_SECONDS=99999 EXHAUSTION_BACKOFF_MAX_SECONDS=100 bash -c \
+  'source "$0/bin/lib/agentic-loop/common.sh"; source "$0/bin/lib/agentic-loop/config.sh"; timing_invariant_violations 300 3600 14400 300 120 30 120 120' "$PROJECT_ROOT")
+grep -Fq 'exhaustion-backoff-order' <<< "$exhaustion_violation" || fail 'timing_invariant_violations did not detect an inverted exhaustion backoff order'
+exhaustion_ok=$(EXHAUSTION_PAUSE_SECONDS=1800 EXHAUSTION_BACKOFF_MAX_SECONDS=21600 bash -c \
+  'source "$0/bin/lib/agentic-loop/common.sh"; source "$0/bin/lib/agentic-loop/config.sh"; timing_invariant_violations 300 3600 14400 300 120 30 120 120' "$PROJECT_ROOT")
+[[ -z $exhaustion_ok ]] || fail 'timing_invariant_violations reported a violation for the healthy exhaustion backoff order'
+
+# bash-fallback-vs-toml drift (acceptance criterion 3): editing only the
+# committed toml value, leaving bin/agentic-loop's own fallback constant
+# behind, must also fail the gate -- this is a distinct failure mode from any
+# single-source invariant above.
+cp "$timing_pristine" "$target/.agentic-loop.toml"
+sed -i 's/^provider_stall_seconds = 3600$/provider_stall_seconds = 100/' "$target/.agentic-loop.toml"
+if mismatch_out=$("$target/bin/agentic-loop" _timing-check --committed 2>&1); then mismatch_rc=0; else mismatch_rc=$?; fi
+[[ $mismatch_rc -eq 1 ]] || fail '_timing-check --committed did not fail when the toml diverges from the bin/agentic-loop fallback default'
+grep -Fq 'fallback-mismatch:PROVIDER_STALL_SECONDS' <<< "$mismatch_out" || fail '_timing-check --committed did not report the fallback/toml mismatch by name'
+
+cp "$timing_pristine" "$target/.agentic-loop.toml"
+"$target/bin/agentic-loop" _timing-check --committed || fail 'restoring the pristine config did not clear _timing-check violations'
+
+# --- stall閾値の実測整合 (Issue #280, ADR 0032) -----------------------------
+# doctor cross-checks the currently applied stall threshold against real
+# stage-duration samples reconstructed from events.log (host-local, zero
+# GitHub calls) -- not a fabricated progress epoch.
+write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=30 STOP_TIMEOUT=10 STALE_DAYS=30
+: > "$state_root/events.log"
+calib_t=1700000000
+for calib_i in $(seq 0 4); do
+  printf '%s\t9991\tprogress\tplan\n' "$((calib_t + calib_i * 100))" >> "$state_root/events.log"
+done
+doctor_calib_sparse=$("$target/bin/agentic-loop" doctor || true)
+grep -Fq '[成功] stall閾値の実測整合（provider stage）' <<< "$doctor_calib_sparse" || fail 'doctor treated fewer than CALIBRATION_MIN_SAMPLES provider samples as calibrated'
+grep -Fq 'sampleが20件未満' <<< "$doctor_calib_sparse" || fail 'doctor did not explain the insufficient-sample verdict'
+
+: > "$state_root/events.log"
+for calib_i in $(seq 0 21); do
+  printf '%s\t9992\tprogress\tplan\n' "$((calib_t + calib_i * 5000))" >> "$state_root/events.log"
+done
+write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=30 STOP_TIMEOUT=10 STALE_DAYS=30 STALL_SECONDS=100 PROVIDER_STALL_SECONDS=100
+doctor_calib_under=$("$target/bin/agentic-loop" doctor || true)
+grep -Fq '[警告] stall閾値の実測整合（provider stage）' <<< "$doctor_calib_under" || fail 'doctor did not warn when the real p90 exceeds provider_stall_seconds'
+grep -Eq 'p90=5000s' <<< "$doctor_calib_under" || fail 'doctor calibration warning did not include the observed p90'
+
+write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=30 STOP_TIMEOUT=10 STALE_DAYS=30 STALL_SECONDS=6000 PROVIDER_STALL_SECONDS=6000
+doctor_calib_ok=$("$target/bin/agentic-loop" doctor || true)
+grep -Fq '[成功] stall閾値の実測整合（provider stage）' <<< "$doctor_calib_ok" || fail 'doctor did not report calibration success once the threshold exceeds the observed p90'
+
+: > "$state_root/events.log"
+cp "$timing_pristine" "$target/.agentic-loop.toml"
+write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=3 STOP_TIMEOUT=10 STALE_DAYS=30
+
+# --- real (not fabricated-epoch) stall transition (Issue #280 acceptance
+# criterion 8) -- a live worker whose fake provider CLI actually sleeps past
+# provider_stall_seconds must be observed as stalled through its own real
+# progress markers; raising the threshold above the sleep keeps it healthy.
+rm -rf "$state_root/workers"
+printf '921 queued open none 2026-01-01T00:00:00Z none feature\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=30 STOP_TIMEOUT=10 STALE_DAYS=30 STALL_SECONDS=1 PROVIDER_STALL_SECONDS=1
+AGENTIC_LOOP_RUN_ONCE=1 FAKE_CODEX_SLEEP=2 "$target/bin/agentic-loop" _supervise &
+real_stall_sup_pid=$!
+real_stall_seen=0
+for _ in $(seq 1 60); do
+  real_status_json=$("$target/bin/agentic-loop" status --format json 2>/dev/null) || true
+  if [[ $(yq -p json '.workers[] | select(.issue == 921) | .health' <<< "$real_status_json" 2>/dev/null) == stalled ]]; then
+    real_stall_seen=1
+    break
+  fi
+  kill -0 "$real_stall_sup_pid" 2>/dev/null || break
+  sleep 0.2
+done
+wait "$real_stall_sup_pid" 2>/dev/null || true
+[[ $real_stall_seen == 1 ]] || fail 'a real fake-provider worker exceeding provider_stall_seconds was not observed as stalled without a fabricated progress epoch'
+
+rm -rf "$state_root/workers"
+printf '922 queued open none 2026-01-01T00:00:00Z none feature\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=30 STOP_TIMEOUT=10 STALE_DAYS=30 STALL_SECONDS=1 PROVIDER_STALL_SECONDS=60
+AGENTIC_LOOP_RUN_ONCE=1 FAKE_CODEX_SLEEP=2 "$target/bin/agentic-loop" _supervise &
+ctrl_stall_sup_pid=$!
+ctrl_stall_seen=0
+for _ in $(seq 1 60); do
+  ctrl_status_json=$("$target/bin/agentic-loop" status --format json 2>/dev/null) || true
+  if [[ $(yq -p json '.workers[] | select(.issue == 922) | .health' <<< "$ctrl_status_json" 2>/dev/null) == stalled ]]; then ctrl_stall_seen=1; fi
+  kill -0 "$ctrl_stall_sup_pid" 2>/dev/null || break
+  sleep 0.2
+done
+wait "$ctrl_stall_sup_pid" 2>/dev/null || true
+[[ $ctrl_stall_seen == 0 ]] || fail 'raising provider_stall_seconds above the fake providers sleep time still misclassified a real worker as stalled'
+
+rm -rf "$state_root/workers"
+: > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+cp "$timing_pristine" "$target/.agentic-loop.toml"
+write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=3 STOP_TIMEOUT=10 STALE_DAYS=30
 
 # --- worker-orphan grace-based reap (Issue #193, ADR 0029) ---
 # A worker-orphan (this host's live pidfile whose Issue GitHub no longer
@@ -6560,7 +7009,10 @@ now=$(date +%s)
 printf '%s\n' "$((now - 60))" > "$state_root/workers/80.started"
 printf '%s\tplan\t5\n' "$((now - 10))" > "$state_root/workers/80.progress"
 printf '%s\n' "$((now - 100))" > "$state_root/workers/81.started"
-printf '%s\texec\t9\n' "$((now - 400))" > "$state_root/workers/81.progress"
+# stage=checks is a non-provider stage, so it uses the narrower STALL_SECONDS
+# band (default 300s) rather than PROVIDER_STALL_SECONDS -- see the dedicated
+# stage-band tests below for exec/plan/replan using the wider band.
+printf '%s\tchecks\t9\n' "$((now - 400))" > "$state_root/workers/81.progress"
 printf '%s\n' "$((now - 20000))" > "$state_root/workers/82.started"
 # Issue 83 intentionally has no local state at all (other-host scenario).
 progress_status_before=$(git -C "$target" status --porcelain)
@@ -6594,6 +7046,63 @@ printf '%s' "$progress_json" | yq -p json -o json >/dev/null || fail 'progress s
 [[ $(printf '%s' "$progress_json" | yq -p json '.workers[] | select(.issue == 83) | .health') == unknown ]] || fail 'progress status JSON did not leave the stateless Issue unknown'
 [[ $(printf '%s' "$progress_json" | yq -p json '.anomalies[] | select(.code == "worker-stalled") | .subject') == '#81' ]] || fail 'progress status JSON did not report the worker-stalled anomaly'
 [[ $(printf '%s' "$progress_json" | yq -p json '.workers[] | select(.issue == 80) | .phase') == '' ]] || fail 'progress status JSON changed the existing phase field contract'
+
+# --- stage-based, configurable stall thresholds (Issue #273) ---
+# Provider stages (plan/exec/replan) block on one long CLI call and must not
+# flag as stalled within ordinary reasoning/exec time; other stages keep the
+# narrower default. Both bands are separately configurable, and status
+# reports which threshold it actually applied.
+write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=3 STOP_TIMEOUT=10 STALE_DAYS=30 STALL_SECONDS=300 PROVIDER_STALL_SECONDS=3600
+printf '84 running open\n85 running open\n86 running open\n' > "$state"
+mkdir -p "$state_root/workers" "$state_root/logs"
+now=$(date +%s)
+printf '%s\n' "$((now - 5000))" > "$state_root/workers/84.started"
+printf '%s\texec\t1\n' "$((now - 1000))" > "$state_root/workers/84.progress"
+printf '%s\n' "$((now - 5000))" > "$state_root/workers/85.started"
+printf '%s\texec\t1\n' "$((now - 4000))" > "$state_root/workers/85.progress"
+printf '%s\n' "$((now - 5000))" > "$state_root/workers/86.started"
+printf '%s\tplan\t1\n' "$((now - 500))" > "$state_root/workers/86.progress"
+band_json=$("$target/bin/agentic-loop" status --format json)
+[[ $(printf '%s' "$band_json" | yq -p json '.workers[] | select(.issue == 84) | .health') == healthy ]] || fail 'exec stage within provider_stall_seconds was misclassified as stalled'
+[[ $(printf '%s' "$band_json" | yq -p json '.workers[] | select(.issue == 84) | .stall_threshold_seconds') == 3600 ]] || fail 'status JSON did not report the applied provider stall threshold'
+[[ $(printf '%s' "$band_json" | yq -p json '.workers[] | select(.issue == 85) | .health') == stalled ]] || fail 'exec stage beyond provider_stall_seconds was not detected as a genuine stall'
+[[ $(printf '%s' "$band_json" | yq -p json '.workers[] | select(.issue == 86) | .health') == healthy ]] || fail 'plan stage within provider_stall_seconds was misclassified as stalled'
+[[ $(printf '%s' "$band_json" | yq -p json '.workers[] | select(.issue == 86) | .stall_threshold_seconds') == 3600 ]] || fail 'plan stage did not report the provider stall threshold'
+band_text=$("$target/bin/agentic-loop" status)
+grep -Fq 'stage=exec' <<< "$band_text" || fail 'worker-stalled anomaly text did not include the stage'
+grep -Eq '適用閾値 3600秒' <<< "$band_text" || fail 'worker-stalled anomaly text did not include the applied threshold'
+
+# Configurability: lowering provider_stall_seconds makes the same 1000s-old
+# exec worker stall, and setting it to 0 disables the band entirely.
+write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=3 STOP_TIMEOUT=10 STALE_DAYS=30 STALL_SECONDS=300 PROVIDER_STALL_SECONDS=500
+tuned_json=$("$target/bin/agentic-loop" status --format json)
+[[ $(printf '%s' "$tuned_json" | yq -p json '.workers[] | select(.issue == 84) | .health') == stalled ]] || fail 'lowering queue.provider_stall_seconds via config did not take effect'
+write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=3 STOP_TIMEOUT=10 STALE_DAYS=30 STALL_SECONDS=300 PROVIDER_STALL_SECONDS=0
+disabled_json=$("$target/bin/agentic-loop" status --format json)
+[[ $(printf '%s' "$disabled_json" | yq -p json '.workers[] | select(.issue == 85) | .health') == healthy ]] || fail 'queue.provider_stall_seconds=0 did not disable stall detection for provider stages'
+rm -rf "$state_root/workers"
+: > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=3 STOP_TIMEOUT=10 STALE_DAYS=30
+
+# A stage output file's mtime (agent_run_stage's plan/result file, including
+# its transient `.raw.*`/`.final.*` siblings while streaming) is a secondary
+# progress signal independent of the progress marker (Issue #273): a worker
+# whose marker looks old but is still visibly writing output must stay
+# healthy.
+printf '87 running open\n' > "$state"
+mkdir -p "$state_root/workers" "$state_root/logs"
+now=$(date +%s)
+printf '%s\n' "$((now - 5000))" > "$state_root/workers/87.started"
+printf '%s\texec\t1\n' "$((now - 4000))" > "$state_root/workers/87.progress"
+: > "$state_root/issue-87-result.txt"
+touch -d "@$((now - 10))" "$state_root/issue-87-result.txt"
+output_json=$("$target/bin/agentic-loop" status --format json)
+[[ $(printf '%s' "$output_json" | yq -p json '.workers[] | select(.issue == 87) | .health') == healthy ]] || fail 'a fresh stage output file mtime did not keep an old-progress-marker worker healthy'
+rm -f "$state_root/issue-87-result.txt"
+rm -rf "$state_root/workers"
+: > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
 
 # `status --watch` on a non-TTY (pipe/redirect) prints the recent events once
 # and exits without a follow loop: later appends are not streamed, and the run
@@ -7403,6 +7912,40 @@ drift_findings=$(
 )
 grep -Fxq 'drift:affected_check_seconds' <<< "$drift_findings" || fail 'capability_validate did not warn when affected_check_seconds >= full_check_seconds'
 
+# --- stall calibration primitives (Issue #280, ADR 0032) -------------------
+# metrics_calibration_verdict is a pure function; test it directly rather than
+# only indirectly through a fleet-wide fixture below.
+calib_verdict_ok=$(CALIBRATION_MIN_SAMPLES=20 bash -c \
+  'source "$0/bin/lib/agentic-loop/common.sh"; source "$0/bin/lib/agentic-loop/metrics.sh"; metrics_calibration_verdict "$1" "$2"' \
+  "$PROJECT_ROOT" $'25\t100\t100\t100\t200' 300)
+[[ $calib_verdict_ok == ok ]] || fail 'metrics_calibration_verdict misclassified a healthy distribution as not ok'
+calib_verdict_under=$(CALIBRATION_MIN_SAMPLES=20 bash -c \
+  'source "$0/bin/lib/agentic-loop/common.sh"; source "$0/bin/lib/agentic-loop/metrics.sh"; metrics_calibration_verdict "$1" "$2"' \
+  "$PROJECT_ROOT" $'25\t3600\t3600\t4000\t5000' 3600)
+[[ $calib_verdict_under == undersized ]] || fail 'metrics_calibration_verdict did not flag a threshold at or below the observed p90 as undersized'
+calib_verdict_sparse=$(CALIBRATION_MIN_SAMPLES=20 bash -c \
+  'source "$0/bin/lib/agentic-loop/common.sh"; source "$0/bin/lib/agentic-loop/metrics.sh"; metrics_calibration_verdict "$1" "$2"' \
+  "$PROJECT_ROOT" $'5\t100\t100\t100\t100' 300)
+[[ $calib_verdict_sparse == insufficient-samples ]] || fail 'metrics_calibration_verdict did not flag too few samples as insufficient-samples'
+calib_verdict_disabled=$(CALIBRATION_MIN_SAMPLES=20 bash -c \
+  'source "$0/bin/lib/agentic-loop/common.sh"; source "$0/bin/lib/agentic-loop/metrics.sh"; metrics_calibration_verdict "$1" "$2"' \
+  "$PROJECT_ROOT" $'25\t9999\t9999\t9999\t9999' 0)
+[[ $calib_verdict_disabled == ok ]] || fail 'metrics_calibration_verdict did not treat threshold=0 (disabled band) as ok'
+
+# events_stage_duration_samples reconstructs stage durations from real
+# progress transitions (no fabricated epoch): the departing stage of each
+# consecutive same-subject progress pair is sampled, the final stage of a
+# subject is never sampled, and a gap beyond worker_timeout_seconds is
+# dropped as host/timeout-attributable rather than a natural stage duration.
+events_calib_log="$TEST_ROOT/events-calibration.log"
+printf '1000\t42\tprogress\tplan\n2000\t42\tprogress\texec\n2100\t42\tprogress\tchecks\n20000\t42\tprogress\tdone\n' > "$events_calib_log"
+events_calib_out=$(EVENTS_LOG="$events_calib_log" EVENTS_CALIBRATION_MAX_LINES=2000 WORKER_TIMEOUT_SECONDS=5000 bash -c \
+  'source "$0/bin/lib/agentic-loop/common.sh"; source "$0/bin/lib/agentic-loop/worker_state.sh"; events_stage_duration_samples' "$PROJECT_ROOT")
+[[ $(grep -c '^provider	' <<< "$events_calib_out") -eq 2 ]] || fail 'events_stage_duration_samples did not attribute the plan/exec departures to the provider band'
+grep -Fxq $'provider\t1000' <<< "$events_calib_out" || fail 'events_stage_duration_samples miscalculated the plan-stage duration'
+grep -Fxq $'provider\t100' <<< "$events_calib_out" || fail 'events_stage_duration_samples miscalculated the exec-stage duration'
+[[ $(grep -c '^non-provider	' <<< "$events_calib_out") -eq 0 ]] || fail 'events_stage_duration_samples produced a sample for a gap beyond worker_timeout_seconds'
+
 # --- bin/agentic-loop metrics (see docs/decisions/0007, docs/operations/loop-metrics.md) ---
 write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=2 LEASE_SECONDS=30 STOP_TIMEOUT=10 STALE_DAYS=30
 metrics_issues="$FAKE_GH_ROOT/$state_key.metrics-issues"
@@ -7529,6 +8072,13 @@ mj() { printf '%s' "$metrics_json" | yq -p json "$1"; }
 [[ $(mj '.durations.needs_input_wait.n') -eq 1 && $(mj '.durations.needs_input_wait.max') -eq 7200 ]] || fail 'metrics computed the wrong closed needs_input_wait sample (511: 7200s)'
 [[ $(mj '.durations.plan_seconds.n') -eq 1 && $(mj '.durations.plan_seconds.max') -eq 50 ]] || fail 'metrics did not read plan_seconds from the enriched usage marker'
 [[ $(mj '.durations.exec_seconds.n') -eq 1 && $(mj '.durations.exec_seconds.max') -eq 120 ]] || fail 'metrics did not read exec_seconds from the enriched usage marker'
+
+# stall_calibration (Issue #280, ADR 0032): this fixture's plan/exec sample
+# counts (1 each) are far below CALIBRATION_MIN_SAMPLES, so the verdict must
+# stay insufficient-samples rather than fabricate a judgement from one point.
+[[ $(mj '.stall_calibration.verdict') == insufficient-samples ]] || fail 'metrics did not report insufficient-samples when plan/exec sample counts are below CALIBRATION_MIN_SAMPLES'
+[[ $(mj '.stall_calibration.plan_p90') -eq 50 && $(mj '.stall_calibration.exec_p90') -eq 120 ]] || fail 'metrics stall_calibration did not surface the observed p90s'
+[[ $(mj '.stall_calibration.provider_stall_seconds') -eq 3600 ]] || fail 'metrics stall_calibration did not echo the applied provider_stall_seconds'
 [[ $(mj '.durations.pr_review_wait.n') -eq 2 && $(mj '.durations.pr_review_wait.max') -eq 7280 ]] || fail 'metrics computed the wrong pr_review_wait distribution (PR 9: 400-120=280, PR 11: 7300-20=7280; PR 10 is unmerged and excluded)'
 [[ $(mj '.durations.lead_time.n') -eq 3 && $(mj '.durations.lead_time.max') -eq 7300 ]] || fail 'metrics computed the wrong lead_time distribution (505 is excluded: no completed marker despite the label)'
 
@@ -7597,6 +8147,23 @@ degraded_json=$(FAKE_METRICS_EVENTS_FAIL=1 "$target/bin/agentic-loop" metrics --
 metrics_text=$("$target/bin/agentic-loop" metrics --days "$days" --as-of "$as_of")
 [[ $metrics_text == *'転帰:'* ]] || fail 'metrics text format did not render a summary'
 [[ $metrics_text != *'Fake issue'* && $metrics_text != *'worker=w'* ]] || fail 'metrics text format leaked private data'
+
+# stall_calibration undersized: append 25 exec_seconds samples at 4000s (>=
+# the fixture's provider_stall_seconds=3600) so the real-execution p90 is at
+# or above the applied threshold and metrics must report verdict=undersized
+# with a matching warning. Appended after every assertion above that depends
+# on this fixture's exact counts/reproducibility, since this mutates the
+# shared metrics_issues/metrics_events files those assertions already read.
+calib_undersized_issues="" calib_undersized_events=""
+for calib_n in $(seq 601 625); do
+  calib_undersized_issues+="$calib_n	$((window_start + 5000))	0	open	category:improvement	25	agent:running"$'\n'
+  calib_undersized_events+="$calib_n	$((window_start + 5010))	usage worker=w stage=exec provider=codex seconds=4000 exit=0"$'\n'
+done
+printf '%s' "$calib_undersized_issues" >> "$metrics_issues"
+printf '%s' "$calib_undersized_events" >> "$metrics_events"
+metrics_json_undersized=$("$target/bin/agentic-loop" metrics --format json --days "$days" --as-of "$as_of")
+[[ $(printf '%s' "$metrics_json_undersized" | yq -p json '.stall_calibration.verdict') == undersized ]] || fail 'metrics did not report undersized once exec_seconds p90 reached provider_stall_seconds'
+[[ $(printf '%s' "$metrics_json_undersized" | yq -p json '.warnings[]') == *stall_calibration* ]] || fail 'metrics did not emit a stall_calibration warning when undersized'
 
 # --- flaky test detection and quarantine (Issue #60, ADR 0022, docs/operations/flaky-tests.md) ---
 flaky_sh="$PROJECT_ROOT/scripts/flaky.sh"
@@ -7796,6 +8363,18 @@ FAKE_RUNNER_STATE="$run_state1" "$run_e2e_sh" --groups queue --runner "$flaky_fa
   || fail 'run-e2e.sh failed for an always-passing group'
 [[ $(yq -p json -r '.verdicts[0].verdict' "$run_record1") == passed ]] || fail 'run-e2e.sh record did not mark an always-passing group as passed'
 [[ $(yq -p json -r '.verdicts[0].attempts | length' "$run_record1") -eq 1 ]] || fail 'run-e2e.sh retried an always-passing group'
+
+# CI matrixは共通入口を変えず、環境変数でrun-e2e.shの既定群を1群へ絞る。
+# 明示的な--groupsを渡さない経路を固定し、各matrix jobが全4群を重複実行する
+# regressionを防ぐ。
+run_state_env="$TEST_ROOT/run-e2e-state-env"
+mkdir -p "$run_state_env"
+echo pass > "$run_state_env/lifecycle.behavior"
+run_report_env="$TEST_ROOT/run-e2e-report-env.tsv"
+AGENTIC_LOOP_TEST_GROUP=lifecycle FAKE_RUNNER_STATE="$run_state_env" "$run_e2e_sh" --runner "$flaky_fake_runner" --registry "$flaky_empty_registry" --report "$run_report_env" --no-record >/dev/null 2>&1 \
+  || fail 'run-e2e.sh failed for the CI matrix environment-selected group'
+[[ $(wc -l < "$run_report_env") -eq 1 ]] || fail 'run-e2e.sh ran more than one group for the CI matrix environment selection'
+grep -Eq '^lifecycle[[:space:]]+passed[[:space:]]+' "$run_report_env" || fail 'run-e2e.sh did not run the CI matrix environment-selected group'
 
 # 常時失敗: 隔離entryがあっても決定的失敗は非ゼロで終了する。
 run_state2="$TEST_ROOT/run-e2e-state-2"
@@ -7999,6 +8578,7 @@ exit 1
 GHFAKE
 chmod +x "$retry_ceiling_dir/bin/gh"
 (
+  # shellcheck disable=SC2030,SC2031 # intentionally subshell-local retry fixture environment
   export PATH="$retry_ceiling_dir/bin:$TEST_HOST_PATH"
   # shellcheck disable=SC2030 # intentionally subshell-local: read by the api.sh sourced just below, within this same subshell
   export STATE_ROOT="$retry_ceiling_dir/state"
@@ -8014,6 +8594,38 @@ chmod +x "$retry_ceiling_dir/bin/gh"
 ) || true
 retry_ceiling_calls=$(wc -l < "$retry_ceiling_calls_log")
 [[ $retry_ceiling_calls -eq 3 ]] || fail "repo_api made $retry_ceiling_calls underlying calls for API_RETRY_ATTEMPTS=3 against a persistently failing endpoint (expected exactly 3, no unbounded retry amplification)"
+
+# A timeout is ambiguous for writes: the server may have committed the
+# request before the client lost its response. Do not blindly resend POST,
+# while preserving timeout retry for idempotent GET reads.
+timeout_method_dir="$TEST_ROOT/timeout-method"
+timeout_method_calls_log="$TEST_ROOT/timeout-method-calls.log"
+mkdir -p "$timeout_method_dir/bin" "$timeout_method_dir/state"
+: > "$timeout_method_calls_log"
+printf 'acme/example\n' > "$timeout_method_dir/state/repository"
+cat > "$timeout_method_dir/bin/gh" <<GHFAKE
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$timeout_method_calls_log"
+printf 'curl: (28) Operation timed out\n' >&2
+exit 1
+GHFAKE
+chmod +x "$timeout_method_dir/bin/gh"
+(
+  # shellcheck disable=SC2030,SC2031 # intentionally subshell-local timeout fixture environment
+  export PATH="$timeout_method_dir/bin:$TEST_HOST_PATH"
+  export STATE_ROOT="$timeout_method_dir/state" PROGRAM_NAME=timeout-method-test
+  export API_RETRY_ATTEMPTS=3 API_RETRY_BASE_SECONDS=0
+  # shellcheck source=bin/lib/agentic-loop/common.sh
+  source "$PROJECT_ROOT/bin/lib/agentic-loop/common.sh"
+  # shellcheck source=bin/lib/agentic-loop/api.sh
+  source "$PROJECT_ROOT/bin/lib/agentic-loop/api.sh"
+  repo_api issues --method POST >/dev/null 2>&1 || true
+  repo_api issues --method GET >/dev/null 2>&1 || true
+)
+timeout_post_calls=$(grep -c -- '--method POST' "$timeout_method_calls_log" || true)
+timeout_get_calls=$(grep -c -- '--method GET' "$timeout_method_calls_log" || true)
+[[ $timeout_post_calls -eq 1 ]] || fail "timeout POST was retried $timeout_post_calls times (expected exactly once)"
+[[ $timeout_get_calls -eq 3 ]] || fail "timeout GET was retried $timeout_get_calls times (expected API_RETRY_ATTEMPTS=3)"
 
 # --- bin/agentic-loop workload static scan (Issue #130, ADR 0025 T7) -------
 # The scanner itself is local-only (zero GitHub calls) and detects each of
@@ -8119,6 +8731,95 @@ reassert_run 'agent:running'
 if grep -Fq 'set 77 running' "$reassert_state/calls"; then fail 'worker_reassert_running wrote redundantly while already agent:running'; fi
 rm -rf "$reassert_state"
 
+# --- bin/agentic-loop smoke (Issue #279) ---
+# This only proves the CLI's wiring to the real-boundary entry points (right
+# functions, right order, bounded call counts) using the fake gh/claude test
+# doubles; it is not a substitute for the real GraphQL/provider boundary,
+# which only `make smoke` against genuine `gh`/provider CLIs exercises (see
+# docs/policies/validation-harness.md).
+printf '279 needs-input open none 2026-01-01T00:00:00Z none improvement\n' >> "$FAKE_GH_ROOT/$state_key.state"
+printf 'https://github.com/acme/installed-project/issues/279\n' >> "$FAKE_GH_ROOT/$state_key.project-items"
+printf '279\tNeeds input\tImprovement\t\n' >> "$FAKE_GH_ROOT/$state_key.project-values"
+rm -f "$FAKE_GH_ROOT/claude-probe-calls"
+calls_before=$(wc -l < "$FAKE_GH_ROOT/calls")
+smoke_out="$TEST_ROOT/smoke-success.out"
+AGENT_PROVIDER=claude FAKE_CLAUDE_PROBE_MODE=ok "$target/bin/agentic-loop" smoke --issue 279 > "$smoke_out" 2>&1 \
+  || fail "smoke did not exit 0 on a healthy boundary: $(cat "$smoke_out")"
+assert_contains "$smoke_out" 'github-graphql: ok' 'smoke did not report the GraphQL boundary as ok'
+assert_contains "$smoke_out" 'github-rest: ok' 'smoke did not report the REST boundary as ok'
+assert_contains "$smoke_out" 'provider(claude): ok' 'smoke did not report the provider boundary as ok'
+# Issue #273: smoke also runs a claude-only real-CLI stream-json boundary
+# check (docs/decisions/0031), a second billable probe call distinct from the
+# usage-percent probe above -- so claude-probe-calls now holds exactly two
+# lines (one --output-format json, one --output-format stream-json) instead
+# of one.
+assert_contains "$smoke_out" 'stream-json boundary: ok' 'smoke did not report the claude stream-json boundary as ok'
+tail -n "+$((calls_before + 1))" "$FAKE_GH_ROOT/calls" > "$TEST_ROOT/smoke-calls.log"
+[[ $(grep -c 'projectItems(first:20' "$TEST_ROOT/smoke-calls.log" || true) -le 1 ]] || fail 'smoke issued more than one projectItems query for one Issue'
+[[ $(grep -Ec $'\tissues/[0-9]+ ' "$TEST_ROOT/smoke-calls.log" || true) -le 2 ]] || fail 'smoke issued more than two read-only REST reads'
+[[ $(wc -l < "$FAKE_GH_ROOT/claude-probe-calls" 2>/dev/null || printf 0) -eq 2 ]] || fail 'smoke did not launch exactly the usage probe and the stream-json boundary probe'
+assert_contains "$FAKE_GH_ROOT/claude-probe-calls" '--output-format json' 'smoke did not run the usage-percent probe with --output-format json'
+assert_contains "$FAKE_GH_ROOT/claude-probe-calls" '--output-format stream-json' 'smoke did not run the stream-json boundary probe with --output-format stream-json'
+assert_contains "$FAKE_GH_ROOT/claude-probe-calls" '--verbose' 'smoke did not pass --verbose to the stream-json boundary probe'
+
+# A GraphQL boundary failure is reported before the (billable) provider probe
+# ever launches.
+rm -f "$FAKE_GH_ROOT/claude-probe-calls"
+smoke_fail_out="$TEST_ROOT/smoke-failure.out"
+if FAKE_PROJECT_CONTENT_FAIL_ISSUE=279 AGENT_PROVIDER=claude FAKE_CLAUDE_PROBE_MODE=ok \
+  "$target/bin/agentic-loop" smoke --issue 279 > "$smoke_fail_out" 2>&1; then
+  fail 'smoke exited 0 despite a forced GraphQL boundary failure'
+fi
+assert_contains "$smoke_fail_out" 'github-graphql: failed' 'smoke did not report the GraphQL boundary failure'
+[[ -s $FAKE_GH_ROOT/claude-probe-calls ]] && fail 'smoke launched the provider probe after a GitHub boundary failure'
+true
+
+# --- gh --body "@path" silent-loss observability: status/doctor (Issue #272, ADR 0030) ---
+
+unexpanded_body_b64=$(printf '@/tmp/issue_body.md' | base64 -w0)
+multiline_body_b64=$(printf '@/tmp/issue_body.md にも触れています。\n続きの行です。' | base64 -w0)
+mention_no_path_b64=$(printf '@wakuwaku3' | base64 -w0)
+mention_with_space_b64=$(printf '@wakuwaku3 ご確認ください' | base64 -w0)
+fenced_path_b64=$(printf '説明:\n```\n@/tmp/issue_body.md\n```\n' | base64 -w0)
+printf '920 queued open none 2026-01-01T00:00:00Z none none %s\n921 queued open none 2026-01-02T00:00:00Z none none %s\n922 queued open none 2026-01-03T00:00:00Z none none %s\n923 queued open none 2026-01-04T00:00:00Z none none %s\n924 queued open none 2026-01-05T00:00:00Z none none %s\n' \
+  "$unexpanded_body_b64" "$multiline_body_b64" "$mention_no_path_b64" "$mention_with_space_b64" "$fenced_path_b64" > "$FAKE_GH_ROOT/$state_key.state"
+calls_before_status=$(wc -l < "$FAKE_GH_ROOT/calls")
+status_body_output=$("$target/bin/agentic-loop" status)
+calls_after_status=$(wc -l < "$FAKE_GH_ROOT/calls")
+[[ $calls_after_status -gt $calls_before_status ]] || fail 'status made no GitHub call while checking body-unexpanded'
+grep -Fq '要対応:' <<< "$status_body_output" || fail 'status did not show a needs-attention section for the lost-requirement Issue'
+grep -Fq 'issue-body-unexpanded #920:' <<< "$status_body_output" || fail 'status did not report the issue-body-unexpanded anomaly for the lost-requirement Issue'
+if grep -Fq '/tmp/issue_body.md' <<< "$status_body_output"; then fail 'status printed the Issue body content instead of a fixed anomaly message'; fi
+for negative_issue in 921 922 923 924; do
+  grep -Fq "issue-body-unexpanded #$negative_issue:" <<< "$status_body_output" && fail "status false-positived a legitimate body as issue-body-unexpanded (#$negative_issue)"
+done
+status_body_json=$("$target/bin/agentic-loop" status --format json)
+grep -Fq '"code":"issue-body-unexpanded"' <<< "$status_body_json" || fail 'status --format json did not report the issue-body-unexpanded anomaly'
+grep -Fq '"subject":"#920"' <<< "$status_body_json" || fail 'status --format json did not name the lost-requirement Issue'
+
+# doctor reuses the same open-Issue snapshot (no extra open-Issue list call)
+# and additionally does a single, unpaginated repo-wide recent-comments scan.
+calls_before_doctor=$(wc -l < "$FAKE_GH_ROOT/calls")
+: > "$FAKE_GH_ROOT/doctor-comments"
+export FAKE_DOCTOR_COMMENTS="$FAKE_GH_ROOT/doctor-comments"
+doctor_body_out=$("$target/bin/agentic-loop" doctor || true)
+open_issue_list_call_count=$(tail -n "+$((calls_before_doctor + 1))" "$FAKE_GH_ROOT/calls" | grep -Fc 'issues --method GET -f state=open' || true)
+[[ $open_issue_list_call_count -eq 1 ]] || fail "doctor issued $open_issue_list_call_count open-Issue list calls, expected exactly 1"
+grep -Fq '要求本文の欠落' <<< "$doctor_body_out" || fail 'doctor did not warn about the lost-requirement Issue body'
+if grep -Fq '/tmp/issue_body.md' <<< "$doctor_body_out"; then fail 'doctor printed the Issue body content instead of a fixed warning message'; fi
+
+# A broken comment (repo-wide, best-effort, single page) is reported distinctly.
+printf '%s\n' "$unexpanded_body_b64" > "$FAKE_GH_ROOT/doctor-comments"
+doctor_comment_out=$("$target/bin/agentic-loop" doctor || true)
+grep -Fq '要求コメントの欠落' <<< "$doctor_comment_out" || fail 'doctor did not warn about the lost-requirement comment'
+: > "$FAKE_GH_ROOT/doctor-comments"
+doctor_clean_out=$("$target/bin/agentic-loop" doctor || true)
+if grep -Fq '要求コメントの欠落' <<< "$doctor_clean_out"; then
+  grep -Fq '対応は不要です。' <<< "$doctor_clean_out" || fail 'doctor did not report success once the lost-requirement comment was fixed'
+fi
+unset FAKE_DOCTOR_COMMENTS
+printf '279 needs-input open none 2026-01-01T00:00:00Z none improvement\n' > "$FAKE_GH_ROOT/$state_key.state"
+
 fi
 
 if [[ $TEST_GROUP == all || $TEST_GROUP == upgrade ]]; then
@@ -8203,6 +8904,61 @@ hook_result=$(run_edit_hook Edit "$hook_outside/main-link/tracked file.txt" "$ho
 hook_result=$(printf '{"tool_name":"Edit","tool_input":{},"cwd":"%s"}' "$hook_main" | env -u AGENTIC_LOOP_AGENT "$PROJECT_ROOT/.claude/hooks/confirm-main-worktree-edit.sh")
 [[ $hook_result == *'"permissionDecision":"deny"'* ]] || fail 'malformed edit input did not fail safely'
 
+# --- gh --body "@path" Bash PreToolUse hook (Issue #272, ADR 0030) ---------
+# Fail-open by design: only a Bash tool_input.command containing an unexpanded
+# `gh --body "@path"`-shaped value is denied; everything else (including a
+# broken payload) passes through unchanged, since Bash is this loop's most
+# common tool and a fail-closed gate here would stall it entirely.
+run_body_hook() { # COMMAND
+  local cmd=$1 escaped
+  escaped=${cmd//\\/\\\\}
+  escaped=${escaped//\"/\\\"}
+  printf '{"tool_name":"Bash","tool_input":{"command":"%s"},"cwd":"%s"}' "$escaped" "$PROJECT_ROOT" \
+    | "$PROJECT_ROOT/.claude/hooks/require-gh-body-file.sh"
+}
+positive_body_commands=(
+  'gh issue create --title x --body "@/tmp/issue_body.md"'
+  'gh issue create --title x --body=@/tmp/issue_body.md'
+  'gh pr comment 12 -b "@/tmp/a/b.md"'
+  'gh pr create --title x --body "@notes.md"'
+)
+for cmd in "${positive_body_commands[@]}"; do
+  hook_result=$(run_body_hook "$cmd")
+  [[ $hook_result == *'"permissionDecision":"deny"'* ]] || fail "gh --body hook did not deny: $cmd"
+  [[ $hook_result == *'--body-file'* ]] || fail "gh --body hook deny did not point at --body-file: $cmd"
+done
+negative_body_commands=(
+  'gh issue create --title x --body-file /tmp/issue_body.md'
+  'gh issue create --title x --body "通常の本文です"'
+  'gh issue comment 1 --body "@wakuwaku3 ご確認ください"'
+  'gh api repos/o/r/issues -f body=@x.md'
+  'ls -la /tmp'
+)
+for cmd in "${negative_body_commands[@]}"; do
+  [[ -z $(run_body_hook "$cmd") ]] || fail "gh --body hook wrongly denied: $cmd"
+done
+# Non-Bash tool calls are never inspected, even if the command text matches.
+non_bash_result=$(printf '{"tool_name":"Edit","tool_input":{"command":"gh issue create --body \\"@x.md\\""},"cwd":"%s"}' "$PROJECT_ROOT" | "$PROJECT_ROOT/.claude/hooks/require-gh-body-file.sh")
+[[ -z $non_bash_result ]] || fail 'gh --body hook inspected a non-Bash tool call'
+# yq missing from PATH: fall back to the raw-payload string scan rather than
+# fail-closed (a Bash tool call must not be blanket-denied just because the
+# JSON parser is unavailable).
+[[ -z $(printf '{"tool_name":"Bash","tool_input":{"command":"ls -la"},"cwd":"%s"}' "$PROJECT_ROOT" | PATH=/usr/bin:/bin "$PROJECT_ROOT/.claude/hooks/require-gh-body-file.sh") ]] \
+  || fail 'gh --body hook denied an unrelated Bash command with yq unavailable'
+hook_result=$(printf '{"tool_name":"Bash","tool_input":{"command":"gh issue create --title x --body \\"@/tmp/issue_body.md\\""},"cwd":"%s"}' "$PROJECT_ROOT" | PATH=/usr/bin:/bin "$PROJECT_ROOT/.claude/hooks/require-gh-body-file.sh")
+[[ $hook_result == *'"permissionDecision":"deny"'* ]] || fail 'gh --body hook did not deny with yq unavailable (raw fallback)'
+# body_unexpanded_file_reference in the hook must agree with the shell
+# common.sh implementation for the same fixture table, so the two cannot
+# drift. common.sh is sourced in an isolated subshell (it defines its own
+# fail/say, which must not clobber this test script's own).
+common_predicate() { ( source "$PROJECT_ROOT/bin/lib/agentic-loop/common.sh" >/dev/null 2>&1; body_unexpanded_file_reference "$1" ); }
+for cmd_body in '@/tmp/issue_body.md' '通常の本文です' '@wakuwaku3 ご確認ください' '@x.md'; do
+  common_verdict=1; common_predicate "$cmd_body" && common_verdict=0
+  hook_verdict=1
+  [[ $(run_body_hook "gh issue create --body \"$cmd_body\"") == *'"deny"'* ]] && hook_verdict=0
+  [[ $common_verdict == "$hook_verdict" ]] || fail "common.sh and the Bash hook disagree on: $cmd_body"
+done
+
 # Regression (Issue #160 + linked-worktree PATH restore): the hook must resolve
 # its JSON parser (yq) from the recorded runtime.path even when invoked with a
 # PATH that omits the Nix-pinned bins -- Claude Code PreToolUse and login shells
@@ -8263,6 +9019,9 @@ AGENTIC_LOOP_SOURCE="$PROJECT_ROOT" AGENTIC_LOOP_TARGET="$upgrade_target" AGENTI
 [[ -x $upgrade_target/.claude/hooks/confirm-main-worktree-edit.sh ]] || fail 'install did not distribute an executable Claude edit hook'
 [[ $(yq -p json -r '.hooks.PreToolUse[0].matcher' "$upgrade_target/.claude/settings.json") == 'Edit|Write|NotebookEdit' ]] || fail 'install did not distribute Claude hook settings'
 [[ $(yq -p json -r '.files[] | select(.path == ".claude/hooks/confirm-main-worktree-edit.sh") | .class' "$upgrade_target/.agentic-loop/manifest.json") == shared ]] || fail 'manifest did not classify the Claude edit hook as shared'
+[[ -x $upgrade_target/.claude/hooks/require-gh-body-file.sh ]] || fail 'install did not distribute an executable gh --body Bash hook'
+[[ $(yq -p json -r '.hooks.PreToolUse[1].matcher' "$upgrade_target/.claude/settings.json") == Bash ]] || fail 'install did not distribute the gh --body Bash hook settings'
+[[ $(yq -p json -r '.files[] | select(.path == ".claude/hooks/require-gh-body-file.sh") | .class' "$upgrade_target/.agentic-loop/manifest.json") == shared ]] || fail 'manifest did not classify the gh --body Bash hook as shared'
 [[ -f $upgrade_target/.agentic-loop/manifest.json ]] || fail 'install did not write a Foundation manifest'
 [[ $(yq -p json -o yaml '.mode' "$upgrade_target/.agentic-loop/manifest.json") == install ]] || fail 'manifest recorded the wrong install mode'
 [[ $(yq -p json -o yaml '.source.repository' "$upgrade_target/.agentic-loop/manifest.json") == 'wakuwaku3/agentic-loop-foundation' ]] || fail 'manifest recorded the wrong source repository'

@@ -27,14 +27,14 @@ secret_guard_modes = ["--staged", "--push", "--all", "--text", "--history", "--a
 # Measured on a change of this repository's own scale (see docs/operations/
 # capability-manifest.md for how to re-measure after a substantial change);
 # used as the basis for queue.worker_timeout_seconds, not enforced directly.
-full_check_seconds = 300
+full_check_seconds = 750
 # local affected check (Issue #59, ADR 0021): never a push/merge gate. Only
 # shortens local iteration feedback; docs/operations/affected-checks.md.
 affected_check = "devbox run --pure affected"
 impact_map = "tests/impact-map.toml"
 # Measured for a single-group selection (environment + lint + one E2E group)
 # on this repository's own scale; see docs/operations/affected-checks.md.
-affected_check_seconds = 150
+affected_check_seconds = 735
 
 [environment]
 definition = ["devbox.json", "devbox.lock"]

@@ -67,7 +67,8 @@ status_snapshot_fetch() {
       elif any(.labels[]; .name == "agent:blocked") then "blocked"
       elif any(.labels[]; .name == "agent:paused") then "paused"
       else "other" end),
-     '"$(queue_rank_jq)"', .created_at] | @tsv'
+     '"$(queue_rank_jq)"', .created_at,
+     ((.body // "") | @base64)] | @tsv'
 }
 
 
@@ -224,18 +225,34 @@ status_supervisor_lock_stale() {
 }
 
 
+# Stall threshold for one progress stage (see docs/decisions/0031): the
+# provider stages block on a single long CLI call (plan/exec/replan) and use
+# the wider PROVIDER_STALL_SECONDS band; every other stage (including an empty/
+# unknown stage) uses STALL_SECONDS. Either band can be set to 0 to disable
+# stall detection for it.
+status_stall_threshold() {
+  case ${1:-} in
+    plan | exec | replan) printf '%s' "$PROVIDER_STALL_SECONDS" ;;
+    *) printf '%s' "$STALL_SECONDS" ;;
+  esac
+}
+
+
 # Classify a running Issue's progress into healthy/stalled/timeout/unknown from
-# purely local state (see docs/decisions/0005). timeout wins over everything
-# once STATUS_RUN_TIMEOUT_EXCEEDED is set (mirroring the existing worker-timeout
-# anomaly); a worker without any local progress signal stays unknown. The worker
-# log's mtime is used as a secondary signal (its body is never read), so a
-# provider thinking inside a stage boundary does not flip to stalled. Sets
+# purely local state (see docs/decisions/0005 and 0031). timeout wins over
+# everything once STATUS_RUN_TIMEOUT_EXCEEDED is set (mirroring the existing
+# worker-timeout anomaly); a worker without any local progress signal stays
+# unknown. A stage output file's mtime is used as a secondary signal (its
+# content is never read), so a provider thinking or streaming inside a stage
+# boundary does not flip to stalled. The threshold applied depends on the
+# current stage (status_stall_threshold): the provider stages (plan/exec/
+# replan) get a wider band since they block on one long CLI call. Sets
 # STATUS_RUN_STAGE / STATUS_RUN_PROGRESS_AGE / STATUS_RUN_PROGRESS_AT /
-# STATUS_RUN_HEALTH.
+# STATUS_RUN_HEALTH / STATUS_RUN_STALL_THRESHOLD.
 status_progress_health() {
-  local issue=$1 timeout_exceeded=${2:-0} now age log_mtime
+  local issue=$1 timeout_exceeded=${2:-0} now age log_mtime threshold
   now=$(date +%s)
-  STATUS_RUN_STAGE='' STATUS_RUN_PROGRESS_AGE='' STATUS_RUN_PROGRESS_AT='' STATUS_RUN_HEALTH=unknown
+  STATUS_RUN_STAGE='' STATUS_RUN_PROGRESS_AGE='' STATUS_RUN_PROGRESS_AT='' STATUS_RUN_HEALTH=unknown STATUS_RUN_STALL_THRESHOLD=''
   if (( timeout_exceeded )); then
     STATUS_RUN_HEALTH=timeout
     return 0
@@ -245,13 +262,17 @@ status_progress_health() {
     STATUS_RUN_STAGE=$PROGRESS_STAGE
     age=$((now - PROGRESS_EPOCH))
   fi
-  if log_mtime=$(worker_log_mtime "$issue"); then
+  if log_mtime=$(worker_stage_output_mtime "$issue"); then
     if [[ -z $age ]] || (( now - log_mtime < age )); then age=$((now - log_mtime)); fi
   fi
   [[ -n $age ]] || return 0
   STATUS_RUN_PROGRESS_AGE=$age
   STATUS_RUN_PROGRESS_AT=$((now - age))
-  if (( age < STATUS_STALL_SECONDS )); then STATUS_RUN_HEALTH=healthy; else STATUS_RUN_HEALTH=stalled; fi
+  threshold=$(status_stall_threshold "$STATUS_RUN_STAGE")
+  STATUS_RUN_STALL_THRESHOLD=$threshold
+  if (( threshold == 0 )); then STATUS_RUN_HEALTH=healthy
+  elif (( age < threshold )); then STATUS_RUN_HEALTH=healthy
+  else STATUS_RUN_HEALTH=stalled; fi
   return 0
 }
 
@@ -452,7 +473,13 @@ status_collect_anomalies() {
     fi
     status_progress_health "$issue" "$to_exceeded"
     if [[ $STATUS_RUN_HEALTH == stalled ]]; then
-      anomaly_add warning worker-stalled "#$issue" "最後の進行から ${STATUS_RUN_PROGRESS_AGE}秒経過しています（stall閾値 ${STATUS_STALL_SECONDS}秒）。" 'status --watch または tail で進行を確認し、必要なら worker_timeout_seconds 到達後の再試行を確認してください。' "${STATUS_RUN_PROGRESS_AGE}" needs-attention
+      local stall_action
+      if (( WORKER_TIMEOUT_SECONDS > 0 )); then
+        stall_action="status --watch または tail で進行を確認してください。実行時間上限（${WORKER_TIMEOUT_SECONDS}秒）到達時に自動停止・再試行されます。"
+      else
+        stall_action='status --watch または tail で進行を確認してください。queue.worker_timeout_seconds=0 のため自動停止は無効です。'
+      fi
+      anomaly_add warning worker-stalled "#$issue" "stage=${STATUS_RUN_STAGE:-不明} 最後の進行から ${STATUS_RUN_PROGRESS_AGE}秒経過しています（適用閾値 ${STATUS_RUN_STALL_THRESHOLD}秒）。" "$stall_action" "${STATUS_RUN_PROGRESS_AGE}" needs-attention
     fi
     LEASE_ID='' LEASE_EXPIRES='' LEASE_HEARTBEAT=''
     if lease_read "$issue"; then
@@ -500,13 +527,30 @@ status_collect_anomalies() {
   status_claim_pause_reasons
   pause=$STATUS_PAUSE_TEXT
   [[ -n $pause ]] && anomaly_add info claim-paused supervisor "claimを一時停止しています: $pause" '次pollで利用可能なprovider・予算・停止要求を再評価し、可能になればclaimを再開します。' "$(status_oldest_marker_elapsed)" recovering
+
+  # gh --body "@path" silently drops the requirement instead of expanding it
+  # (Issue #272): flag a queued Issue whose whole body is nothing but such a
+  # reference so an operator notices before (or even without) claim_next's
+  # own pre-claim diversion (mark_body_unexpanded). Skipped when the snapshot
+  # itself is unavailable rather than reading a stale/empty QUEUE_* set.
+  if (( STATUS_GITHUB_OK )); then
+    local body_decoded
+    for i in "${!QUEUE_NUM[@]}"; do
+      issue=${QUEUE_NUM[$i]}
+      [[ -n ${QUEUE_BODY_B64[$i]:-} ]] || continue
+      body_decoded=$(base64 -d <<< "${QUEUE_BODY_B64[$i]}" 2>/dev/null || true)
+      if body_unexpanded_file_reference "$body_decoded"; then
+        anomaly_add warning issue-body-unexpanded "#$issue" 'Issue本文が単一行のファイル参照のみで、要求が失われています（gh --body "@path" は展開されません）。' "gh issue edit $issue --body-file <正しい本文のファイル> を実行し、その後 gh issue edit $issue --add-label agent:queued で再投入してください。" 0 needs-attention
+      fi
+    done
+  fi
   return 0
 }
 
 
 status_collect_snapshot() {
   STATUS_GITHUB_OK=1
-  local raw num title state priority catrank created
+  local raw num title state priority catrank created body_b64
   if status_cache_fresh "$STATUS_SNAPSHOT_FETCHED"; then
     raw=$STATUS_SNAPSHOT_RAW
   elif ! raw=$(status_snapshot_fetch); then
@@ -516,11 +560,11 @@ status_collect_snapshot() {
     STATUS_SNAPSHOT_RAW=$raw
     STATUS_SNAPSHOT_FETCHED=$(date +%s)
   fi
-  while IFS=$'\t' read -r num title state priority catrank created; do
+  while IFS=$'\t' read -r num title state priority catrank created body_b64; do
     [[ -n $num ]] || continue
     case $state in
       running) RUN_NUM+=("$num"); RUN_TITLE+=("$title") ;;
-      queued) QUEUE_NUM+=("$num"); QUEUE_TITLE+=("$title"); QUEUE_PRIORITY+=("$priority"); QUEUE_CATRANK+=("$catrank"); QUEUE_CREATED+=("$created") ;;
+      queued) QUEUE_NUM+=("$num"); QUEUE_TITLE+=("$title"); QUEUE_PRIORITY+=("$priority"); QUEUE_CATRANK+=("$catrank"); QUEUE_CREATED+=("$created"); QUEUE_BODY_B64+=("$body_b64") ;;
       needs-input) NEEDSINPUT_NUM+=("$num"); NEEDSINPUT_TITLE+=("$title") ;;
       failed) FAILED_NUM+=("$num"); FAILED_TITLE+=("$title") ;;
       parked) PARKED_NUM+=("$num"); PARKED_TITLE+=("$title") ;;
@@ -784,7 +828,7 @@ status_render_json() {
         scope_sep=','
       done <<< "$STATUS_RUN_SCOPE"
     fi
-    printf '],"started_at":%s,"elapsed_seconds":%s,"timeout_at":%s,"timeout_exceeded":%s,"heartbeat_at":%s,"lease_expires_at":%s,"lease_expired":%s,"worktree":"%s","worktree_exists":%s,"dirty":%s,"diverged":%s,"branch":"%s","pr":%s,"pr_url":"%s","pr_state":"%s","checks":"%s","local_state":%s,"stage":"%s","progress_at":%s,"progress_age_seconds":%s,"health":"%s"}' \
+    printf '],"started_at":%s,"elapsed_seconds":%s,"timeout_at":%s,"timeout_exceeded":%s,"heartbeat_at":%s,"lease_expires_at":%s,"lease_expired":%s,"worktree":"%s","worktree_exists":%s,"dirty":%s,"diverged":%s,"branch":"%s","pr":%s,"pr_url":"%s","pr_state":"%s","checks":"%s","local_state":%s,"stage":"%s","progress_at":%s,"progress_age_seconds":%s,"stall_threshold_seconds":%s,"health":"%s"}' \
       "${STATUS_RUN_STARTED:-null}" "${STATUS_RUN_ELAPSED:-null}" "${STATUS_RUN_TIMEOUT_AT:-null}" \
       "$( ((STATUS_RUN_TIMEOUT_EXCEEDED)) && printf true || printf false )" \
       "${STATUS_RUN_HEARTBEAT:-null}" "${STATUS_RUN_LEASE_EXPIRES:-null}" \
@@ -794,7 +838,7 @@ status_render_json() {
       "$(json_escape "$STATUS_RUN_BRANCH")" \
       "${STATUS_RUN_PR:-null}" "$(json_escape "$STATUS_RUN_PR_URL")" "$(json_escape "$STATUS_RUN_PR_STATE")" "$(json_escape "$STATUS_RUN_CHECKS")" \
       "$( ((STATUS_RUN_LOCAL)) && printf true || printf false )" \
-      "$(json_escape "$STATUS_RUN_STAGE")" "${STATUS_RUN_PROGRESS_AT:-null}" "${STATUS_RUN_PROGRESS_AGE:-null}" "$(json_escape "$STATUS_RUN_HEALTH")"
+      "$(json_escape "$STATUS_RUN_STAGE")" "${STATUS_RUN_PROGRESS_AT:-null}" "${STATUS_RUN_PROGRESS_AGE:-null}" "${STATUS_RUN_STALL_THRESHOLD:-null}" "$(json_escape "$STATUS_RUN_HEALTH")"
     sep=','
   done
   printf '],'
@@ -910,7 +954,7 @@ cmd_status() {
     return 0
   fi
   declare -ga RUN_NUM=() RUN_TITLE=()
-  declare -ga QUEUE_NUM=() QUEUE_TITLE=() QUEUE_PRIORITY=() QUEUE_CATRANK=() QUEUE_CREATED=()
+  declare -ga QUEUE_NUM=() QUEUE_TITLE=() QUEUE_PRIORITY=() QUEUE_CATRANK=() QUEUE_CREATED=() QUEUE_BODY_B64=()
   declare -ga NEEDSINPUT_NUM=() NEEDSINPUT_TITLE=() FAILED_NUM=() FAILED_TITLE=() PARKED_NUM=() PARKED_TITLE=() INREVIEW_NUM=() INREVIEW_TITLE=() BLOCKED_NUM=() BLOCKED_TITLE=() PAUSED_NUM=() PAUSED_TITLE=()
   declare -ga STALE_NUM=() STALE_TITLE=()
   declare -ga ANOMALY_LEVEL=() ANOMALY_CODE=() ANOMALY_SUBJECT=() ANOMALY_DETAIL=() ANOMALY_ACTION=() ANOMALY_ELAPSED=() ANOMALY_CLASSIFICATION=()

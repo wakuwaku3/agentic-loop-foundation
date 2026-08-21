@@ -12,7 +12,11 @@ set -euo pipefail
 readonly PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 readonly RUN_ROOT="$(mktemp -d)"
 readonly ALL_GROUPS=(queue lifecycle auxiliary upgrade)
-declare -a TEST_GROUPS=("${ALL_GROUPS[@]}")
+if [[ -n ${AGENTIC_LOOP_TEST_GROUP:-} ]]; then
+  declare -a TEST_GROUPS=("$AGENTIC_LOOP_TEST_GROUP")
+else
+  declare -a TEST_GROUPS=("${ALL_GROUPS[@]}")
+fi
 report_file=''
 runner="$PROJECT_ROOT/tests/test-agentic-loop.sh"
 "$PROJECT_ROOT/tests/test-stage-evidence.sh"

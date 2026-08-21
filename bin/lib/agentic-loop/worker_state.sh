@@ -16,6 +16,18 @@ recent_lease_since() {
 }
 
 
+# `gh api --paginate --jq` evaluates jq once per response page. Keep the
+# per-comment filter, then fold the page outputs in the shell so the newest
+# lease is selected across the complete response rather than only the last
+# page (Issue #238).
+latest_lease_body() {
+  local issue=$1 since=$2 output
+  # workload-unbounded: Issueに紐づく有限のコメント件数からleaseを全件走査; bound=Issue comment count; track=#238
+  output=$(repo_api "issues/$issue/comments" --method GET -f since="$since" -f per_page=100 --paginate --jq '.[] | .body | select(contains("agentic-loop:lease"))' 2>/dev/null) || return 1
+  awk 'NF { value=$0 } END { if (value != "") print value }' <<< "$output"
+}
+
+
 lease_file() { printf '%s\n' "$STATE_ROOT/workers/$1.lease"; }
 
 worker_started_file() { printf '%s/workers/%s.started' "$STATE_ROOT" "$1"; }
@@ -75,6 +87,41 @@ progress_write() {
 progress_touch() { progress_write "$1" "$2" || true; }
 
 
+# --- stall-threshold calibration against real stage durations (Issue #280,
+# ADR 0032) -- host-local read of the shared events.log, zero GitHub calls.
+# For each subject, the gap between two consecutive `progress` rows is the
+# duration status's stall detection measures for the *departing* stage (its
+# last progress marker's age at the moment of the next transition). Bounded
+# to the newest EVENTS_CALIBRATION_MAX_LINES lines. A subject's final observed
+# stage is never sampled (it has no next transition, so its duration is
+# unknown -- still running or the log rotated mid-attempt). A gap exceeding
+# worker_timeout_seconds is dropped: it is host/timeout-attributable, not a
+# stage's natural duration, and would otherwise corrupt p90. Prints
+# band<TAB>seconds, one row per sample; band is "provider" for the stages
+# status_stall_threshold widens (plan/exec/replan), "non-provider" otherwise.
+events_stage_duration_samples() {
+  [[ -r $EVENTS_LOG ]] || return 0
+  local epoch subject code stage band delta
+  local -A last_epoch=() last_stage=()
+  while IFS=$'\t' read -r epoch subject code stage; do
+    [[ $code == progress ]] || continue
+    [[ $epoch =~ ^[0-9]+$ ]] || continue
+    if [[ -n ${last_epoch[$subject]:-} ]]; then
+      delta=$((epoch - last_epoch[$subject]))
+      if (( delta > 0 )) && { (( WORKER_TIMEOUT_SECONDS == 0 )) || (( delta <= WORKER_TIMEOUT_SECONDS )); }; then
+        case ${last_stage[$subject]} in
+          plan | exec | replan) band=provider ;;
+          *) band=non-provider ;;
+        esac
+        printf '%s\t%s\n' "$band" "$delta"
+      fi
+    fi
+    last_epoch[$subject]=$epoch
+    last_stage[$subject]=$stage
+  done < <(tail -n "$EVENTS_CALIBRATION_MAX_LINES" "$EVENTS_LOG")
+}
+
+
 # Read the local progress marker into PROGRESS_EPOCH / PROGRESS_STAGE. Returns
 # 1 (leaving both empty) when absent or corrupt.
 progress_read() {
@@ -94,6 +141,35 @@ worker_log_mtime() {
   local mtime
   mtime=$(stat -c %Y "$STATE_ROOT/logs/issue-$1.log" 2>/dev/null) || return 1
   printf '%s\n' "$mtime"
+}
+
+
+# Secondary progress signal (see docs/decisions/0031): the newest mtime among
+# this Issue's stage output files -- the worker log plus the plan/result
+# files agent_run_stage writes, including their in-flight `.raw.*`/`.final.*`
+# siblings written while a provider CLI is still streaming a stage. Only
+# mtimes are read, never content, so a provider's in-progress output can never
+# leak into status/tail (secret boundary, same as worker_log_mtime). Returns
+# failure only when none of these paths exist yet.
+worker_stage_output_mtime() {
+  local issue=$1 latest='' mtime path
+  shopt -s nullglob
+  local -a paths=(
+    "$STATE_ROOT/logs/issue-$issue.log"
+    "$STATE_ROOT/issue-$issue-plan.txt"
+    "$STATE_ROOT/issue-$issue-result.txt"
+    "$STATE_ROOT/issue-$issue-plan.txt".raw.*
+    "$STATE_ROOT/issue-$issue-plan.txt".final.*
+    "$STATE_ROOT/issue-$issue-result.txt".raw.*
+    "$STATE_ROOT/issue-$issue-result.txt".final.*
+  )
+  shopt -u nullglob
+  for path in "${paths[@]}"; do
+    mtime=$(stat -c %Y "$path" 2>/dev/null) || continue
+    if [[ -z $latest ]] || (( mtime > latest )); then latest=$mtime; fi
+  done
+  [[ -n $latest ]] || return 1
+  printf '%s\n' "$latest"
 }
 
 
@@ -467,7 +543,10 @@ recover_expired() {
       clear_worker_local "$issue"
     else
       # workload-unbounded: one per-Issue lease lookup per running Issue lacking a local pidfile, no batched multi-Issue endpoint exists; bound=running Issue count
-      body=$(repo_api "issues/$issue/comments" --method GET -f since="$since" -f per_page=100 --paginate --jq '[.[].body | select(contains("agentic-loop:lease"))] | last // ""' 2>/dev/null | tail -n 1 || true)
+      if ! body=$(latest_lease_body "$issue" "$since"); then
+        # An unreadable lease must be honored conservatively; retry next poll.
+        continue
+      fi
       expires=$(printf '%s\n' "$body" | sed -n 's/.*expires=\([0-9][0-9]*\).*/\1/p' | head -n 1)
       [[ -n $expires && $expires -ge $now ]] && continue
     fi

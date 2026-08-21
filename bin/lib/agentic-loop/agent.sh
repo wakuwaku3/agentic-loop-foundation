@@ -237,6 +237,26 @@ claude_probe_usage_percent() {
 }
 
 
+# Real-CLI boundary check (Issue #273, used only by `smoke`, never `make
+# check` or any per-poll path): confirms the actual claude binary still
+# accepts `--print --output-format stream-json --verbose` and terminates the
+# JSONL stream with a `{"type":"result",...}` event -- the two facts
+# agent_run_stage's claude branch and agent_claude_stream_terminal_event
+# depend on, and which no fake CLI can validate (see docs/decisions/0031).
+# AGENTIC_LOOP_PROBE marks this a zero-side-effect health check, same as
+# claude_probe_usage_percent. Billed like any other Claude call.
+claude_stream_json_boundary_check() {
+  command -v claude >/dev/null 2>&1 || return 1
+  command -v timeout >/dev/null 2>&1 || return 1
+  local response terminal
+  response=$(AGENTIC_LOOP_PROBE=1 timeout 30 claude --print --output-format stream-json --verbose --dangerously-skip-permissions 'say OK' 2>/dev/null) || true
+  [[ -n $response ]] || return 1
+  terminal=$(agent_claude_stream_terminal_event <(printf '%s\n' "$response"))
+  [[ -n $terminal ]] || return 1
+  [[ $(yq -r '.type // ""' <<< "$terminal" 2>/dev/null) == result ]]
+}
+
+
 # Cached wrapper around claude_probe_usage_percent, mirroring
 # opencode_go_usage_cached: the probe runs at most once per USAGE_CACHE_SECONDS,
 # and a failed probe is remembered too so an outage does not retry (and
@@ -261,6 +281,44 @@ claude_probe_usage_cached() {
   mkdir -p "$STATE_ROOT/pools"
   printf '%s\t%s\n' "$now" "$percent" > "$cache_file.tmp" 2>/dev/null && mv "$cache_file.tmp" "$cache_file" 2>/dev/null || true
   printf '%s' "$percent"
+}
+
+
+# One-shot, uncached boundary probe for `bin/agentic-loop smoke` (Issue #279):
+# unlike agent_provider_usage_percent (cached, feeds the pool
+# exhaustion/recovery decision), this always launches the provider CLI so
+# smoke actually exercises the real boundary once per invocation. Reuses
+# claude_probe_usage_percent unchanged (its is_error check already proves a
+# structured response; either 0 or 100 counts as "reached the boundary").
+# codex/opencode get an equivalent minimal read-only probe. Returns 0 on a
+# structured response, 1 otherwise. Never prints response text, tokens, or
+# cost (secret boundary): the caller only sees this exit code.
+agent_provider_probe_once() {
+  local provider=$1 dir=${2:-$PWD}
+  command -v timeout >/dev/null 2>&1 || return 1
+  case $provider in
+    claude)
+      claude_probe_usage_percent >/dev/null
+      ;;
+    codex)
+      command -v codex >/dev/null 2>&1 || return 1
+      local result_file rc=0
+      result_file=$(mktemp)
+      AGENTIC_LOOP_PROBE=1 timeout 30 codex exec --sandbox read-only -c 'approval_policy="never"' \
+        --output-last-message "$result_file" 'say OK' >/dev/null 2>&1 || rc=$?
+      [[ $rc -eq 0 && -s $result_file ]]; rc=$?
+      rm -f "$result_file"
+      return "$rc"
+      ;;
+    opencode)
+      command -v opencode >/dev/null 2>&1 || return 1
+      local response
+      response=$(AGENTIC_LOOP_PROBE=1 timeout 30 opencode run --auto --format json --dir "$dir" 'say OK' 2>/dev/null) || true
+      [[ -n $response ]] || return 1
+      yq -e 'select(.part.type == "text")' - <<< "$response" >/dev/null 2>&1
+      ;;
+    *) return 1 ;;
+  esac
 }
 
 
@@ -401,17 +459,18 @@ agent_pool_probe_confirm_bump() {
 # Accepts ISO-8601 (…Z) and Codex-style "try again at Aug 20th, 2026 9:27 PM".
 # Returns non-zero when nothing parseable is found.
 agent_parse_reset_epoch() {
-  local text=${1:-} iso human epoch
+  local text=${1:-} iso human epoch now
   [[ -n $text ]] || return 1
+  now=$(date +%s)
   iso=$(grep -oiE '[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]+)?Z?' <<< "$text" | head -n 1 || true)
   if [[ -n $iso ]]; then
     epoch=$(date -d "$iso" +%s 2>/dev/null) || true
-    [[ $epoch =~ ^[0-9]+$ ]] && { printf '%s\n' "$epoch"; return 0; }
+    [[ $epoch =~ ^[0-9]+$ && $epoch -gt $now ]] && { printf '%s\n' "$epoch"; return 0; }
   fi
   human=$(grep -oiE 'try again at[[:space:]]+[^.;\n]+' <<< "$text" | head -n 1 | sed -E 's/^[Tt]ry again at[[:space:]]+//; s/([0-9]+)(st|nd|rd|th)/\1/g' || true)
   if [[ -n $human ]]; then
     epoch=$(date -d "$human" +%s 2>/dev/null) || true
-    [[ $epoch =~ ^[0-9]+$ ]] && { printf '%s\n' "$epoch"; return 0; }
+    [[ $epoch =~ ^[0-9]+$ && $epoch -gt $now ]] && { printf '%s\n' "$epoch"; return 0; }
   fi
   return 1
 }
@@ -729,8 +788,9 @@ agent_result_is_budget_stop() {
 
 # Classify a stage result: pool-quota exhaustion vs model-specific failure.
 # Pool exhaustion (quota / 429 / usage limit / insufficient_quota / credit
-# balance, or a non-zero exit with no output -- the latter kept for backward
-# compatibility) pauses that pool and re-queues the Issue. `overloaded` and
+# balance) pauses that pool and re-queues the Issue. A transport failure with
+# no diagnostic is provider error, not evidence that the subscription pool is
+# exhausted. `overloaded` and
 # model-resolution failures are model-specific: the stage moves to the next
 # model in the pool instead of treating the whole subscription as spent.
 #
@@ -749,7 +809,6 @@ agent_result_is_pool_exhausted() {
   (( exit_code != 0 )) || (( provider_error == 1 )) || return 1
   agent_result_is_budget_stop "$result_file" && return 1
   [[ -r $result_file ]] && grep -qiE 'usage limit|rate.?limit|too many requests|(^|[^0-9])429([^0-9]|$)|insufficient_quota|quota exceeded|credit balance' "$result_file" && return 0
-  (( exit_code != 0 )) && [[ ! -s $result_file ]] && return 0
   return 1
 }
 
@@ -830,6 +889,11 @@ agent_run_stage() {
   raw_result="${result_file}.raw.$$"
   stderr_file="${result_file}.stderr.$$"
   started_ms=$(date +%s%3N)
+  # A stage killed mid-run (timeout/orphan reap, before this function's own
+  # cleanup below executes) leaves its `.raw.*`/`.final.*` siblings behind
+  # (see docs/decisions/0031). Clear this exact stage output's residue before
+  # starting so disk usage stays bounded to the stage currently in flight.
+  rm -f "${result_file}".raw.* "${result_file}".stderr.* "${result_file}".final.*
   # Structured "the provider reported a failure" flag, consumed by
   # agent_result_is_pool_exhausted so a SUCCESSFUL stage whose output merely
   # mentions rate limits/quota is never misread as the pool being spent.  A
@@ -850,12 +914,17 @@ agent_run_stage() {
   # the rest of the worker.
   case $provider in
     claude)
-      # --output-format json returns one object; the final message (plan text or
-      # the AGENTIC_LOOP_RESULT sentinel) stays inside .result and is matched as
-      # a substring, so the raw JSON is the result file. Token/cost fields are
-      # extracted for the usage record without adding a jq dependency. Claude has
-      # no OS sandbox, so the plan stage relies on the prompt to avoid writes.
-      local -a claude_args=(--print --output-format json --dangerously-skip-permissions --add-dir "$git_common_dir" --add-dir "$agents_dir")
+      # --output-format stream-json (requires --verbose; see docs/decisions/
+      # 0031) streams one JSON object per line as the provider works, instead
+      # of a single object emitted only at the end -- this stage output file's
+      # mtime is what gives status a genuine in-progress signal for a long
+      # exec/plan call (worker_stage_output_mtime). The terminal `{"type":
+      # "result",...}` event is the same envelope shape --output-format json
+      # used to emit directly, so it alone -- never the raw stream -- is
+      # extracted below and fed to the existing .result/is_error/usage
+      # parsing. Claude has no OS sandbox, so the plan stage relies on the
+      # prompt to avoid writes.
+      local -a claude_args=(--print --output-format stream-json --verbose --dangerously-skip-permissions --add-dir "$git_common_dir" --add-dir "$agents_dir")
       [[ -n $model ]] && claude_args+=(--model "$model")
       # A declared reasoning effort must actually reach the provider (Issue
       # #265): claude takes it as `--effort`. An undeclared effort adds no
@@ -878,27 +947,53 @@ agent_run_stage() {
         printf 'max_cost_usd=%s\n' "$claude_cost_cap" >> "$usage_file"
       fi
       (cd "$worktree" && AGENTIC_LOOP_AGENT=1 claude "${claude_args[@]}" "$prompt") > "$raw_result" 2>"$stderr_file" || provider_rc=$?
-      agent_usage_from_claude_json "$raw_result" >> "$usage_file" || true
+      # Extract only the terminal `{"type":"result",...}` line. The stream also
+      # carries `rate_limit_event` and other non-terminal events whose text can
+      # trip the pool-exhaustion regex (`rate.?limit`) even on a successful
+      # stage, and may include non-JSON noise lines from tool output -- copying
+      # the raw stream into result_file would misclassify both (docs/decisions/
+      # 0031). A stream with no terminal event yet (killed mid-run, or a CLI
+      # that never emits one) leaves final_result empty, and every parse below
+      # degenerates to the same empty-result_file fallback (stderr copy) as
+      # before this change.
+      local final_result="${result_file}.final.$$"
+      agent_claude_stream_terminal_event "$raw_result" > "$final_result" 2>/dev/null || true
+      agent_usage_from_claude_json "$final_result" >> "$usage_file" || true
       # Claude exits zero even on an API failure under --output-format json and
       # reports it through is_error/api_error_status in the envelope, so read that
       # structured flag before extracting the plan text.  Without it, a
       # successful plan whose .result discusses rate limits/quota would be
       # misread as pool exhaustion; with it, only a real provider error is.
       local claude_is_error claude_api_error
-      claude_is_error=$(yq -r '.is_error // false' "$raw_result" 2>/dev/null || printf 'false')
-      claude_api_error=$(yq -r '.api_error_status // ""' "$raw_result" 2>/dev/null || printf '')
+      claude_is_error=$(yq -r '.is_error // false' "$final_result" 2>/dev/null || printf 'false')
+      claude_api_error=$(yq -r '.api_error_status // ""' "$final_result" 2>/dev/null || printf '')
       if [[ $claude_is_error == true || ( -n $claude_api_error && $claude_api_error != null ) ]]; then
+        STAGE_PROVIDER_ERROR=1
+      fi
+      # A successful process that emits non-JSON violates Claude's transport
+      # contract and must remain a provider-stage failure, rather than being
+      # treated as a clean markerless response.
+      # yq accepts YAML scalars (for example, `not json`), while Claude's
+      # --output-format json contract requires a JSON object envelope.
+      if ! grep -Eq '^[[:space:]]*\{' "$raw_result" || ! grep -Eq '\}[[:space:]]*$' "$raw_result" || ! jq -e 'type == "object"' "$raw_result" >/dev/null 2>&1; then
         STAGE_PROVIDER_ERROR=1
       fi
       # Claude's final assistant response is the JSON result field, not the
       # surrounding transport object.  On a provider error keep the whole
-      # envelope so the classifier's quota signatures see api_error_status and
-      # any error text, not just .result.
-      if (( STAGE_PROVIDER_ERROR == 1 )); then
-        cp "$raw_result" "$result_file"
+      # terminal envelope so the classifier's quota signatures see
+      # api_error_status and any error text, not just .result. No terminal
+      # event at all (final_result empty) must leave result_file genuinely
+      # empty for the stderr fallback below -- `yq -r '.result // ""'` on an
+      # empty input still exits 0 and writes a single newline, which would
+      # otherwise make result_file look non-empty and skip that fallback.
+      if [[ ! -s $final_result ]]; then
+        : > "$result_file"
+      elif (( STAGE_PROVIDER_ERROR == 1 )); then
+        cp "$final_result" "$result_file"
       else
-        yq -r '.result // ""' "$raw_result" > "$result_file" 2>/dev/null || cp "$raw_result" "$result_file"
+        yq -r '.result // ""' "$final_result" > "$result_file" 2>/dev/null || cp "$final_result" "$result_file"
       fi
+      rm -f "$raw_result" "$final_result"
       ;;
     opencode)
       # opencode has no OS sandbox; --dir scopes work to the worktree and --auto
@@ -972,6 +1067,26 @@ agent_run_stage() {
     rm -f "$raw_result" "$stderr_file"
   fi
   return "$provider_rc"
+}
+
+
+# Extract the last `{"type":"result",...}` line from a Claude --output-format
+# stream-json JSONL payload (see docs/decisions/0031): the terminal event has
+# the same envelope shape --output-format json used to emit directly, so it is
+# the only line callers should feed to .result/is_error/usage parsing. Reads
+# line by line rather than `yq -o=... 'select(...)'  over the whole file so a
+# non-JSON noise line (observed in practice: MCP tool logging mixed into
+# stdout) never aborts extraction -- yq simply fails to match that one line.
+# Prints nothing (not even a blank line) when no terminal event is found.
+agent_claude_stream_terminal_event() {
+  local file=$1 line result_line=''
+  [[ -r $file ]] || return 0
+  while IFS= read -r line; do
+    [[ -n $line ]] || continue
+    [[ $(yq -r '.type // ""' <<< "$line" 2>/dev/null) == result ]] && result_line=$line
+  done < "$file"
+  [[ -n $result_line ]] && printf '%s\n' "$result_line"
+  return 0
 }
 
 
@@ -1114,6 +1229,13 @@ run_stage_candidates() {
         say "モデル固有の失敗のため次の候補へ切り替えます: pool=$CAND_POOL provider=$CAND_PROVIDER model=$CAND_MODEL" >&2
         continue
       fi
+      STAGE_RC=3
+      return 3
+    fi
+    # A structured transport failure may have exit code 0 (Claude's JSON
+    # protocol uses this for some failures). It is not a successful stage and
+    # must not fall through to the markerless-success path.
+    if (( STAGE_PROVIDER_ERROR == 1 )); then
       STAGE_RC=3
       return 3
     fi

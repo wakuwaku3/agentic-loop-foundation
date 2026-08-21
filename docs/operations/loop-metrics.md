@@ -69,6 +69,10 @@ Actions（CI run）、GraphQL、Projects APIは読まない。理由は[ADR 0007
 
 `busy_seconds`は窓内に収まる`attempt_duration`（開始が窓より前なら窓開始でクリップ）の総和、`ratio = busy_seconds / (max_workers × window_seconds)`。これは「Supervisorが持つworker slotのうち平均して何割が稼働していたか」という**設備の占有率**であり、worker単位の内訳を持たないため個人やworker単位の速度比較には使えない。
 
+### stall閾値の実測整合（stall_calibration、Issue #280、[ADR 0032](../decisions/0032-time-constant-invariants-and-calibration.md)）
+
+`durations.plan_seconds`/`durations.exec_seconds`から追加のGitHub呼び出しなしで算出する。両方のp90が現在の`queue.provider_stall_seconds`未満なら`verdict: "ok"`、いずれかのbandのサンプル数が20件未満なら`verdict: "insufficient-samples"`（判断保留、警告ではない）、いずれかのp90が現在の`queue.provider_stall_seconds`以上なら`verdict: "undersized"`で`warnings`に一言追加される。`stall_seconds`/`provider_stall_seconds`をそのまま含むので、`plan_p90`/`exec_p90`と閾値を並べて確認できる。`doctor`は同じ判定を`events.log`のstage別実測分布（host-local）に対して行い、metricsのfleet横断集計とは独立に運用中のこの1repository分だけを確認できる。
+
 ## 出力例（`--format json`の主なキー）
 
 ```json
@@ -82,6 +86,7 @@ Actions（CI run）、GraphQL、Projects APIは読まない。理由は[ADR 0007
   "counters": {"attempts": 0, "retry": 0, "...": "..."},
   "failures": {},
   "utilization": {"max_workers": 4, "window_seconds": 2592000, "busy_seconds": 0, "ratio": 0},
+  "stall_calibration": {"stall_seconds": 300, "provider_stall_seconds": 3600, "plan_p90": null, "exec_p90": null, "verdict": "insufficient-samples"},
   "by_category": {"loop-continuity": 0, "confidentiality-incident": 0, "integrity-incident": 0, "availability-incident": 0, "bug": 0, "feature": 0, "improvement": 0},
   "by_priority": {"25": 2, "50": 1, "75": 3},
   "warnings": []

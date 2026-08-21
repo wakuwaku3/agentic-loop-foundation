@@ -76,3 +76,47 @@ json_escape() {
 # shorthand for readability (see Issue #110); this is the single point where
 # the shorthand becomes the real newline GitHub renders.
 unfold_body() { printf '%s' "${1//\\n/$'\n'}"; }
+
+
+# Whether `body` (an Issue or comment body, already decoded) is nothing but
+# an unexpanded `gh --body "@path/to/file"` reference: `gh --body` (unlike
+# `--body-file`) never reads the file, so the requirement it was meant to
+# carry is silently lost and the literal `@path` string becomes the whole
+# body (Issue #272). True only when the WHOLE body (after trimming
+# surrounding whitespace) is a single line starting with `@`, the part after
+# `@` has no whitespace, and it looks like a path (contains `/` or ends in a
+# `.extension`) -- so an ordinary body, a multi-line body that merely
+# mentions `@path` somewhere, a `@mention` reply such as `@wakuwaku3 ご確認
+# ください`, and a bare `@name` with no path shape are all negatives.
+body_unexpanded_file_reference() {
+  local body=$1
+  body="${body#"${body%%[![:space:]]*}"}"
+  body="${body%"${body##*[![:space:]]}"}"
+  [[ -n $body ]] || return 1
+  [[ $body != *$'\n'* ]] || return 1
+  [[ $body == @* ]] || return 1
+  local rest=${body#@}
+  [[ -n $rest ]] || return 1
+  [[ $rest != *[[:space:]]* ]] || return 1
+  [[ $rest == */* || $rest =~ \.[A-Za-z0-9]+$ ]] || return 1
+  return 0
+}
+
+
+# Move a queued Issue whose body is nothing but an unexpanded `gh --body
+# "@path"` reference (body_unexpanded_file_reference) to agent:needs-input
+# before claim_next ever hands it to a worker, mirroring mark_dependency_
+# blocked's shape (dependency.sh). Idempotent via a state marker file so a
+# later poll does not repost the same explanatory comment. Never closes the
+# Issue (see docs/decisions/0016-failure-park-not-close.md): a human must
+# re-post the real body and re-queue it.
+mark_body_unexpanded() {
+  local issue=$1 file
+  file="$STATE_ROOT/body-unexpanded/issue-$issue"
+  [[ -e $file ]] && return 0
+  mkdir -p "$STATE_ROOT/body-unexpanded"
+  : > "$file"
+  set_issue_state "$issue" needs-input
+  project_sync_state "$issue" needs-input || true
+  comment_issue "$issue" "<!-- agentic-loop:body-unexpanded -->\nIssue本文が単一行のファイル参照のみで、要求が失われているため claim を保留しました。\`gh --body \"@path\"\` は展開されません。\`gh issue edit $issue --body-file <正しい本文のファイル>\` で本文を再投稿し、その後 \`agent:queued\` Labelを再付与してください。" || true
+}

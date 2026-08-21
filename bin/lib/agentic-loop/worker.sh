@@ -246,7 +246,7 @@ decomposition_manifest_from_plan() {
 
 
 decomposition_validate() {
-  local manifest=$1 parent_depth=${2:-0} keys key dep count scope child_depth
+  local manifest=$1 parent_depth=${2:-0} keys key dep count scope child_depth scope_raw
   [[ -n $manifest ]] || return 1
   command -v yq >/dev/null 2>&1 || return 1
   [[ $(yq -p json -r '.schema // ""' <<< "$manifest" 2>/dev/null) == "$DECOMPOSITION_SCHEMA_VERSION" ]] || return 1
@@ -263,7 +263,9 @@ decomposition_validate() {
     [[ $key =~ ^[a-z0-9][a-z0-9-]*$ && -n $title && -n $purpose && -n $child_depth && -n $scope ]] || return 1
     # Reuse the existing normalizer; a malformed scope never becomes an
     # optimistic empty scope.
-    [[ -n $(scope_marker_from_body "<!-- agentic-loop:scope $scope -->") ]] || return 1
+    scope_raw=$(scope_marker_from_body "<!-- agentic-loop:scope $scope -->")
+    [[ -n $scope_raw ]] || return 1
+    [[ -n $(scope_tokens_normalize "$scope_raw") ]] || return 1
   done < <(yq -p json -r '.children[] | [.key, (.title // ""), (.purpose // ""), (.acceptance_criteria // ""), .scope] | @tsv' <<< "$manifest" 2>/dev/null)
   while IFS= read -r dep; do
     [[ -z $dep ]] && continue
@@ -273,7 +275,10 @@ decomposition_validate() {
   # proof and makes materialization/retry deterministic.
   local seen=''
   while IFS= read -r key; do
-    while IFS= read -r dep; do [[ -z $dep ]] || grep -Fxq "$dep" <<< "$seen" || return 1; done < <(yq -p json -r --arg k "$key" '.children[] | select(.key == $k) | .depends_on[]? // ""' <<< "$manifest")
+    # mikefarah yq does not implement jq's --arg flag (Issue #222). Pass the
+    # untrusted key through env() so DAG validation is executed rather than
+    # silently becoming a no-op when the installed CLI changes.
+    while IFS= read -r dep; do [[ -z $dep ]] || grep -Fxq "$dep" <<< "$seen" || return 1; done < <(k="$key" yq -p json -r '.children[] | select(.key == env(k)) | .depends_on[]? // ""' <<< "$manifest")
     seen+="$key"$'\n'
   done <<< "$keys"
 }
@@ -288,7 +293,8 @@ decomposition_materialize() {
   category=$(repo_api "issues/$parent" --jq '[.labels[].name | select(startswith("category:"))][0] // "category:improvement"' 2>/dev/null) || return 3
   declare -A children=()
   while IFS=$'\t' read -r key title purpose criteria scope deps; do
-    existing=$(repo_api issues --method GET -f state=all -f per_page=100 --jq '.[] | select((.body // "") | contains("agentic-loop:child parent='"$parent"' key='"$key"' plan='"$hash"'")) | .number' 2>/dev/null | head -n1 || true)
+    # workload-unbounded: 親Issueの有限なIssue一覧を子Issue照合のため全件取得; bound=repository Issue count; track=#237
+    existing=$(repo_api issues --method GET -f state=all -f per_page=100 --paginate --jq '.[] | select((.body // "") | contains("agentic-loop:child parent='"$parent"' key='"$key"' plan='"$hash"'")) | .number' 2>/dev/null | head -n1 || true)
     if [[ $existing =~ ^[1-9][0-9]*$ ]]; then child=$existing
     else
       body="## 目的\n\n$purpose\n\n## 親Issue\n\n#$parent の共通制約と統合受け入れ条件に従います。\n\n## 個別受け入れ条件\n\n$criteria\n\n<!-- agentic-loop:child parent=$parent key=$key plan=$hash -->\n<!-- agentic-loop:scope $scope -->"
@@ -429,7 +435,7 @@ resume_probe() {
     [$m.number // "", $m.head.sha // "", $m.html_url // "", $o.number // "", $o.html_url // "", $m.merge_commit_sha // "", $m.base.ref // ""] | join("SEP")
   '
   pr_jq=${pr_jq/SEP/$sep}
-  pr_tsv=$(repo_api pulls --method GET -f state=all -f head="${repository%%/*}:$branch" -f per_page=100 --jq "$pr_jq" 2>/dev/null) || true
+  pr_tsv=$(repo_api pulls --method GET -f state=all -f head="${repository%%/*}:$branch" -f per_page=100 --paginate --jq "$pr_jq" 2>/dev/null) || true
   [[ -n $pr_tsv ]] && IFS=$'\x1f' read -r merged_pr merged_sha merged_url open_pr open_url merged_merge_commit merged_base <<< "$pr_tsv"
 
   if [[ $merged_pr =~ ^[0-9]+$ ]]; then
@@ -623,6 +629,16 @@ resume_needs_decision_body() {
 }
 
 
+# A single lookup for the branch's merged PR, shared by the markerless-exit
+# rescue and the ordinary completion path so a worker turn queries GitHub for
+# it at most once (Issue #262).
+worker_merged_pr_tsv() {
+  local repository=$1 branch=$2
+  repo_api pulls --method GET -f state=closed -f head="${repository%%/*}:$branch" -f per_page=100 \
+    --jq 'map(select(.merged_at != null and .head.ref == "'"$branch"'")) | first | [.html_url, .head.sha, (.number|tostring), .base.ref, (.merge_commit_sha // .head.sha)] | @tsv' 2>/dev/null || true
+}
+
+
 worker() {
   local issue=$1 worker=$2 repository default_branch branch worktree result git_common_dir agents_dir exit_code=0 heartbeat_pid merged_pr='' merged_oid=''
   worker_confirm_running_label "$issue" || { clear_worker_local "$issue"; return 0; }
@@ -746,9 +762,11 @@ worker() {
     done
   ) & heartbeat_pid=$!
   local plan_usage="$STATE_ROOT/issue-$issue-plan-usage.txt" exec_usage="$STATE_ROOT/issue-$issue-usage.txt"
-  local plan_file="$(preflight_plan_file "$issue")" attempt=0 protocol_retry=0 max_retries started failure_context='' exhausted=0 exec_rc plan_rc
+  local plan_file="$(preflight_plan_file "$issue")" attempt=0 protocol_retry=0 max_retries started failure_context='' exhausted=0 exec_rc plan_rc markerless_clean_exit=0 markerless_merged_tsv=''
+  local plan_stage_retry=0 plan_stage_max plan_failed=0 plan_failed_exhaustion=0
   local resume_context; resume_context=$(resume_context_block "$branch")
   max_retries=$(agent_plan_max_retries)
+  plan_stage_max=$max_retries
   while :; do
     # A pause/abort's cooperative stop request is checked only at this stage
     # boundary (never mid-provider-call): an authorized operator's own
@@ -775,9 +793,23 @@ worker() {
       break
     fi
     if (( plan_rc != 0 )); then
-      : > "$plan_file"
-      say 'plan段の全候補が失敗したため、plan結果なしでexecへ進みます。' >&2
+      # A plan failure must never fall through to exec with an empty plan --
+      # that would bypass scope refinement, preflight, workload, and
+      # decomposition simultaneously. Retry the plan stage itself in-turn
+      # (bounded by plan_stage_max, reusing the replan retry budget so no new
+      # config key is introduced) before treating it as terminal.
+      if (( plan_stage_retry < plan_stage_max )); then
+        plan_stage_retry=$((plan_stage_retry + 1))
+        say "plan段が失敗したため、同turn内で再試行します（$plan_stage_retry/$plan_stage_max）。" >&2
+        continue
+      fi
+      plan_failed=1
+      agent_any_pool_marker_active && plan_failed_exhaustion=1
+      exit_code=$STAGE_EXIT_CODE
+      progress_touch "$issue" plan-failed
+      break
     fi
+    plan_stage_retry=0
     worker_refine_scope_from_plan "$issue" "$plan_file"
     progress_touch "$issue" preflight
     if ! preflight_gate "$issue" "$plan_file"; then
@@ -859,6 +891,7 @@ worker() {
         fi
       fi
       if [[ $exit_code -eq 0 ]] && ! agent_result_terminal_marker "$result" >/dev/null; then
+        markerless_clean_exit=1
         break
       fi
     fi
@@ -895,6 +928,23 @@ worker() {
     return 0
   fi
   project_add_pull_requests "$branch"
+  # A provider can finish cleanly twice without returning a terminal marker
+  # while the PR is merged concurrently (Issue #262). The merge is an
+  # independently observable completion fact, so let the existing completion
+  # path validate traceability and perform its guarded cleanup. This is
+  # narrowly scoped to the protocol-retry loop's own clean-exit-without-marker
+  # break (markerless_clean_exit): a stage failure such as a per-stage cost
+  # ceiling or pool exhaustion also leaves exit_code=0 with no marker (the
+  # provider process itself exits 0 even though STAGE_RC classified it as a
+  # failure) and must keep following the ordinary failure/requeue path below
+  # instead of being mistaken for this rescue.
+  if (( markerless_clean_exit )) && [[ $exit_code -eq 0 ]] && ! agent_result_terminal_marker "$result" >/dev/null; then
+    markerless_merged_tsv=$(worker_merged_pr_tsv "$repository" "$branch")
+    if [[ -n $markerless_merged_tsv ]]; then
+      printf '\nAGENTIC_LOOP_RESULT=completed\n' >> "$result"
+      comment_issue "$issue" "<!-- agentic-loop:markerless-merged worker=$worker -->\nexec段は終了markerなしで正常終了しましたが、branch \`$branch\` にmerge済みPRが存在することをGitHubで確認したため、通常の完了検証（トレーサビリティ・commit一致・cleanup）へ合流します。" || true
+    fi
+  fi
   if [[ $exit_code -eq 0 ]] && agent_result_is "$result" completed; then
     # Cleanup + the final Label/close transition is unsafe to interrupt
     # mid-sequence (see docs/decisions/0019); a pause/abort drain waits out
@@ -926,7 +976,8 @@ worker() {
     else
       [[ $postmortem_marker == complete ]] && postmortem_turn_marker_clear "$issue"
       local merged_number='' merged_base='' merged_commit=''
-      IFS=$'\t' read -r merged_pr merged_oid merged_number merged_base merged_commit < <(repo_api pulls --method GET -f state=closed -f head="${repository%%/*}:$branch" -f per_page=100 --jq 'map(select(.merged_at != null and .head.ref == "'"$branch"'")) | first | [.html_url, .head.sha, (.number|tostring), .base.ref, (.merge_commit_sha // .head.sha)] | @tsv' 2>/dev/null || true) || true
+      [[ -z $markerless_merged_tsv ]] && markerless_merged_tsv=$(worker_merged_pr_tsv "$repository" "$branch")
+      IFS=$'\t' read -r merged_pr merged_oid merged_number merged_base merged_commit <<< "$markerless_merged_tsv"
       progress_touch "$issue" cleanup
       if [[ -n $merged_pr && $merged_oid =~ ^[0-9a-fA-F]{40}$ ]]; then
         if ! preflight_reevaluate_diff "$issue" "$merged_oid" "$default_branch"; then
@@ -973,6 +1024,19 @@ worker() {
     set_issue_state "$issue" needs-input
     project_sync_state "$issue" needs-input
     comment_issue "$issue" "<!-- agentic-loop:declined worker=$worker -->\nWorkerはこのIssueを実施不要または実施不能と提案しました（理由は直前のcommentを参照）。worker自身はcloseしません。認可済みの運用者が確認し、必要なら \`bin/agentic-loop dispose $issue --reason cancelled\` 等で終了してください。"
+  elif (( plan_failed )); then
+    if (( plan_failed_exhaustion )); then
+      clear_attempts "$issue"
+      progress_touch "$issue" queued
+      set_issue_state "$issue" queued
+      project_sync_state "$issue" queued
+      comment_issue "$issue" "<!-- agentic-loop:exhausted worker=$worker pool=${LAST_EXHAUSTED_POOL:-} reason=plan-failure -->\nplan段が $plan_stage_max 回連続で失敗しましたが、provider poolの枯渇markerが有効なため試行回数を消費せずIssueを再キューします。空計画でexecへは進んでいません。preflight/workload/decomposition/scope精緻化はplan成功後に評価します。全プールが利用不可の間だけSupervisorのclaimを一時停止し、枠回復後に自動再開します。"
+    else
+      progress_touch "$issue" failed
+      set_issue_state "$issue" failed
+      project_sync_state "$issue" failed
+      comment_issue "$issue" "<!-- agentic-loop:failed worker=$worker reason=plan-failure exit=$exit_code -->\nplan段が $plan_stage_max 回連続で失敗したため、空計画でexecへは進まずこのturnを終了しました。preflight/workload/decomposition/scope精緻化はplan成功後にのみ評価されます。Supervisorが自動的に再試行し、上限回数に達してもcloseせず \`agent:parked\`（人間トリアージ待ち）へ移します。"
+    fi
   elif (( exhausted )); then
     clear_attempts "$issue"
     progress_touch "$issue" queued
