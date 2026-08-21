@@ -768,8 +768,9 @@ agent_result_is_budget_stop() {
 
 # Classify a stage result: pool-quota exhaustion vs model-specific failure.
 # Pool exhaustion (quota / 429 / usage limit / insufficient_quota / credit
-# balance, or a non-zero exit with no output -- the latter kept for backward
-# compatibility) pauses that pool and re-queues the Issue. `overloaded` and
+# balance) pauses that pool and re-queues the Issue. A transport failure with
+# no diagnostic is provider error, not evidence that the subscription pool is
+# exhausted. `overloaded` and
 # model-resolution failures are model-specific: the stage moves to the next
 # model in the pool instead of treating the whole subscription as spent.
 #
@@ -788,7 +789,6 @@ agent_result_is_pool_exhausted() {
   (( exit_code != 0 )) || (( provider_error == 1 )) || return 1
   agent_result_is_budget_stop "$result_file" && return 1
   [[ -r $result_file ]] && grep -qiE 'usage limit|rate.?limit|too many requests|(^|[^0-9])429([^0-9]|$)|insufficient_quota|quota exceeded|credit balance' "$result_file" && return 0
-  (( exit_code != 0 )) && [[ ! -s $result_file ]] && return 0
   return 1
 }
 
@@ -926,6 +926,14 @@ agent_run_stage() {
       claude_is_error=$(yq -r '.is_error // false' "$raw_result" 2>/dev/null || printf 'false')
       claude_api_error=$(yq -r '.api_error_status // ""' "$raw_result" 2>/dev/null || printf '')
       if [[ $claude_is_error == true || ( -n $claude_api_error && $claude_api_error != null ) ]]; then
+        STAGE_PROVIDER_ERROR=1
+      fi
+      # A successful process that emits non-JSON violates Claude's transport
+      # contract and must remain a provider-stage failure, rather than being
+      # treated as a clean markerless response.
+      # yq accepts YAML scalars (for example, `not json`), while Claude's
+      # --output-format json contract requires a JSON object envelope.
+      if ! grep -Eq '^[[:space:]]*\{' "$raw_result" || ! grep -Eq '\}[[:space:]]*$' "$raw_result" || ! jq -e 'type == "object"' "$raw_result" >/dev/null 2>&1; then
         STAGE_PROVIDER_ERROR=1
       fi
       # Claude's final assistant response is the JSON result field, not the
@@ -1124,6 +1132,13 @@ run_stage_candidates() {
         say "モデル固有の失敗のため次の候補へ切り替えます: pool=$CAND_POOL provider=$CAND_PROVIDER model=$CAND_MODEL" >&2
         continue
       fi
+      STAGE_RC=3
+      return 3
+    fi
+    # A structured transport failure may have exit code 0 (Claude's JSON
+    # protocol uses this for some failures). It is not a successful stage and
+    # must not fall through to the markerless-success path.
+    if (( STAGE_PROVIDER_ERROR == 1 )); then
       STAGE_RC=3
       return 3
     fi

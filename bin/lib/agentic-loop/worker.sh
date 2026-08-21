@@ -246,7 +246,7 @@ decomposition_manifest_from_plan() {
 
 
 decomposition_validate() {
-  local manifest=$1 parent_depth=${2:-0} keys key dep count scope child_depth
+  local manifest=$1 parent_depth=${2:-0} keys key dep count scope child_depth scope_raw
   [[ -n $manifest ]] || return 1
   command -v yq >/dev/null 2>&1 || return 1
   [[ $(yq -p json -r '.schema // ""' <<< "$manifest" 2>/dev/null) == "$DECOMPOSITION_SCHEMA_VERSION" ]] || return 1
@@ -263,7 +263,9 @@ decomposition_validate() {
     [[ $key =~ ^[a-z0-9][a-z0-9-]*$ && -n $title && -n $purpose && -n $child_depth && -n $scope ]] || return 1
     # Reuse the existing normalizer; a malformed scope never becomes an
     # optimistic empty scope.
-    [[ -n $(scope_marker_from_body "<!-- agentic-loop:scope $scope -->") ]] || return 1
+    scope_raw=$(scope_marker_from_body "<!-- agentic-loop:scope $scope -->")
+    [[ -n $scope_raw ]] || return 1
+    [[ -n $(scope_tokens_normalize "$scope_raw") ]] || return 1
   done < <(yq -p json -r '.children[] | [.key, (.title // ""), (.purpose // ""), (.acceptance_criteria // ""), .scope] | @tsv' <<< "$manifest" 2>/dev/null)
   while IFS= read -r dep; do
     [[ -z $dep ]] && continue
@@ -273,7 +275,10 @@ decomposition_validate() {
   # proof and makes materialization/retry deterministic.
   local seen=''
   while IFS= read -r key; do
-    while IFS= read -r dep; do [[ -z $dep ]] || grep -Fxq "$dep" <<< "$seen" || return 1; done < <(yq -p json -r --arg k "$key" '.children[] | select(.key == $k) | .depends_on[]? // ""' <<< "$manifest")
+    # mikefarah yq does not implement jq's --arg flag (Issue #222). Pass the
+    # untrusted key through env() so DAG validation is executed rather than
+    # silently becoming a no-op when the installed CLI changes.
+    while IFS= read -r dep; do [[ -z $dep ]] || grep -Fxq "$dep" <<< "$seen" || return 1; done < <(k="$key" yq -p json -r '.children[] | select(.key == env(k)) | .depends_on[]? // ""' <<< "$manifest")
     seen+="$key"$'\n'
   done <<< "$keys"
 }
