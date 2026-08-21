@@ -1387,8 +1387,10 @@ done
 assert_contains "$target/.agents/skills/submit-requirement/SKILL.md" 'in Japanese' 'installed submission skill did not require Japanese GitHub content'
 assert_contains "$target/.agents/skills/diagnose-codebase/SKILL.md" 'without modifying' 'diagnosis skill did not prohibit code changes'
 assert_contains "$target/AGENTS.md" '通常のbuild・変更要求' 'installed AGENTS.md lacks queue-first routing'
+assert_contains "$target/AGENTS.md" 'git管理外（gitignore対象）' 'installed AGENTS.md lacks the local overlay intake exception'
 assert_contains "$target/AGENTS.md" 'agent:running' 'installed AGENTS.md lacks the worker exception'
 assert_contains "$target/.agents/skills/submit-requirement/SKILL.md" 'Queue-first intake' 'installed skill lacks queue-first routing'
+assert_contains "$target/.agents/skills/submit-requirement/SKILL.md" 'git-ignored, repository-local overlay' 'installed submission skill lacks the local overlay intake exception'
 assert_contains "$target/.agents/skills/submit-requirement/SKILL.md" 'Non-recursive worker exception' 'installed skill lacks the worker exception'
 assert_contains "$target/AGENTS.md" '新規Issue作成を明示した場合は重複検索を省略' 'installed AGENTS.md does not bypass duplicate search for explicit Issue creation'
 assert_contains "$target/.agents/skills/submit-requirement/SKILL.md" 'do not search for duplicates and create a new Issue' 'installed skill does not bypass duplicate search for explicit Issue creation'
@@ -1402,6 +1404,7 @@ assert_contains "$target/docs/operations/issue-queue.md" 'open・closed Issueを
 assert_contains "$target/docs/operations/issue-queue.md" 'Supervisorが停止中であること' 'installed docs do not require stopped-Supervisor reporting'
 assert_contains "$target/docs/operations/issue-queue.md" 'Supervisor停止はこのfallbackと区別する' 'installed docs conflate a stopped Supervisor with GitHub verification failure'
 assert_contains "$target/docs/operations/issue-queue.md" '安全なfallback' 'installed docs lack safe fallback'
+assert_contains "$target/docs/operations/issue-queue.md" 'repository-local設定overlayの扱い' 'installed docs lack local overlay routing guidance'
 timer="$XDG_CONFIG_HOME/systemd/user/agentic-loop-main-sync-$(printf '%s' "${target#/}" | tr '/' '-').timer"
 service=${timer%.timer}.service
 [[ -f $timer && -f $service ]] || fail 'install did not create the periodic main update units'
