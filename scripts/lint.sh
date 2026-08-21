@@ -19,7 +19,8 @@ required=(AGENTS.md README.md Makefile .editorconfig .gitignore .codex/config.to
   bin/lib/agentic-loop/workload.sh scripts/upgrade/migrations/0006-workload-config.sh
   docs/policies/postmortem.md docs/decisions/0026-postmortem-closed-loop.md bin/lib/agentic-loop/postmortem.sh docs/operations/postmortem.md
   scripts/upgrade/migrations/0007-postmortem-config.sh .agents/skills/postmortem/SKILL.md .agents/skills/postmortem/agents/openai.yaml .claude/skills/postmortem/SKILL.md
-  docs/decisions/0030-lost-requirement-detection.md .claude/hooks/require-gh-body-file.sh)
+  docs/decisions/0030-lost-requirement-detection.md .claude/hooks/require-gh-body-file.sh
+  docs/decisions/0031-stage-stall-threshold-and-provider-progress-signal.md)
 for file in "${required[@]}"; do
   [[ -f $file ]] || { printf 'Missing required file: %s\n' "$file" >&2; exit 1; }
 done

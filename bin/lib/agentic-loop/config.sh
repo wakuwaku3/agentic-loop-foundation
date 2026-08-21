@@ -43,6 +43,8 @@ load_config() {
       queue.retry_cooldown_seconds) key=RETRY_COOLDOWN_SECONDS ;;
       queue.worker_timeout_seconds) key=WORKER_TIMEOUT_SECONDS ;;
       queue.worker_orphan_grace_seconds) key=WORKER_ORPHAN_GRACE_SECONDS ;;
+      queue.stall_seconds) key=STALL_SECONDS ;;
+      queue.provider_stall_seconds) key=PROVIDER_STALL_SECONDS ;;
       queue.unknown_scope) UNKNOWN_SCOPE=$value; continue ;;
       queue.exclusive_paths) EXCLUSIVE_PATHS=$value; continue ;;
       queue.traceability) TRACEABILITY=$value; continue ;;
@@ -93,6 +95,8 @@ validate_config() {
   [[ $RETRY_COOLDOWN_SECONDS =~ ^[0-9]+$ ]] || fail 'RETRY_COOLDOWN_SECONDS must be a non-negative integer'
   [[ $WORKER_TIMEOUT_SECONDS =~ ^[0-9]+$ ]] || fail 'WORKER_TIMEOUT_SECONDS must be a non-negative integer'
   [[ $WORKER_ORPHAN_GRACE_SECONDS =~ ^[0-9]+$ ]] || fail 'WORKER_ORPHAN_GRACE_SECONDS must be a non-negative integer'
+  [[ $STALL_SECONDS =~ ^[0-9]+$ ]] || fail 'STALL_SECONDS must be a non-negative integer'
+  [[ $PROVIDER_STALL_SECONDS =~ ^[0-9]+$ ]] || fail 'PROVIDER_STALL_SECONDS must be a non-negative integer'
   case $UNKNOWN_SCOPE in isolated | exclusive | open) ;; *) fail 'UNKNOWN_SCOPE must be isolated, exclusive, or open' ;; esac
   case $TRACEABILITY in require | warn | off) ;; *) fail 'TRACEABILITY must be require, warn, or off' ;; esac
   case $PREFLIGHT in require | warn | off) ;; *) fail 'PREFLIGHT must be require, warn, or off' ;; esac

@@ -225,18 +225,34 @@ status_supervisor_lock_stale() {
 }
 
 
+# Stall threshold for one progress stage (see docs/decisions/0031): the
+# provider stages block on a single long CLI call (plan/exec/replan) and use
+# the wider PROVIDER_STALL_SECONDS band; every other stage (including an empty/
+# unknown stage) uses STALL_SECONDS. Either band can be set to 0 to disable
+# stall detection for it.
+status_stall_threshold() {
+  case ${1:-} in
+    plan | exec | replan) printf '%s' "$PROVIDER_STALL_SECONDS" ;;
+    *) printf '%s' "$STALL_SECONDS" ;;
+  esac
+}
+
+
 # Classify a running Issue's progress into healthy/stalled/timeout/unknown from
-# purely local state (see docs/decisions/0005). timeout wins over everything
-# once STATUS_RUN_TIMEOUT_EXCEEDED is set (mirroring the existing worker-timeout
-# anomaly); a worker without any local progress signal stays unknown. The worker
-# log's mtime is used as a secondary signal (its body is never read), so a
-# provider thinking inside a stage boundary does not flip to stalled. Sets
+# purely local state (see docs/decisions/0005 and 0031). timeout wins over
+# everything once STATUS_RUN_TIMEOUT_EXCEEDED is set (mirroring the existing
+# worker-timeout anomaly); a worker without any local progress signal stays
+# unknown. A stage output file's mtime is used as a secondary signal (its
+# content is never read), so a provider thinking or streaming inside a stage
+# boundary does not flip to stalled. The threshold applied depends on the
+# current stage (status_stall_threshold): the provider stages (plan/exec/
+# replan) get a wider band since they block on one long CLI call. Sets
 # STATUS_RUN_STAGE / STATUS_RUN_PROGRESS_AGE / STATUS_RUN_PROGRESS_AT /
-# STATUS_RUN_HEALTH.
+# STATUS_RUN_HEALTH / STATUS_RUN_STALL_THRESHOLD.
 status_progress_health() {
-  local issue=$1 timeout_exceeded=${2:-0} now age log_mtime
+  local issue=$1 timeout_exceeded=${2:-0} now age log_mtime threshold
   now=$(date +%s)
-  STATUS_RUN_STAGE='' STATUS_RUN_PROGRESS_AGE='' STATUS_RUN_PROGRESS_AT='' STATUS_RUN_HEALTH=unknown
+  STATUS_RUN_STAGE='' STATUS_RUN_PROGRESS_AGE='' STATUS_RUN_PROGRESS_AT='' STATUS_RUN_HEALTH=unknown STATUS_RUN_STALL_THRESHOLD=''
   if (( timeout_exceeded )); then
     STATUS_RUN_HEALTH=timeout
     return 0
@@ -246,13 +262,17 @@ status_progress_health() {
     STATUS_RUN_STAGE=$PROGRESS_STAGE
     age=$((now - PROGRESS_EPOCH))
   fi
-  if log_mtime=$(worker_log_mtime "$issue"); then
+  if log_mtime=$(worker_stage_output_mtime "$issue"); then
     if [[ -z $age ]] || (( now - log_mtime < age )); then age=$((now - log_mtime)); fi
   fi
   [[ -n $age ]] || return 0
   STATUS_RUN_PROGRESS_AGE=$age
   STATUS_RUN_PROGRESS_AT=$((now - age))
-  if (( age < STATUS_STALL_SECONDS )); then STATUS_RUN_HEALTH=healthy; else STATUS_RUN_HEALTH=stalled; fi
+  threshold=$(status_stall_threshold "$STATUS_RUN_STAGE")
+  STATUS_RUN_STALL_THRESHOLD=$threshold
+  if (( threshold == 0 )); then STATUS_RUN_HEALTH=healthy
+  elif (( age < threshold )); then STATUS_RUN_HEALTH=healthy
+  else STATUS_RUN_HEALTH=stalled; fi
   return 0
 }
 
@@ -453,7 +473,13 @@ status_collect_anomalies() {
     fi
     status_progress_health "$issue" "$to_exceeded"
     if [[ $STATUS_RUN_HEALTH == stalled ]]; then
-      anomaly_add warning worker-stalled "#$issue" "最後の進行から ${STATUS_RUN_PROGRESS_AGE}秒経過しています（stall閾値 ${STATUS_STALL_SECONDS}秒）。" 'status --watch または tail で進行を確認し、必要なら worker_timeout_seconds 到達後の再試行を確認してください。' "${STATUS_RUN_PROGRESS_AGE}" needs-attention
+      local stall_action
+      if (( WORKER_TIMEOUT_SECONDS > 0 )); then
+        stall_action="status --watch または tail で進行を確認してください。実行時間上限（${WORKER_TIMEOUT_SECONDS}秒）到達時に自動停止・再試行されます。"
+      else
+        stall_action='status --watch または tail で進行を確認してください。queue.worker_timeout_seconds=0 のため自動停止は無効です。'
+      fi
+      anomaly_add warning worker-stalled "#$issue" "stage=${STATUS_RUN_STAGE:-不明} 最後の進行から ${STATUS_RUN_PROGRESS_AGE}秒経過しています（適用閾値 ${STATUS_RUN_STALL_THRESHOLD}秒）。" "$stall_action" "${STATUS_RUN_PROGRESS_AGE}" needs-attention
     fi
     LEASE_ID='' LEASE_EXPIRES='' LEASE_HEARTBEAT=''
     if lease_read "$issue"; then
@@ -802,7 +828,7 @@ status_render_json() {
         scope_sep=','
       done <<< "$STATUS_RUN_SCOPE"
     fi
-    printf '],"started_at":%s,"elapsed_seconds":%s,"timeout_at":%s,"timeout_exceeded":%s,"heartbeat_at":%s,"lease_expires_at":%s,"lease_expired":%s,"worktree":"%s","worktree_exists":%s,"dirty":%s,"diverged":%s,"branch":"%s","pr":%s,"pr_url":"%s","pr_state":"%s","checks":"%s","local_state":%s,"stage":"%s","progress_at":%s,"progress_age_seconds":%s,"health":"%s"}' \
+    printf '],"started_at":%s,"elapsed_seconds":%s,"timeout_at":%s,"timeout_exceeded":%s,"heartbeat_at":%s,"lease_expires_at":%s,"lease_expired":%s,"worktree":"%s","worktree_exists":%s,"dirty":%s,"diverged":%s,"branch":"%s","pr":%s,"pr_url":"%s","pr_state":"%s","checks":"%s","local_state":%s,"stage":"%s","progress_at":%s,"progress_age_seconds":%s,"stall_threshold_seconds":%s,"health":"%s"}' \
       "${STATUS_RUN_STARTED:-null}" "${STATUS_RUN_ELAPSED:-null}" "${STATUS_RUN_TIMEOUT_AT:-null}" \
       "$( ((STATUS_RUN_TIMEOUT_EXCEEDED)) && printf true || printf false )" \
       "${STATUS_RUN_HEARTBEAT:-null}" "${STATUS_RUN_LEASE_EXPIRES:-null}" \
@@ -812,7 +838,7 @@ status_render_json() {
       "$(json_escape "$STATUS_RUN_BRANCH")" \
       "${STATUS_RUN_PR:-null}" "$(json_escape "$STATUS_RUN_PR_URL")" "$(json_escape "$STATUS_RUN_PR_STATE")" "$(json_escape "$STATUS_RUN_CHECKS")" \
       "$( ((STATUS_RUN_LOCAL)) && printf true || printf false )" \
-      "$(json_escape "$STATUS_RUN_STAGE")" "${STATUS_RUN_PROGRESS_AT:-null}" "${STATUS_RUN_PROGRESS_AGE:-null}" "$(json_escape "$STATUS_RUN_HEALTH")"
+      "$(json_escape "$STATUS_RUN_STAGE")" "${STATUS_RUN_PROGRESS_AT:-null}" "${STATUS_RUN_PROGRESS_AGE:-null}" "${STATUS_RUN_STALL_THRESHOLD:-null}" "$(json_escape "$STATUS_RUN_HEALTH")"
     sep=','
   done
   printf '],'
