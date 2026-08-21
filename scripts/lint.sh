@@ -18,7 +18,8 @@ required=(AGENTS.md README.md Makefile .editorconfig .gitignore .codex/config.to
   docs/policies/resource-scalability.md docs/decisions/0025-resource-scalability-budget.md docs/operations/workload-budget.md
   bin/lib/agentic-loop/workload.sh scripts/upgrade/migrations/0006-workload-config.sh
   docs/policies/postmortem.md docs/decisions/0026-postmortem-closed-loop.md bin/lib/agentic-loop/postmortem.sh docs/operations/postmortem.md
-  scripts/upgrade/migrations/0007-postmortem-config.sh .agents/skills/postmortem/SKILL.md .agents/skills/postmortem/agents/openai.yaml .claude/skills/postmortem/SKILL.md)
+  scripts/upgrade/migrations/0007-postmortem-config.sh .agents/skills/postmortem/SKILL.md .agents/skills/postmortem/agents/openai.yaml .claude/skills/postmortem/SKILL.md
+  docs/decisions/0030-lost-requirement-detection.md .claude/hooks/require-gh-body-file.sh)
 for file in "${required[@]}"; do
   [[ -f $file ]] || { printf 'Missing required file: %s\n' "$file" >&2; exit 1; }
 done
@@ -55,6 +56,17 @@ grep -Fq '.claude/skills/direct-edit/SKILL.md' scripts/lib/foundation-files.sh |
 grep -Fq '.claude/settings.json' scripts/lib/foundation-files.sh || { printf 'Claude settings are not distributed as a shared file.\n' >&2; exit 1; }
 grep -Fq '.claude/hooks/confirm-main-worktree-edit.sh' scripts/lib/foundation-files.sh || { printf 'Claude edit hook is not distributed as a shared file.\n' >&2; exit 1; }
 grep -Fq 'confirm-main-worktree-edit.sh' scripts/install-target.sh || { printf 'Claude edit hook is not made executable on install.\n' >&2; exit 1; }
+
+[[ $(yq -p json -r '.hooks.PreToolUse[1].matcher // ""' .claude/settings.json) == 'Bash' ]] || { printf 'gh --body Bash hook matcher is invalid.\n' >&2; exit 1; }
+[[ $(yq -p json -r '.hooks.PreToolUse[1].hooks[0].command // ""' .claude/settings.json) == '${CLAUDE_PROJECT_DIR}/.claude/hooks/require-gh-body-file.sh' ]] || { printf 'gh --body Bash hook command is invalid.\n' >&2; exit 1; }
+grep -Fq 'permissionDecision":"deny"' .claude/hooks/require-gh-body-file.sh || { printf 'gh --body Bash hook must gate matches with a deny decision.\n' >&2; exit 1; }
+if grep -Fq 'permissionDecision":"ask"' .claude/hooks/require-gh-body-file.sh; then
+  printf 'gh --body Bash hook must not use ask (bypassPermissions overrides it); deny instead.\n' >&2
+  exit 1
+fi
+grep -Fq -- '--body-file' .claude/hooks/require-gh-body-file.sh || { printf 'gh --body Bash hook must point operators at --body-file.\n' >&2; exit 1; }
+grep -Fq '.claude/hooks/require-gh-body-file.sh' scripts/lib/foundation-files.sh || { printf 'gh --body Bash hook is not distributed as a shared file.\n' >&2; exit 1; }
+grep -Fq 'require-gh-body-file.sh' scripts/install-target.sh || { printf 'gh --body Bash hook is not made executable on install.\n' >&2; exit 1; }
 
 grep -Fxq 'approval_policy = "never"' .codex/config.toml || { printf 'Invalid Codex approval policy.\n' >&2; exit 1; }
 if grep -Eq '^[[:space:]]*sandbox_mode[[:space:]]*=' .codex/config.toml; then

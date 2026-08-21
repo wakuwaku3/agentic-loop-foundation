@@ -67,7 +67,8 @@ status_snapshot_fetch() {
       elif any(.labels[]; .name == "agent:blocked") then "blocked"
       elif any(.labels[]; .name == "agent:paused") then "paused"
       else "other" end),
-     '"$(queue_rank_jq)"', .created_at] | @tsv'
+     '"$(queue_rank_jq)"', .created_at,
+     ((.body // "") | @base64)] | @tsv'
 }
 
 
@@ -500,13 +501,30 @@ status_collect_anomalies() {
   status_claim_pause_reasons
   pause=$STATUS_PAUSE_TEXT
   [[ -n $pause ]] && anomaly_add info claim-paused supervisor "claimを一時停止しています: $pause" '次pollで利用可能なprovider・予算・停止要求を再評価し、可能になればclaimを再開します。' "$(status_oldest_marker_elapsed)" recovering
+
+  # gh --body "@path" silently drops the requirement instead of expanding it
+  # (Issue #272): flag a queued Issue whose whole body is nothing but such a
+  # reference so an operator notices before (or even without) claim_next's
+  # own pre-claim diversion (mark_body_unexpanded). Skipped when the snapshot
+  # itself is unavailable rather than reading a stale/empty QUEUE_* set.
+  if (( STATUS_GITHUB_OK )); then
+    local body_decoded
+    for i in "${!QUEUE_NUM[@]}"; do
+      issue=${QUEUE_NUM[$i]}
+      [[ -n ${QUEUE_BODY_B64[$i]:-} ]] || continue
+      body_decoded=$(base64 -d <<< "${QUEUE_BODY_B64[$i]}" 2>/dev/null || true)
+      if body_unexpanded_file_reference "$body_decoded"; then
+        anomaly_add warning issue-body-unexpanded "#$issue" 'Issue本文が単一行のファイル参照のみで、要求が失われています（gh --body "@path" は展開されません）。' "gh issue edit $issue --body-file <正しい本文のファイル> を実行し、その後 gh issue edit $issue --add-label agent:queued で再投入してください。" 0 needs-attention
+      fi
+    done
+  fi
   return 0
 }
 
 
 status_collect_snapshot() {
   STATUS_GITHUB_OK=1
-  local raw num title state priority catrank created
+  local raw num title state priority catrank created body_b64
   if status_cache_fresh "$STATUS_SNAPSHOT_FETCHED"; then
     raw=$STATUS_SNAPSHOT_RAW
   elif ! raw=$(status_snapshot_fetch); then
@@ -516,11 +534,11 @@ status_collect_snapshot() {
     STATUS_SNAPSHOT_RAW=$raw
     STATUS_SNAPSHOT_FETCHED=$(date +%s)
   fi
-  while IFS=$'\t' read -r num title state priority catrank created; do
+  while IFS=$'\t' read -r num title state priority catrank created body_b64; do
     [[ -n $num ]] || continue
     case $state in
       running) RUN_NUM+=("$num"); RUN_TITLE+=("$title") ;;
-      queued) QUEUE_NUM+=("$num"); QUEUE_TITLE+=("$title"); QUEUE_PRIORITY+=("$priority"); QUEUE_CATRANK+=("$catrank"); QUEUE_CREATED+=("$created") ;;
+      queued) QUEUE_NUM+=("$num"); QUEUE_TITLE+=("$title"); QUEUE_PRIORITY+=("$priority"); QUEUE_CATRANK+=("$catrank"); QUEUE_CREATED+=("$created"); QUEUE_BODY_B64+=("$body_b64") ;;
       needs-input) NEEDSINPUT_NUM+=("$num"); NEEDSINPUT_TITLE+=("$title") ;;
       failed) FAILED_NUM+=("$num"); FAILED_TITLE+=("$title") ;;
       parked) PARKED_NUM+=("$num"); PARKED_TITLE+=("$title") ;;
@@ -910,7 +928,7 @@ cmd_status() {
     return 0
   fi
   declare -ga RUN_NUM=() RUN_TITLE=()
-  declare -ga QUEUE_NUM=() QUEUE_TITLE=() QUEUE_PRIORITY=() QUEUE_CATRANK=() QUEUE_CREATED=()
+  declare -ga QUEUE_NUM=() QUEUE_TITLE=() QUEUE_PRIORITY=() QUEUE_CATRANK=() QUEUE_CREATED=() QUEUE_BODY_B64=()
   declare -ga NEEDSINPUT_NUM=() NEEDSINPUT_TITLE=() FAILED_NUM=() FAILED_TITLE=() PARKED_NUM=() PARKED_TITLE=() INREVIEW_NUM=() INREVIEW_TITLE=() BLOCKED_NUM=() BLOCKED_TITLE=() PAUSED_NUM=() PAUSED_TITLE=()
   declare -ga STALE_NUM=() STALE_TITLE=()
   declare -ga ANOMALY_LEVEL=() ANOMALY_CODE=() ANOMALY_SUBJECT=() ANOMALY_DETAIL=() ANOMALY_ACTION=() ANOMALY_ELAPSED=() ANOMALY_CLASSIFICATION=()

@@ -26,6 +26,10 @@ claim_next() {
       [[ $pid =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null && continue
     fi
     body=$(base64 -d <<< "$body_b64" 2>/dev/null || true)
+    if body_unexpanded_file_reference "$body"; then
+      mark_body_unexpanded "$issue"
+      continue
+    fi
     if ! dependency_status "$issue" "$body"; then
       [[ -n $DEPENDENCY_REASON ]] && mark_dependency_blocked "$issue" "$DEPENDENCY_REASON" "$DEPENDENCY_DETAIL"
       continue

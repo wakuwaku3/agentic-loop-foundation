@@ -326,6 +326,42 @@ doctor_collect() {
   if (( flaky_rc == 0 )); then
     doctor_add success 'flaky test registry' '隔離entryは検証済み、または宣言がありません。' '対応は不要です。'
   fi
+
+  # gh --body "@path" silently drops the requirement instead of expanding it
+  # (Issue #272). status_snapshot_fetch is the shared open-Issue read (see
+  # its own doc comment in status.sh); reuse the single result here rather
+  # than issuing a second open-Issue list call for this check.
+  # workload-unbounded: on-demand read; bound=open Issue count
+  local snapshot_raw='' body_issue_hits=0 snap_num _snap_title _snap_state _snap_rank1 _snap_rank2 _snap_created snap_body_b64 snap_body
+  if snapshot_raw=$(status_snapshot_fetch); then
+    while IFS=$'\t' read -r snap_num _snap_title _snap_state _snap_rank1 _snap_rank2 _snap_created snap_body_b64; do
+      [[ -n $snap_num ]] || continue
+      [[ ${snap_body_b64:-} != '-' && -n ${snap_body_b64:-} ]] || continue
+      snap_body=$(base64 -d <<< "$snap_body_b64" 2>/dev/null || true)
+      body_unexpanded_file_reference "$snap_body" && body_issue_hits=$((body_issue_hits + 1))
+    done <<< "$snapshot_raw"
+  fi
+  if (( body_issue_hits > 0 )); then
+    doctor_add warning '要求本文の欠落' "open Issueのうち ${body_issue_hits}件で本文が単一行のファイル参照のみです（gh --body \"@path\" は展開されません）。要求内容が失われています。" 'bin/agentic-loop status で issue-body-unexpanded anomalyの対象Issueを確認し、gh issue edit <番号> --body-file <正しい本文のファイル> を実行してください。'
+  else
+    doctor_add success '要求本文の欠落' 'open Issueの本文はファイル参照のみではありません。' '対応は不要です。'
+  fi
+
+  # Direct (no --paginate), best-effort read of the newest 100 comments
+  # repository-wide -- same bounded, non-exhaustive policy as
+  # status_stale_fetch (see its doc comment), not a per-Issue sweep.
+  local comment_raw='' comment_hit=0 comment_b64 comment_body
+  comment_raw=$(repo_api issues/comments --method GET -f per_page=100 --jq '.[] | (.body // "" | @base64)' 2>/dev/null || true)
+  while IFS= read -r comment_b64; do
+    [[ -n $comment_b64 ]] || continue
+    comment_body=$(base64 -d <<< "$comment_b64" 2>/dev/null || true)
+    if body_unexpanded_file_reference "$comment_body"; then comment_hit=1; break; fi
+  done <<< "$comment_raw"
+  if (( comment_hit )); then
+    doctor_add warning '要求コメントの欠落' '直近のコメント（最大100件、repository全体）に単一行のファイル参照のみの本文があります（gh --body "@path" は展開されません）。' '対象のコメントを確認し、正しい内容を再投稿してください。'
+  else
+    doctor_add success '要求コメントの欠落' '直近コメントの本文はファイル参照のみではありません。' '対応は不要です。'
+  fi
 }
 
 
