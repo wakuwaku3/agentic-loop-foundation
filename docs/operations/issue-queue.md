@@ -191,6 +191,8 @@ Supervisor停止中でも、キューのファイル、対象repositoryとIssue�
 
 各Issueは2段で処理する。まず調査と計画だけを行う高品質な**plan段**（Codexは `--sandbox read-only` で実行し、書き込みを行わない）、続いて計画に従って実装・検証・PR・mergeまで行う低コストな**exec段**である。高コストな推論を計画に集中させ、実作業は安価に回す。exec段が完了条件を満たせない場合は、`[agent.retry].plan_max`（既定1回）まで、より高いreasoning effortでplanを見直して再実行する。中断後の再開時は既存のworktree・branch・commit・PR・merge状態をGit/GitHub APIから観測してphaseを判定し、既存の成果物を再利用する（[中断からの再開](#中断からの再開)、[ADR 0004](../decisions/0004-worker-resume-and-handoff.md)）。
 
+plan段の全候補が失敗した場合、空計画のままexec段へは進まない（scope精緻化・preflight・workload・decompositionの各gateを同時に迂回してしまうため）。まず同じturn内で`agent.retry.plan_max`回まで（既存のreplan予算を再利用し、新しい設定キーは追加しない）plan段だけを再試行する。それでも失敗が続く場合、いずれかの宣言済みprovider poolが枯渇markerを持っていれば環境要因の相関とみなし、試行回数を消費せず`queued`へ戻す（`agentic-loop:exhausted reason=plan-failure`）。枯渇markerがなければ通常のタスク失敗として`agent:failed`（`agentic-loop:failed reason=plan-failure`）へ遷移し、既存の`retry_failed`（`max_attempts`・`retry_cooldown_seconds`）を経て上限到達時は`agent:parked`へ移る。これにより、planが恒常的に失敗するIssueが無限にclaim・requeueを繰り返してprovider予算を消費し続けることはない。
+
 **局面ごとにprovider・model・reasoning effortを指定できる。** 例えばplanはCodexのフラグシップを高effortで、execはopencodeで、のように混在させられる。段がproviderを省略すると `[agent].provider` を継承する。`reasoning_effort` はCodex（`-c model_reasoning_effort`）とClaude（`--effort`、水準は `low|medium|high|xhigh|max`）へ実際に渡る。宣言しない場合はprovider CLIの既定に委ね、Codexだけは従来の既定（plan=`high` / exec=`low`）を維持する。Claudeで水準外の値を宣言した場合は設定不正として`doctor`が失敗を報告し、その値はCLIへ渡さない。opencodeは`run`に相当するflagを持たないため渡さない（modelの選択で表現する）。適用されたeffortはIssueの`agentic-loop:usage`コメントに`reasoning_effort=`として記録される。opencodeのmodelは `provider/model` 形式である。
 
 ```toml

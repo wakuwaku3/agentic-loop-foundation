@@ -990,7 +990,19 @@ if [[ $* == *'Use $diagnose-codebase'* ]]; then
     "$worktree/bin/agentic-loop" sync-issue 99 >/dev/null
   fi
 fi
-if [[ ${FAKE_CODEX_GIT_OPERATIONS:-0} == 1 ]]; then
+# --add-dir is only ever passed on the workspace-write (exec) call (see
+# agent.sh's plan/exec codex_args split); the plan call is --sandbox
+# read-only and cannot perform Git writes in real Codex either. Gate this
+# fixture the same way so a plan-stage call never falsely trips the
+# missing-add-dir check as a plan failure.
+plan_or_exec_workspace_write=0
+for ((gi=1; gi<=$#; gi++)); do
+  if [[ ${!gi} == --sandbox ]] && (( gi < $# )); then
+    gj=$((gi + 1))
+    [[ ${!gj} == workspace-write ]] && plan_or_exec_workspace_write=1
+  fi
+done
+if [[ ${FAKE_CODEX_GIT_OPERATIONS:-0} == 1 ]] && (( plan_or_exec_workspace_write )); then
   expected=$(git -C "$worktree" rev-parse --path-format=absolute --git-common-dir)
   [[ " $add_dirs " == *" $expected "* ]] || { printf 'missing Git add-dir: %s (expected %s)\n' "$add_dirs" "$expected" >&2; exit 3; }
   [[ " $add_dirs " == *" $worktree/.agents "* ]] || { printf 'missing .agents add-dir: %s\n' "$add_dirs" >&2; exit 3; }
@@ -2239,23 +2251,76 @@ assert_contains "$FAKE_GH_ROOT/opencode-calls" 'run --auto' 'exec phase did not 
 [[ $(grep -c -- '--sandbox workspace-write' "$FAKE_GH_ROOT/codex-calls") -eq 0 ]] || fail 'exec phase unexpectedly ran on codex'
 assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'provider=codex stage=plan' 'plan usage did not record the codex provider'
 
-# Each Issue runs a read-only plan stage before the workspace-write exec stage,
-# and an exec that never satisfies completion triggers bounded re-planning.
-write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=30 STOP_TIMEOUT=10 STALE_DAYS=30
+# Each Issue runs a read-only plan stage before the workspace-write exec stage.
+# A plan whose every candidate fails must never fall through to exec with an
+# empty plan (that would bypass scope refinement, preflight, workload, and
+# decomposition simultaneously). It is retried in-turn (bounded by
+# agent.retry.plan_max) before being treated as a genuine task failure, so the
+# preflight/workload gate markers are never emitted for this turn.
+write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=30 STOP_TIMEOUT=10 STALE_DAYS=30 MAX_ATTEMPTS=3 RETRY_COOLDOWN_SECONDS=0
 printf '20 queued open none 2026-01-01T00:00:00Z\n' > "$state"
 : > "$FAKE_GH_ROOT/$state_key.comments"
 : > "$FAKE_GH_ROOT/codex-calls"
-AGENT_PLAN_MAX_RETRIES=1 FAKE_CODEX_RESULT='AGENTIC_LOOP_RESULT=failed' AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _supervise
-grep -Eq '^20 failed' "$state" || fail 'exhausted re-planning did not fail the Issue'
-plan_passes=$(grep -c -- '--sandbox read-only' "$FAKE_GH_ROOT/codex-calls")
-[[ $plan_passes -eq 2 ]] || fail "expected 2 planning passes (initial + 1 retry), got $plan_passes"
-exec_passes=$(grep -c -- '--sandbox workspace-write' "$FAKE_GH_ROOT/codex-calls")
-[[ $exec_passes -eq 2 ]] || fail "expected 2 exec passes (initial + 1 retry), got $exec_passes"
-assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'flagshipモデルで計画を見直して再実行' 're-planning was not announced on the Issue'
+AGENT_PLAN_MAX_RETRIES=1 FAKE_CODEX_EXIT=1 AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _supervise
+grep -Eq '^20 failed' "$state" || fail 'a plan failure exhausting its in-turn retries did not fail the Issue'
+plan_passes=$(grep -c -- '--sandbox read-only' "$FAKE_GH_ROOT/codex-calls" || true)
+[[ $plan_passes -eq 2 ]] || fail "expected the initial planning pass plus one in-turn retry, got $plan_passes"
+exec_passes=$(grep -c -- '--sandbox workspace-write' "$FAKE_GH_ROOT/codex-calls" || true)
+[[ $exec_passes -eq 0 ]] || fail 'plan failure unexpectedly started an empty-plan exec'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'reason=plan-failure' 'plan failure was not observable on the Issue'
 assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'stage=plan' 'plan stage usage was not recorded'
-assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'stage=exec' 'exec stage usage was not recorded'
+if grep -Fq 'agentic-loop:preflight' "$FAKE_GH_ROOT/$state_key.comments"; then fail 'a plan failure unexpectedly reached the preflight gate'; fi
+if grep -Fq 'agentic-loop:workload' "$FAKE_GH_ROOT/$state_key.comments"; then fail 'a plan failure unexpectedly reached the workload gate'; fi
 git -C "$target" worktree remove "$target-worktrees/issue-20" --force 2>/dev/null || true
 git -C "$target" branch -D agent/issue-20 >/dev/null 2>&1 || true
+
+# Repeated plan failures still converge on the ordinary retry_failed/parked
+# path (no new state and no infinite requeue loop): with MAX_ATTEMPTS=1 the
+# single claim already used the whole retry budget, so the next poll parks
+# the Issue directly instead of reclaiming it for another plan attempt.
+write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=30 STOP_TIMEOUT=10 STALE_DAYS=30 MAX_ATTEMPTS=1 RETRY_COOLDOWN_SECONDS=0
+printf '21 queued open none 2026-01-01T00:00:00Z\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+: > "$FAKE_GH_ROOT/codex-calls"
+rm -f "$closes"
+AGENT_PLAN_MAX_RETRIES=1 FAKE_CODEX_EXIT=1 AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _supervise
+grep -Eq '^21 failed' "$state" || fail 'a plan failure with no retry budget left did not fail the Issue'
+calls_before_park=$(wc -l < "$FAKE_GH_ROOT/codex-calls")
+AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _supervise
+grep -Eq '^21 parked open' "$state" || fail 'a plan failure at MAX_ATTEMPTS was not parked instead of requeued indefinitely'
+[[ ! -r "$closes" ]] || ! grep -Fq $'^21\t' "$closes" || fail 'a plan-failure Issue reaching MAX_ATTEMPTS must never be closed'
+calls_after_park=$(wc -l < "$FAKE_GH_ROOT/codex-calls")
+[[ $calls_after_park -eq $calls_before_park ]] || fail 'parking a retry-exhausted Issue unexpectedly reclaimed it for another plan attempt'
+git -C "$target" worktree remove "$target-worktrees/issue-21" --force 2>/dev/null || true
+git -C "$target" branch -D agent/issue-21 >/dev/null 2>&1 || true
+
+# A plan failure while a DIFFERENT declared pool is marked exhausted is
+# treated like pool exhaustion (requeued without consuming an Issue attempt),
+# not like a genuine task failure -- even though the plan stage itself
+# reported an ordinary per-candidate error (STAGE_RC=3) rather than
+# STAGE_RC=1/2, and even though the exhausted pool is not the one plan itself
+# used (agent_any_pool_marker_active is a weaker, correlation-only signal;
+# only marking every declared pool would also block a fresh claim).
+{
+  printf '[agent.plan]\nprovider = "codex"\n'
+  printf '[agent.exec]\nprovider = "opencode"\n'
+  printf '[queue]\npoll_seconds = 1\nmax_workers = 1\nlease_seconds = 30\nstop_timeout = 10\nstale_days = 30\nmax_attempts = 1\nretry_cooldown_seconds = 0\n'
+} > "$target/.agentic-loop.toml"
+printf '22 queued open none 2026-01-01T00:00:00Z\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+: > "$FAKE_GH_ROOT/codex-calls"
+rm -rf "$state_root/pools"
+mkdir -p "$state_root/pools/opencode"
+printf '%s\n' "$(( $(date +%s) + 1800 ))" > "$state_root/pools/opencode/exhausted"
+AGENT_PLAN_MAX_RETRIES=1 FAKE_CODEX_EXIT=1 AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _supervise
+grep -Eq '^22 queued' "$state" || fail 'a plan failure correlated with another pool exhaustion was not requeued'
+if grep -Eq '^22 failed' "$state"; then fail 'a plan failure correlated with pool exhaustion must not fail the Issue'; fi
+[[ ! -e "$state_root/attempts/issue-22" ]] || fail 'a plan failure correlated with pool exhaustion consumed an Issue attempt'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:exhausted' 'pool-exhaustion-correlated plan failure was not recorded as exhausted'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'reason=plan-failure' 'pool-exhaustion-correlated plan failure did not record its origin'
+rm -rf "$state_root/pools"
+git -C "$target" worktree remove "$target-worktrees/issue-22" --force 2>/dev/null || true
+git -C "$target" branch -D agent/issue-22 >/dev/null 2>&1 || true
 
 # A clean exec exit without a terminal marker is a protocol retry, not a
 # flagship replan. The second response uses the same plan and completes.

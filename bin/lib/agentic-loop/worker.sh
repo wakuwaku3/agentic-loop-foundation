@@ -758,8 +758,10 @@ worker() {
   ) & heartbeat_pid=$!
   local plan_usage="$STATE_ROOT/issue-$issue-plan-usage.txt" exec_usage="$STATE_ROOT/issue-$issue-usage.txt"
   local plan_file="$(preflight_plan_file "$issue")" attempt=0 protocol_retry=0 max_retries started failure_context='' exhausted=0 exec_rc plan_rc markerless_clean_exit=0 markerless_merged_tsv=''
+  local plan_stage_retry=0 plan_stage_max plan_failed=0 plan_failed_exhaustion=0
   local resume_context; resume_context=$(resume_context_block "$branch")
   max_retries=$(agent_plan_max_retries)
+  plan_stage_max=$max_retries
   while :; do
     # A pause/abort's cooperative stop request is checked only at this stage
     # boundary (never mid-provider-call): an authorized operator's own
@@ -786,9 +788,23 @@ worker() {
       break
     fi
     if (( plan_rc != 0 )); then
-      : > "$plan_file"
-      say 'plan段の全候補が失敗したため、plan結果なしでexecへ進みます。' >&2
+      # A plan failure must never fall through to exec with an empty plan --
+      # that would bypass scope refinement, preflight, workload, and
+      # decomposition simultaneously. Retry the plan stage itself in-turn
+      # (bounded by plan_stage_max, reusing the replan retry budget so no new
+      # config key is introduced) before treating it as terminal.
+      if (( plan_stage_retry < plan_stage_max )); then
+        plan_stage_retry=$((plan_stage_retry + 1))
+        say "plan段が失敗したため、同turn内で再試行します（$plan_stage_retry/$plan_stage_max）。" >&2
+        continue
+      fi
+      plan_failed=1
+      agent_any_pool_marker_active && plan_failed_exhaustion=1
+      exit_code=$STAGE_EXIT_CODE
+      progress_touch "$issue" plan-failed
+      break
     fi
+    plan_stage_retry=0
     worker_refine_scope_from_plan "$issue" "$plan_file"
     progress_touch "$issue" preflight
     if ! preflight_gate "$issue" "$plan_file"; then
@@ -1003,6 +1019,19 @@ worker() {
     set_issue_state "$issue" needs-input
     project_sync_state "$issue" needs-input
     comment_issue "$issue" "<!-- agentic-loop:declined worker=$worker -->\nWorkerはこのIssueを実施不要または実施不能と提案しました（理由は直前のcommentを参照）。worker自身はcloseしません。認可済みの運用者が確認し、必要なら \`bin/agentic-loop dispose $issue --reason cancelled\` 等で終了してください。"
+  elif (( plan_failed )); then
+    if (( plan_failed_exhaustion )); then
+      clear_attempts "$issue"
+      progress_touch "$issue" queued
+      set_issue_state "$issue" queued
+      project_sync_state "$issue" queued
+      comment_issue "$issue" "<!-- agentic-loop:exhausted worker=$worker pool=${LAST_EXHAUSTED_POOL:-} reason=plan-failure -->\nplan段が $plan_stage_max 回連続で失敗しましたが、provider poolの枯渇markerが有効なため試行回数を消費せずIssueを再キューします。空計画でexecへは進んでいません。preflight/workload/decomposition/scope精緻化はplan成功後に評価します。全プールが利用不可の間だけSupervisorのclaimを一時停止し、枠回復後に自動再開します。"
+    else
+      progress_touch "$issue" failed
+      set_issue_state "$issue" failed
+      project_sync_state "$issue" failed
+      comment_issue "$issue" "<!-- agentic-loop:failed worker=$worker reason=plan-failure exit=$exit_code -->\nplan段が $plan_stage_max 回連続で失敗したため、空計画でexecへは進まずこのturnを終了しました。preflight/workload/decomposition/scope精緻化はplan成功後にのみ評価されます。Supervisorが自動的に再試行し、上限回数に達してもcloseせず \`agent:parked\`（人間トリアージ待ち）へ移します。"
+    fi
   elif (( exhausted )); then
     clear_attempts "$issue"
     progress_touch "$issue" queued
