@@ -719,10 +719,7 @@ case "${1:-} ${2:-}" in
       else awk -v n="$issue" '$1 == n {print "agent:" $2}' "$state"; fi
     elif [[ $endpoint =~ ^commits/.+/check-runs$ ]]; then
       jqarg=''
-      for ((i = 1; i <= $#; i++)); do
-        if [[ ${!i} == --jq ]]; then j=$((i + 1)); jqarg=${!j};
-        elif [[ ${!i} == --jq=* ]]; then jqarg=${!i#--jq=}; fi
-      done
+      for ((i = 1; i <= $#; i++)); do [[ ${!i} == --jq ]] && { j=$((i + 1)); jqarg=${!j}; }; done
       if [[ $jqarg == '.check_runs' ]]; then
         # trace.sh's trace_evaluate (Issue #53): distinct from resume_probe's
         # multi-line check-status jq matched in the else branch below.
@@ -730,11 +727,10 @@ case "${1:-} ${2:-}" in
       else
         if [[ -n ${FAKE_RESUME_CHECK_RUNS:-} ]]; then
           # Keep the production JSON boundary: evaluate the exact jq program
-          # received from the caller instead of duplicating its logic here.
-          printf '%s\n' "$FAKE_RESUME_CHECK_RUNS" | jq -r "$jqarg" ||
-            printf '%s\n' "$FAKE_RESUME_CHECK_RUNS" | jq -r '.check_runs | map(.conclusion) | if any(. == "failure" or . == "timed_out" or . == "cancelled") then "failure" elif any(. == "in_progress" or . == "queued") then "in_progress" elif (length > 0 and all(. == "success" or . == "neutral" or . == "skipped")) then "success" else "unknown" end'
-        elif [[ -n ${FAKE_RESUME_CHECKS:-} ]]; then
-          printf '%s\n' "$FAKE_RESUME_CHECKS"
+          # received from the caller instead of duplicating its logic here. A
+          # non-zero exit here must fail the test, not fall back to a
+          # test-side reimplementation that could mask a broken production jq.
+          printf '%s\n' "$FAKE_RESUME_CHECK_RUNS" | jq -r "$jqarg"
         fi
       fi
     elif [[ $endpoint =~ ^pulls/[0-9]+/files$ ]]; then
@@ -4546,7 +4542,8 @@ printf '17 running open\n' > "$state"
 : > "$FAKE_GH_ROOT/codex-calls"
 git -C "$target" worktree add --quiet -b agent/issue-17 "$target-worktrees/issue-17" origin/main
 git -C "$target-worktrees/issue-17" commit --quiet --allow-empty -m 'in-progress work'
-FAKE_RESUME_OPEN_PR=42 FAKE_RESUME_OPEN_URL="https://github.example/acme/installed-project/pull/42" FAKE_RESUME_CHECKS=in_progress \
+FAKE_RESUME_OPEN_PR=42 FAKE_RESUME_OPEN_URL="https://github.example/acme/installed-project/pull/42" \
+  FAKE_RESUME_CHECK_RUNS='{"check_runs":[{"status":"queued","conclusion":null}]}' \
   "$target/bin/agentic-loop" _worker 17 resume-open-worker
 # shellcheck disable=SC2016 # Backticks are literal Markdown in the expected provider prompt.
 assert_contains "$FAKE_GH_ROOT/codex-calls" '既存のbranch `agent/issue-17` とPR #42 を再利用してください' 'an open-PR resume did not inject reuse instructions into the provider prompt'
@@ -4576,6 +4573,9 @@ resume_check_case 1701 '{"check_runs":[{"status":"completed","conclusion":"succe
 resume_check_case 1702 '{"check_runs":[{"status":"queued","conclusion":null}]}' in_progress
 resume_check_case 1703 '{"check_runs":[{"status":"completed","conclusion":"timed_out"}]}' failure
 resume_check_case 1704 '{"check_runs":[]}' unknown
+# A pending check-run must win even when every other run has already
+# concluded success: status is the pending signal, conclusion is not.
+resume_check_case 1705 '{"check_runs":[{"status":"completed","conclusion":"success"},{"status":"in_progress","conclusion":null}]}' in_progress
 
 # An open PR that is behind the fetched default branch must be distinguished
 # from an ahead-only PR even if its checks are already green.  The provider is
@@ -4593,7 +4593,8 @@ git -C "$target" commit --quiet --allow-empty -m 'advanced default branch'
 git -C "$target" push --quiet origin main
 base_head=$(git -C "$target" rev-parse HEAD)
 : > "$FAKE_GH_ROOT/calls"
-FAKE_RESUME_OPEN_PR=43 FAKE_RESUME_OPEN_URL="https://github.example/acme/installed-project/pull/43" FAKE_RESUME_CHECKS=success \
+FAKE_RESUME_OPEN_PR=43 FAKE_RESUME_OPEN_URL="https://github.example/acme/installed-project/pull/43" \
+  FAKE_RESUME_CHECK_RUNS='{"check_runs":[{"status":"completed","conclusion":"success"}]}' \
   FAKE_RESUME_BASE_SHA=$base_head FAKE_RESUME_HEAD_SHA=$resume_head FAKE_RESUME_MERGEABLE=true FAKE_RESUME_MERGEABLE_STATE=clean \
   "$target/bin/agentic-loop" _worker 18 resume-behind-worker
 assert_contains "$FAKE_GH_ROOT/codex-calls" 'phase: needs-rebase' 'a behind open PR was not routed to needs-rebase'
@@ -4622,7 +4623,8 @@ git -C "$target" add resume-conflict.txt
 git -C "$target" commit --quiet -m 'default side conflict'
 git -C "$target" push --quiet origin main
 base_head=$(git -C "$target" rev-parse HEAD)
-FAKE_RESUME_OPEN_PR=44 FAKE_RESUME_OPEN_URL="https://github.example/acme/installed-project/pull/44" FAKE_RESUME_CHECKS=success \
+FAKE_RESUME_OPEN_PR=44 FAKE_RESUME_OPEN_URL="https://github.example/acme/installed-project/pull/44" \
+  FAKE_RESUME_CHECK_RUNS='{"check_runs":[{"status":"completed","conclusion":"success"}]}' \
   FAKE_RESUME_BASE_SHA=$base_head FAKE_RESUME_HEAD_SHA=$resume_head FAKE_RESUME_MERGEABLE=false FAKE_RESUME_MERGEABLE_STATE=dirty \
   "$target/bin/agentic-loop" _worker 19 resume-conflict-worker
 assert_contains "$FAKE_GH_ROOT/codex-calls" 'phase: needs-rebase' 'an explicitly unmergeable PR was not routed to needs-rebase'
@@ -4643,7 +4645,8 @@ git -C "$target" add resume-conflict.txt
 git -C "$target" commit --quiet -m 'second default conflict'
 git -C "$target" push --quiet origin main
 base_head=$(git -C "$target" rev-parse HEAD)
-FAKE_RESUME_OPEN_PR=45 FAKE_RESUME_OPEN_URL="https://github.example/acme/installed-project/pull/45" FAKE_RESUME_CHECKS=success \
+FAKE_RESUME_OPEN_PR=45 FAKE_RESUME_OPEN_URL="https://github.example/acme/installed-project/pull/45" \
+  FAKE_RESUME_CHECK_RUNS='{"check_runs":[{"status":"completed","conclusion":"success"}]}' \
   FAKE_RESUME_BASE_SHA=$base_head FAKE_RESUME_HEAD_SHA=$resume_head FAKE_RESUME_MERGEABLE=null FAKE_RESUME_MERGEABLE_STATE=unknown \
   "$target/bin/agentic-loop" _worker 20 resume-unknown-worker
 assert_contains "$FAKE_GH_ROOT/codex-calls" 'phase: needs-rebase' 'merge-tree did not classify an unknown conflicting PR as needs-rebase'

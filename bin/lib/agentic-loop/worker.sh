@@ -485,6 +485,10 @@ resume_probe() {
         fi
         ;;
     esac
+    # status and conclusion are evaluated as separate signals: a completed
+    # check-run's status is always "completed", so folding it into the same
+    # success list would make the all(...) success test permanently false
+    # once any run finishes. status only ever needs to detect pending runs.
     RESUME_CHECKS=$(repo_api "commits/$RESUME_HEAD/check-runs" --jq '
       ([.check_runs[].conclusion] | map(select(. != null))) as $conclusions |
       ([.check_runs[].status] | map(select(. != null))) as $statuses |
