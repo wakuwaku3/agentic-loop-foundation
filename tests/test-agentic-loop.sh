@@ -173,6 +173,30 @@ workload_plan_body() { printf '## 計画\n\n```agentic-loop:workload\n%s\n```\n\
 
 mkdir -p "$FAKE_BIN" "$FAKE_GH_ROOT"
 
+# External CLI contract lint: detect known-invalid forms while allowing
+# typed flags, body files, literal @ text, and Markdown examples.
+cli_contract_fixture="$TEST_ROOT/cli-contracts.sh"
+cat > "$cli_contract_fixture" <<'EOF'
+yq --arg k a '.children[]'
+gh issue create --body "@/tmp/issue_body.md"
+gh api -f count=3
+gh issue create --body-file body.txt
+printf '%s\n' 'email@example.test and @path are literal text'
+```sh
+gh issue create --body "@path"
+```
+EOF
+cli_contract_output=$("$PROJECT_ROOT/scripts/lint-cli-contracts.sh" "$cli_contract_fixture")
+grep -Fq 'yq flag --arg' <<< "$cli_contract_output" || fail 'CLI contract lint missed yq --arg fixture'
+grep -Fq 'gh --body の @path' <<< "$cli_contract_output" || fail 'CLI contract lint missed gh --body @path fixture'
+grep -Fq 'gh api の型付き値' <<< "$cli_contract_output" || fail 'CLI contract lint missed gh api -f typed value fixture'
+if grep -Fq "$cli_contract_fixture:5:" <<< "$cli_contract_output"; then
+  fail 'CLI contract lint falsely flagged valid @ text or body-file'
+fi
+if grep -Fq "$cli_contract_fixture:7:" <<< "$cli_contract_output"; then
+  fail 'CLI contract lint falsely flagged Markdown code block'
+fi
+
 # Disable git auto-maintenance globally for the whole harness: commit, push,
 # and receive-pack spawn `git maintenance run --auto --detach` in the
 # background, which repacks fixture repos while a later step clones them and

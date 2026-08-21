@@ -34,7 +34,7 @@ readonly SHARED_FILES=(
 )
 readonly INIT_FILES=(
   README.md docs/development.md .editorconfig .gitignore Makefile install.sh devbox.json devbox.lock
-  docs/decisions/0001-minimal-foundation.md scripts/format.sh scripts/lint.sh scripts/check-environment.sh scripts/install-target.sh
+  docs/decisions/0001-minimal-foundation.md scripts/format.sh scripts/lint.sh scripts/lint-cli-contracts.sh scripts/check-environment.sh scripts/install-target.sh
   tests/test-agentic-loop.sh tests/run-e2e.sh .github/workflows/ci.yml .github/PULL_REQUEST_TEMPLATE.md
   .agentic-loop/capabilities.toml
   scripts/affected-check.sh tests/impact-map.toml
