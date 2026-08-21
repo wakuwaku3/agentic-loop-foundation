@@ -730,8 +730,9 @@ agent_result_is_budget_stop() {
 
 # Classify a stage result: pool-quota exhaustion vs model-specific failure.
 # Pool exhaustion (quota / 429 / usage limit / insufficient_quota / credit
-# balance, or a non-zero exit with no output -- the latter kept for backward
-# compatibility) pauses that pool and re-queues the Issue. `overloaded` and
+# balance) pauses that pool and re-queues the Issue. A transport failure with
+# no diagnostic is provider error, not evidence that the subscription pool is
+# exhausted. `overloaded` and
 # model-resolution failures are model-specific: the stage moves to the next
 # model in the pool instead of treating the whole subscription as spent.
 #
@@ -750,7 +751,6 @@ agent_result_is_pool_exhausted() {
   (( exit_code != 0 )) || (( provider_error == 1 )) || return 1
   agent_result_is_budget_stop "$result_file" && return 1
   [[ -r $result_file ]] && grep -qiE 'usage limit|rate.?limit|too many requests|(^|[^0-9])429([^0-9]|$)|insufficient_quota|quota exceeded|credit balance' "$result_file" && return 0
-  (( exit_code != 0 )) && [[ ! -s $result_file ]] && return 0
   return 1
 }
 

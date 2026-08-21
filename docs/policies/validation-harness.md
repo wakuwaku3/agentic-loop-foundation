@@ -6,6 +6,23 @@
 
 ## 共通入口と検証層
 
+### fake provider と実CLIの契約照合
+
+fake provider は高速で決定的な故障注入を担うが、実CLIの完全な代替では
+ない。境界ごとに、実CLIで観測した成功・失敗の最小入出力契約を記録し、
+fake fixtureと突き合わせる。対象境界は、終了コードとstdout/stderrの搬送、
+ClaudeのJSON envelopeと `is_error`、Codexの最終メッセージファイル、外部
+CLIの終了コード・標準エラーである。
+今回のdecomposition契約では、mikefarah yq固有の引数差分（Issue #222）も
+この照合対象に含める。
+
+突き合わせは通常の完全テストへ課金呼び出しを混ぜず、実CLIの変更時または
+故障形状追加時に、既存のCodex loginと固定開発環境で一度だけ記録した非秘密
+fixtureを更新し、`devbox run --pure check` 内のfake smoke testで再生する。
+実CLIを利用できない環境では契約を推測で拡張せず、観測不能な差分をIssueに
+残す。fixtureにはCLI version、終了コード、stdout/stderrの有無、JSON schema
+上の判定だけを記録し、prompt、秘密、全文ログは保存しない。
+
 ローカルとCIは、同じリポジトリ内のコード化済み環境と同じ共通入口を使用する。共通入口から呼ぶ処理や依存をCI専用に分岐させてはならず、検証内容の追加・変更は共通入口へ反映する。このリポジトリの完全チェックとCIの共通入口は `devbox run --pure check` とする。
 
 検証を次の層に分ける。
