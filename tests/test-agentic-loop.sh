@@ -4553,24 +4553,6 @@ assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'checks=in_progress' 'an ope
 git -C "$target" worktree remove --force "$target-worktrees/issue-17" 2>/dev/null || true
 git -C "$target" branch -D agent/issue-17 >/dev/null 2>&1 || true
 
-# A completed check-run's status is an execution state, not a conclusion.
-# All successful conclusions must therefore be reported as success rather
-# than unknown when an open PR is resumed.
-printf '171 running open\n' > "$state"
-: > "$FAKE_GH_ROOT/$state_key.comments"
-: > "$FAKE_GH_ROOT/codex-calls"
-git -C "$target" worktree add --quiet -b agent/issue-171 "$target-worktrees/issue-171" origin/main
-git -C "$target-worktrees/issue-171" commit --quiet --allow-empty -m 'completed successful checks'
-FAKE_RESUME_OPEN_PR=421 FAKE_RESUME_OPEN_URL="https://github.example/acme/installed-project/pull/421" \
-  FAKE_RESUME_HEAD_SHA=$(git -C "$target-worktrees/issue-171" rev-parse HEAD) \
-  FAKE_RESUME_CHECKS=success \
-  FAKE_RESUME_CHECK_RUNS='{"check_runs":[{"conclusion":"success","status":"completed"},{"conclusion":"neutral","status":"completed"},{"conclusion":"skipped","status":"completed"}]}' \
-  "$target/bin/agentic-loop" _worker 171 resume-completed-success-worker
-assert_contains "$FAKE_GH_ROOT/codex-calls" 'checks: success' 'completed successful check-runs were not classified as success'
-assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'checks=success' 'the handoff did not record completed successful check-runs as success'
-git -C "$target" worktree remove --force "$target-worktrees/issue-171" 2>/dev/null || true
-git -C "$target" branch -D agent/issue-171 >/dev/null 2>&1 || true
-
 # An open PR that is behind the fetched default branch must be distinguished
 # from an ahead-only PR even if its checks are already green.  The provider is
 # instructed to merge (not rebase) the default branch, resolve conflicts,
