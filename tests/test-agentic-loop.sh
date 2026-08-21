@@ -686,7 +686,11 @@ case "${1:-} ${2:-}" in
         # multi-line check-status jq matched in the else branch below.
         if [[ -n ${FAKE_CHECK_RUNS_FILE:-} ]]; then cat "$FAKE_CHECK_RUNS_FILE"; else printf '[]\n'; fi
       else
-        [[ -n ${FAKE_RESUME_CHECKS:-} ]] && printf '%s\n' "$FAKE_RESUME_CHECKS"
+        if [[ -n ${FAKE_RESUME_CHECK_RUNS:-} ]]; then
+          printf '%s\n' "$FAKE_RESUME_CHECK_RUNS" | jq -r "$jqarg"
+        elif [[ -n ${FAKE_RESUME_CHECKS:-} ]]; then
+          printf '%s\n' "$FAKE_RESUME_CHECKS"
+        fi
       fi
     elif [[ $endpoint =~ ^pulls/[0-9]+/files$ ]]; then
       # trace.sh's trace_evaluate PR changed-files read (Issue #53).
@@ -3918,6 +3922,22 @@ assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'phase=pr-open' 'an open-PR 
 assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'checks=in_progress' 'an open-PR resume check status was not recorded in the handoff'
 git -C "$target" worktree remove --force "$target-worktrees/issue-17" 2>/dev/null || true
 git -C "$target" branch -D agent/issue-17 >/dev/null 2>&1 || true
+
+# A completed check-run's status is an execution state, not a conclusion.
+# All successful conclusions must therefore be reported as success rather
+# than unknown when an open PR is resumed.
+printf '171 running open\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+: > "$FAKE_GH_ROOT/codex-calls"
+git -C "$target" worktree add --quiet -b agent/issue-171 "$target-worktrees/issue-171" origin/main
+git -C "$target-worktrees/issue-171" commit --quiet --allow-empty -m 'completed successful checks'
+FAKE_RESUME_OPEN_PR=421 FAKE_RESUME_OPEN_URL="https://github.example/acme/installed-project/pull/421" \
+  FAKE_RESUME_CHECK_RUNS='{"check_runs":[{"conclusion":"success","status":"completed"},{"conclusion":"neutral","status":"completed"},{"conclusion":"skipped","status":"completed"}]}' \
+  "$target/bin/agentic-loop" _worker 171 resume-completed-success-worker
+assert_contains "$FAKE_GH_ROOT/codex-calls" 'checks: success' 'completed successful check-runs were not classified as success'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'checks=success' 'the handoff did not record completed successful check-runs as success'
+git -C "$target" worktree remove --force "$target-worktrees/issue-171" 2>/dev/null || true
+git -C "$target" branch -D agent/issue-171 >/dev/null 2>&1 || true
 
 # An open PR that is behind the fetched default branch must be distinguished
 # from an ahead-only PR even if its checks are already green.  The provider is

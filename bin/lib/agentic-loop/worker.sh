@@ -453,10 +453,11 @@ resume_probe() {
         ;;
     esac
     RESUME_CHECKS=$(repo_api "commits/$RESUME_HEAD/check-runs" --jq '
-      ([.check_runs[].conclusion, .check_runs[].status] | map(select(. != null))) as $s |
-      if ($s | any(. == "failure" or . == "timed_out" or . == "cancelled")) then "failure"
-      elif ($s | any(. == "in_progress" or . == "queued")) then "in_progress"
-      elif (($s | length) > 0 and ($s | all(. == "success" or . == "neutral" or . == "skipped"))) then "success"
+      ([.check_runs[].conclusion] | map(select(. != null))) as $conclusions |
+      ([.check_runs[].status] | map(select(. != null))) as $statuses |
+      if ($conclusions | any(. == "failure" or . == "timed_out" or . == "cancelled")) then "failure"
+      elif ($statuses | any(. == "in_progress" or . == "queued")) then "in_progress"
+      elif (($conclusions | length) > 0 and ($conclusions | all(. == "success" or . == "neutral" or . == "skipped"))) then "success"
       else "unknown" end
     ' 2>/dev/null) || true
     [[ -n $RESUME_CHECKS ]] || RESUME_CHECKS=unknown
