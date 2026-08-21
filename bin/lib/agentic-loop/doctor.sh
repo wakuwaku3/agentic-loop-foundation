@@ -53,6 +53,26 @@ doctor_residual_belongs_to_running() {
 }
 
 
+# Compare a band's real observed stage-duration distribution (from
+# events_stage_duration_samples, see worker_state.sh) against the currently
+# applied stall threshold (Issue #280, ADR 0032). Below CALIBRATION_MIN_SAMPLES
+# this stays a success ("not enough evidence yet"), never a silent skip, so a
+# fresh install is not misread as calibrated. threshold=0 (band disabled) is
+# also left as success -- there is nothing to calibrate.
+doctor_calibration_check() {
+  local band_label=$1 dist=$2 threshold=$3 threshold_name=$4 n mean p50 p90 max
+  IFS=$'\t' read -r n mean p50 p90 max <<< "$dist"
+  n=${n:-0}
+  if (( n < CALIBRATION_MIN_SAMPLES )); then
+    doctor_add success "stall閾値の実測整合（${band_label}）" "実測sampleが${CALIBRATION_MIN_SAMPLES}件未満のため判定していません（n=${n}）。" '対応は不要です。events.logにsampleが積み重なると自動的に判定されます。'
+  elif (( threshold > 0 && p90 >= threshold )); then
+    doctor_add warning "stall閾値の実測整合（${band_label}）" "実測 n=${n} mean=${mean}s p50=${p50}s p90=${p90}s max=${max}s に対し、現在の${threshold_name}=${threshold}秒はp90以下で、誤ってstalledと通知される恐れがあります。" "docs/operations/issue-queue.md を確認し、${threshold_name} を実測p90（${p90}秒）より大きい値へ見直してください。"
+  else
+    doctor_add success "stall閾値の実測整合（${band_label}）" "実測 n=${n} p90=${p90}s は現在の${threshold_name}=${threshold}秒と整合しています。" '対応は不要です。'
+  fi
+}
+
+
 doctor_collect() {
   local origin='' default_branch='' hooks='' unit_dir unit issue_worktrees='' agent_branches='' log_files=''
   if [[ -n $CONFIG_ERROR ]]; then
@@ -65,18 +85,40 @@ doctor_collect() {
     doctor_non_negative_config API_RETRY_BASE_SECONDS "$API_RETRY_BASE_SECONDS"
     doctor_positive_config MAX_ATTEMPTS "$MAX_ATTEMPTS"; doctor_non_negative_config RETRY_COOLDOWN_SECONDS "$RETRY_COOLDOWN_SECONDS"
     doctor_non_negative_config WORKER_TIMEOUT_SECONDS "$WORKER_TIMEOUT_SECONDS"
-    if (( WORKER_TIMEOUT_SECONDS > 0 && WORKER_TIMEOUT_SECONDS < WORKER_TIMEOUT_MIN_SAFE_SECONDS )); then
-      doctor_add warning '設定値: WORKER_TIMEOUT_SECONDS' '正常に進行中のworkerを誤って停止する恐れがあります。' "docs/operations/issue-queue.md を確認し、worker_timeout_seconds を ${WORKER_TIMEOUT_MIN_SAFE_SECONDS}秒以上、または実測の所要時間に基づく値へ見直してください。"
-    fi
     doctor_non_negative_config WORKER_ORPHAN_GRACE_SECONDS "$WORKER_ORPHAN_GRACE_SECONDS"
     doctor_non_negative_config STALL_SECONDS "$STALL_SECONDS"
     doctor_non_negative_config PROVIDER_STALL_SECONDS "$PROVIDER_STALL_SECONDS"
-    if (( PROVIDER_STALL_SECONDS > 0 && WORKER_TIMEOUT_SECONDS > 0 && PROVIDER_STALL_SECONDS >= WORKER_TIMEOUT_SECONDS )); then
-      doctor_add warning '設定値: PROVIDER_STALL_SECONDS' 'provider stageのstall検出が実行時間上限と同時または後に発火し、観測の価値が失われます。' "docs/operations/issue-queue.md を確認し、queue.provider_stall_seconds を queue.worker_timeout_seconds（現在 ${WORKER_TIMEOUT_SECONDS}秒）より小さい値に見直してください。"
+    # Time constant invariants (Issue #280, ADR 0032): timing_invariant_violations
+    # is the single source of truth, also used by `_timing-check --committed`
+    # (scripts/lint.sh's hard gate) and by tests. Here it runs against the live
+    # merged config (CONFIG_LOCAL included), and every violation stays a
+    # warning -- doctor never fails the queue over a tunable timing value.
+    local timing_name timing_detail timing_remedy timing_label timing_violations=0
+    while IFS=$'\t' read -r timing_name timing_detail timing_remedy; do
+      [[ -n $timing_name ]] || continue
+      timing_violations=$((timing_violations + 1))
+      case $timing_name in
+        stall-before-timeout) timing_label='設定値: STALL_SECONDS' ;;
+        provider-stall-before-timeout | stall-band-order) timing_label='設定値: PROVIDER_STALL_SECONDS' ;;
+        worker-timeout-too-low) timing_label='設定値: WORKER_TIMEOUT_SECONDS' ;;
+        heartbeat-lease-margin) timing_label='設定値: LEASE_SECONDS' ;;
+        pause-grace-before-timeout) timing_label='設定値: PAUSE_GRACE_SECONDS' ;;
+        poll-backoff-order) timing_label='設定値: POLL_SECONDS' ;;
+        exhaustion-backoff-order) timing_label='設定値: EXHAUSTION_BACKOFF_MAX_SECONDS' ;;
+        orphan-grace-before-timeout) timing_label='設定値: WORKER_ORPHAN_GRACE_SECONDS' ;;
+        *) timing_label='設定値: 時間定数' ;;
+      esac
+      doctor_add warning "$timing_label" "$timing_detail" "$timing_remedy"
+    done < <(timing_invariant_violations "$STALL_SECONDS" "$PROVIDER_STALL_SECONDS" "$WORKER_TIMEOUT_SECONDS" "$LEASE_SECONDS" "$PAUSE_GRACE_SECONDS" "$POLL_SECONDS" "$POLL_MAX_SECONDS" "$WORKER_ORPHAN_GRACE_SECONDS")
+    if (( timing_violations == 0 )); then
+      doctor_add success '時間定数の不変条件' '時間定数間の既知の関係はすべて健全です。' '対応は不要です。'
     fi
-    if (( PROVIDER_STALL_SECONDS > 0 && STALL_SECONDS > 0 && PROVIDER_STALL_SECONDS < STALL_SECONDS )); then
-      doctor_add warning '設定値: PROVIDER_STALL_SECONDS' "非providerのstall閾値（queue.stall_seconds=${STALL_SECONDS}秒）より小さく、帯が逆転しています。" 'docs/operations/issue-queue.md を確認し、queue.provider_stall_seconds を queue.stall_seconds 以上に見直してください。'
-    fi
+    local calib_samples calib_provider_dist calib_nonprovider_dist
+    calib_samples=$(events_stage_duration_samples)
+    calib_provider_dist=$(awk -F'\t' '$1 == "provider" { print $2 }' <<< "$calib_samples" | metrics_distribution)
+    calib_nonprovider_dist=$(awk -F'\t' '$1 == "non-provider" { print $2 }' <<< "$calib_samples" | metrics_distribution)
+    doctor_calibration_check 'provider stage' "$calib_provider_dist" "$PROVIDER_STALL_SECONDS" 'queue.provider_stall_seconds'
+    doctor_calibration_check '非providerのstage' "$calib_nonprovider_dist" "$STALL_SECONDS" 'queue.stall_seconds'
     doctor_enum_config UNKNOWN_SCOPE "$UNKNOWN_SCOPE" isolated exclusive open
     doctor_enum_config TRACEABILITY "$TRACEABILITY" require warn off
     if [[ $TRACEABILITY == require || $TRACEABILITY == warn || $TRACEABILITY == off ]]; then
