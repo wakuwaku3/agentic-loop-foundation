@@ -20,7 +20,8 @@ required=(AGENTS.md README.md Makefile .editorconfig .gitignore .codex/config.to
   docs/policies/postmortem.md docs/decisions/0026-postmortem-closed-loop.md bin/lib/agentic-loop/postmortem.sh docs/operations/postmortem.md
   scripts/upgrade/migrations/0007-postmortem-config.sh .agents/skills/postmortem/SKILL.md .agents/skills/postmortem/agents/openai.yaml .claude/skills/postmortem/SKILL.md
   docs/decisions/0030-lost-requirement-detection.md .claude/hooks/require-gh-body-file.sh
-  docs/decisions/0031-stage-stall-threshold-and-provider-progress-signal.md)
+  docs/decisions/0031-stage-stall-threshold-and-provider-progress-signal.md
+  docs/decisions/0032-time-constant-invariants-and-calibration.md)
 for file in "${required[@]}"; do
   [[ -f $file ]] || { printf 'Missing required file: %s\n' "$file" >&2; exit 1; }
 done
@@ -779,5 +780,9 @@ if grep -Fq 'state=closed' <<< "$workload_fn_body"; then
   exit 1
 fi
 ./bin/agentic-loop workload || { printf 'bin/agentic-loop workload detected an unannotated finite-resource/scalability violation.\n' >&2; exit 1; }
+
+# --- time constant invariants (Issue #280, ADR 0032) ------------------------
+grep -Fq 'timing_invariant_violations' bin/lib/agentic-loop/config.sh || { printf 'Time constant invariant check is missing.\n' >&2; exit 1; }
+./bin/agentic-loop _timing-check --committed || { printf '.agentic-loop.toml violates a time constant invariant (see bin/agentic-loop _timing-check --committed).\n' >&2; exit 1; }
 
 printf 'Lint passed.\n'
