@@ -24,7 +24,7 @@
 
 ## CIと実行条件
 
-すべての自動テストはリポジトリ共通の検証入口から実行できなければならない。CIの採否と実行条件は[検証ハーネスポリシー](validation-harness.md)に従い、public repositoryではpushとpull requestでCIがその入口を実行する。このリポジトリの共通入口は、固定された開発環境で `make check` を呼び出す `devbox run --pure check` とする。
+すべての自動テストはリポジトリ共通の検証入口から実行できなければならない。CIの採否と実行条件は[検証ハーネスポリシー](validation-harness.md)に従い、public repositoryではpushとpull requestでCIがその入口を実行する。このリポジトリの共通入口は、固定された開発環境で `make check` を呼び出す `devbox run --pure check` とする。CIで独立したE2E群をmatrixへ分割する場合も各jobはこの入口を使い、全群の必須checkが揃って初めて完全検証の成功とする。
 
 テストは毎回独立して実行でき、再実行可能で、実行順序や以前の実行結果に依存しないものとする。失敗時は検証した要求と差分を識別できる情報を出力する。
 

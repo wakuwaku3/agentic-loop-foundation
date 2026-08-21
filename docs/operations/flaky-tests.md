@@ -60,7 +60,8 @@ bin/agentic-loop flaky report [--record PATH]
 
 ## 連携
 
-- **CI**: 共通入口は変えない。隔離再実行のぶん実行時間が伸びうるため`.github/workflows/ci.yml`の`timeout-minutes`は20である。
+- **CI**: 共通入口は変えない。隔離再実行とrunner遅延を許容しつつ上限を維持するため`.github/workflows/ci.yml`の`timeout-minutes`は30である。
+- **CI matrix**: `AGENTIC_LOOP_TEST_GROUP`は`tests/run-e2e.sh`の既定群を1群へ絞る。明示的な`--groups`がある場合はそちらを優先する。ローカルの共通入口では環境変数を設定せず全4群を実行し、CIでは固定matrixの各jobが1群ずつ同じ共通入口から実行する。
 - **Projects Recovery View**: `Recovery`のfilterに`flaky` labelが含まれ、未修復の修復Issueが回復導線に現れる。
 - **自己診断**: `diagnose-codebase` skillは`bin/agentic-loop flaky --format json`を追加の証跡sourceとして使う。
 - **Issueキュー**: 修復Issueは通常の`agent:queued`としてSupervisorが処理する。`doctor`はregistryの期限切れを失敗、残期間3日以内を警告として表示する。

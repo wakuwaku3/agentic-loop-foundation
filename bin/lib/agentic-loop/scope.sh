@@ -293,7 +293,10 @@ issue_genuinely_running() {
   worker_pid_live "$issue" && return 0
   now=$(date +%s)
   since=$(recent_lease_since "$now")
-  body=$(repo_api "issues/$issue/comments" --method GET -f since="$since" -f per_page=100 --paginate --jq '[.[].body | select(contains("agentic-loop:lease"))] | last // ""' 2>/dev/null | tail -n 1 || true)
+  if ! body=$(latest_lease_body "$issue" "$since"); then
+    # A failed lease read must block claiming until GitHub can be read again.
+    return 0
+  fi
   expires=$(printf '%s\n' "$body" | sed -n 's/.*expires=\([0-9][0-9]*\).*/\1/p' | head -n 1)
   [[ -n $expires && $expires -ge $now ]]
 }

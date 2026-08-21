@@ -3,6 +3,8 @@ set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
+./scripts/lint-cli-contracts.sh
+
 required=(AGENTS.md README.md Makefile .editorconfig .gitignore .codex/config.toml .claude/settings.json .claude/hooks/confirm-main-worktree-edit.sh install.sh devbox.json devbox.lock docs/policies/cost.md docs/policies/testing.md docs/policies/external-environment.md docs/policies/development-environment.md docs/policies/ai-tool-neutrality.md docs/policies/github-language.md docs/policies/validation-harness.md docs/policies/continuous-delivery.md docs/decisions/0002-github-issue-queue.md docs/decisions/0003-supervisor-resilience-and-api-budget.md docs/decisions/0004-worker-resume-and-handoff.md docs/decisions/0005-status-observability.md docs/decisions/0006-worker-hang-timeout.md docs/decisions/0007-loop-metrics.md docs/decisions/0009-foundation-upgrade.md docs/decisions/0010-authorized-issue-disposition.md docs/decisions/0012-provider-pool-fallback.md docs/decisions/0013-agentic-loop-modules.md docs/decisions/0014-scope-structural-conflict.md docs/decisions/0015-numeric-priority-marker.md docs/decisions/0016-failure-park-not-close.md docs/operations/issue-queue.md docs/operations/codebase-diagnosis.md docs/operations/loop-metrics.md docs/operations/upgrade.md .agentic-loop.toml .agentic-loop/guard-secrets.sh .agentic-loop/update-main.sh .agentic-loop/diagnose-codebase.sh .githooks/pre-commit .githooks/pre-push .agents/skills/submit-requirement/SKILL.md .agents/skills/diagnose-codebase/SKILL.md .claude/skills/submit-requirement/SKILL.md .claude/skills/diagnose-codebase/SKILL.md bin/agentic-loop bin/agentic-loop-diagnose bin/lib/agentic-loop/common.sh bin/lib/agentic-loop/config.sh bin/lib/agentic-loop/api.sh bin/lib/agentic-loop/agent.sh bin/lib/agentic-loop/setup.sh bin/lib/agentic-loop/service.sh bin/lib/agentic-loop/status.sh bin/lib/agentic-loop/doctor.sh bin/lib/agentic-loop/upgrade.sh bin/lib/agentic-loop/metrics.sh bin/lib/agentic-loop/project.sh bin/lib/agentic-loop/dispose.sh bin/lib/agentic-loop/worker_state.sh bin/lib/agentic-loop/dependency.sh bin/lib/agentic-loop/scope.sh bin/lib/agentic-loop/priority.sh bin/lib/agentic-loop/supervisor.sh bin/lib/agentic-loop/worker.sh bin/lib/agentic-loop/trace.sh scripts/check-environment.sh scripts/install-target.sh scripts/lib/foundation-files.sh scripts/upgrade-target.sh scripts/upgrade/migrations/0001-foundation-config-section.sh scripts/upgrade/migrations/0002-traceability-config.sh
   docs/decisions/0017-requirement-traceability.md docs/operations/traceability.md .github/PULL_REQUEST_TEMPLATE.md
   docs/decisions/0018-repository-capability-manifest.md docs/operations/capability-manifest.md bin/lib/agentic-loop/capability.sh
@@ -157,7 +159,7 @@ grep -Fq 'docs/decisions/0015-numeric-priority-marker.md' scripts/lib/foundation
   printf 'Numeric-priority ADR is not distributed.\n' >&2
   exit 1
 }
-grep -Fq 'devbox run --pure check' .github/workflows/ci.yml || {
+grep -Fq 'devbox run --pure -- env AGENTIC_LOOP_TEST_GROUP=${{ matrix.group }} make check' .github/workflows/ci.yml || {
   printf 'CI does not use the common Devbox entry point.\n' >&2
   exit 1
 }
@@ -521,8 +523,27 @@ if grep -Fq -- '--skip)' scripts/flaky.sh tests/run-e2e.sh; then
   printf 'flaky.sh/run-e2e.sh must not gain a --skip interface.\n' >&2
   exit 1
 fi
-grep -Eq '^[[:space:]]*timeout-minutes:[[:space:]]*20$' .github/workflows/ci.yml || {
+grep -Eq '^[[:space:]]*timeout-minutes:[[:space:]]*30$' .github/workflows/ci.yml || {
   printf 'CI timeout-minutes was not raised for isolated flaky retries (see ADR 0022).\n' >&2
+  exit 1
+}
+ci_push_block=$(sed -n '/^  push:$/,/^  pull_request:$/p' .github/workflows/ci.yml)
+[[ $ci_push_block == $'  push:\n    branches:\n      - main\n  pull_request:' ]] || {
+  printf 'CI push trigger must be restricted to main to avoid duplicate PR checks.\n' >&2
+  exit 1
+}
+grep -Eq '^[[:space:]]*pull_request:[[:space:]]*$' .github/workflows/ci.yml || {
+  printf 'CI pull_request trigger is required for PR checks.\n' >&2
+  exit 1
+}
+for group in queue lifecycle auxiliary upgrade; do
+  grep -Eq "^[[:space:]]+-[[:space:]]+$group[[:space:]]*$" .github/workflows/ci.yml || {
+    printf 'CI matrix is missing required E2E group: %s\n' "$group" >&2
+    exit 1
+  }
+done
+grep -Fq 'devbox run --pure -- env AGENTIC_LOOP_TEST_GROUP=${{ matrix.group }} make check' .github/workflows/ci.yml || {
+  printf 'CI matrix group is not connected to the common check entry point.\n' >&2
   exit 1
 }
 grep -Fq '"flaky"' bin/lib/agentic-loop/setup.sh || { printf 'flaky label is not created by setup.\n' >&2; exit 1; }
