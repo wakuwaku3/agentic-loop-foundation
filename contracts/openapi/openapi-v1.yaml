@@ -23,6 +23,22 @@ paths:
       security: [{bearerAuth: []}]
       requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/CaptureRequest'}}}}
       responses: {'201': {description: captured, content: {application/json: {schema: {$ref: '#/components/schemas/CaptureResponse'}}}}, '400': {$ref: '#/components/responses/Error'}, '401': {$ref: '#/components/responses/Error'}, '403': {$ref: '#/components/responses/Error'}, '405': {$ref: '#/components/responses/Error'}, '413': {$ref: '#/components/responses/Error'}, '415': {$ref: '#/components/responses/Error'}, '500': {$ref: '#/components/responses/Error'}, '503': {$ref: '#/components/responses/Error'}}
+  /v1/runner/enrollment:
+    post:
+      operationId: issueRunnerEnrollment
+      security: [{bearerAuth: []}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/RunnerEnrollmentRequest'}}}}
+      responses: {'201': {description: one-time enrollment token}, '400': {$ref: '#/components/responses/Error'}, '401': {$ref: '#/components/responses/Error'}, '403': {$ref: '#/components/responses/Error'}}
+  /v1/runner/enrollment/challenge:
+    post:
+      operationId: beginRunnerEnrollment
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/RunnerChallengeRequest'}}}}
+      responses: {'200': {description: Ed25519 challenge}, '401': {$ref: '#/components/responses/Error'}, '503': {$ref: '#/components/responses/Error'}}
+  /v1/runner/enrollment/complete:
+    post:
+      operationId: completeRunnerEnrollment
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/RunnerCompleteRequest'}}}}
+      responses: {'200': {description: short-lived runner session}, '401': {$ref: '#/components/responses/Error'}, '503': {$ref: '#/components/responses/Error'}}
   /v1/requirements/{requirement_id}:
     get:
       operationId: getRequirement
@@ -119,6 +135,21 @@ components:
       additionalProperties: false
       required: [request_id, text]
       properties: {request_id: {type: string}, requirement_id: {type: string}, text: {type: string}}
+    RunnerEnrollmentRequest:
+      type: object
+      additionalProperties: false
+      required: [runner_id]
+      properties: {runner_id: {type: string}}
+    RunnerChallengeRequest:
+      type: object
+      additionalProperties: false
+      required: [enrollment_token, public_key]
+      properties: {enrollment_token: {type: string}, public_key: {type: string, description: base64 Ed25519 public key}}
+    RunnerCompleteRequest:
+      type: object
+      additionalProperties: false
+      required: [challenge_id, signature]
+      properties: {challenge_id: {type: string}, signature: {type: string, description: base64url Ed25519 signature}}
     ControlRequest:
       type: object
       additionalProperties: false

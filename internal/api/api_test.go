@@ -1,6 +1,8 @@
 package api_test
 
 import (
+	"crypto/ed25519"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -10,6 +12,7 @@ import (
 
 	"github.com/takushi/agentic-loop-foundation/v2/internal/api"
 	"github.com/takushi/agentic-loop-foundation/v2/internal/application"
+	"github.com/takushi/agentic-loop-foundation/v2/internal/runner"
 	"github.com/takushi/agentic-loop-foundation/v2/internal/store/memory"
 )
 
@@ -32,7 +35,11 @@ func testHandler(t *testing.T) http.Handler {
 		t.Fatal(err)
 	}
 	auth := api.BearerAuthenticator{"owner": {Role: application.RoleOwner, Subject: "owner"}, "runner": {Role: application.RoleRunner, Subject: "runner", RunnerID: "runner-1"}}
-	return api.New(api.Config{Authenticator: auth, Service: svc, AllowedOrigins: []string{"https://console.example"}})
+	enrollment, err := runner.NewService(runner.NewMemoryStore())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return api.New(api.Config{Authenticator: auth, Service: svc, RunnerEnrollment: enrollment, AllowedOrigins: []string{"https://console.example"}})
 }
 func call(h http.Handler, method, path, body, token string) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(method, path, strings.NewReader(body))
@@ -156,5 +163,48 @@ func TestRouteContractErrorsAndRunnerPermitRole(t *testing.T) {
 	large := strings.Repeat("x", 1<<20)
 	if w := call(h, http.MethodPost, "/v1/requirements", `{"request_id":"large","text":"`+large+`"}`, "owner"); w.Code != 413 {
 		t.Fatal(w.Code)
+	}
+}
+
+func TestRunnerEnrollmentHTTPChallengeFlow(t *testing.T) {
+	pub, private, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := testHandler(t)
+	issue := call(h, http.MethodPost, "/v1/runner/enrollment", `{"runner_id":"runner-http"}`, "owner")
+	if issue.Code != http.StatusCreated {
+		t.Fatalf("issue=%d %s", issue.Code, issue.Body.String())
+	}
+	var issued struct {
+		Token string `json:"enrollment_token"`
+	}
+	if err := json.Unmarshal(issue.Body.Bytes(), &issued); err != nil {
+		t.Fatal(err)
+	}
+	challenge := call(h, http.MethodPost, "/v1/runner/enrollment/challenge", `{"enrollment_token":"`+issued.Token+`","public_key":"`+base64.RawStdEncoding.EncodeToString(pub)+`"}`, "")
+	if challenge.Code != http.StatusOK {
+		t.Fatalf("challenge=%d %s", challenge.Code, challenge.Body.String())
+	}
+	var c struct {
+		ID        string    `json:"challenge_id"`
+		RunnerID  string    `json:"runner_id"`
+		Nonce     string    `json:"nonce"`
+		Method    string    `json:"method"`
+		Path      string    `json:"path"`
+		IssuedAt  time.Time `json:"issued_at"`
+		ExpiresAt time.Time `json:"expires_at"`
+	}
+	if err := json.Unmarshal(challenge.Body.Bytes(), &c); err != nil {
+		t.Fatal(err)
+	}
+	nonce, err := base64.RawURLEncoding.DecodeString(c.Nonce)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sig := ed25519.Sign(private, runner.ChallengeMessage(runner.Challenge{ID: c.ID, RunnerID: c.RunnerID, Nonce: nonce, Method: c.Method, Path: c.Path, IssuedAt: c.IssuedAt, ExpiresAt: c.ExpiresAt}))
+	complete := call(h, http.MethodPost, "/v1/runner/enrollment/complete", `{"challenge_id":"`+c.ID+`","signature":"`+base64.RawURLEncoding.EncodeToString(sig)+`"}`, "")
+	if complete.Code != http.StatusOK || !strings.Contains(complete.Body.String(), "session_token") {
+		t.Fatalf("complete=%d %s", complete.Code, complete.Body.String())
 	}
 }

@@ -3,7 +3,9 @@ package api
 
 import (
 	"context"
+	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -16,6 +18,7 @@ import (
 
 	"github.com/takushi/agentic-loop-foundation/v2/internal/application"
 	"github.com/takushi/agentic-loop-foundation/v2/internal/domain"
+	"github.com/takushi/agentic-loop-foundation/v2/internal/runner"
 	"github.com/takushi/agentic-loop-foundation/v2/internal/web"
 )
 
@@ -25,9 +28,10 @@ type Authenticator interface {
 	Authenticate(*http.Request) (application.Caller, error)
 }
 type Config struct {
-	Authenticator  Authenticator
-	Service        *application.Service
-	AllowedOrigins []string
+	Authenticator    Authenticator
+	Service          *application.Service
+	RunnerEnrollment *runner.Service
+	AllowedOrigins   []string
 }
 type Handler struct {
 	config Config
@@ -77,8 +81,29 @@ func (h *Handler) route(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "schema_version": "v1"})
 		return
 	}
+	if r.URL.Path == "/v1/runner/enrollment/challenge" && r.Method == http.MethodPost {
+		h.enrollmentChallenge(w, r)
+		return
+	}
+	if r.URL.Path == "/v1/runner/enrollment/complete" && r.Method == http.MethodPost {
+		h.enrollmentComplete(w, r)
+		return
+	}
 	if h.config.Authenticator == nil || h.config.Service == nil {
 		h.error(w, r, http.StatusServiceUnavailable, "not_configured", "authenticated API is not configured")
+		return
+	}
+	if r.URL.Path == "/v1/runner/enrollment" && r.Method == http.MethodPost {
+		caller, err := h.config.Authenticator.Authenticate(r)
+		if err != nil {
+			h.error(w, r, http.StatusUnauthorized, "unauthorized", "authentication failed")
+			return
+		}
+		if caller.Role != application.RoleOwner {
+			h.error(w, r, http.StatusForbidden, "forbidden", "owner role required")
+			return
+		}
+		h.issueEnrollment(w, r)
 		return
 	}
 	if r.Method == http.MethodGet && (r.URL.Path == "/owner" || r.URL.Path == "/owner/") {
@@ -224,6 +249,81 @@ func (h *Handler) route(w http.ResponseWriter, r *http.Request) {
 		}
 		h.error(w, r, http.StatusNotFound, "not_found", "route not found")
 	}
+}
+
+func (h *Handler) enrollmentChallenge(w http.ResponseWriter, r *http.Request) {
+	if h.config.RunnerEnrollment == nil {
+		h.error(w, r, http.StatusServiceUnavailable, "not_configured", "runner enrollment is not configured")
+		return
+	}
+	var b struct {
+		EnrollmentToken string `json:"enrollment_token"`
+		PublicKey       string `json:"public_key"`
+	}
+	if !h.decode(w, r, &b) {
+		return
+	}
+	key, err := decodePublicKey(b.PublicKey)
+	if err != nil {
+		h.error(w, r, http.StatusBadRequest, "invalid_request", "public key required")
+		return
+	}
+	c, err := h.config.RunnerEnrollment.Begin(r.Context(), b.EnrollmentToken, key)
+	if err != nil {
+		h.error(w, r, http.StatusUnauthorized, "enrollment_failed", "enrollment challenge failed")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"challenge_id": c.ID, "runner_id": c.RunnerID, "nonce": base64.RawURLEncoding.EncodeToString(c.Nonce), "method": c.Method, "path": c.Path, "issued_at": c.IssuedAt, "expires_at": c.ExpiresAt})
+}
+
+func (h *Handler) issueEnrollment(w http.ResponseWriter, r *http.Request) {
+	if h.config.RunnerEnrollment == nil {
+		h.error(w, r, http.StatusServiceUnavailable, "not_configured", "runner enrollment is not configured")
+		return
+	}
+	var b struct {
+		RunnerID string `json:"runner_id"`
+	}
+	if !h.decode(w, r, &b) {
+		return
+	}
+	token, err := h.config.RunnerEnrollment.IssueEnrollment(r.Context(), b.RunnerID, runner.TokenTTL)
+	if err != nil {
+		h.error(w, r, http.StatusBadRequest, "invalid_request", "could not issue enrollment")
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{"enrollment_token": token, "expires_in_seconds": int(runner.TokenTTL / time.Second)})
+}
+
+func (h *Handler) enrollmentComplete(w http.ResponseWriter, r *http.Request) {
+	if h.config.RunnerEnrollment == nil {
+		h.error(w, r, http.StatusServiceUnavailable, "not_configured", "runner enrollment is not configured")
+		return
+	}
+	var b struct {
+		ChallengeID string `json:"challenge_id"`
+		Signature   string `json:"signature"`
+	}
+	if !h.decode(w, r, &b) {
+		return
+	}
+	s, err := h.config.RunnerEnrollment.Complete(r.Context(), b.ChallengeID, b.Signature)
+	if err != nil {
+		h.error(w, r, http.StatusUnauthorized, "enrollment_failed", "enrollment completion failed")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"runner_id": s.RunnerID, "session_token": s.Token, "expires_at": s.ExpiresAt})
+}
+
+func decodePublicKey(value string) (ed25519.PublicKey, error) {
+	b, err := base64.RawStdEncoding.DecodeString(value)
+	if err != nil {
+		b, err = hex.DecodeString(value)
+	}
+	if err != nil || len(b) != ed25519.PublicKeySize {
+		return nil, errors.New("invalid public key")
+	}
+	return ed25519.PublicKey(b), nil
 }
 func (h *Handler) renew(w http.ResponseWriter, r *http.Request, id string) {
 	var b struct {

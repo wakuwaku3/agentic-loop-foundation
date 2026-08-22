@@ -32,7 +32,7 @@ component-contracts:
 component-control-plane:
 	@go test ./cmd/control-plane ./internal/api ./internal/domain
 component-runner:
-	@go test ./cmd/runner ./cmd/bootstrap ./internal/domain
+	@go test ./cmd/runner ./cmd/bootstrap ./internal/domain ./internal/runner
 component-domain:
 	@go test ./internal/domain
 component-application:
