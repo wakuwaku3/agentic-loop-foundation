@@ -82,10 +82,18 @@ func (h *Handler) route(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.URL.Path == "/v1/runner/enrollment/challenge" && r.Method == http.MethodPost {
+		if !h.enrollmentTransportAuth(r) {
+			h.error(w, r, http.StatusUnauthorized, "unauthorized", "IAP owner authentication required")
+			return
+		}
 		h.enrollmentChallenge(w, r)
 		return
 	}
 	if r.URL.Path == "/v1/runner/enrollment/complete" && r.Method == http.MethodPost {
+		if !h.enrollmentTransportAuth(r) {
+			h.error(w, r, http.StatusUnauthorized, "unauthorized", "IAP owner authentication required")
+			return
+		}
 		h.enrollmentComplete(w, r)
 		return
 	}
@@ -249,6 +257,18 @@ func (h *Handler) route(w http.ResponseWriter, r *http.Request) {
 		}
 		h.error(w, r, http.StatusNotFound, "not_found", "route not found")
 	}
+}
+
+// Legacy local authenticators keep existing emulator tests usable. Production
+// composition uses CombinedAuthenticator and therefore gates both enrollment
+// public-looking endpoints on the IAP owner assertion.
+func (h *Handler) enrollmentTransportAuth(r *http.Request) bool {
+	combined, ok := h.config.Authenticator.(CombinedAuthenticator)
+	if !ok {
+		return true
+	}
+	caller, err := combined.Authenticate(r)
+	return err == nil && caller.Role == application.RoleOwner
 }
 
 func (h *Handler) enrollmentChallenge(w http.ResponseWriter, r *http.Request) {

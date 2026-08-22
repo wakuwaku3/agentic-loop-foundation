@@ -15,104 +15,107 @@ paths:
   /v1/requirements:
     get:
       operationId: listRequirements
-      security: [{bearerAuth: []}]
+      security: [{iapOwner: []}]
       parameters: [{name: page_size, in: query, schema: {type: integer, minimum: 1, maximum: 100, default: 25}}, {name: cursor, in: query, schema: {type: string, description: opaque cursor from the previous page}}]
       responses: {'200': {description: bounded requirement page, content: {application/json: {schema: {$ref: '#/components/schemas/RequirementPageResponse'}}}}, '400': {$ref: '#/components/responses/Error'}, '401': {$ref: '#/components/responses/Error'}, '403': {$ref: '#/components/responses/Error'}, '404': {$ref: '#/components/responses/Error'}, '405': {$ref: '#/components/responses/Error'}, '500': {$ref: '#/components/responses/Error'}, '503': {$ref: '#/components/responses/Error'}}
     post:
       operationId: captureRequirement
-      security: [{bearerAuth: []}]
+      security: [{iapOwner: []}]
       requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/CaptureRequest'}}}}
       responses: {'201': {description: captured, content: {application/json: {schema: {$ref: '#/components/schemas/CaptureResponse'}}}}, '400': {$ref: '#/components/responses/Error'}, '401': {$ref: '#/components/responses/Error'}, '403': {$ref: '#/components/responses/Error'}, '405': {$ref: '#/components/responses/Error'}, '413': {$ref: '#/components/responses/Error'}, '415': {$ref: '#/components/responses/Error'}, '500': {$ref: '#/components/responses/Error'}, '503': {$ref: '#/components/responses/Error'}}
   /v1/runner/enrollment:
     post:
       operationId: issueRunnerEnrollment
-      security: [{bearerAuth: []}]
+      security: [{iapOwner: []}]
       requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/RunnerEnrollmentRequest'}}}}
       responses: {'201': {description: one-time enrollment token}, '400': {$ref: '#/components/responses/Error'}, '401': {$ref: '#/components/responses/Error'}, '403': {$ref: '#/components/responses/Error'}}
   /v1/runner/enrollment/challenge:
     post:
       operationId: beginRunnerEnrollment
+      security: [{iapOwner: []}]
       requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/RunnerChallengeRequest'}}}}
       responses: {'200': {description: Ed25519 challenge}, '401': {$ref: '#/components/responses/Error'}, '503': {$ref: '#/components/responses/Error'}}
   /v1/runner/enrollment/complete:
     post:
       operationId: completeRunnerEnrollment
+      security: [{iapOwner: []}]
       requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/RunnerCompleteRequest'}}}}
       responses: {'200': {description: short-lived runner session}, '401': {$ref: '#/components/responses/Error'}, '503': {$ref: '#/components/responses/Error'}}
   /v1/requirements/{requirement_id}:
     get:
       operationId: getRequirement
-      security: [{bearerAuth: []}]
+      security: [{iapOwner: []}]
       parameters: [{name: requirement_id, in: path, required: true, schema: {type: string}}]
       responses: {'200': {description: requirement detail, content: {application/json: {schema: {$ref: '#/components/schemas/RequirementDetailResponse'}}}}, '401': {$ref: '#/components/responses/Error'}, '403': {$ref: '#/components/responses/Error'}, '404': {$ref: '#/components/responses/Error'}}
   /v1/controls:
     get:
       operationId: listControlReads
-      security: [{bearerAuth: []}]
+      security: [{iapOwner: []}]
       responses: {'200': {description: control lifecycle metadata, content: {application/json: {schema: {$ref: '#/components/schemas/ControlReadListResponse'}}}}, '401': {$ref: '#/components/responses/Error'}, '403': {$ref: '#/components/responses/Error'}}
     post:
       operationId: setControl
-      security: [{bearerAuth: []}]
+      security: [{iapOwner: []}]
       requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/ControlRequest'}}}}
       responses: {'200': {description: changed, content: {application/json: {schema: {$ref: '#/components/schemas/ControlResponse'}}}}, '400': {$ref: '#/components/responses/Error'}, '401': {$ref: '#/components/responses/Error'}, '403': {$ref: '#/components/responses/Error'}, '405': {$ref: '#/components/responses/Error'}, '413': {$ref: '#/components/responses/Error'}, '415': {$ref: '#/components/responses/Error'}, '500': {$ref: '#/components/responses/Error'}, '503': {$ref: '#/components/responses/Error'}}
   /v1/queue/summary:
     get:
       operationId: queueSummary
-      security: [{bearerAuth: []}]
+      security: [{iapOwner: []}]
       responses: {'200': {description: bounded queue counts, content: {application/json: {schema: {$ref: '#/components/schemas/QueueSummary'}}}}, '401': {$ref: '#/components/responses/Error'}, '403': {$ref: '#/components/responses/Error'}}
   /v1/export:
     get:
       operationId: exportOwnerMetadata
-      security: [{bearerAuth: []}]
+      security: [{iapOwner: []}]
       parameters: [{name: format, in: query, schema: {type: string, enum: [json, ndjson], default: json}}, {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 100, default: 100}}]
       responses: {'200': {description: metadata-only export; provider output and secrets are excluded, content: {application/json: {schema: {$ref: '#/components/schemas/ExportResponse'}}, application/x-ndjson: {schema: {$ref: '#/components/schemas/ExportRecord'}}}}, '401': {$ref: '#/components/responses/Error'}, '403': {$ref: '#/components/responses/Error'}}
   /v1/runner/claims:acquire:
     post:
       operationId: claim
-      security: [{bearerAuth: []}]
+      security: [{runnerSession: []}]
       requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/ClaimRequest'}}}}
       responses: {'200': {description: claimed, content: {application/json: {schema: {$ref: '#/components/schemas/ClaimResponse'}}}}, '400': {$ref: '#/components/responses/Error'}, '401': {$ref: '#/components/responses/Error'}, '403': {$ref: '#/components/responses/Error'}, '409': {$ref: '#/components/responses/Error'}, '500': {$ref: '#/components/responses/Error'}, '503': {$ref: '#/components/responses/Error'}}
   /v1/runner/permits:check:
     post:
       operationId: permit
-      security: [{bearerAuth: []}]
+      security: [{runnerSession: []}]
       requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/PermitRequest'}}}}
       responses: {'200': {description: decided, content: {application/json: {schema: {$ref: '#/components/schemas/PermitResponse'}}}}, '400': {$ref: '#/components/responses/Error'}, '401': {$ref: '#/components/responses/Error'}, '403': {$ref: '#/components/responses/Error'}, '409': {$ref: '#/components/responses/Error'}, '500': {$ref: '#/components/responses/Error'}, '503': {$ref: '#/components/responses/Error'}}
   /v1/executions/result:
     post:
       operationId: acceptResult
-      security: [{bearerAuth: []}]
+      security: [{runnerSession: []}]
       requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/ResultRequest'}}}}
       responses: {'200': {description: accepted, content: {application/json: {schema: {$ref: '#/components/schemas/ResultResponse'}}}}, '400': {$ref: '#/components/responses/Error'}, '401': {$ref: '#/components/responses/Error'}, '403': {$ref: '#/components/responses/Error'}, '409': {$ref: '#/components/responses/Error'}, '500': {$ref: '#/components/responses/Error'}, '503': {$ref: '#/components/responses/Error'}}
   /v1/runner/heartbeat:
     post:
       operationId: heartbeat
-      security: [{bearerAuth: []}]
+      security: [{runnerSession: []}]
       requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/HeartbeatRequest'}}}}
       responses: {'200': {description: accepted, content: {application/json: {schema: {$ref: '#/components/schemas/LifecycleResponse'}}}}, '400': {$ref: '#/components/responses/Error'}, '401': {$ref: '#/components/responses/Error'}, '403': {$ref: '#/components/responses/Error'}, '405': {$ref: '#/components/responses/Error'}, '500': {$ref: '#/components/responses/Error'}, '503': {$ref: '#/components/responses/Error'}}
   /v1/runner/checkpoints:
     post:
       operationId: checkpoint
-      security: [{bearerAuth: []}]
+      security: [{runnerSession: []}]
       requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/CheckpointRequest'}}}}
       responses: {'200': {description: accepted, content: {application/json: {schema: {$ref: '#/components/schemas/LifecycleResponse'}}}}, '400': {$ref: '#/components/responses/Error'}, '401': {$ref: '#/components/responses/Error'}, '403': {$ref: '#/components/responses/Error'}, '404': {$ref: '#/components/responses/Error'}, '409': {$ref: '#/components/responses/Error'}, '500': {$ref: '#/components/responses/Error'}, '503': {$ref: '#/components/responses/Error'}}
   /v1/leases/{lease_id}:renew:
     post:
       operationId: renewLease
-      security: [{bearerAuth: []}]
+      security: [{runnerSession: []}]
       parameters: [{name: lease_id, in: path, required: true, schema: {type: string}}]
       requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/RenewRequest'}}}}
       responses: {'200': {description: renewed, content: {application/json: {schema: {$ref: '#/components/schemas/RenewResponse'}}}}, '400': {$ref: '#/components/responses/Error'}, '401': {$ref: '#/components/responses/Error'}, '403': {$ref: '#/components/responses/Error'}, '409': {$ref: '#/components/responses/Error'}, '500': {$ref: '#/components/responses/Error'}, '503': {$ref: '#/components/responses/Error'}}
   /v1/executions/{execution_id}:start:
     post:
       operationId: startExecution
-      security: [{bearerAuth: []}]
+      security: [{runnerSession: []}]
       parameters: [{name: execution_id, in: path, required: true, schema: {type: string}}]
       requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/StartRequest'}}}}
       responses: {'200': {description: started, content: {application/json: {schema: {$ref: '#/components/schemas/StartResponse'}}}}, '400': {$ref: '#/components/responses/Error'}, '401': {$ref: '#/components/responses/Error'}, '403': {$ref: '#/components/responses/Error'}, '409': {$ref: '#/components/responses/Error'}, '500': {$ref: '#/components/responses/Error'}, '503': {$ref: '#/components/responses/Error'}}
 components:
   securitySchemes:
-    bearerAuth: {type: http, scheme: bearer}
+    iapOwner: {type: apiKey, in: header, name: X-Goog-Authenticated-User-Email}
+    runnerSession: {type: apiKey, in: header, name: X-Agentic-Runner-Session}
   responses:
     Error: {description: error, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
   schemas:

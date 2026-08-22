@@ -70,6 +70,22 @@ resource "google_cloud_run_v2_service" "app" {
 
     containers {
       image = local.image
+      env {
+        name  = "INSTALLATION_ID"
+        value = var.installation_id
+      }
+      env {
+        name  = "GCP_PROJECT_ID"
+        value = var.project_id
+      }
+      env {
+        name  = "OWNER_EMAILS"
+        value = join(",", sort(tolist(var.owner_emails)))
+      }
+      env {
+        name  = "OWNER_ORIGINS"
+        value = join(",", sort(tolist(var.owner_origins)))
+      }
       resources {
         limits = {
           cpu    = "0.08"
@@ -113,8 +129,8 @@ resource "google_cloud_run_v2_service_iam_member" "iap_service_agent_invoker" {
 }
 
 resource "google_project_iam_member" "iap_accessor" {
-  for_each = var.iap_owner_members
+  for_each = var.owner_emails
   project  = var.project_id
   role     = "roles/iap.httpsResourceAccessor"
-  member   = each.value
+  member   = "user:${each.value}"
 }

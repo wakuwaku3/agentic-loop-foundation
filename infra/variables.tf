@@ -22,6 +22,33 @@ variable "service_account_id" {
   default = "agentic-loop-runtime"
 }
 
+variable "installation_id" {
+  description = "Stable installation namespace used for all canonical records."
+  type        = string
+  validation {
+    condition     = can(regex("^[a-z][a-z0-9-]{2,62}$", var.installation_id))
+    error_message = "installation_id must be a lowercase, DNS-like identifier."
+  }
+}
+
+variable "owner_emails" {
+  description = "Explicit human owner email allowlist. Each owner also receives IAP access."
+  type        = set(string)
+  validation {
+    condition     = length(var.owner_emails) > 0 && alltrue([for email in var.owner_emails : can(regex("^[^[:space:]@]+@[^[:space:]@]+$", email))])
+    error_message = "owner_emails must be a non-empty set of email addresses."
+  }
+}
+
+variable "owner_origins" {
+  description = "Exact HTTPS browser origins allowed to submit owner mutations."
+  type        = set(string)
+  validation {
+    condition     = length(var.owner_origins) > 0 && alltrue([for origin in var.owner_origins : can(regex("^https://[^/]+$", origin))])
+    error_message = "owner_origins must contain exact HTTPS origins without paths."
+  }
+}
+
 variable "artifact_repository" {
   description = "Existing Artifact Registry repository name; no repository is created here."
   type        = string
@@ -37,15 +64,5 @@ variable "image_digest" {
   validation {
     condition     = can(regex("^[a-f0-9]{64}$", var.image_digest))
     error_message = "image_digest must be a 64-character lowercase sha256 digest."
-  }
-}
-
-variable "iap_owner_members" {
-  description = "Explicit IAP allowlist, e.g. user:owner@example.com or group:owners@example.com."
-  type        = set(string)
-  default     = []
-  validation {
-    condition     = length(var.iap_owner_members) > 0 && alltrue([for m in var.iap_owner_members : !contains(m, "allUsers") && !contains(m, "allAuthenticatedUsers")])
-    error_message = "iap_owner_members must be a non-empty explicit allowlist and may not contain public principals."
   }
 }
