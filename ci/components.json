@@ -7,6 +7,7 @@
     {"id":"control-plane","roots":["cmd/control-plane/**"],"public_contracts":["contracts/openapi/openapi-v1.yaml"],"contract_dependencies":["contracts/openapi/openapi-v1.yaml"],"dependencies":["api"],"check":{"runner":"make","target":"component-control-plane"}},
     {"id":"runner","roots":["cmd/runner/**","cmd/bootstrap/**","internal/runner/**"],"public_contracts":[],"contract_dependencies":[],"dependencies":["domain"],"check":{"runner":"make","target":"component-runner"}},
     {"id":"reconciler","roots":["internal/reconciler/**"],"public_contracts":[],"contract_dependencies":[],"dependencies":["application","domain","store-memory","store-firestore"],"check":{"runner":"make","target":"component-reconciler"}},
+    {"id":"legacy-import","roots":["cmd/legacy-import/**","internal/legacyimport/**"],"public_contracts":[],"contract_dependencies":[],"dependencies":[],"check":{"runner":"make","target":"component-legacy-import"}},
     {"id":"domain","roots":["internal/domain/**"],"public_contracts":[],"contract_dependencies":[],"dependencies":[],"check":{"runner":"make","target":"component-domain"}},
     {"id":"application","roots":["internal/application/**"],"public_contracts":[],"contract_dependencies":[],"dependencies":["domain"],"check":{"runner":"make","target":"component-application"}},
     {"id":"store-memory","roots":["internal/store/memory/**"],"public_contracts":[],"contract_dependencies":[],"dependencies":["domain","application"],"check":{"runner":"make","target":"component-store-memory"}},

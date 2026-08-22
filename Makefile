@@ -1,4 +1,4 @@
-.PHONY: check environment format lint test contracts docs secrets smoke clean infra-policy infra-lint infra-validate component-plan affected candidate candidate-affected component ownership component-ci component-contracts component-control-plane component-runner component-domain component-application component-store-memory component-store-firestore component-api component-web component-docs component-test component-infra component-tooling component-reconciler
+.PHONY: check environment format lint test contracts docs secrets smoke clean infra-policy infra-lint infra-validate component-plan affected candidate candidate-affected component ownership component-ci component-contracts component-control-plane component-runner component-domain component-application component-store-memory component-store-firestore component-api component-web component-docs component-test component-infra component-tooling component-reconciler component-release component-legacy-import
 
 GO ?= go
 EVIDENCE_DIR ?= build/evidence
@@ -35,6 +35,10 @@ component-runner:
 	@go test ./cmd/runner ./cmd/bootstrap ./internal/domain ./internal/runner
 component-reconciler:
 	@go test ./internal/reconciler ./internal/application ./internal/domain
+component-release:
+	@go test ./internal/release ./internal/domain
+component-legacy-import:
+	@go test ./internal/legacyimport ./cmd/legacy-import
 component-domain:
 	@go test ./internal/domain
 component-application:
