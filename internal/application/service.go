@@ -698,6 +698,80 @@ func (s *Service) PlanIncrement(ctx context.Context, req PlanRequest) (PlanRespo
 	return s.Plan(ctx, req)
 }
 
+// Prepare moves a planned increment from proposed to ready. Keeping this
+// transition at the application boundary lets runners claim only increments
+// that passed the explicit planning/validation gate.
+type PrepareRequest struct {
+	RequestID, IncrementID string
+	ExpectedVersion        domain.Version
+}
+
+type PrepareResponse struct {
+	IncrementID string         `json:"increment_id"`
+	Version     domain.Version `json:"version"`
+}
+
+func (s *Service) Prepare(ctx context.Context, req PrepareRequest) (out PrepareResponse, err error) {
+	_, actor, err := callerActor(ctx, RoleOwner, RoleScheduler)
+	if err != nil {
+		return out, err
+	}
+	if err = requireRequest(req.RequestID); err != nil {
+		return out, err
+	}
+	fingerprint, err := requestFingerprint("prepare", req)
+	if err != nil {
+		return out, err
+	}
+	eventID, err := s.ids.Next("event")
+	if err != nil {
+		return out, err
+	}
+	operationID, err := s.ids.Next("operation")
+	if err != nil {
+		return out, err
+	}
+	err = s.mutate(ctx, "prepare:"+req.RequestID, func(u UnitOfWork) error {
+		if prior, ok, e := u.Idempotency(ctx, req.RequestID, "prepare"); e != nil {
+			return e
+		} else if ok {
+			if prior.Fingerprint != fingerprint {
+				return ErrIdempotencyConflict
+			}
+			return restoreResponse(prior, &out)
+		}
+		inc, ok, e := u.Increment(ctx, req.IncrementID)
+		if e != nil {
+			return e
+		}
+		if !ok {
+			return ErrNotFound
+		}
+		if inc.Version != req.ExpectedVersion {
+			return domain.ErrStaleVersion
+		}
+		next, e := domain.DecideIncrement(inc, domain.IncrementCommand{
+			Kind:            domain.IncrementPrepare,
+			Actor:           actor,
+			At:              s.clock.Now(),
+			ExpectedVersion: req.ExpectedVersion,
+		})
+		if e != nil {
+			return e
+		}
+		if e = u.SaveIncrement(ctx, next, inc.Version); e != nil {
+			return e
+		}
+		out = PrepareResponse{IncrementID: req.IncrementID, Version: next.Version}
+		return s.record(ctx, u, eventID, operationID, fingerprint, req.RequestID, "prepare", "increment", req.IncrementID, next.Version, "increment.ready", actor.String(), nil, out)
+	})
+	return out, err
+}
+
+func (s *Service) PrepareIncrement(ctx context.Context, req PrepareRequest) (PrepareResponse, error) {
+	return s.Prepare(ctx, req)
+}
+
 type ClaimRequest struct {
 	RequestID, IncrementID   string
 	ExpectedIncrementVersion domain.Version
