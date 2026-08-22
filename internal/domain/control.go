@@ -244,7 +244,7 @@ func EffectFromPermit(decision PermitDecision, current EffectiveControlResult, c
 	if current.Mode == "" {
 		current.Mode = ControlAllow
 	}
-	if !decision.Allowed() || current.Mode != ControlAllow || !current.Found || decision.kind != kind || decision.target != target || decision.fencingToken != fence || decision.revision != revision || current.Revision != decision.revision || current.Scope != decision.scope || currentFencingToken != decision.fencingToken {
+	if !decision.Allowed() || current.Mode != ControlAllow || decision.kind != kind || decision.target != target || decision.fencingToken != fence || decision.revision != revision || current.Revision != decision.revision || current.Scope != decision.scope || currentFencingToken != decision.fencingToken || (!current.Found && revision != 0) {
 		return Effect{}, ErrControlDenied
 	}
 	if _, err := NewOperationID(operationID.String()); err != nil {

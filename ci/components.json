@@ -7,6 +7,8 @@
     {"id":"control-plane","roots":["cmd/control-plane/**"],"public_contracts":["contracts/openapi.yaml"],"contract_dependencies":["contracts/openapi.yaml"],"dependencies":["domain"],"check":{"runner":"make","target":"component-control-plane"}},
     {"id":"runner","roots":["cmd/runner/**","cmd/bootstrap/**"],"public_contracts":[],"contract_dependencies":[],"dependencies":["domain"],"check":{"runner":"make","target":"component-runner"}},
     {"id":"domain","roots":["internal/domain/**"],"public_contracts":[],"contract_dependencies":[],"dependencies":[],"check":{"runner":"make","target":"component-domain"}},
+    {"id":"application","roots":["internal/application/**"],"public_contracts":[],"contract_dependencies":[],"dependencies":["domain"],"check":{"runner":"make","target":"component-application"}},
+    {"id":"store-memory","roots":["internal/store/memory/**"],"public_contracts":[],"contract_dependencies":[],"dependencies":["domain","application"],"check":{"runner":"make","target":"component-store-memory"}},
     {"id":"internal-contracts","roots":["internal/contracts/**"],"public_contracts":[],"contract_dependencies":["contracts/**"],"dependencies":["contracts"],"check":{"runner":"make","target":"component-contracts"}},
     {"id":"docs","roots":["docs/**","README.md","AGENTS.md"],"public_contracts":[],"contract_dependencies":[],"dependencies":[],"check":{"runner":"make","target":"component-docs"}},
     {"id":"tooling","roots":[".editorconfig",".gitignore"],"public_contracts":[],"contract_dependencies":[],"dependencies":[],"check":{"runner":"make","target":"component-tooling"}},

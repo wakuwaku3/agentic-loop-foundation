@@ -1,4 +1,4 @@
-.PHONY: check environment format lint test contracts docs secrets smoke clean component-plan affected candidate component ownership component-ci component-contracts component-control-plane component-runner component-domain component-docs component-test component-infra component-tooling
+.PHONY: check environment format lint test contracts docs secrets smoke clean component-plan affected candidate component ownership component-ci component-contracts component-control-plane component-runner component-domain component-application component-store-memory component-docs component-test component-infra component-tooling
 
 GO ?= go
 EVIDENCE_DIR ?= build/evidence
@@ -32,6 +32,10 @@ component-runner:
 	@go test ./cmd/runner ./cmd/bootstrap ./internal/domain
 component-domain:
 	@go test ./internal/domain
+component-application:
+	@go test ./internal/application
+component-store-memory:
+	@go test ./internal/store/memory
 component-docs:
 	@! rg -n 'TODO\(ci\)' docs README.md
 component-test:

@@ -1,0 +1,730 @@
+package application
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"time"
+
+	"github.com/takushi/agentic-loop-foundation/v2/internal/domain"
+)
+
+var (
+	ErrNotFound         = errors.New("application record not found")
+	ErrDuplicateRequest = errors.New("request id has already been used for another operation")
+)
+
+func requireRequest(requestID string) error {
+	if requestID == "" {
+		return errors.New("request_id is required")
+	}
+	return nil
+}
+
+func sameTarget(requested, canonical domain.ControlTarget) bool {
+	if requested.InstallationID != "" && requested.InstallationID != canonical.InstallationID {
+		return false
+	}
+	if requested.RepositoryID != "" && requested.RepositoryID != canonical.RepositoryID {
+		return false
+	}
+	if requested.RequirementID != "" && requested.RequirementID != canonical.RequirementID {
+		return false
+	}
+	if requested.IncrementID != "" && requested.IncrementID != canonical.IncrementID {
+		return false
+	}
+	if requested.RunnerID != "" && requested.RunnerID != canonical.RunnerID {
+		return false
+	}
+	if requested.Channel != "" && requested.Channel != canonical.Channel {
+		return false
+	}
+	return true
+}
+
+func canonicalizeTarget(requested, canonical domain.ControlTarget) domain.ControlTarget {
+	if canonical.InstallationID == "" {
+		canonical.InstallationID = requested.InstallationID
+	}
+	if canonical.RepositoryID == "" {
+		canonical.RepositoryID = requested.RepositoryID
+	}
+	if canonical.RequirementID == "" {
+		canonical.RequirementID = requested.RequirementID
+	}
+	if canonical.IncrementID == "" {
+		canonical.IncrementID = requested.IncrementID
+	}
+	if canonical.RunnerID == "" {
+		canonical.RunnerID = requested.RunnerID
+	}
+	if canonical.Channel == "" {
+		canonical.Channel = requested.Channel
+	}
+	return canonical
+}
+
+func validControlMode(mode domain.ControlMode) bool {
+	switch mode {
+	case domain.ControlAllow, domain.ControlPauseIntake, domain.ControlPauseClaim, domain.ControlGracefulStop, domain.ControlImmediateStop, domain.ControlEmergencyStop, domain.ControlCancel:
+		return true
+	}
+	return false
+}
+func validControlScope(scope domain.ControlScope) bool {
+	if scope.Value == "" {
+		return false
+	}
+	switch scope.Kind {
+	case domain.ScopeInstallation, domain.ScopeRepository, domain.ScopeRequirement, domain.ScopeIncrement, domain.ScopeRunner, domain.ScopeChannel:
+		return true
+	}
+	return false
+}
+
+type Service struct {
+	tx     Transactor
+	clock  Clock
+	ids    IDGenerator
+	config ServiceConfig
+}
+
+type ServiceConfig struct {
+	InstallationID string
+	RepositoryID   string
+	LeaseTTL       time.Duration
+}
+
+func NewService(tx Transactor, clock Clock, ids IDGenerator) (*Service, error) {
+	return NewServiceWithConfig(tx, clock, ids, ServiceConfig{LeaseTTL: time.Minute})
+}
+func NewServiceWithConfig(tx Transactor, clock Clock, ids IDGenerator, config ServiceConfig) (*Service, error) {
+	if config.InstallationID == "" {
+		return nil, errors.New("installation authority is required")
+	}
+	if config.LeaseTTL <= 0 {
+		config.LeaseTTL = time.Minute
+	}
+	return &Service{tx: tx, clock: clock, ids: ids, config: config}, nil
+}
+
+type CaptureRequest struct{ RequestID, RequirementID, Text string }
+type CaptureResponse struct {
+	RequirementID string
+	Version       domain.Version
+}
+
+func (s *Service) Capture(ctx context.Context, req CaptureRequest) (out CaptureResponse, err error) {
+	_, actor, err := callerActor(ctx, RoleOwner)
+	if err != nil {
+		return out, err
+	}
+	if err = requireRequest(req.RequestID); err != nil {
+		return out, err
+	}
+	fingerprint, err := requestFingerprint("capture", req)
+	if err != nil {
+		return out, err
+	}
+	id := req.RequirementID
+	if id == "" {
+		id, err = s.ids.Next("requirement")
+		if err != nil {
+			return out, err
+		}
+	}
+	eventID, err := s.ids.Next("event")
+	if err != nil {
+		return out, err
+	}
+	operationID, err := s.ids.Next("operation")
+	if err != nil {
+		return out, err
+	}
+	err = s.tx.Transact(ctx, func(u UnitOfWork) error {
+		if prior, ok, e := u.Idempotency(ctx, req.RequestID, "capture"); e != nil {
+			return e
+		} else if ok {
+			if prior.Fingerprint != fingerprint {
+				return ErrIdempotencyConflict
+			}
+			return restoreResponse(prior, &out)
+		}
+		rid, e := domain.NewRequirementID(id)
+		if e != nil {
+			return e
+		}
+		controls, e := u.Controls(ctx)
+		if e != nil {
+			return e
+		}
+		target := domain.ControlTarget{InstallationID: s.config.InstallationID}
+		effective := domain.EffectiveControl(controls, target)
+		revision := domain.Revision(0)
+		if effective.Found {
+			revision = effective.Revision
+		}
+		if _, e = domain.Permit(effective, domain.PermitRequest{Kind: domain.PermitIntake, Target: target, ControlRevision: revision, Resource: id}); e != nil {
+			return e
+		}
+		r := domain.Requirement{ID: rid, Status: domain.RequirementCaptured, Version: 1}
+		if e = domain.Validate(r); e != nil {
+			return e
+		}
+		if e = u.SaveRequirement(ctx, r, 0); e != nil {
+			return e
+		}
+		if e = u.SaveRequirementText(ctx, id, req.Text); e != nil {
+			return e
+		}
+		out = CaptureResponse{RequirementID: id, Version: r.Version}
+		return s.record(ctx, u, eventID, operationID, fingerprint, req.RequestID, "capture", "requirement", id, r.Version, "requirement.captured", actor.String(), nil, out)
+	})
+	return out, err
+}
+
+// Verbose aliases are kept at the application boundary so transport adapters
+// can use names that read naturally without introducing another service.
+func (s *Service) CaptureRequirement(ctx context.Context, req CaptureRequest) (CaptureResponse, error) {
+	return s.Capture(ctx, req)
+}
+
+type PlanRequest struct {
+	RequestID, RequirementID, IncrementID string
+	ExpectedRequirementVersion            domain.Version
+}
+type PlanResponse struct {
+	RequirementID, IncrementID string
+	Version                    domain.Version
+}
+
+func (s *Service) Plan(ctx context.Context, req PlanRequest) (out PlanResponse, err error) {
+	_, actor, err := callerActor(ctx, RoleOwner, RoleScheduler)
+	if err != nil {
+		return out, err
+	}
+	if err = requireRequest(req.RequestID); err != nil {
+		return out, err
+	}
+	fingerprint, err := requestFingerprint("plan", req)
+	if err != nil {
+		return out, err
+	}
+	id := req.IncrementID
+	if id == "" {
+		id, err = s.ids.Next("increment")
+		if err != nil {
+			return out, err
+		}
+	}
+	eventID, err := s.ids.Next("event")
+	if err != nil {
+		return out, err
+	}
+	operationID, err := s.ids.Next("operation")
+	if err != nil {
+		return out, err
+	}
+	err = s.tx.Transact(ctx, func(u UnitOfWork) error {
+		if prior, ok, e := u.Idempotency(ctx, req.RequestID, "plan"); e != nil {
+			return e
+		} else if ok {
+			if prior.Fingerprint != fingerprint {
+				return ErrIdempotencyConflict
+			}
+			return restoreResponse(prior, &out)
+		}
+		r, ok, e := u.Requirement(ctx, req.RequirementID)
+		if e != nil {
+			return e
+		}
+		if !ok {
+			return ErrNotFound
+		}
+		if req.ExpectedRequirementVersion != r.Version {
+			return domain.ErrStaleVersion
+		}
+		iid, e := domain.NewIncrementID(id)
+		if e != nil {
+			return e
+		}
+		rid, e := domain.NewRequirementID(req.RequirementID)
+		if e != nil {
+			return e
+		}
+		next := r
+		next.Increments = append(append([]domain.IncrementID(nil), r.Increments...), iid)
+		next.Version++
+		if e = u.SaveRequirement(ctx, next, r.Version); e != nil {
+			return e
+		}
+		inc := domain.Increment{ID: iid, RequirementID: rid, Status: domain.IncrementProposed, Version: 1}
+		if e = u.SaveIncrement(ctx, inc, 0); e != nil {
+			return e
+		}
+		target := domain.ControlTarget{InstallationID: s.config.InstallationID, RepositoryID: s.config.RepositoryID}
+		target.IncrementID = iid
+		target.RequirementID = rid
+		if e = u.SaveCanonicalTarget(ctx, id, target); e != nil {
+			return e
+		}
+		out = PlanResponse{RequirementID: req.RequirementID, IncrementID: id, Version: inc.Version}
+		return s.record(ctx, u, eventID, operationID, fingerprint, req.RequestID, "plan", "increment", id, inc.Version, "increment.proposed", actor.String(), nil, out)
+	})
+	return out, err
+}
+func (s *Service) PlanIncrement(ctx context.Context, req PlanRequest) (PlanResponse, error) {
+	return s.Plan(ctx, req)
+}
+
+type ClaimRequest struct {
+	RequestID, IncrementID   string
+	ExpectedIncrementVersion domain.Version
+	ControlRevision          domain.Revision
+	Target                   domain.ControlTarget
+}
+type ClaimResponse struct {
+	IncrementID, ExecutionID, LeaseID, RunnerID string
+	Version                                     domain.Version
+	FencingToken                                domain.FencingToken
+}
+
+func (s *Service) Claim(ctx context.Context, req ClaimRequest) (out ClaimResponse, err error) {
+	_, actor, runner, err := runnerCaller(ctx)
+	if err != nil {
+		return out, err
+	}
+	if err = requireRequest(req.RequestID); err != nil {
+		return out, err
+	}
+	fingerprint, err := requestFingerprint("claim", req)
+	if err != nil {
+		return out, err
+	}
+	eventID, err := s.ids.Next("event")
+	if err != nil {
+		return out, err
+	}
+	operationID, err := s.ids.Next("operation")
+	if err != nil {
+		return out, err
+	}
+	outboxID, err := s.ids.Next("outbox")
+	if err != nil {
+		return out, err
+	}
+	executionID, err := s.ids.Next("execution")
+	if err != nil {
+		return out, err
+	}
+	leaseID, err := s.ids.Next("lease")
+	if err != nil {
+		return out, err
+	}
+	issuedAt := s.clock.Now()
+	if issuedAt.IsZero() {
+		return out, errors.New("clock returned zero time")
+	}
+	expiresAt := issuedAt.Add(s.config.LeaseTTL)
+	err = s.tx.Transact(ctx, func(u UnitOfWork) error {
+		if prior, ok, e := u.Idempotency(ctx, req.RequestID, "claim"); e != nil {
+			return e
+		} else if ok {
+			if prior.Fingerprint != fingerprint {
+				return ErrIdempotencyConflict
+			}
+			return restoreResponse(prior, &out)
+		}
+		inc, ok, e := u.Increment(ctx, req.IncrementID)
+		if e != nil {
+			return e
+		}
+		if !ok {
+			return ErrNotFound
+		}
+		if req.ExpectedIncrementVersion != inc.Version {
+			return domain.ErrStaleVersion
+		}
+		if lease, exists, e := u.ActiveLeaseForIncrementAt(ctx, req.IncrementID, issuedAt); e != nil {
+			return e
+		} else if exists && lease.Status == domain.LeaseActive {
+			return fmt.Errorf("increment already claimed")
+		}
+		claimBase := inc
+		var expiredLease domain.Lease
+		if inc.Status == domain.IncrementLeased {
+			var found bool
+			expiredLease, found, e = u.LatestLeaseForIncrement(ctx, req.IncrementID)
+			if !found || expiredLease.Status != domain.LeaseActive || expiredLease.ActiveAt(issuedAt) {
+				return domain.ErrInvalidTransition
+			}
+			expiredLease, e = domain.ExpireLease(expiredLease, issuedAt)
+			if e != nil {
+				return e
+			}
+			claimBase.Status = domain.IncrementReady
+			claimBase.Version++
+		}
+		iid, e := domain.NewIncrementID(req.IncrementID)
+		if e != nil {
+			return e
+		}
+		eid, e := domain.NewExecutionID(executionID)
+		if e != nil {
+			return e
+		}
+		lid, e := domain.NewLeaseID(leaseID)
+		if e != nil {
+			return e
+		}
+		canonical, found, e := u.CanonicalTarget(ctx, req.IncrementID, runner.String())
+		if e != nil {
+			return e
+		}
+		if !found {
+			canonical = domain.ControlTarget{IncrementID: iid, RunnerID: runner}
+		}
+		if canonical.RunnerID == "" {
+			canonical.RunnerID = runner
+		}
+		if canonical.IncrementID == "" {
+			canonical.IncrementID = iid
+		}
+		if !sameTarget(req.Target, canonical) {
+			return domain.ErrControlDenied
+		}
+		canonical = canonicalizeTarget(req.Target, canonical)
+		controls, e := u.Controls(ctx)
+		if e != nil {
+			return e
+		}
+		effective := domain.EffectiveControl(controls, canonical)
+		permit, e := domain.Permit(effective, domain.PermitRequest{Kind: domain.PermitClaim, Target: canonical, ControlRevision: req.ControlRevision, Resource: req.IncrementID})
+		if e != nil {
+			return e
+		}
+		_ = permit
+		fence, e := u.MaxFencingToken(ctx, req.IncrementID)
+		if e != nil {
+			return e
+		}
+		lease, e := domain.IssueLease(domain.LeaseRequest{ID: lid, ExecutionID: eid, IncrementID: iid, RunnerID: runner, PreviousFencingToken: fence, ControlRevision: req.ControlRevision, IssuedAt: issuedAt, ExpiresAt: expiresAt})
+		if e != nil {
+			return e
+		}
+		cmd := domain.IncrementCommand{Kind: domain.IncrementLease, Actor: actor, At: issuedAt, ExpectedVersion: claimBase.Version}
+		next, e := domain.DecideIncrement(claimBase, cmd)
+		if e != nil {
+			return e
+		}
+		exec := domain.Execution{ID: eid, IncrementID: iid, RunnerID: runner, LeaseID: lid, FencingToken: lease.FencingToken, ControlRevision: req.ControlRevision, Status: domain.ExecutionLeased, Version: 1}
+		if e = u.SaveIncrement(ctx, next, inc.Version); e != nil {
+			return e
+		}
+		if expiredLease.ID != "" {
+			if e = u.SaveLease(ctx, expiredLease, expiredLease.Version-1); e != nil {
+				return e
+			}
+		}
+		if e = u.SaveLease(ctx, lease, 0); e != nil {
+			return e
+		}
+		if e = u.SaveExecution(ctx, exec, 0); e != nil {
+			return e
+		}
+		out = ClaimResponse{IncrementID: req.IncrementID, ExecutionID: executionID, LeaseID: leaseID, RunnerID: runner.String(), Version: next.Version, FencingToken: lease.FencingToken}
+		effectOutbox, e := s.effectOutbox(ctx, u, outboxID, operationID, req.RequestID, domain.PermitClaim, canonical, next.Version, lease.FencingToken, req.ControlRevision, "claim-issued", runner.String())
+		if e != nil {
+			return e
+		}
+		return s.record(ctx, u, eventID, operationID, fingerprint, req.RequestID, "claim", "increment", req.IncrementID, next.Version, "increment.claimed", actor.String(), effectOutbox, out)
+	})
+	return out, err
+}
+func (s *Service) ClaimIncrement(ctx context.Context, req ClaimRequest) (ClaimResponse, error) {
+	return s.Claim(ctx, req)
+}
+
+type ControlRequest struct {
+	RequestID string
+	Scope     domain.ControlScope
+	Mode      domain.ControlMode
+	Reason    string
+	At        time.Time
+}
+type ControlResponse struct {
+	Revision domain.Revision
+	Mode     domain.ControlMode
+}
+
+func (s *Service) Control(ctx context.Context, req ControlRequest) (out ControlResponse, err error) {
+	_, actor, err := callerActor(ctx, RoleOwner)
+	if err != nil {
+		return out, err
+	}
+	if err = requireRequest(req.RequestID); err != nil {
+		return out, err
+	}
+	if !validControlScope(req.Scope) || !validControlMode(req.Mode) {
+		return out, errors.New("invalid control mode or scope")
+	}
+	if req.At.IsZero() {
+		req.At = s.clock.Now()
+	}
+	fingerprint, err := requestFingerprint("control", req)
+	if err != nil {
+		return out, err
+	}
+	eventID, err := s.ids.Next("event")
+	if err != nil {
+		return out, err
+	}
+	operationID, err := s.ids.Next("operation")
+	if err != nil {
+		return out, err
+	}
+	outboxID, err := s.ids.Next("outbox")
+	if err != nil {
+		return out, err
+	}
+	err = s.tx.Transact(ctx, func(u UnitOfWork) error {
+		if prior, ok, e := u.Idempotency(ctx, req.RequestID, "control"); e != nil {
+			return e
+		} else if ok {
+			if prior.Fingerprint != fingerprint {
+				return ErrIdempotencyConflict
+			}
+			return restoreResponse(prior, &out)
+		}
+		revision, e := u.ControlRevision(ctx)
+		if e != nil {
+			return e
+		}
+		revision++
+		at := req.At
+		if at.IsZero() {
+			return errors.New("control requires timestamp")
+		}
+		intent := domain.ControlIntent{Scope: req.Scope, Mode: req.Mode, Revision: revision, Actor: actor, At: at, Reason: req.Reason}
+		if e = u.SaveControl(ctx, intent, revision-1); e != nil {
+			return e
+		}
+		out = ControlResponse{Revision: revision, Mode: req.Mode}
+		return s.record(ctx, u, eventID, operationID, fingerprint, req.RequestID, "control", "control", req.Scope.Value, domain.Version(revision), "control.changed", actor.String(), &OutboxItem{ID: outboxID, Kind: "control-changed", Target: req.Scope.Value, ExpectedVersion: domain.Version(revision), ControlRevision: revision}, out)
+	})
+	return out, err
+}
+func (s *Service) SetControl(ctx context.Context, req ControlRequest) (ControlResponse, error) {
+	return s.Control(ctx, req)
+}
+
+type PermitRequest struct {
+	RequestID                          string
+	Kind                               domain.PermitKind
+	Target                             domain.ControlTarget
+	ControlRevision                    domain.Revision
+	FencingToken, ExpectedFencingToken domain.FencingToken
+	Resource                           string
+}
+type PermitResponse struct {
+	Allowed  bool
+	Revision domain.Revision
+	Reason   string
+}
+
+func (s *Service) Permit(ctx context.Context, req PermitRequest) (out PermitResponse, err error) {
+	if _, _, err = callerActor(ctx, RoleOwner, RoleRunner, RoleScheduler); err != nil {
+		return out, err
+	}
+	if err = requireRequest(req.RequestID); err != nil {
+		return out, err
+	}
+	err = s.tx.Transact(ctx, func(u UnitOfWork) error {
+		controls, e := u.Controls(ctx)
+		if e != nil {
+			return e
+		}
+		d, e := domain.Permit(domain.EffectiveControl(controls, req.Target), domain.PermitRequest{Kind: req.Kind, Target: req.Target, ControlRevision: req.ControlRevision, FencingToken: req.FencingToken, ExpectedFencingToken: req.ExpectedFencingToken, Resource: req.Resource})
+		out = PermitResponse{Allowed: d.Allowed(), Revision: d.Revision(), Reason: d.Reason()}
+		return e
+	})
+	return out, err
+}
+func (s *Service) EvaluatePermit(ctx context.Context, req PermitRequest) (PermitResponse, error) {
+	return s.Permit(ctx, req)
+}
+
+type AcceptResultRequest struct {
+	RequestID, ExecutionID, LeaseID string
+	ExpectedExecutionVersion        domain.Version
+	FencingToken                    domain.FencingToken
+	ControlRevision                 domain.Revision
+	Succeeded                       bool
+	Target                          domain.ControlTarget
+}
+type AcceptResultResponse struct {
+	ExecutionID string
+	Status      domain.ExecutionStatus
+	Version     domain.Version
+}
+
+func (s *Service) AcceptResult(ctx context.Context, req AcceptResultRequest) (out AcceptResultResponse, err error) {
+	_, actor, runner, err := runnerCaller(ctx)
+	if err != nil {
+		return out, err
+	}
+	if err = requireRequest(req.RequestID); err != nil {
+		return out, err
+	}
+	now := s.clock.Now()
+	if now.IsZero() {
+		return out, errors.New("clock returned zero time")
+	}
+	fingerprint, err := requestFingerprint("accept-result", req)
+	if err != nil {
+		return out, err
+	}
+	eventID, err := s.ids.Next("event")
+	if err != nil {
+		return out, err
+	}
+	operationID, err := s.ids.Next("operation")
+	if err != nil {
+		return out, err
+	}
+	outboxID, err := s.ids.Next("outbox")
+	if err != nil {
+		return out, err
+	}
+	err = s.tx.Transact(ctx, func(u UnitOfWork) error {
+		if prior, ok, e := u.Idempotency(ctx, req.RequestID, "accept-result"); e != nil {
+			return e
+		} else if ok {
+			if prior.Fingerprint != fingerprint {
+				return ErrIdempotencyConflict
+			}
+			return restoreResponse(prior, &out)
+		}
+		exec, ok, e := u.Execution(ctx, req.ExecutionID)
+		if e != nil {
+			return e
+		}
+		if !ok {
+			return ErrNotFound
+		}
+		if exec.RunnerID != runner {
+			return domain.ErrLeaseNotOwned
+		}
+		if exec.Version != req.ExpectedExecutionVersion {
+			return domain.ErrStaleVersion
+		}
+		lease, ok, e := u.Lease(ctx, req.LeaseID)
+		if e != nil {
+			return e
+		}
+		if !ok {
+			return ErrNotFound
+		}
+		if lease.RunnerID != runner {
+			return domain.ErrLeaseNotOwned
+		}
+		canonical, found, e := u.CanonicalTarget(ctx, exec.IncrementID.String(), exec.RunnerID.String())
+		if e != nil {
+			return e
+		}
+		if !found {
+			canonical = domain.ControlTarget{IncrementID: exec.IncrementID, RunnerID: exec.RunnerID}
+		}
+		if !sameTarget(req.Target, canonical) {
+			return domain.ErrControlDenied
+		}
+		canonical = canonicalizeTarget(req.Target, canonical)
+		controls, e := u.Controls(ctx)
+		if e != nil {
+			return e
+		}
+		next, e := domain.AcceptExecutionResult(exec, lease, domain.ExecutionResult{ExecutionID: exec.ID, LeaseID: lease.ID, FencingToken: req.FencingToken, ControlRevision: req.ControlRevision, At: now, Succeeded: req.Succeeded}, domain.EffectiveControl(controls, canonical))
+		if e != nil {
+			return e
+		}
+		if e = u.SaveExecution(ctx, next, exec.Version); e != nil {
+			return e
+		}
+		out = AcceptResultResponse{ExecutionID: req.ExecutionID, Status: next.Status, Version: next.Version}
+		effectOutbox, e := s.effectOutbox(ctx, u, outboxID, operationID, req.RequestID, domain.PermitExternalEffect, canonical, next.Version, req.FencingToken, req.ControlRevision, "result-accepted", req.ExecutionID)
+		if e != nil {
+			return e
+		}
+		return s.record(ctx, u, eventID, operationID, fingerprint, req.RequestID, "accept-result", "execution", req.ExecutionID, next.Version, "execution.result-accepted", actor.String(), effectOutbox, out)
+	})
+	return out, err
+}
+func (s *Service) AcceptExecutionResult(ctx context.Context, req AcceptResultRequest) (AcceptResultResponse, error) {
+	return s.AcceptResult(ctx, req)
+}
+
+// effectOutbox is the sole construction path for external-effect outbox
+// records. It re-reads policy and fence immediately before durable intent is
+// recorded, then obtains the opaque domain Effect permit.
+func (s *Service) effectOutbox(ctx context.Context, u UnitOfWork, outboxID, operationID, requestID string, kind domain.PermitKind, target domain.ControlTarget, expected domain.Version, fence domain.FencingToken, revision domain.Revision, outboxKind, resource string) (*OutboxItem, error) {
+	if target.IncrementID != "" {
+		latestFence, err := u.MaxFencingToken(ctx, target.IncrementID.String())
+		if err != nil {
+			return nil, err
+		}
+		if latestFence != fence {
+			return nil, domain.ErrStaleFence
+		}
+	}
+	controls, err := u.Controls(ctx)
+	if err != nil {
+		return nil, err
+	}
+	current := domain.EffectiveControl(controls, target)
+	authoritativeRevision := domain.Revision(0)
+	if current.Found {
+		authoritativeRevision = current.Revision
+	}
+	if authoritativeRevision != revision {
+		return nil, domain.ErrControlDenied
+	}
+	operation, err := domain.NewOperationID(operationID)
+	if err != nil {
+		return nil, err
+	}
+	request, err := domain.NewRequestID(requestID)
+	if err != nil {
+		return nil, err
+	}
+	permit, err := domain.Permit(current, domain.PermitRequest{Kind: kind, Target: target, ControlRevision: revision, FencingToken: fence, ExpectedFencingToken: fence, Resource: resource})
+	if err != nil {
+		return nil, err
+	}
+	effect, err := domain.EffectFromPermit(permit, current, fence, operation, request, kind, resource, expected, fence, revision, nil)
+	if err != nil {
+		return nil, err
+	}
+	return &OutboxItem{ID: outboxID, OperationID: effect.OperationID.String(), Kind: outboxKind, Target: effect.Target, ExpectedVersion: effect.ExpectedVersion, FencingToken: effect.FencingToken, ControlRevision: effect.ControlRevision}, nil
+}
+
+func (s *Service) record(ctx context.Context, u UnitOfWork, eventID, operationID, fingerprint, requestID, operation, aggregateType, aggregateID string, version domain.Version, typ, actor string, outbox *OutboxItem, value any) error {
+	err := error(nil)
+	at := s.clock.Now()
+	if at.IsZero() {
+		return errors.New("clock returned zero time")
+	}
+	if outbox != nil {
+		outbox.RequestID = requestID
+		outbox.OperationID = operationID
+		outbox.CreatedAt = at
+	}
+	if err = u.Record(Event{ID: eventID, RequestID: requestID, AggregateType: aggregateType, AggregateID: aggregateID, Type: typ, ActorID: actor, Version: version, At: at}, outbox); err != nil {
+		return err
+	}
+	response, err := responseJSON(value)
+	if err != nil {
+		return err
+	}
+	return u.SaveIdempotency(ctx, IdempotentResponse{RequestID: requestID, Operation: operation, Fingerprint: fingerprint, ResponseJSON: response, Value: value})
+}
