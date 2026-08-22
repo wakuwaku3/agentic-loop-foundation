@@ -1,0 +1,691 @@
+// Package firestore implements application UnitOfWork on a real Cloud
+// Firestore transaction. Writes are staged until the callback returns: this
+// preserves Firestore's read-before-write rule and gives read-your-writes.
+package firestore
+
+import (
+	"context"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"sort"
+	"strings"
+	"time"
+	"unicode/utf8"
+
+	cloudfirestore "cloud.google.com/go/firestore"
+	"google.golang.org/api/iterator"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+
+	"github.com/takushi/agentic-loop-foundation/v2/internal/application"
+	"github.com/takushi/agentic-loop-foundation/v2/internal/domain"
+)
+
+const MaxWrites = 400
+const MaxQueryRows = 1000
+const RecordSchema = "v1"
+const MaxPathKeyBytes = 512
+
+var (
+	ErrInvalidSchema = errors.New("invalid record schema")
+	ErrWriteCap      = errors.New("firestore write cap exceeded")
+	ErrQueryLimit    = errors.New("firestore query result exceeds bounded limit")
+)
+
+func PathKey(value string) (string, error) {
+	if strings.TrimSpace(value) == "" || !utf8.ValidString(value) {
+		return "", errors.New("empty path key")
+	}
+	if len([]byte(value)) > MaxPathKeyBytes {
+		return "", errors.New("path key exceeds byte limit")
+	}
+	return base64.RawURLEncoding.EncodeToString([]byte(value)), nil
+}
+func CollectionPath(installation, collection string) (string, error) {
+	i, err := PathKey(installation)
+	if err != nil {
+		return "", err
+	}
+	if collection == "" {
+		return "", errors.New("empty collection")
+	}
+	return "installations/" + i + "/" + collection, nil
+}
+
+// EncodeRecord/DecodeRecord are the stable JSON codec used by export and
+// migration tools. Firestore stores the payload as a JSON string in the same
+// envelope, preventing implicit Firestore value coercion.
+func EncodeRecord(kind string, value any) ([]byte, error) {
+	if kind == "" {
+		return nil, ErrInvalidSchema
+	}
+	return json.Marshal(map[string]any{"record_schema": RecordSchema, "kind": kind, "value": value})
+}
+func DecodeRecord(data []byte, expectedKind string, out any) error {
+	var e struct {
+		Schema string          `json:"record_schema"`
+		Kind   string          `json:"kind"`
+		Value  json.RawMessage `json:"value"`
+	}
+	if expectedKind == "" {
+		return ErrInvalidSchema
+	}
+	if err := json.Unmarshal(data, &e); err != nil || e.Schema != RecordSchema || e.Kind != expectedKind || len(e.Value) == 0 {
+		return ErrInvalidSchema
+	}
+	if err := json.Unmarshal(e.Value, out); err != nil {
+		return ErrInvalidSchema
+	}
+	return nil
+}
+
+type document struct {
+	RecordSchema string `firestore:"record_schema"`
+	Kind         string `firestore:"kind"`
+	Payload      string `firestore:"payload"`
+}
+
+type requirementRecord struct {
+	Requirement domain.Requirement `json:"requirement"`
+	Text        string             `json:"text,omitempty"`
+}
+
+func encodeDocument(kind string, value any) (document, error) {
+	if kind == "" {
+		return document{}, ErrInvalidSchema
+	}
+	b, err := json.Marshal(value)
+	if err != nil {
+		return document{}, err
+	}
+	return document{RecordSchema: RecordSchema, Kind: kind, Payload: string(b)}, nil
+}
+func decodeDocument(snap *cloudfirestore.DocumentSnapshot, expectedKind string, out any) error {
+	if snap == nil || !snap.Exists() {
+		return nil
+	}
+	var d document
+	if err := snap.DataTo(&d); err != nil || d.RecordSchema != RecordSchema || d.Kind != expectedKind || d.Payload == "" {
+		return ErrInvalidSchema
+	}
+	if err := json.Unmarshal([]byte(d.Payload), out); err != nil {
+		return ErrInvalidSchema
+	}
+	return nil
+}
+
+type pending struct {
+	ref    *cloudfirestore.DocumentRef
+	doc    document
+	create bool
+}
+type unit struct {
+	store  *Store
+	tx     *cloudfirestore.Transaction
+	ctx    context.Context
+	cache  map[string]*cloudfirestore.DocumentSnapshot
+	values map[string]pending
+}
+
+// Store is a tenant-scoped Firestore adapter. It has no canonical in-memory
+// state; all application records belong to Firestore.
+type Store struct {
+	client       *cloudfirestore.Client
+	installation string
+}
+
+func NewStore(client *cloudfirestore.Client, installation string) (*Store, error) {
+	if client == nil || installation == "" {
+		return nil, errors.New("firestore client and installation are required")
+	}
+	if os.Getenv("FIRESTORE_EMULATOR_HOST") != "" {
+		return nil, errors.New("production Firestore constructor refuses emulator host; use NewEmulatorStore")
+	}
+	if _, err := PathKey(installation); err != nil {
+		return nil, err
+	}
+	return &Store{client: client, installation: installation}, nil
+}
+
+// NewEmulatorStore is the only constructor permitted to use a Firestore
+// emulator. Tests must opt in explicitly instead of accidentally redirecting
+// a production adapter through FIRESTORE_EMULATOR_HOST.
+func NewEmulatorStore(client *cloudfirestore.Client, installation string) (*Store, error) {
+	if client == nil || installation == "" {
+		return nil, errors.New("firestore client and installation are required")
+	}
+	if _, err := PathKey(installation); err != nil {
+		return nil, err
+	}
+	return &Store{client: client, installation: installation}, nil
+}
+func NewWithClient(client *cloudfirestore.Client, installation string) (*Store, error) {
+	return NewStore(client, installation)
+}
+func (s *Store) InstallationRoot() (string, error) {
+	i, err := PathKey(s.installation)
+	if err != nil {
+		return "", err
+	}
+	return "installations/" + i, nil
+}
+func (s *Store) path(collection, id string) (*cloudfirestore.DocumentRef, error) {
+	root, err := CollectionPath(s.installation, collection)
+	if err != nil {
+		return nil, err
+	}
+	key, err := PathKey(id)
+	if err != nil {
+		return nil, err
+	}
+	return s.client.Doc(root + "/" + key), nil
+}
+
+func (s *Store) Transact(ctx context.Context, fn func(application.UnitOfWork) error) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return s.client.RunTransaction(ctx, func(ctx context.Context, tx *cloudfirestore.Transaction) error {
+		u := &unit{store: s, tx: tx, ctx: ctx, cache: map[string]*cloudfirestore.DocumentSnapshot{}, values: map[string]pending{}}
+		if err := fn(u); err != nil {
+			return err
+		}
+		return u.flush()
+	})
+}
+
+// AuthorityContext lets application event recording reuse the timestamp
+// captured before a transaction callback, including Firestore retry attempts.
+func (u *unit) AuthorityContext() context.Context { return u.ctx }
+func (u *unit) read(ref *cloudfirestore.DocumentRef) (*cloudfirestore.DocumentSnapshot, error) {
+	if v, ok := u.cache[ref.Path]; ok {
+		return v, nil
+	}
+	v, err := u.tx.Get(ref)
+	if err != nil {
+		if status.Code(err) == codes.NotFound {
+			u.cache[ref.Path] = nil
+			return nil, nil
+		}
+		return nil, err
+	}
+	u.cache[ref.Path] = v
+	return v, nil
+}
+func (u *unit) value(ref *cloudfirestore.DocumentRef, kind string, out any) (bool, error) {
+	if p, ok := u.values[ref.Path]; ok {
+		if err := json.Unmarshal([]byte(p.doc.Payload), out); err != nil {
+			return false, ErrInvalidSchema
+		}
+		return true, nil
+	}
+	s, err := u.read(ref)
+	if err != nil {
+		return false, err
+	}
+	if s == nil || !s.Exists() {
+		return false, nil
+	}
+	if err := decodeDocument(s, kind, out); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+func (u *unit) stage(ref *cloudfirestore.DocumentRef, kind string, value any, create bool) error {
+	d, err := encodeDocument(kind, value)
+	if err != nil {
+		return err
+	}
+	if _, ok := u.values[ref.Path]; !ok && len(u.values) >= MaxWrites {
+		return ErrWriteCap
+	}
+	if prior, ok := u.values[ref.Path]; ok && prior.create {
+		create = true
+	}
+	u.values[ref.Path] = pending{ref: ref, doc: d, create: create}
+	return nil
+}
+func (u *unit) saveVersion(ref *cloudfirestore.DocumentRef, kind string, value any, expected, current domain.Version) error {
+	if current != expected {
+		return domain.ErrStaleVersion
+	}
+	return u.stage(ref, kind, value, expected == 0 && current == 0)
+}
+func (u *unit) flush() error {
+	if len(u.values) > MaxWrites {
+		return ErrWriteCap
+	}
+	paths := make([]string, 0, len(u.values))
+	for p := range u.values {
+		paths = append(paths, p)
+	}
+	sort.Strings(paths)
+	for _, p := range paths {
+		v := u.values[p]
+		ref := v.ref
+		var err error
+		if v.create {
+			err = u.tx.Create(ref, v.doc)
+		} else {
+			err = u.tx.Set(ref, v.doc)
+		}
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (u *unit) Requirement(ctx context.Context, id string) (domain.Requirement, bool, error) {
+	ref, err := u.store.path("requirements", id)
+	if err != nil {
+		return domain.Requirement{}, false, err
+	}
+	var v requirementRecord
+	ok, err := u.value(ref, "requirement", &v)
+	return v.Requirement, ok, err
+}
+func (u *unit) Requirements(ctx context.Context) ([]domain.Requirement, error) {
+	rows, err := u.query(ctx, "requirements", "requirement")
+	if err != nil {
+		return nil, err
+	}
+	out := make([]domain.Requirement, 0, len(rows))
+	for _, b := range rows {
+		var v requirementRecord
+		if json.Unmarshal(b, &v) != nil {
+			return nil, ErrInvalidSchema
+		}
+		out = append(out, v.Requirement)
+	}
+	return out, nil
+}
+func (u *unit) SaveRequirement(ctx context.Context, value domain.Requirement, expected domain.Version) error {
+	ref, err := u.store.path("requirements", value.ID.String())
+	if err != nil {
+		return err
+	}
+	var old requirementRecord
+	got, err := u.value(ref, "requirement", &old)
+	if err != nil {
+		return err
+	}
+	var current domain.Version
+	if got {
+		current = old.Requirement.Version
+	}
+	return u.saveVersion(ref, "requirement", requirementRecord{Requirement: value, Text: old.Text}, expected, current)
+}
+func (u *unit) SaveRequirementText(ctx context.Context, id, text string) error {
+	ref, err := u.store.path("requirements", id)
+	if err != nil {
+		return err
+	}
+	var current requirementRecord
+	ok, err := u.value(ref, "requirement", &current)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return application.ErrNotFound
+	}
+	current.Text = text
+	return u.stage(ref, "requirement", current, false)
+}
+func (u *unit) RequirementText(ctx context.Context, id string) (string, bool, error) {
+	ref, err := u.store.path("requirements", id)
+	if err != nil {
+		return "", false, err
+	}
+	var v requirementRecord
+	ok, err := u.value(ref, "requirement", &v)
+	return v.Text, ok, err
+}
+func (u *unit) Increment(ctx context.Context, id string) (domain.Increment, bool, error) {
+	ref, err := u.store.path("increments", id)
+	if err != nil {
+		return domain.Increment{}, false, err
+	}
+	var v domain.Increment
+	ok, err := u.value(ref, "increment", &v)
+	return v, ok, err
+}
+func (u *unit) SaveIncrement(ctx context.Context, value domain.Increment, expected domain.Version) error {
+	ref, err := u.store.path("increments", value.ID.String())
+	if err != nil {
+		return err
+	}
+	var old domain.Increment
+	got, err := u.value(ref, "increment", &old)
+	if err != nil {
+		return err
+	}
+	var current domain.Version
+	if got {
+		current = old.Version
+	}
+	return u.saveVersion(ref, "increment", value, expected, current)
+}
+func (u *unit) Execution(ctx context.Context, id string) (domain.Execution, bool, error) {
+	ref, err := u.store.path("executions", id)
+	if err != nil {
+		return domain.Execution{}, false, err
+	}
+	var v domain.Execution
+	ok, err := u.value(ref, "execution", &v)
+	return v, ok, err
+}
+func (u *unit) SaveExecution(ctx context.Context, value domain.Execution, expected domain.Version) error {
+	ref, err := u.store.path("executions", value.ID.String())
+	if err != nil {
+		return err
+	}
+	var old domain.Execution
+	got, err := u.value(ref, "execution", &old)
+	if err != nil {
+		return err
+	}
+	var current domain.Version
+	if got {
+		current = old.Version
+	}
+	return u.saveVersion(ref, "execution", value, expected, current)
+}
+func (u *unit) Lease(ctx context.Context, id string) (domain.Lease, bool, error) {
+	ref, err := u.store.path("leases", id)
+	if err != nil {
+		return domain.Lease{}, false, err
+	}
+	var v domain.Lease
+	ok, err := u.value(ref, "lease", &v)
+	return v, ok, err
+}
+func (u *unit) SaveLease(ctx context.Context, value domain.Lease, expected domain.Version) error {
+	ref, err := u.store.path("leases", value.ID.String())
+	if err != nil {
+		return err
+	}
+	var old domain.Lease
+	got, err := u.value(ref, "lease", &old)
+	if err != nil {
+		return err
+	}
+	var current domain.Version
+	if got {
+		current = old.Version
+	}
+	return u.saveVersion(ref, "lease", value, expected, current)
+}
+func (u *unit) ActiveLeaseForIncrement(ctx context.Context, id string) (domain.Lease, bool, error) {
+	rows, err := u.queryWhere(ctx, "leases", "lease", "increment_id", id, "status", string(domain.LeaseActive))
+	if err != nil {
+		return domain.Lease{}, false, err
+	}
+	for _, b := range rows {
+		var v domain.Lease
+		if json.Unmarshal(b, &v) != nil {
+			return domain.Lease{}, false, ErrInvalidSchema
+		}
+		return v, true, nil
+	}
+	return domain.Lease{}, false, nil
+}
+func (u *unit) ActiveLeaseForIncrementAt(ctx context.Context, id string, at time.Time) (domain.Lease, bool, error) {
+	v, ok, err := u.ActiveLeaseForIncrement(ctx, id)
+	if err != nil || !ok {
+		return v, ok, err
+	}
+	return v, v.ActiveAt(at), nil
+}
+func (u *unit) LatestLeaseForIncrement(ctx context.Context, id string) (domain.Lease, bool, error) {
+	rows, err := u.queryWhere(ctx, "leases", "lease", "increment_id", id, "", "")
+	if err != nil {
+		return domain.Lease{}, false, err
+	}
+	var latest domain.Lease
+	found := false
+	for _, b := range rows {
+		var v domain.Lease
+		if json.Unmarshal(b, &v) != nil {
+			return latest, false, ErrInvalidSchema
+		}
+		if !found || v.FencingToken > latest.FencingToken {
+			latest, found = v, true
+		}
+	}
+	return latest, found, nil
+}
+func (u *unit) MaxFencingToken(ctx context.Context, id string) (domain.FencingToken, error) {
+	v, ok, err := u.LatestLeaseForIncrement(ctx, id)
+	if err != nil || !ok {
+		return 0, err
+	}
+	return v.FencingToken, nil
+}
+func (u *unit) CanonicalTarget(ctx context.Context, incrementID, runnerID string) (domain.ControlTarget, bool, error) {
+	ref, err := u.store.path("targets", incrementID)
+	if err != nil {
+		return domain.ControlTarget{}, false, err
+	}
+	var v domain.ControlTarget
+	ok, err := u.value(ref, "target", &v)
+	return v, ok, err
+}
+func (u *unit) SaveCanonicalTarget(ctx context.Context, incrementID string, target domain.ControlTarget) error {
+	ref, err := u.store.path("targets", incrementID)
+	if err != nil {
+		return err
+	}
+	return u.stage(ref, "target", target, false)
+}
+func (u *unit) Controls(ctx context.Context) ([]domain.ControlIntent, error) {
+	rows, err := u.query(ctx, "controls", "control")
+	if err != nil {
+		return nil, err
+	}
+	out := make([]domain.ControlIntent, 0, len(rows))
+	for _, b := range rows {
+		var v domain.ControlIntent
+		if json.Unmarshal(b, &v) != nil {
+			return nil, ErrInvalidSchema
+		}
+		out = append(out, v)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Revision < out[j].Revision })
+	return out, nil
+}
+func (u *unit) SaveControl(ctx context.Context, value domain.ControlIntent, expected domain.Revision) error {
+	current, err := u.ControlRevision(ctx)
+	if err != nil {
+		return err
+	}
+	if current != expected {
+		return domain.ErrStaleVersion
+	}
+	ref, err := u.store.path("controls", fmt.Sprintf("%d", value.Revision))
+	if err != nil {
+		return err
+	}
+	return u.stage(ref, "control", value, true)
+}
+func (u *unit) ControlRevision(ctx context.Context) (domain.Revision, error) {
+	rows, err := u.query(ctx, "controls", "control")
+	if err != nil {
+		return 0, err
+	}
+	var current domain.Revision
+	for _, b := range rows {
+		var v domain.ControlIntent
+		if json.Unmarshal(b, &v) != nil {
+			return 0, ErrInvalidSchema
+		}
+		if v.Revision > current {
+			current = v.Revision
+		}
+	}
+	for _, p := range u.values {
+		if p.doc.Kind != "control" {
+			continue
+		}
+		var v domain.ControlIntent
+		if json.Unmarshal([]byte(p.doc.Payload), &v) == nil && v.Revision > current {
+			current = v.Revision
+		}
+	}
+	return current, nil
+}
+func (u *unit) Idempotency(ctx context.Context, requestID, operation string) (application.IdempotentResponse, bool, error) {
+	ref, err := u.store.path("idempotency", requestID)
+	if err != nil {
+		return application.IdempotentResponse{}, false, err
+	}
+	var v application.IdempotentResponse
+	ok, err := u.value(ref, "idempotency", &v)
+	if err != nil || !ok {
+		return v, ok, err
+	}
+	if v.Operation != operation {
+		return v, true, application.ErrIdempotencyConflict
+	}
+	return v, true, nil
+}
+func (u *unit) SaveIdempotency(ctx context.Context, value application.IdempotentResponse) error {
+	ref, err := u.store.path("idempotency", value.RequestID)
+	if err != nil {
+		return err
+	}
+	var old application.IdempotentResponse
+	got, err := u.value(ref, "idempotency", &old)
+	if err != nil {
+		return err
+	}
+	if got && (old.Operation != value.Operation || old.Fingerprint != value.Fingerprint) {
+		return application.ErrIdempotencyConflict
+	}
+	if got {
+		return nil
+	}
+	return u.stage(ref, "idempotency", value, true)
+}
+func (u *unit) Record(event application.Event, outbox *application.OutboxItem) error {
+	ref, err := u.store.path("events", event.ID)
+	if err != nil {
+		return err
+	}
+	if err = u.stage(ref, "event", event, true); err != nil {
+		return err
+	}
+	if outbox != nil {
+		ref, err = u.store.path("outbox", outbox.ID)
+		if err != nil {
+			return err
+		}
+		if err = u.stage(ref, "outbox", *outbox, true); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (u *unit) query(ctx context.Context, collection, kind string) ([][]byte, error) {
+	path, err := CollectionPath(u.store.installation, collection)
+	if err != nil {
+		return nil, err
+	}
+	snaps, err := u.tx.Documents(u.store.client.Collection(path).Limit(MaxQueryRows + 1)).GetAll()
+	if err != nil {
+		return nil, err
+	}
+	if len(snaps) > MaxQueryRows {
+		return nil, ErrQueryLimit
+	}
+	seen := map[string]bool{}
+	out := make([][]byte, 0, len(snaps)+len(u.values))
+	for _, snap := range snaps {
+		seen[snap.Ref.Path] = true
+		var d document
+		if snap.DataTo(&d) != nil || d.RecordSchema != RecordSchema || d.Kind != kind {
+			return nil, ErrInvalidSchema
+		}
+		out = append(out, []byte(d.Payload))
+	}
+	for p, v := range u.values {
+		if v.doc.Kind == kind && !seen[p] {
+			out = append(out, []byte(v.doc.Payload))
+		}
+	}
+	return out, nil
+}
+func (u *unit) queryWhere(ctx context.Context, collection, kind, field, value, field2, value2 string) ([][]byte, error) {
+	// Domain structs intentionally use opaque Go types and do not expose a
+	// Firestore field-name contract. Querying those field names would silently
+	// break when a codec changes, so this bounded adapter reads the collection
+	// and applies the predicate to decoded values. M2-B adds indexed candidate
+	// projections once their schema is public.
+	rows, err := u.query(ctx, collection, kind)
+	if err != nil {
+		return nil, err
+	}
+	out := make([][]byte, 0, len(rows))
+	for _, b := range rows {
+		var lease domain.Lease
+		if kind != "lease" || json.Unmarshal(b, &lease) != nil {
+			return nil, ErrInvalidSchema
+		}
+		match := func(name, expected string) bool {
+			switch name {
+			case "increment_id":
+				return lease.IncrementID.String() == expected
+			case "status":
+				return string(lease.Status) == expected
+			}
+			return false
+		}
+		if !match(field, value) || (field2 != "" && !match(field2, value2)) {
+			continue
+		}
+		out = append(out, b)
+	}
+	return out, nil
+}
+
+func (s *Store) Events(ctx context.Context) ([]application.Event, error) {
+	return readCollection[application.Event](ctx, s, "events", "event")
+}
+func (s *Store) Outbox(ctx context.Context) ([]application.OutboxItem, error) {
+	return readCollection[application.OutboxItem](ctx, s, "outbox", "outbox")
+}
+func readCollection[T any](ctx context.Context, s *Store, collection, kind string) ([]T, error) {
+	path, err := CollectionPath(s.installation, collection)
+	if err != nil {
+		return nil, err
+	}
+	it := s.client.Collection(path).Limit(MaxQueryRows + 1).Documents(ctx)
+	defer it.Stop()
+	out := []T{}
+	for {
+		snap, e := it.Next()
+		if e == iterator.Done {
+			break
+		}
+		if e != nil {
+			return nil, e
+		}
+		if len(out) >= MaxQueryRows {
+			return nil, ErrQueryLimit
+		}
+		var d document
+		if e = snap.DataTo(&d); e != nil || d.RecordSchema != RecordSchema || d.Kind != kind {
+			return nil, ErrInvalidSchema
+		}
+		var v T
+		if e = json.Unmarshal([]byte(d.Payload), &v); e != nil {
+			return nil, ErrInvalidSchema
+		}
+		out = append(out, v)
+	}
+	return out, nil
+}

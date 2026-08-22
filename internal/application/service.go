@@ -91,6 +91,22 @@ type Service struct {
 	config ServiceConfig
 }
 
+type authorityTimeKey struct{}
+
+func withAuthorityTime(ctx context.Context, at time.Time) context.Context {
+	return context.WithValue(ctx, authorityTimeKey{}, at)
+}
+
+func (s *Service) transact(ctx context.Context, fn func(UnitOfWork) error) error {
+	// Capture once outside the transaction callback. Firestore may retry the
+	// callback; authority time must not change between attempts.
+	at := s.clock.Now()
+	if at.IsZero() {
+		return errors.New("clock returned zero time")
+	}
+	return s.tx.Transact(withAuthorityTime(ctx, at), fn)
+}
+
 type ServiceConfig struct {
 	InstallationID string
 	RepositoryID   string
@@ -158,7 +174,7 @@ func (s *Service) Renew(ctx context.Context, req RenewRequest) (out RenewRespons
 	if e != nil {
 		return out, e
 	}
-	err = s.tx.Transact(ctx, func(u UnitOfWork) error {
+	err = s.transact(ctx, func(u UnitOfWork) error {
 		if p, ok, x := u.Idempotency(ctx, req.RequestID, "renew"); x != nil {
 			return x
 		} else if ok {
@@ -240,7 +256,7 @@ func (s *Service) Start(ctx context.Context, req StartRequest) (out StartRespons
 	if e != nil {
 		return out, e
 	}
-	err = s.tx.Transact(ctx, func(u UnitOfWork) error {
+	err = s.transact(ctx, func(u UnitOfWork) error {
 		if p, ok, x := u.Idempotency(ctx, req.RequestID, "start"); x != nil {
 			return x
 		} else if ok {
@@ -327,7 +343,7 @@ func (s *Service) Heartbeat(ctx context.Context, req HeartbeatRequest) (out Life
 	if e != nil {
 		return out, e
 	}
-	err = s.tx.Transact(ctx, func(u UnitOfWork) error {
+	err = s.transact(ctx, func(u UnitOfWork) error {
 		if p, ok, x := u.Idempotency(ctx, req.RequestID, "heartbeat"); x != nil {
 			return x
 		} else if ok {
@@ -349,6 +365,10 @@ func (s *Service) Checkpoint(ctx context.Context, req CheckpointRequest) (out Li
 	if e = requireRequest(req.RequestID); e != nil {
 		return out, e
 	}
+	now := s.clock.Now()
+	if now.IsZero() {
+		return out, errors.New("clock returned zero time")
+	}
 	fp, e := requestFingerprint("checkpoint", req)
 	if e != nil {
 		return out, e
@@ -361,7 +381,7 @@ func (s *Service) Checkpoint(ctx context.Context, req CheckpointRequest) (out Li
 	if e != nil {
 		return out, e
 	}
-	err = s.tx.Transact(ctx, func(u UnitOfWork) error {
+	err = s.transact(ctx, func(u UnitOfWork) error {
 		if p, ok, x := u.Idempotency(ctx, req.RequestID, "checkpoint"); x != nil {
 			return x
 		} else if ok {
@@ -383,10 +403,6 @@ func (s *Service) Checkpoint(ctx context.Context, req CheckpointRequest) (out Li
 		}
 		if !ok {
 			return ErrNotFound
-		}
-		now := s.clock.Now()
-		if now.IsZero() {
-			return errors.New("clock returned zero time")
 		}
 		if exec.LeaseID != lease.ID || lease.ExecutionID != exec.ID || exec.RunnerID != runner || lease.RunnerID != runner || !lease.ActiveAt(now) {
 			return domain.ErrLeaseNotOwned
@@ -428,7 +444,7 @@ func (s *Service) ListRequirements(ctx context.Context) ([]RequirementView, erro
 		return nil, err
 	}
 	var out []RequirementView
-	err := s.tx.Transact(ctx, func(u UnitOfWork) error {
+	err := s.transact(ctx, func(u UnitOfWork) error {
 		rows, err := u.Requirements(ctx)
 		if err != nil {
 			return err
@@ -455,7 +471,7 @@ func (s *Service) GetRequirement(ctx context.Context, id string) (RequirementVie
 	}
 	var out RequirementView
 	var found bool
-	err := s.tx.Transact(ctx, func(u UnitOfWork) error {
+	err := s.transact(ctx, func(u UnitOfWork) error {
 		r, ok, e := u.Requirement(ctx, id)
 		if e != nil {
 			return e
@@ -505,7 +521,7 @@ func (s *Service) Capture(ctx context.Context, req CaptureRequest) (out CaptureR
 	if err != nil {
 		return out, err
 	}
-	err = s.tx.Transact(ctx, func(u UnitOfWork) error {
+	err = s.transact(ctx, func(u UnitOfWork) error {
 		if prior, ok, e := u.Idempotency(ctx, req.RequestID, "capture"); e != nil {
 			return e
 		} else if ok {
@@ -590,7 +606,7 @@ func (s *Service) Plan(ctx context.Context, req PlanRequest) (out PlanResponse, 
 	if err != nil {
 		return out, err
 	}
-	err = s.tx.Transact(ctx, func(u UnitOfWork) error {
+	err = s.transact(ctx, func(u UnitOfWork) error {
 		if prior, ok, e := u.Idempotency(ctx, req.RequestID, "plan"); e != nil {
 			return e
 		} else if ok {
@@ -694,7 +710,7 @@ func (s *Service) Claim(ctx context.Context, req ClaimRequest) (out ClaimRespons
 		return out, errors.New("clock returned zero time")
 	}
 	expiresAt := issuedAt.Add(s.config.LeaseTTL)
-	err = s.tx.Transact(ctx, func(u UnitOfWork) error {
+	err = s.transact(ctx, func(u UnitOfWork) error {
 		if prior, ok, e := u.Idempotency(ctx, req.RequestID, "claim"); e != nil {
 			return e
 		} else if ok {
@@ -855,7 +871,7 @@ func (s *Service) Control(ctx context.Context, req ControlRequest) (out ControlR
 	if err != nil {
 		return out, err
 	}
-	err = s.tx.Transact(ctx, func(u UnitOfWork) error {
+	err = s.transact(ctx, func(u UnitOfWork) error {
 		if prior, ok, e := u.Idempotency(ctx, req.RequestID, "control"); e != nil {
 			return e
 		} else if ok {
@@ -907,7 +923,7 @@ func (s *Service) Permit(ctx context.Context, req PermitRequest) (out PermitResp
 	if err = requireRequest(req.RequestID); err != nil {
 		return out, err
 	}
-	err = s.tx.Transact(ctx, func(u UnitOfWork) error {
+	err = s.transact(ctx, func(u UnitOfWork) error {
 		controls, e := u.Controls(ctx)
 		if e != nil {
 			return e
@@ -964,7 +980,7 @@ func (s *Service) AcceptResult(ctx context.Context, req AcceptResultRequest) (ou
 	if err != nil {
 		return out, err
 	}
-	err = s.tx.Transact(ctx, func(u UnitOfWork) error {
+	err = s.transact(ctx, func(u UnitOfWork) error {
 		if prior, ok, e := u.Idempotency(ctx, req.RequestID, "accept-result"); e != nil {
 			return e
 		} else if ok {
@@ -1076,8 +1092,14 @@ func (s *Service) effectOutbox(ctx context.Context, u UnitOfWork, outboxID, oper
 }
 
 func (s *Service) record(ctx context.Context, u UnitOfWork, eventID, operationID, fingerprint, requestID, operation, aggregateType, aggregateID string, version domain.Version, typ, actor string, outbox *OutboxItem, value any) error {
+	if authority, ok := u.(interface{ AuthorityContext() context.Context }); ok {
+		ctx = authority.AuthorityContext()
+	}
 	err := error(nil)
-	at := s.clock.Now()
+	at, ok := ctx.Value(authorityTimeKey{}).(time.Time)
+	if !ok || at.IsZero() {
+		return errors.New("transaction authority time is required")
+	}
 	if at.IsZero() {
 		return errors.New("clock returned zero time")
 	}

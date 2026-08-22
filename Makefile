@@ -1,10 +1,10 @@
-.PHONY: check environment format lint test contracts docs secrets smoke clean component-plan affected candidate component ownership component-ci component-contracts component-control-plane component-runner component-domain component-application component-store-memory component-api component-docs component-test component-infra component-tooling
+.PHONY: check environment format lint test contracts docs secrets smoke clean component-plan affected candidate component ownership component-ci component-contracts component-control-plane component-runner component-domain component-application component-store-memory component-store-firestore component-api component-docs component-test component-infra component-tooling
 
 GO ?= go
 EVIDENCE_DIR ?= build/evidence
 BASE ?= HEAD^
 
-check: environment format lint test contracts docs secrets ownership
+check: environment format lint test contracts docs secrets ownership component-store-firestore
 
 component-plan:
 	@go run ./cmd/ci-plan --changed "$$(scripts/affected.sh --list "$(BASE)")"
@@ -36,6 +36,8 @@ component-application:
 	@go test ./internal/application
 component-store-memory:
 	@go test ./internal/store/memory
+component-store-firestore:
+	@scripts/firestore-emulator.sh go test -race ./internal/store/firestore
 component-api:
 	@go test ./internal/api
 component-docs:

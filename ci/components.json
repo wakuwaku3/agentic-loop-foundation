@@ -9,11 +9,12 @@
     {"id":"domain","roots":["internal/domain/**"],"public_contracts":[],"contract_dependencies":[],"dependencies":[],"check":{"runner":"make","target":"component-domain"}},
     {"id":"application","roots":["internal/application/**"],"public_contracts":[],"contract_dependencies":[],"dependencies":["domain"],"check":{"runner":"make","target":"component-application"}},
     {"id":"store-memory","roots":["internal/store/memory/**"],"public_contracts":[],"contract_dependencies":[],"dependencies":["domain","application"],"check":{"runner":"make","target":"component-store-memory"}},
+    {"id":"store-firestore","roots":["internal/store/firestore/**","firestore.indexes.json"],"public_contracts":[],"contract_dependencies":[],"dependencies":["domain","application"],"check":{"runner":"make","target":"component-store-firestore"}},
     {"id":"api","roots":["internal/api/**"],"public_contracts":["contracts/openapi/openapi-v1.yaml"],"contract_dependencies":["contracts/openapi/openapi-v1.yaml"],"dependencies":["application","domain"],"check":{"runner":"make","target":"component-api"}},
     {"id":"internal-contracts","roots":["internal/contracts/**"],"public_contracts":[],"contract_dependencies":["contracts/**"],"dependencies":["contracts"],"check":{"runner":"make","target":"component-contracts"}},
     {"id":"docs","roots":["docs/**","README.md","AGENTS.md"],"public_contracts":[],"contract_dependencies":[],"dependencies":[],"check":{"runner":"make","target":"component-docs"}},
     {"id":"tooling","roots":[".editorconfig",".gitignore"],"public_contracts":[],"contract_dependencies":[],"dependencies":[],"check":{"runner":"make","target":"component-tooling"}},
-    {"id":"environment","roots":["devbox.json","devbox.lock","go.mod","go.sum","Makefile","scripts/**",".github/**"],"public_contracts":[],"contract_dependencies":[],"dependencies":[],"check":{"runner":"make","target":"component-tooling"}},
+    {"id":"environment","roots":["devbox.json","devbox.lock","go.mod","go.sum","Makefile","scripts/**","firebase.json",".github/**"],"public_contracts":[],"contract_dependencies":[],"dependencies":[],"check":{"runner":"make","target":"component-tooling"}},
     {"id":"repository-meta","roots":[".codex/**"],"public_contracts":[],"contract_dependencies":[],"dependencies":[],"check":{"runner":"make","target":"component-tooling"}},
     {"id":"task-ledger","roots":[".agents/**"],"public_contracts":[],"contract_dependencies":[],"dependencies":[],"check":{"runner":"make","target":"component-tooling"}}
   ]

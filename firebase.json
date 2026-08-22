@@ -1,0 +1,5 @@
+{
+  "emulators": {
+    "firestore": { "port": 18080 }
+  }
+}

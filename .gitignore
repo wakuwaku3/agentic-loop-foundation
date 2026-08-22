@@ -12,6 +12,7 @@
 /coverage.out
 /build/
 /tmp/
+*-debug.log
 
 # Devbox local state
 .direnv/

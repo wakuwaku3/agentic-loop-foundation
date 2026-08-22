@@ -404,6 +404,44 @@
         }
       }
     },
+    "firebase-tools@15.27.0": {
+      "last_modified": "2026-08-16T22:25:34Z",
+      "resolved": "github:NixOS/nixpkgs/21e032ff95225fb81164a2b2b696c5f6841fcb62#firebase-tools",
+      "source": "devbox-search",
+      "version": "15.27.0",
+      "systems": {
+        "aarch64-darwin": {
+          "outputs": [
+            {
+              "name": "out",
+              "path": "/nix/store/s16469fd1w5a70xlp5vjbca0ci2rlmwp-firebase-tools-15.27.0",
+              "default": true
+            }
+          ],
+          "store_path": "/nix/store/s16469fd1w5a70xlp5vjbca0ci2rlmwp-firebase-tools-15.27.0"
+        },
+        "aarch64-linux": {
+          "outputs": [
+            {
+              "name": "out",
+              "path": "/nix/store/si9d94213dpkbf73982bsai357i3vmkk-firebase-tools-15.27.0",
+              "default": true
+            }
+          ],
+          "store_path": "/nix/store/si9d94213dpkbf73982bsai357i3vmkk-firebase-tools-15.27.0"
+        },
+        "x86_64-linux": {
+          "outputs": [
+            {
+              "name": "out",
+              "path": "/nix/store/xf8lj9bfvbnl92avsfm278gfgachigy1-firebase-tools-15.27.0",
+              "default": true
+            }
+          ],
+          "store_path": "/nix/store/xf8lj9bfvbnl92avsfm278gfgachigy1-firebase-tools-15.27.0"
+        }
+      }
+    },
     "gawk@5.4.1": {
       "last_modified": "2026-08-12T11:28:58Z",
       "resolved": "github:NixOS/nixpkgs/044bfe75bfe4c7bbe043dc17b5e42ea823b84a09#gawk",
@@ -528,8 +566,8 @@
       }
     },
     "github:NixOS/nixpkgs/nixpkgs-unstable": {
-      "last_modified": "2026-08-10T07:49:06Z",
-      "resolved": "github:NixOS/nixpkgs/d482ef84049d9b7276b83a06e4e4d76983830097?lastModified=1786348146&narHash=sha256-we5zDEFfn8TgzeWKjKDMIjeQZ59omEPl23NIF%2B13%2Fys%3D"
+      "last_modified": "2026-08-20T07:12:19Z",
+      "resolved": "github:NixOS/nixpkgs/391b592eb44808b3bd0cb80bb71b63a5a118b8bb?lastModified=1787209939&narHash=sha256-WvvHR4kSQLAbtouMC%2FruZ5UpLwlUcY3K4FAllMN%2ByGk%3D"
     },
     "gitleaks@8.30.1": {
       "last_modified": "2026-08-12T11:28:58Z",
@@ -801,51 +839,87 @@
         }
       }
     },
-    "go@1.24.13": {
-      "last_modified": "2026-02-23T15:40:43Z",
-      "resolved": "github:NixOS/nixpkgs/80d901ec0377e19ac3f7bb8c035201e2e098cc97#go_1_24",
+    "go@1.25.0": {
+      "last_modified": "2025-09-18T16:33:27Z",
+      "resolved": "github:NixOS/nixpkgs/f4b140d5b253f5e2a1ff4e5506edbf8267724bde#go",
       "source": "devbox-search",
-      "version": "1.24.13",
+      "version": "1.25.0",
       "systems": {
         "aarch64-darwin": {
           "outputs": [
             {
               "name": "out",
-              "path": "/nix/store/xnd476nfyfvwcw88zsn1f209j6lb3wjf-go-1.24.13",
+              "path": "/nix/store/cr196bvbbai01r0w11p1inkzkdrqdx6y-go-1.25.0",
               "default": true
             }
           ],
-          "store_path": "/nix/store/xnd476nfyfvwcw88zsn1f209j6lb3wjf-go-1.24.13"
+          "store_path": "/nix/store/cr196bvbbai01r0w11p1inkzkdrqdx6y-go-1.25.0"
         },
         "aarch64-linux": {
           "outputs": [
             {
               "name": "out",
-              "path": "/nix/store/s6i249vg8halwzs8xgk2d9pwsz03qifv-go-1.24.13",
+              "path": "/nix/store/yhcdwwikp86p2cpq0qr7di91ji63460s-go-1.25.0",
               "default": true
             }
           ],
-          "store_path": "/nix/store/s6i249vg8halwzs8xgk2d9pwsz03qifv-go-1.24.13"
+          "store_path": "/nix/store/yhcdwwikp86p2cpq0qr7di91ji63460s-go-1.25.0"
         },
         "x86_64-darwin": {
           "outputs": [
             {
               "name": "out",
-              "path": "/nix/store/c0c7z7mad47pn5c1n5w6m6yqmqmgrzg1-go-1.24.13",
+              "path": "/nix/store/hz7dfw13v8iff4vf6vbnqnlnd7wh7j5x-go-1.25.0",
               "default": true
             }
           ],
-          "store_path": "/nix/store/c0c7z7mad47pn5c1n5w6m6yqmqmgrzg1-go-1.24.13"
+          "store_path": "/nix/store/hz7dfw13v8iff4vf6vbnqnlnd7wh7j5x-go-1.25.0"
         },
         "x86_64-linux": {
           "outputs": [
             {
               "name": "out",
-              "path": "/nix/store/sqcn3z4zax0anz48ymwfqs2dp7q6vhqy-go-1.24.13",
+              "path": "/nix/store/3fd683jfggglpshxprz9mi5sz8wd3c9p-go-1.25.0",
               "default": true
             }
           ],
-          "store_path": "/nix/store/sqcn3z4zax0anz48ymwfqs2dp7q6vhqy-go-1.24.13"
+          "store_path": "/nix/store/3fd683jfggglpshxprz9mi5sz8wd3c9p-go-1.25.0"
+        }
+      }
+    },
+    "javaPackages.compiler.openjdk21@21.0.12+8": {
+      "last_modified": "2026-08-12T11:28:58Z",
+      "resolved": "github:NixOS/nixpkgs/044bfe75bfe4c7bbe043dc17b5e42ea823b84a09#javaPackages.compiler.openjdk21",
+      "source": "devbox-search",
+      "version": "21.0.12+8",
+      "systems": {
+        "aarch64-linux": {
+          "outputs": [
+            {
+              "name": "out",
+              "path": "/nix/store/zq0g2yawic3l26h07gb5fflcncrjg4qa-openjdk-21.0.12+8",
+              "default": true
+            },
+            {
+              "name": "debug",
+              "path": "/nix/store/znprv6yqhr4zsfwj0k2k71l677vvzy44-openjdk-21.0.12+8-debug"
+            }
+          ],
+          "store_path": "/nix/store/zq0g2yawic3l26h07gb5fflcncrjg4qa-openjdk-21.0.12+8"
+        },
+        "x86_64-linux": {
+          "outputs": [
+            {
+              "name": "out",
+              "path": "/nix/store/1slz0vmmgsd7p6i4c0jaywkpw56wl2yg-openjdk-21.0.12+8",
+              "default": true
+            },
+            {
+              "name": "debug",
+              "path": "/nix/store/63y613m17jnbp7i5gsqfirixr43l57cb-openjdk-21.0.12+8-debug"
+            }
+          ],
+          "store_path": "/nix/store/1slz0vmmgsd7p6i4c0jaywkpw56wl2yg-openjdk-21.0.12+8"
         }
       }
     },

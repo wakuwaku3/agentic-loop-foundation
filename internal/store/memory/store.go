@@ -79,7 +79,10 @@ type Clock struct{ NowValue time.Time }
 
 func (c Clock) Now() time.Time { return c.NowValue }
 
-type unit struct{ s *state }
+type unit struct {
+	s   *state
+	ctx context.Context
+}
 
 func (m *Store) Transact(ctx context.Context, fn func(application.UnitOfWork) error) error {
 	if err := ctx.Err(); err != nil {
@@ -88,13 +91,17 @@ func (m *Store) Transact(ctx context.Context, fn func(application.UnitOfWork) er
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	working := m.data.clone()
-	u := &unit{s: &working}
+	u := &unit{s: &working, ctx: ctx}
 	if err := fn(u); err != nil {
 		return err
 	}
 	m.data = working
 	return nil
 }
+
+// AuthorityContext is used by application event recording to carry the
+// timestamp captured before a transaction callback.
+func (u *unit) AuthorityContext() context.Context { return u.ctx }
 
 func (u *unit) Requirement(_ context.Context, id string) (domain.Requirement, bool, error) {
 	v, ok := u.s.requirements[id]
