@@ -18,20 +18,21 @@ import (
 var ErrOptimisticConflict = domain.ErrStaleVersion
 
 type state struct {
-	requirements map[string]domain.Requirement
-	increments   map[string]domain.Increment
-	executions   map[string]domain.Execution
-	leases       map[string]domain.Lease
-	controls     []domain.ControlIntent
-	requests     map[string]application.IdempotentResponse
-	texts        map[string]string
-	targets      map[string]domain.ControlTarget
-	events       []application.Event
-	outbox       []application.OutboxItem
+	requirements    map[string]domain.Requirement
+	increments      map[string]domain.Increment
+	executions      map[string]domain.Execution
+	leases          map[string]domain.Lease
+	controls        []domain.ControlIntent
+	controlProgress map[domain.Revision]domain.ControlProgress
+	requests        map[string]application.IdempotentResponse
+	texts           map[string]string
+	targets         map[string]domain.ControlTarget
+	events          []application.Event
+	outbox          []application.OutboxItem
 }
 
 func newState() state {
-	return state{requirements: map[string]domain.Requirement{}, increments: map[string]domain.Increment{}, executions: map[string]domain.Execution{}, leases: map[string]domain.Lease{}, requests: map[string]application.IdempotentResponse{}, texts: map[string]string{}, targets: map[string]domain.ControlTarget{}}
+	return state{requirements: map[string]domain.Requirement{}, increments: map[string]domain.Increment{}, executions: map[string]domain.Execution{}, leases: map[string]domain.Lease{}, requests: map[string]application.IdempotentResponse{}, texts: map[string]string{}, targets: map[string]domain.ControlTarget{}, controlProgress: map[domain.Revision]domain.ControlProgress{}}
 }
 func (s state) clone() state {
 	n := newState()
@@ -49,6 +50,9 @@ func (s state) clone() state {
 		n.leases[k] = v
 	}
 	n.controls = append([]domain.ControlIntent(nil), s.controls...)
+	for k, v := range s.controlProgress {
+		n.controlProgress[k] = v
+	}
 	for k, v := range s.requests {
 		n.requests[k] = v
 	}
@@ -116,6 +120,100 @@ func (u *unit) Requirements(_ context.Context) ([]domain.Requirement, error) {
 	for _, v := range u.s.requirements {
 		v.Increments = append([]domain.IncrementID(nil), v.Increments...)
 		out = append(out, v)
+	}
+	return out, nil
+}
+
+// RequirementsPage keeps pagination work proportional to the requested page;
+// the in-memory adapter mirrors Firestore's ordering and exclusive cursor.
+func (u *unit) RequirementsPage(_ context.Context, afterID string, limit int) ([]domain.Requirement, bool, error) {
+	rows := make([]domain.Requirement, 0, len(u.s.requirements))
+	for _, v := range u.s.requirements {
+		v.Increments = append([]domain.IncrementID(nil), v.Increments...)
+		rows = append(rows, v)
+	}
+	sort.Slice(rows, func(i, j int) bool { return rows[i].ID.String() < rows[j].ID.String() })
+	start := 0
+	for start < len(rows) && rows[start].ID.String() <= afterID {
+		start++
+	}
+	if limit <= 0 {
+		return nil, false, nil
+	}
+	end := start + limit
+	more := end < len(rows)
+	if end > len(rows) {
+		end = len(rows)
+	}
+	return rows[start:end], more, nil
+}
+func (u *unit) RequirementTexts(_ context.Context, ids []string) (map[string]string, error) {
+	out := make(map[string]string, len(ids))
+	if len(ids) == 0 {
+		return out, nil
+	}
+	for _, id := range ids {
+		if v, ok := u.s.texts[id]; ok {
+			out[id] = v
+		}
+	}
+	return out, nil
+}
+func (u *unit) IncrementsForRequirements(_ context.Context, ids []string) ([]domain.Increment, error) {
+	filter := map[string]bool{}
+	for _, id := range ids {
+		filter[id] = true
+	}
+	all := len(ids) == 0
+	out := make([]domain.Increment, 0, len(u.s.increments))
+	for _, v := range u.s.increments {
+		if all || filter[v.ID.String()] || filter[v.RequirementID.String()] {
+			out = append(out, v)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID.String() < out[j].ID.String() })
+	return out, nil
+}
+func (u *unit) ExecutionsForIncrements(_ context.Context, ids []string) ([]domain.Execution, error) {
+	filter := map[string]bool{}
+	for _, id := range ids {
+		filter[id] = true
+	}
+	out := make([]domain.Execution, 0, len(u.s.executions))
+	for _, v := range u.s.executions {
+		if filter[v.IncrementID.String()] {
+			out = append(out, v)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID.String() < out[j].ID.String() })
+	return out, nil
+}
+func (u *unit) EventsPage(_ context.Context, afterID string, limit int) ([]application.Event, bool, error) {
+	rows := append([]application.Event(nil), u.s.events...)
+	sort.Slice(rows, func(i, j int) bool { return rows[i].ID < rows[j].ID })
+	start := 0
+	for start < len(rows) && rows[start].ID <= afterID {
+		start++
+	}
+	end := start + limit
+	more := end < len(rows)
+	if end > len(rows) {
+		end = len(rows)
+	}
+	return rows[start:end], more, nil
+}
+func (u *unit) QueueSummary(_ context.Context) (application.QueueSummary, error) {
+	out := application.QueueSummary{ByRequirementStatus: map[string]int{}, ByIncrementStatus: map[string]int{}, Requirements: len(u.s.requirements), Increments: len(u.s.increments)}
+	for _, v := range u.s.requirements {
+		out.ByRequirementStatus[string(v.Status)]++
+	}
+	for _, v := range u.s.increments {
+		out.ByIncrementStatus[string(v.Status)]++
+	}
+	for _, v := range u.s.executions {
+		if v.Status == domain.ExecutionRunning || v.Status == domain.ExecutionStarting {
+			out.ActiveExecutions++
+		}
 	}
 	return out, nil
 }
@@ -243,6 +341,22 @@ func (u *unit) ControlRevision(_ context.Context) (domain.Revision, error) {
 		}
 	}
 	return n, nil
+}
+func (u *unit) ControlProgress(_ context.Context, revision domain.Revision) (domain.ControlProgress, bool, error) {
+	v, ok := u.s.controlProgress[revision]
+	return v, ok, nil
+}
+func (u *unit) SaveControlProgress(_ context.Context, value domain.ControlProgress, expected domain.ControlState) error {
+	old, ok := u.s.controlProgress[value.Revision]
+	if !ok {
+		if expected != "" {
+			return domain.ErrStaleVersion
+		}
+	} else if old.State != expected {
+		return domain.ErrStaleVersion
+	}
+	u.s.controlProgress[value.Revision] = value
+	return nil
 }
 func (u *unit) Idempotency(_ context.Context, id, op string) (application.IdempotentResponse, bool, error) {
 	v, ok := u.s.requests[id]

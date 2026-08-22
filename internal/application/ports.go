@@ -94,6 +94,26 @@ type RequirementRepository interface {
 	Requirements(ctx context.Context) ([]domain.Requirement, error)
 	SaveRequirement(ctx context.Context, value domain.Requirement, expected domain.Version) error
 }
+
+// RequirementReadRepository is the bounded production read-side contract. Implementations
+// must apply the bound in the storage query (rather than loading the whole
+// collection and slicing it in the application). afterID is an internal,
+// stable ordering key; the public service wraps it in an opaque cursor.
+type RequirementReadRepository interface {
+	RequirementsPage(ctx context.Context, afterID string, limit int) ([]domain.Requirement, bool, error)
+	RequirementTexts(ctx context.Context, ids []string) (map[string]string, error)
+	IncrementsForRequirements(ctx context.Context, ids []string) ([]domain.Increment, error)
+	ExecutionsForIncrements(ctx context.Context, ids []string) ([]domain.Execution, error)
+}
+
+// EventReadRepository is intentionally metadata-only. Provider output and
+// credentials never cross this port.
+type EventReadRepository interface {
+	EventsPage(ctx context.Context, afterID string, limit int) ([]Event, bool, error)
+}
+type QueueSummaryRepository interface {
+	QueueSummary(ctx context.Context) (QueueSummary, error)
+}
 type RequirementTextRepository interface {
 	SaveRequirementText(ctx context.Context, id, text string) error
 	RequirementText(ctx context.Context, id string) (string, bool, error)
@@ -123,6 +143,10 @@ type ControlRepository interface {
 	SaveControl(ctx context.Context, value domain.ControlIntent, expected domain.Revision) error
 	ControlRevision(ctx context.Context) (domain.Revision, error)
 }
+type ControlProgressRepository interface {
+	ControlProgress(ctx context.Context, revision domain.Revision) (domain.ControlProgress, bool, error)
+	SaveControlProgress(ctx context.Context, value domain.ControlProgress, expected domain.ControlState) error
+}
 type IdempotencyRepository interface {
 	Idempotency(ctx context.Context, requestID string, operation string) (IdempotentResponse, bool, error)
 	SaveIdempotency(ctx context.Context, value IdempotentResponse) error
@@ -139,6 +163,10 @@ type UnitOfWork interface {
 	LeaseRepository
 	TargetRepository
 	ControlRepository
+	ControlProgressRepository
+	RequirementReadRepository
+	EventReadRepository
+	QueueSummaryRepository
 	IdempotencyRepository
 	Outbox(ctx context.Context, id string) (OutboxItem, bool, error)
 	Outboxes(ctx context.Context, now time.Time, limit int) ([]OutboxItem, error)

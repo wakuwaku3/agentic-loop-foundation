@@ -289,7 +289,25 @@ func evidenceKey(root string, c Component, all []Component) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 func Candidate(m Manifest, root, evidenceDir string) error {
+	ids := make([]string, 0, len(m.Components))
 	for _, c := range m.Components {
+		ids = append(ids, c.ID)
+	}
+	return CandidateComponents(m, root, evidenceDir, ids)
+}
+
+// CandidateComponents verifies fresh evidence only for the affected closure.
+// CI may use this after independently attesting that the unchanged component
+// keys belong to a successful parent workflow run.
+func CandidateComponents(m Manifest, root, evidenceDir string, ids []string) error {
+	wanted := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		wanted[id] = true
+	}
+	for _, c := range m.Components {
+		if !wanted[c.ID] {
+			continue
+		}
 		k, err := evidenceKey(root, c, m.Components)
 		if err != nil {
 			return err
@@ -304,6 +322,18 @@ func Candidate(m Manifest, root, evidenceDir string) error {
 		}
 		if json.Unmarshal(b, &v) != nil || v.Result != "passed" || v.EvidenceKey != k {
 			return fmt.Errorf("invalid evidence for %s", c.ID)
+		}
+	}
+	for id := range wanted {
+		found := false
+		for _, c := range m.Components {
+			if c.ID == id {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return fmt.Errorf("unknown candidate component %s", id)
 		}
 	}
 	return nil

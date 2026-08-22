@@ -5,6 +5,7 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
+  actions: read
 jobs:
   plan:
     runs-on: ubuntu-latest
@@ -13,5 +14,10 @@ jobs:
         with:
           fetch-depth: 2
       - uses: jetify-com/devbox-install-action@22b0f5500b14df4ea357ce673fbd4ced940ed6a1 # v0.13.0
+      - name: Verify parent CI attestation
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_EVENT_BEFORE: ${{ github.event.before }}
+        run: scripts/verify-parent-ci.sh
       - run: devbox run --pure -- make affected
-      - run: devbox run --pure -- make candidate
+      - run: devbox run --pure -- make candidate-affected

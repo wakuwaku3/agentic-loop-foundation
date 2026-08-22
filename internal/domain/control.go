@@ -31,8 +31,8 @@ const (
 )
 
 type ControlScope struct {
-	Kind  ControlScopeKind
-	Value string
+	Kind  ControlScopeKind `json:"kind"`
+	Value string           `json:"value"`
 }
 type ControlIntent struct {
 	Scope    ControlScope
@@ -41,6 +41,19 @@ type ControlIntent struct {
 	Actor    ActorID
 	At       time.Time
 	Reason   string
+}
+
+// ControlProgress is durable observation, not an inference from an intent.
+// A newly-created intent is requested only; later states require an explicit
+// observation/evidence transition.
+type ControlProgress struct {
+	Revision       Revision
+	State          ControlState
+	RequestedAt    time.Time
+	AcknowledgedAt time.Time
+	EffectiveAt    time.Time
+	VerifiedAt     time.Time
+	EvidenceRef    string
 }
 
 type ControlTarget struct {

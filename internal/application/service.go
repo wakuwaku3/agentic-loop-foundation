@@ -316,7 +316,10 @@ func (s *Service) Start(ctx context.Context, req StartRequest) (out StartRespons
 	return out, err
 }
 
-type HeartbeatRequest struct{ RequestID string }
+type HeartbeatRequest struct {
+	RequestID       string
+	ControlRevision domain.Revision
+}
 type CheckpointRequest struct {
 	RequestID, ExecutionID, LeaseID string
 	FencingToken                    domain.FencingToken
@@ -330,6 +333,10 @@ func (s *Service) Heartbeat(ctx context.Context, req HeartbeatRequest) (out Life
 	}
 	if e = requireRequest(req.RequestID); e != nil {
 		return out, e
+	}
+	authorityAt := s.clock.Now()
+	if authorityAt.IsZero() {
+		return out, errors.New("clock returned zero time")
 	}
 	fp, e := requestFingerprint("heartbeat", req)
 	if e != nil {
@@ -351,6 +358,24 @@ func (s *Service) Heartbeat(ctx context.Context, req HeartbeatRequest) (out Life
 				return ErrIdempotencyConflict
 			}
 			return restoreResponse(p, &out)
+		}
+		if req.ControlRevision != 0 {
+			{
+				progress, exists, e := u.ControlProgress(ctx, req.ControlRevision)
+				if e != nil {
+					return e
+				}
+				if exists && progress.State == domain.ControlRequested {
+					if e = domain.AdvanceControlState(progress.State, domain.ControlAcknowledged); e != nil {
+						return e
+					}
+					progress.State = domain.ControlAcknowledged
+					progress.AcknowledgedAt = authorityAt
+					if e = u.SaveControlProgress(ctx, progress, domain.ControlRequested); e != nil {
+						return e
+					}
+				}
+			}
 		}
 		out = LifecycleResponse{Accepted: true}
 		return s.record(ctx, u, eid, oid, fp, req.RequestID, "heartbeat", "runner", runner.String(), 1, "runner.heartbeat", actor.String(), nil, out)
@@ -429,14 +454,6 @@ func (s *Service) Checkpoint(ctx context.Context, req CheckpointRequest) (out Li
 		return s.record(ctx, u, eid, oid, fp, req.RequestID, "checkpoint", "execution", req.ExecutionID, exec.Version, "execution.checkpointed", actor.String(), nil, out)
 	})
 	return out, err
-}
-
-type RequirementView struct {
-	RequirementID string                   `json:"requirement_id"`
-	Status        domain.RequirementStatus `json:"status"`
-	Version       domain.Version           `json:"version"`
-	IncrementIDs  []string                 `json:"increment_ids"`
-	Text          string                   `json:"text,omitempty"`
 }
 
 func (s *Service) ListRequirements(ctx context.Context) ([]RequirementView, error) {
@@ -837,8 +854,9 @@ type ControlRequest struct {
 	At        time.Time
 }
 type ControlResponse struct {
-	Revision domain.Revision    `json:"revision"`
-	Mode     domain.ControlMode `json:"mode"`
+	Revision domain.Revision     `json:"revision"`
+	Mode     domain.ControlMode  `json:"mode"`
+	State    domain.ControlState `json:"state"`
 }
 
 func (s *Service) Control(ctx context.Context, req ControlRequest) (out ControlResponse, err error) {
@@ -893,7 +911,10 @@ func (s *Service) Control(ctx context.Context, req ControlRequest) (out ControlR
 		if e = u.SaveControl(ctx, intent, revision-1); e != nil {
 			return e
 		}
-		out = ControlResponse{Revision: revision, Mode: req.Mode}
+		if e = u.SaveControlProgress(ctx, domain.ControlProgress{Revision: revision, State: domain.ControlRequested, RequestedAt: at}, ""); e != nil {
+			return e
+		}
+		out = ControlResponse{Revision: revision, Mode: req.Mode, State: domain.ControlRequested}
 		return s.record(ctx, u, eventID, operationID, fingerprint, req.RequestID, "control", "control", req.Scope.Value, domain.Version(revision), "control.changed", actor.String(), &OutboxItem{ID: outboxID, Kind: "control-changed", Target: req.Scope.Value, ControlScope: req.Scope, ExpectedVersion: domain.Version(revision), ControlRevision: revision}, out)
 	})
 	return out, err

@@ -1,0 +1,8 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Agentic Loop Owner</title><link rel="stylesheet" href="/owner/assets/owner.css"></head>
+<body><header><h1>Owner console</h1><p class="muted">Stable controls and Preview evidence are shown as metadata only.</p></header>
+<main><section aria-labelledby="capture-title"><h2 id="capture-title">Post a requirement</h2><form id="capture"><label for="text">Requirement</label><textarea id="text" required></textarea><button type="submit">Capture</button><p id="capture-status" role="status"></p></form></section>
+<section aria-labelledby="queue-title"><h2 id="queue-title">Queue / status</h2><button id="refresh">Refresh</button><pre id="queue" aria-live="polite">Loading…</pre></section>
+<section aria-labelledby="control-title"><h2 id="control-title">Control</h2><form id="control"><label>Scope <input id="scope" required value="installation"></label><label>Value <input id="scope-value" required></label><label>Mode <select id="mode"><option>allow</option><option>pause-intake</option><option>pause-claim</option><option>graceful-stop</option><option>immediate-stop</option><option>emergency-stop</option><option>cancel</option></select></label><button type="submit">Apply</button><p id="control-status" role="status"></p></form></section>
+<section aria-labelledby="release-title"><h2 id="release-title">Release evidence</h2><p>Stable and Preview are represented by digest references. Raw provider output and credentials are never rendered.</p></section></main>
+<script src="/owner/assets/owner.js" defer></script></body></html>

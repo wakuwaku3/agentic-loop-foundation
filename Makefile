@@ -1,4 +1,4 @@
-.PHONY: check environment format lint test contracts docs secrets smoke clean component-plan affected candidate component ownership component-ci component-contracts component-control-plane component-runner component-domain component-application component-store-memory component-store-firestore component-api component-docs component-test component-infra component-tooling
+.PHONY: check environment format lint test contracts docs secrets smoke clean component-plan affected candidate candidate-affected component ownership component-ci component-contracts component-control-plane component-runner component-domain component-application component-store-memory component-store-firestore component-api component-web component-docs component-test component-infra component-tooling
 
 GO ?= go
 EVIDENCE_DIR ?= build/evidence
@@ -22,6 +22,9 @@ component:
 candidate:
 	@go run ./cmd/ci-plan --candidate --evidence-dir "$(EVIDENCE_DIR)"
 
+candidate-affected:
+	@go run ./cmd/ci-plan --candidate --candidate-changed "$$(scripts/affected.sh --list "$(BASE)")" --evidence-dir "$(EVIDENCE_DIR)"
+
 component-ci:
 	@go test ./internal/ci ./cmd/ci-plan
 component-contracts:
@@ -40,6 +43,8 @@ component-store-firestore:
 	@scripts/firestore-emulator.sh go test -race ./internal/store/firestore
 component-api:
 	@go test ./internal/api
+component-web:
+	@go test ./internal/web
 component-docs:
 	@! rg -n 'TODO\(ci\)' docs README.md
 component-test:

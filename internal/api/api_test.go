@@ -147,7 +147,7 @@ func TestRouteContractErrorsAndRunnerPermitRole(t *testing.T) {
 	if w := call(h, http.MethodPost, "/v1/nope", "{}", "owner"); w.Code != 404 {
 		t.Fatal(w.Code)
 	}
-	if w := call(h, http.MethodGet, "/v1/controls", "", "owner"); w.Code != 405 {
+	if w := call(h, http.MethodGet, "/v1/controls", "", "owner"); w.Code != 200 {
 		t.Fatal(w.Code)
 	}
 	if w := call(h, http.MethodPost, "/v1/runner/permits:check", `{"request_id":"p","kind":"claim","control_revision":0,"fencing_token":0,"resource":"x"}`, "owner"); w.Code != 403 {

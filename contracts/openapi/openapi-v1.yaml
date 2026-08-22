@@ -16,7 +16,8 @@ paths:
     get:
       operationId: listRequirements
       security: [{bearerAuth: []}]
-      responses: {'200': {description: requirements, content: {application/json: {schema: {$ref: '#/components/schemas/RequirementListResponse'}}}}, '401': {$ref: '#/components/responses/Error'}, '403': {$ref: '#/components/responses/Error'}, '404': {$ref: '#/components/responses/Error'}, '405': {$ref: '#/components/responses/Error'}, '500': {$ref: '#/components/responses/Error'}, '503': {$ref: '#/components/responses/Error'}}
+      parameters: [{name: page_size, in: query, schema: {type: integer, minimum: 1, maximum: 100, default: 25}}, {name: cursor, in: query, schema: {type: string, description: opaque cursor from the previous page}}]
+      responses: {'200': {description: bounded requirement page, content: {application/json: {schema: {$ref: '#/components/schemas/RequirementPageResponse'}}}}, '400': {$ref: '#/components/responses/Error'}, '401': {$ref: '#/components/responses/Error'}, '403': {$ref: '#/components/responses/Error'}, '404': {$ref: '#/components/responses/Error'}, '405': {$ref: '#/components/responses/Error'}, '500': {$ref: '#/components/responses/Error'}, '503': {$ref: '#/components/responses/Error'}}
     post:
       operationId: captureRequirement
       security: [{bearerAuth: []}]
@@ -27,13 +28,28 @@ paths:
       operationId: getRequirement
       security: [{bearerAuth: []}]
       parameters: [{name: requirement_id, in: path, required: true, schema: {type: string}}]
-      responses: {'200': {description: requirement, content: {application/json: {schema: {$ref: '#/components/schemas/RequirementResponse'}}}}, '401': {$ref: '#/components/responses/Error'}, '403': {$ref: '#/components/responses/Error'}, '404': {$ref: '#/components/responses/Error'}}
+      responses: {'200': {description: requirement detail, content: {application/json: {schema: {$ref: '#/components/schemas/RequirementDetailResponse'}}}}, '401': {$ref: '#/components/responses/Error'}, '403': {$ref: '#/components/responses/Error'}, '404': {$ref: '#/components/responses/Error'}}
   /v1/controls:
+    get:
+      operationId: listControlReads
+      security: [{bearerAuth: []}]
+      responses: {'200': {description: control lifecycle metadata, content: {application/json: {schema: {$ref: '#/components/schemas/ControlReadListResponse'}}}}, '401': {$ref: '#/components/responses/Error'}, '403': {$ref: '#/components/responses/Error'}}
     post:
       operationId: setControl
       security: [{bearerAuth: []}]
       requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/ControlRequest'}}}}
       responses: {'200': {description: changed, content: {application/json: {schema: {$ref: '#/components/schemas/ControlResponse'}}}}, '400': {$ref: '#/components/responses/Error'}, '401': {$ref: '#/components/responses/Error'}, '403': {$ref: '#/components/responses/Error'}, '405': {$ref: '#/components/responses/Error'}, '413': {$ref: '#/components/responses/Error'}, '415': {$ref: '#/components/responses/Error'}, '500': {$ref: '#/components/responses/Error'}, '503': {$ref: '#/components/responses/Error'}}
+  /v1/queue/summary:
+    get:
+      operationId: queueSummary
+      security: [{bearerAuth: []}]
+      responses: {'200': {description: bounded queue counts, content: {application/json: {schema: {$ref: '#/components/schemas/QueueSummary'}}}}, '401': {$ref: '#/components/responses/Error'}, '403': {$ref: '#/components/responses/Error'}}
+  /v1/export:
+    get:
+      operationId: exportOwnerMetadata
+      security: [{bearerAuth: []}]
+      parameters: [{name: format, in: query, schema: {type: string, enum: [json, ndjson], default: json}}, {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 100, default: 100}}]
+      responses: {'200': {description: metadata-only export; provider output and secrets are excluded, content: {application/json: {schema: {$ref: '#/components/schemas/ExportResponse'}}, application/x-ndjson: {schema: {$ref: '#/components/schemas/ExportRecord'}}}}, '401': {$ref: '#/components/responses/Error'}, '403': {$ref: '#/components/responses/Error'}}
   /v1/runner/claims:acquire:
     post:
       operationId: claim
@@ -138,11 +154,46 @@ components:
       additionalProperties: false
       required: [requirements]
       properties: {requirements: {type: array, items: {$ref: '#/components/schemas/RequirementResponse'}}}
+    RequirementPageResponse:
+      type: object
+      additionalProperties: false
+      required: [requirements, page_size]
+      properties: {requirements: {type: array, items: {$ref: '#/components/schemas/RequirementResponse'}}, next_cursor: {type: string}, page_size: {type: integer}}
+    RequirementDetailResponse:
+      type: object
+      additionalProperties: false
+      required: [requirement_id, status, version, increments, next_action, page_size, truncated]
+      properties: {requirement_id: {type: string}, original_text: {type: string}, status: {type: string}, version: {type: integer}, increments: {type: array, items: {type: object}}, next_action: {type: string}, page_size: {type: integer, maximum: 100}, truncated: {type: boolean}}
+    ControlRead:
+      type: object
+      additionalProperties: false
+      required: [scope, mode, revision, requested, acknowledged, effective, verified]
+      properties: {scope: {type: object}, mode: {type: string}, revision: {type: integer}, requested: {type: boolean}, acknowledged: {type: boolean}, effective: {type: boolean}, verified: {type: boolean}}
+    ControlReadListResponse:
+      type: object
+      additionalProperties: false
+      required: [controls]
+      properties: {controls: {type: array, items: {$ref: '#/components/schemas/ControlRead'}}}
+    QueueSummary:
+      type: object
+      additionalProperties: false
+      required: [requirements, by_requirement_status, increments, by_increment_status, active_executions]
+      properties: {requirements: {type: integer}, by_requirement_status: {type: object}, increments: {type: integer}, by_increment_status: {type: object}, active_executions: {type: integer}}
+    ExportRecord:
+      type: object
+      additionalProperties: false
+      required: [schema_version, kind, digest, value]
+      properties: {schema_version: {const: v1}, kind: {type: string, enum: [requirement, control, event]}, digest: {type: string, pattern: '^sha256:'}, value: {type: object}}
+    ExportResponse:
+      type: object
+      additionalProperties: false
+      required: [schema_version, records]
+      properties: {schema_version: {const: v1}, records: {type: array, maxItems: 300, items: {$ref: '#/components/schemas/ExportRecord'}}}
     ControlResponse:
       type: object
       additionalProperties: false
       required: [revision, mode]
-      properties: {revision: {type: integer}, mode: {type: string}}
+      properties: {revision: {type: integer}, mode: {type: string}, state: {type: string, enum: [requested, acknowledged, effective, verified]}}
     ClaimResponse:
       type: object
       additionalProperties: false

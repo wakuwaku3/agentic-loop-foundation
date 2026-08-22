@@ -10,11 +10,13 @@ import (
 	"io"
 	"mime"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/takushi/agentic-loop-foundation/v2/internal/application"
 	"github.com/takushi/agentic-loop-foundation/v2/internal/domain"
+	"github.com/takushi/agentic-loop-foundation/v2/internal/web"
 )
 
 const maxJSON = 1 << 20
@@ -79,6 +81,23 @@ func (h *Handler) route(w http.ResponseWriter, r *http.Request) {
 		h.error(w, r, http.StatusServiceUnavailable, "not_configured", "authenticated API is not configured")
 		return
 	}
+	if r.Method == http.MethodGet && (r.URL.Path == "/owner" || r.URL.Path == "/owner/") {
+		caller, err := h.config.Authenticator.Authenticate(r)
+		if err != nil {
+			h.error(w, r, 401, "unauthorized", "authentication failed")
+			return
+		}
+		if caller.Role != application.RoleOwner {
+			h.error(w, r, 403, "forbidden", "owner role required")
+			return
+		}
+		h.ownerUI(w, r)
+		return
+	}
+	if r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/owner/assets/") {
+		h.ownerAsset(w, r, strings.TrimPrefix(r.URL.Path, "/owner/assets/"))
+		return
+	}
 	if r.URL.Path == "/v1/requirements" && r.Method == http.MethodGet {
 		caller, err := h.config.Authenticator.Authenticate(r)
 		if err != nil {
@@ -90,6 +109,59 @@ func (h *Handler) route(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		h.listRequirements(w, r.WithContext(application.ContextWithCaller(r.Context(), caller)))
+		return
+	}
+	if r.URL.Path == "/v1/controls" && r.Method == http.MethodGet {
+		caller, err := h.config.Authenticator.Authenticate(r)
+		if err != nil {
+			h.error(w, r, 401, "unauthorized", "authentication failed")
+			return
+		}
+		if caller.Role != application.RoleOwner {
+			h.error(w, r, 403, "forbidden", "owner role required")
+			return
+		}
+		h.listControls(w, r.WithContext(application.ContextWithCaller(r.Context(), caller)))
+		return
+	}
+	if strings.HasPrefix(r.URL.Path, "/v1/requirements/") && r.Method == http.MethodGet {
+		caller, err := h.config.Authenticator.Authenticate(r)
+		if err != nil {
+			h.error(w, r, 401, "unauthorized", "authentication failed")
+			return
+		}
+		if caller.Role != application.RoleOwner {
+			h.error(w, r, 403, "forbidden", "owner role required")
+			return
+		}
+		id := strings.TrimPrefix(r.URL.Path, "/v1/requirements/")
+		h.getRequirement(w, r.WithContext(application.ContextWithCaller(r.Context(), caller)), id)
+		return
+	}
+	if r.URL.Path == "/v1/queue/summary" && r.Method == http.MethodGet {
+		caller, err := h.config.Authenticator.Authenticate(r)
+		if err != nil {
+			h.error(w, r, 401, "unauthorized", "authentication failed")
+			return
+		}
+		if caller.Role != application.RoleOwner {
+			h.error(w, r, 403, "forbidden", "owner role required")
+			return
+		}
+		h.queueSummary(w, r.WithContext(application.ContextWithCaller(r.Context(), caller)))
+		return
+	}
+	if r.URL.Path == "/v1/export" && r.Method == http.MethodGet {
+		caller, err := h.config.Authenticator.Authenticate(r)
+		if err != nil {
+			h.error(w, r, 401, "unauthorized", "authentication failed")
+			return
+		}
+		if caller.Role != application.RoleOwner {
+			h.error(w, r, 403, "forbidden", "owner role required")
+			return
+		}
+		h.export(w, r.WithContext(application.ContextWithCaller(r.Context(), caller)))
 		return
 	}
 	if strings.HasPrefix(r.URL.Path, "/v1/requirements/") && r.Method == http.MethodGet {
@@ -192,11 +264,14 @@ type heartbeatBody struct {
 }
 
 func (h *Handler) heartbeat(w http.ResponseWriter, r *http.Request) {
-	var b heartbeatBody
+	var b struct {
+		RequestID       string          `json:"request_id"`
+		ControlRevision domain.Revision `json:"control_revision"`
+	}
 	if !h.decode(w, r, &b) {
 		return
 	}
-	out, e := h.config.Service.Heartbeat(r.Context(), application.HeartbeatRequest{RequestID: b.RequestID})
+	out, e := h.config.Service.Heartbeat(r.Context(), application.HeartbeatRequest{RequestID: b.RequestID, ControlRevision: b.ControlRevision})
 	if e != nil {
 		h.domainError(w, r, e)
 		return
@@ -222,15 +297,24 @@ func (h *Handler) checkpoint(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, out)
 }
 func (h *Handler) listRequirements(w http.ResponseWriter, r *http.Request) {
-	out, err := h.config.Service.ListRequirements(r.Context())
+	size := 0
+	if raw := r.URL.Query().Get("page_size"); raw != "" {
+		var e error
+		size, e = strconv.Atoi(raw)
+		if e != nil {
+			h.error(w, r, 400, "invalid_page", "page_size must be an integer")
+			return
+		}
+	}
+	out, err := h.config.Service.ListRequirementsPage(r.Context(), r.URL.Query().Get("cursor"), size)
 	if err != nil {
 		h.domainError(w, r, err)
 		return
 	}
-	writeJSON(w, 200, map[string]any{"requirements": out})
+	writeJSON(w, 200, out)
 }
 func (h *Handler) getRequirement(w http.ResponseWriter, r *http.Request, id string) {
-	out, ok, err := h.config.Service.GetRequirement(r.Context(), id)
+	out, ok, err := h.config.Service.GetRequirementDetail(r.Context(), id)
 	if err != nil {
 		h.domainError(w, r, err)
 		return
@@ -240,6 +324,98 @@ func (h *Handler) getRequirement(w http.ResponseWriter, r *http.Request, id stri
 		return
 	}
 	writeJSON(w, 200, out)
+}
+
+func (h *Handler) listControls(w http.ResponseWriter, r *http.Request) {
+	size := 0
+	if raw := r.URL.Query().Get("page_size"); raw != "" {
+		var err error
+		size, err = strconv.Atoi(raw)
+		if err != nil {
+			h.error(w, r, 400, "invalid_page", "page_size must be an integer")
+			return
+		}
+	}
+	out, err := h.config.Service.ListControls(r.Context(), size)
+	if err != nil {
+		h.domainError(w, r, err)
+		return
+	}
+	writeJSON(w, 200, map[string]any{"controls": out})
+}
+func (h *Handler) queueSummary(w http.ResponseWriter, r *http.Request) {
+	out, err := h.config.Service.QueueSummary(r.Context())
+	if err != nil {
+		h.domainError(w, r, err)
+		return
+	}
+	writeJSON(w, 200, out)
+}
+func (h *Handler) export(w http.ResponseWriter, r *http.Request) {
+	limit := application.MaxPageSize
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		if n, e := strconv.Atoi(raw); e == nil {
+			limit = n
+		}
+	}
+	if limit < 1 || limit > application.MaxPageSize {
+		h.error(w, r, 400, "invalid_limit", "limit must be between 1 and 100")
+		return
+	}
+	format := r.URL.Query().Get("format")
+	if format == "" {
+		format = "json"
+	}
+	if format != "json" && format != "ndjson" {
+		h.error(w, r, 400, "invalid_format", "format must be json or ndjson")
+		return
+	}
+	rows, err := h.config.Service.Export(r.Context(), limit)
+	if err != nil {
+		h.domainError(w, r, err)
+		return
+	}
+	if format == "ndjson" {
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		w.Header().Set("Content-Disposition", "attachment; filename=agentic-loop-export.ndjson")
+		enc := json.NewEncoder(w)
+		for _, row := range rows {
+			if err := enc.Encode(row); err != nil {
+				return
+			}
+		}
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Content-Disposition", "attachment; filename=agentic-loop-export.json")
+	_ = json.NewEncoder(w).Encode(map[string]any{"schema_version": "v1", "records": rows})
+}
+func (h *Handler) ownerUI(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; frame-ancestors 'none'")
+	w.WriteHeader(http.StatusOK)
+	_, _ = io.WriteString(w, web.OwnerHTML())
+}
+func (h *Handler) ownerAsset(w http.ResponseWriter, r *http.Request, name string) {
+	if name == "" || strings.Contains(name, "..") || strings.ContainsAny(name, "/\\") {
+		h.error(w, r, 404, "not_found", "asset not found")
+		return
+	}
+	b, ok := web.Asset(name)
+	if !ok {
+		h.error(w, r, 404, "not_found", "asset not found")
+		return
+	}
+	ct := "text/plain; charset=utf-8"
+	if strings.HasSuffix(name, ".css") {
+		ct = "text/css; charset=utf-8"
+	}
+	if strings.HasSuffix(name, ".js") {
+		ct = "application/javascript; charset=utf-8"
+	}
+	w.Header().Set("Content-Type", ct)
+	w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; frame-ancestors 'none'")
+	_, _ = w.Write(b)
 }
 func (h *Handler) originAllowed(r *http.Request, caller application.Caller) error {
 	origin := r.Header.Get("Origin")

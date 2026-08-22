@@ -16,6 +16,7 @@ func main() {
 	manifest := flag.String("manifest", "ci/components.json", "manifest path")
 	changed := flag.String("changed", "", "comma/newline separated paths")
 	candidate := flag.Bool("candidate", false, "check evidence for every component")
+	candidateChanged := flag.String("candidate-changed", "", "verify evidence for the affected closure of these paths")
 	execute := flag.Bool("execute", false, "run selected component checks and write evidence")
 	component := flag.String("component", "", "run one component")
 	evidenceOut := flag.String("evidence-out", "build/evidence", "evidence output directory")
@@ -36,8 +37,18 @@ func main() {
 		}
 	}
 	if *candidate {
-		if err := ci.Candidate(m, *root, *evidence); err != nil {
-			fail(err)
+		var candidateErr error
+		if *candidateChanged != "" {
+			plan, err := ci.Affected(m, split(*candidateChanged))
+			if err != nil {
+				fail(err)
+			}
+			candidateErr = ci.CandidateComponents(m, *root, *evidence, plan.Selected)
+		} else {
+			candidateErr = ci.Candidate(m, *root, *evidence)
+		}
+		if candidateErr != nil {
+			fail(candidateErr)
 		}
 		output(map[string]any{"candidate": true})
 		return

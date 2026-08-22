@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/crc32"
 	"os"
 	"sort"
 	"strings"
@@ -28,6 +29,7 @@ const MaxWrites = 400
 const MaxQueryRows = 1000
 const RecordSchema = "v1"
 const MaxPathKeyBytes = 512
+const queueShards = 32
 
 var (
 	ErrInvalidSchema = errors.New("invalid record schema")
@@ -89,11 +91,18 @@ type document struct {
 	OutboxStatus        string `firestore:"outbox_status,omitempty"`
 	OutboxNextAttemptAt string `firestore:"outbox_next_attempt_at,omitempty"`
 	OutboxLeaseUntil    string `firestore:"outbox_lease_until,omitempty"`
+	IndexIncrementID    string `firestore:"index_increment_id,omitempty"`
 }
 
 type requirementRecord struct {
 	Requirement domain.Requirement `json:"requirement"`
 	Text        string             `json:"text,omitempty"`
+}
+type queueCounter struct {
+	Schema           string         `json:"schema"`
+	Requirements     map[string]int `json:"requirements"`
+	Increments       map[string]int `json:"increments"`
+	ActiveExecutions int            `json:"active_executions"`
 }
 
 func encodeDocument(kind string, value any) (document, error) {
@@ -105,6 +114,9 @@ func encodeDocument(kind string, value any) (document, error) {
 		return document{}, err
 	}
 	d := document{RecordSchema: RecordSchema, Kind: kind, Payload: string(b)}
+	if v, ok := value.(domain.Execution); ok {
+		d.IndexIncrementID = v.IncrementID.String()
+	}
 	if kind == "outbox" {
 		v, ok := value.(application.OutboxItem)
 		if !ok {
@@ -327,6 +339,169 @@ func (u *unit) Requirements(ctx context.Context) ([]domain.Requirement, error) {
 	}
 	return out, nil
 }
+
+func (u *unit) RequirementsPage(ctx context.Context, afterID string, limit int) ([]domain.Requirement, bool, error) {
+	if limit <= 0 || limit > application.MaxPageSize {
+		return nil, false, fmt.Errorf("invalid requirement page limit")
+	}
+	path, err := CollectionPath(u.store.installation, "requirements")
+	if err != nil {
+		return nil, false, err
+	}
+	q := u.store.client.Collection(path).OrderBy(cloudfirestore.DocumentID, cloudfirestore.Asc)
+	if afterID != "" {
+		key, e := PathKey(afterID)
+		if e != nil {
+			return nil, false, e
+		}
+		q = q.StartAfter(path + "/" + key)
+	}
+	snaps, err := u.tx.Documents(q.Limit(limit + 1)).GetAll()
+	if err != nil {
+		return nil, false, err
+	}
+	more := len(snaps) > limit
+	if more {
+		snaps = snaps[:limit]
+	}
+	out := make([]domain.Requirement, 0, len(snaps))
+	for _, snap := range snaps {
+		u.cache[snap.Ref.Path] = snap
+		var v requirementRecord
+		if err := decodeDocument(snap, "requirement", &v); err != nil {
+			return nil, false, err
+		}
+		out = append(out, v.Requirement)
+	}
+	return out, more, nil
+}
+func (u *unit) RequirementTexts(ctx context.Context, ids []string) (map[string]string, error) {
+	out := make(map[string]string, len(ids))
+	if len(ids) == 0 {
+		return out, nil
+	}
+	// One bounded transaction read for the page, rather than a read per row.
+	refs := make([]*cloudfirestore.DocumentRef, 0, len(ids))
+	for _, id := range ids {
+		ref, err := u.store.path("requirements", id)
+		if err != nil {
+			return nil, err
+		}
+		refs = append(refs, ref)
+	}
+	for i, ref := range refs {
+		snap, err := u.read(ref)
+		if err != nil {
+			return nil, err
+		}
+		if snap == nil || !snap.Exists() {
+			continue
+		}
+		var v requirementRecord
+		if err := decodeDocument(snap, "requirement", &v); err != nil {
+			return nil, err
+		}
+		out[ids[i]] = v.Text
+	}
+	return out, nil
+}
+func (u *unit) IncrementsForRequirements(ctx context.Context, ids []string) ([]domain.Increment, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	refs := make([]*cloudfirestore.DocumentRef, 0, len(ids))
+	for _, id := range ids {
+		r, e := u.store.path("increments", id)
+		if e != nil {
+			return nil, e
+		}
+		refs = append(refs, r)
+	}
+	snaps, err := u.tx.GetAll(refs)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]domain.Increment, 0, len(snaps))
+	for _, snap := range snaps {
+		if snap == nil || !snap.Exists() {
+			continue
+		}
+		var v domain.Increment
+		if err := decodeDocument(snap, "increment", &v); err != nil {
+			return nil, err
+		}
+		out = append(out, v)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID.String() < out[j].ID.String() })
+	return out, nil
+}
+func (u *unit) ExecutionsForIncrements(ctx context.Context, ids []string) ([]domain.Execution, error) {
+	path, err := CollectionPath(u.store.installation, "executions")
+	if err != nil {
+		return nil, err
+	}
+	out := make([]domain.Execution, 0)
+	if len(ids) == 0 {
+		return out, nil
+	}
+	for start := 0; start < len(ids); start += 30 {
+		end := start + 30
+		if end > len(ids) {
+			end = len(ids)
+		}
+		vals := make([]any, end-start)
+		for i := range ids[start:end] {
+			vals[i] = ids[start+i]
+		}
+		snaps, e := u.tx.Documents(u.store.client.Collection(path).Where("index_increment_id", "in", vals).Limit(MaxQueryRows + 1)).GetAll()
+		if e != nil {
+			return nil, e
+		}
+		if len(snaps) > MaxQueryRows {
+			return nil, ErrQueryLimit
+		}
+		for _, snap := range snaps {
+			var v domain.Execution
+			if e := decodeDocument(snap, "execution", &v); e != nil {
+				return nil, e
+			}
+			out = append(out, v)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID.String() < out[j].ID.String() })
+	return out, nil
+}
+func (u *unit) EventsPage(ctx context.Context, afterID string, limit int) ([]application.Event, bool, error) {
+	path, err := CollectionPath(u.store.installation, "events")
+	if err != nil {
+		return nil, false, err
+	}
+	q := u.store.client.Collection(path).OrderBy(cloudfirestore.DocumentID, cloudfirestore.Asc)
+	if afterID != "" {
+		key, e := PathKey(afterID)
+		if e != nil {
+			return nil, false, e
+		}
+		q = q.StartAfter(path + "/" + key)
+	}
+	snaps, e := u.tx.Documents(q.Limit(limit + 1)).GetAll()
+	if e != nil {
+		return nil, false, e
+	}
+	more := len(snaps) > limit
+	if more {
+		snaps = snaps[:limit]
+	}
+	out := make([]application.Event, 0, len(snaps))
+	for _, snap := range snaps {
+		var v application.Event
+		if e := decodeDocument(snap, "event", &v); e != nil {
+			return nil, false, e
+		}
+		out = append(out, v)
+	}
+	return out, more, nil
+}
 func (u *unit) SaveRequirement(ctx context.Context, value domain.Requirement, expected domain.Version) error {
 	ref, err := u.store.path("requirements", value.ID.String())
 	if err != nil {
@@ -340,6 +515,9 @@ func (u *unit) SaveRequirement(ctx context.Context, value domain.Requirement, ex
 	var current domain.Version
 	if got {
 		current = old.Requirement.Version
+	}
+	if err := u.adjustCounter(ctx, value.ID.String(), "requirement", string(old.Requirement.Status), string(value.Status), 0); err != nil {
+		return err
 	}
 	return u.saveVersion(ref, "requirement", requirementRecord{Requirement: value, Text: old.Text}, expected, current)
 }
@@ -391,6 +569,9 @@ func (u *unit) SaveIncrement(ctx context.Context, value domain.Increment, expect
 	if got {
 		current = old.Version
 	}
+	if err := u.adjustCounter(ctx, value.ID.String(), "increment", string(old.Status), string(value.Status), 0); err != nil {
+		return err
+	}
 	return u.saveVersion(ref, "increment", value, expected, current)
 }
 func (u *unit) Execution(ctx context.Context, id string) (domain.Execution, bool, error) {
@@ -415,6 +596,17 @@ func (u *unit) SaveExecution(ctx context.Context, value domain.Execution, expect
 	var current domain.Version
 	if got {
 		current = old.Version
+	}
+	oldActive := 0
+	if got && (old.Status == domain.ExecutionRunning || old.Status == domain.ExecutionStarting) {
+		oldActive = 1
+	}
+	newActive := 0
+	if value.Status == domain.ExecutionRunning || value.Status == domain.ExecutionStarting {
+		newActive = 1
+	}
+	if err := u.adjustCounter(ctx, value.ID.String(), "execution", string(old.Status), string(value.Status), newActive-oldActive); err != nil {
+		return err
 	}
 	return u.saveVersion(ref, "execution", value, expected, current)
 }
@@ -560,6 +752,31 @@ func (u *unit) ControlRevision(ctx context.Context) (domain.Revision, error) {
 		}
 	}
 	return current, nil
+}
+
+func (u *unit) ControlProgress(ctx context.Context, revision domain.Revision) (domain.ControlProgress, bool, error) {
+	ref, err := u.store.path("control_progress", fmt.Sprintf("%d", revision))
+	if err != nil {
+		return domain.ControlProgress{}, false, err
+	}
+	var v domain.ControlProgress
+	ok, err := u.value(ref, "control-progress", &v)
+	return v, ok, err
+}
+func (u *unit) SaveControlProgress(ctx context.Context, value domain.ControlProgress, expected domain.ControlState) error {
+	ref, err := u.store.path("control_progress", fmt.Sprintf("%d", value.Revision))
+	if err != nil {
+		return err
+	}
+	var old domain.ControlProgress
+	ok, err := u.value(ref, "control-progress", &old)
+	if err != nil {
+		return err
+	}
+	if (!ok && expected != "") || (ok && old.State != expected) {
+		return domain.ErrStaleVersion
+	}
+	return u.stage(ref, "control-progress", value, !ok)
 }
 func (u *unit) Idempotency(ctx context.Context, requestID, operation string) (application.IdempotentResponse, bool, error) {
 	ref, err := u.store.path("idempotency", requestID)
@@ -771,6 +988,70 @@ func (u *unit) query(ctx context.Context, collection, kind string) ([][]byte, er
 		if v.doc.Kind == kind && !seen[p] {
 			out = append(out, []byte(v.doc.Payload))
 		}
+	}
+	return out, nil
+}
+
+func (u *unit) adjustCounter(ctx context.Context, id, kind, oldStatus, newStatus string, activeDelta int) error {
+	shard := int(crc32.ChecksumIEEE([]byte(id)) % queueShards)
+	ref, err := u.store.path("queue_counters", fmt.Sprintf("%02d", shard))
+	if err != nil {
+		return err
+	}
+	var c queueCounter
+	ok, err := u.value(ref, "queue-counter", &c)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		c = queueCounter{Schema: "v1", Requirements: map[string]int{}, Increments: map[string]int{}}
+	}
+	if kind == "requirement" {
+		if oldStatus != "" {
+			c.Requirements[oldStatus]--
+		}
+		c.Requirements[newStatus]++
+	}
+	if kind == "increment" {
+		if oldStatus != "" {
+			c.Increments[oldStatus]--
+		}
+		c.Increments[newStatus]++
+	}
+	c.ActiveExecutions += activeDelta
+	return u.stage(ref, "queue-counter", c, !ok)
+}
+func (u *unit) QueueSummary(ctx context.Context) (application.QueueSummary, error) {
+	refs := make([]*cloudfirestore.DocumentRef, queueShards)
+	for i := range refs {
+		r, e := u.store.path("queue_counters", fmt.Sprintf("%02d", i))
+		if e != nil {
+			return application.QueueSummary{}, e
+		}
+		refs[i] = r
+	}
+	snaps, e := u.tx.GetAll(refs)
+	if e != nil {
+		return application.QueueSummary{}, e
+	}
+	out := application.QueueSummary{ByRequirementStatus: map[string]int{}, ByIncrementStatus: map[string]int{}}
+	for _, snap := range snaps {
+		if snap == nil || !snap.Exists() {
+			continue
+		}
+		var c queueCounter
+		if e := decodeDocument(snap, "queue-counter", &c); e != nil {
+			return out, e
+		}
+		for k, v := range c.Requirements {
+			out.ByRequirementStatus[k] += v
+			out.Requirements += v
+		}
+		for k, v := range c.Increments {
+			out.ByIncrementStatus[k] += v
+			out.Increments += v
+		}
+		out.ActiveExecutions += c.ActiveExecutions
 	}
 	return out, nil
 }
