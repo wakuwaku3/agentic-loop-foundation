@@ -28,10 +28,12 @@ type Authenticator interface {
 	Authenticate(*http.Request) (application.Caller, error)
 }
 type Config struct {
-	Authenticator    Authenticator
-	Service          *application.Service
-	RunnerEnrollment *runner.Service
-	AllowedOrigins   []string
+	Authenticator     Authenticator
+	Service           *application.Service
+	RunnerEnrollment  *runner.Service
+	AllowedOrigins    []string
+	InternalReconcile func(context.Context) error
+	ReconcileIdentity string
 }
 type Handler struct {
 	config Config
@@ -79,6 +81,19 @@ func (h *Handler) route(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "schema_version": "v1"})
+		return
+	}
+	if r.URL.Path == "/internal/reconcile" && r.Method == http.MethodPost {
+		asserted := strings.ToLower(strings.TrimSpace(r.Header.Get("X-Goog-Authenticated-User-Email")))
+		if h.config.InternalReconcile == nil || h.config.ReconcileIdentity == "" || r.Header.Get("X-Agentic-Runner-Session") != "" || asserted != "accounts.google.com:"+strings.ToLower(strings.TrimSpace(h.config.ReconcileIdentity)) || strings.ContainsAny(asserted, " \t\r\n") {
+			h.error(w, r, http.StatusUnauthorized, "unauthorized", "reconcile scheduler identity required")
+			return
+		}
+		if err := h.config.InternalReconcile(r.Context()); err != nil {
+			h.domainError(w, r, err)
+			return
+		}
+		writeJSON(w, http.StatusAccepted, map[string]string{"status": "reconciliation_requested"})
 		return
 	}
 	if r.URL.Path == "/v1/runner/enrollment/challenge" && r.Method == http.MethodPost {

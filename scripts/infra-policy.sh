@@ -26,6 +26,8 @@ rg -n 'image_digest|sha256:' "$infra" >/dev/null || fail 'Cloud Run image must b
 rg -n 'prevent_destroy\s*=\s*true|deletion_protection\s*=\s*true' "$infra" >/dev/null || fail 'destroy protection is missing'
 rg -n 'Shards\s*=\s*32|Reads:\s*40_000|Writes:\s*16_000|Deletes:\s*16_000' "$root/internal/quota/quota.go" >/dev/null || fail 'bounded 80% Firestore reservation is missing'
 rg -n 'ReadTransactionUsage|MutationUsage|MaxBoundedQueryReads|MaxReadBoundaryReads' "$root/internal/quota/quota.go" >/dev/null || fail 'conservative boundary I/O reservations are missing'
+rg -n 'enable_reconcile_scheduler|reconcile_cost_preflight_approved|google_cloud_scheduler_job' "$infra" >/dev/null || fail 'reconcile scheduler cost gate is missing'
+rg -n 'google_service_account" "reconciler"|RECONCILE_IDENTITY|reconciler_iap_accessor' "$infra" >/dev/null || fail 'dedicated reconciler identity wiring is missing'
 
 if command -v tofu >/dev/null 2>&1; then
   (cd "$infra" && tofu fmt -check -diff)

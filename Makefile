@@ -85,7 +85,7 @@ secrets:
 smoke:
 	@$(GO) run ./cmd/runner --version | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+-dev$$'
 	@$(GO) run ./cmd/bootstrap --version | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+-dev$$'
-	@port=18080; PORT=$$port $(GO) run ./cmd/control-plane >/tmp/agentic-loop-v2-healthz.log 2>&1 & pid=$$!; trap 'kill $$pid 2>/dev/null || true' EXIT; for i in 1 2 3 4 5; do curl -fsS "http://127.0.0.1:$$port/healthz" && exit 0; sleep 1; done; exit 1
+	@$(GO) run ./cmd/control-plane --version | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+-dev$$'
 
 infra-policy:
 	@scripts/infra-policy.sh

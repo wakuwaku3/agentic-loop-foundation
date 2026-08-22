@@ -96,6 +96,7 @@ type document struct {
 	IndexLeaseID        string `firestore:"index_lease_id,omitempty"`
 	LeaseStatus         string `firestore:"lease_status,omitempty"`
 	LeaseExpiresAt      string `firestore:"lease_expires_at,omitempty"`
+	ControlVerification string `firestore:"control_verification,omitempty"`
 }
 
 type requirementRecord struct {
@@ -147,12 +148,20 @@ func encodeDocument(kind string, value any) (document, error) {
 			return document{}, application.ErrInvalidOutbox
 		}
 		d.OutboxStatus = string(status)
+		d.IndexLeaseID = v.LeaseID
 		if !v.NextAttemptAt.IsZero() {
 			d.OutboxNextAttemptAt = v.NextAttemptAt.UTC().Format(time.RFC3339Nano)
 		}
 		if !v.DeliveryLeaseUntil.IsZero() {
 			d.OutboxLeaseUntil = v.DeliveryLeaseUntil.UTC().Format(time.RFC3339Nano)
 		}
+	}
+	if kind == "control-progress" {
+		v, ok := value.(domain.ControlProgress)
+		if !ok {
+			return document{}, ErrInvalidSchema
+		}
+		d.ControlVerification = string(v.Verification)
 	}
 	return d, nil
 }
@@ -744,6 +753,31 @@ func (u *unit) ExpiredActiveLeases(ctx context.Context, at time.Time, cursor str
 	}
 	return out, next, nil
 }
+func (u *unit) ActiveLeases(ctx context.Context, limit int) ([]domain.Lease, error) {
+	if limit <= 0 || limit > 101 {
+		limit = 101
+	}
+	path, err := CollectionPath(u.store.installation, "leases")
+	if err != nil {
+		return nil, err
+	}
+	snaps, err := u.tx.Documents(u.store.client.Collection(path).Where("lease_status", "==", string(domain.LeaseActive)).OrderBy(cloudfirestore.DocumentID, cloudfirestore.Asc).Limit(limit + 1)).GetAll()
+	if err != nil {
+		return nil, err
+	}
+	if len(snaps) > limit {
+		return nil, errors.New("active lease safety limit exceeded")
+	}
+	out := make([]domain.Lease, 0, len(snaps))
+	for _, snap := range snaps {
+		var v domain.Lease
+		if decodeDocument(snap, "lease", &v) != nil {
+			return nil, ErrInvalidSchema
+		}
+		out = append(out, v)
+	}
+	return out, nil
+}
 func (u *unit) ExecutionByLease(ctx context.Context, leaseID string) (domain.Execution, bool, error) {
 	path, err := CollectionPath(u.store.installation, "executions")
 	if err != nil {
@@ -764,6 +798,57 @@ func (u *unit) ExecutionByLease(ctx context.Context, leaseID string) (domain.Exe
 		return domain.Execution{}, false, ErrInvalidSchema
 	}
 	return v, true, nil
+}
+func (u *unit) PendingControlProgresses(ctx context.Context, limit int) ([]domain.ControlProgress, error) {
+	if limit <= 0 || limit > 100 {
+		limit = 100
+	}
+	path, err := CollectionPath(u.store.installation, "control_progress")
+	if err != nil {
+		return nil, err
+	}
+	snaps, err := u.tx.Documents(u.store.client.Collection(path).Where("control_verification", "==", string(domain.VerificationPending)).OrderBy(cloudfirestore.DocumentID, cloudfirestore.Asc).Limit(limit)).GetAll()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]domain.ControlProgress, 0, len(snaps))
+	for _, snap := range snaps {
+		var v domain.ControlProgress
+		if decodeDocument(snap, "control-progress", &v) != nil {
+			return nil, ErrInvalidSchema
+		}
+		out = append(out, v)
+	}
+	return out, nil
+}
+func (u *unit) OutboxResolution(ctx context.Context, leaseID string) (application.OutboxResolution, error) {
+	path, err := CollectionPath(u.store.installation, "outbox")
+	if err != nil {
+		return application.OutboxResolution{}, err
+	}
+	const limit = 100
+	snaps, err := u.tx.Documents(u.store.client.Collection(path).Where("index_lease_id", "==", leaseID).Limit(limit + 1)).GetAll()
+	if err != nil {
+		return application.OutboxResolution{}, err
+	}
+	if len(snaps) > limit {
+		return application.OutboxResolution{}, errors.New("outbox resolution safety limit exceeded")
+	}
+	var result application.OutboxResolution
+	for _, snap := range snaps {
+		var v application.OutboxItem
+		if decodeDocument(snap, "outbox", &v) != nil {
+			return application.OutboxResolution{}, ErrInvalidSchema
+		}
+		switch v.Status {
+		case application.OutboxDelivered, application.OutboxConfirmed, application.OutboxSuperseded:
+		case application.OutboxAmbiguous, application.OutboxReconciling, application.OutboxNeedsInput, application.OutboxDead:
+			result.Ambiguous = true
+		default:
+			result.Pending = true
+		}
+	}
+	return result, nil
 }
 func (u *unit) LatestLeaseForIncrement(ctx context.Context, id string) (domain.Lease, bool, error) {
 	rows, err := u.queryWhere(ctx, "leases", "lease", "increment_id", id, "", "")

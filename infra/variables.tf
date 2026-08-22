@@ -66,3 +66,50 @@ variable "image_digest" {
     error_message = "image_digest must be a 64-character lowercase sha256 digest."
   }
 }
+
+variable "reconciler_service_account_id" {
+  description = "Dedicated service account used only for authenticated reconciliation triggers."
+  type        = string
+  default     = "agentic-loop-reconciler"
+  validation {
+    condition     = can(regex("^[a-z][a-z0-9-]{5,28}$", var.reconciler_service_account_id))
+    error_message = "reconciler_service_account_id must be a valid service-account id."
+  }
+}
+
+variable "enable_reconcile_scheduler" {
+  description = "Create the paid/account-level Cloud Scheduler job only after explicit cost preflight approval."
+  type        = bool
+  default     = false
+}
+
+variable "reconcile_cost_preflight_approved" {
+  description = "Explicit approval that account-level Cloud Scheduler free-tier usage and price were checked."
+  type        = bool
+  default     = false
+}
+
+variable "reconcile_scheduler_name" {
+  type    = string
+  default = "agentic-loop-reconcile"
+}
+
+variable "reconcile_schedule" {
+  type    = string
+  default = "*/5 * * * *"
+}
+
+variable "reconcile_time_zone" {
+  type    = string
+  default = "Etc/UTC"
+}
+
+variable "reconcile_iap_audience" {
+  description = "Existing custom IAP OAuth client/resource audience used by Scheduler OIDC. Required when scheduler is enabled."
+  type        = string
+  default     = ""
+  validation {
+    condition     = !var.enable_reconcile_scheduler || trimspace(var.reconcile_iap_audience) != ""
+    error_message = "reconcile_iap_audience is required when the Scheduler is enabled."
+  }
+}

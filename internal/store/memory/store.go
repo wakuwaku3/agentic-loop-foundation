@@ -322,6 +322,21 @@ func (u *unit) ExpiredActiveLeases(_ context.Context, at time.Time, cursor strin
 	}
 	return rows, next, nil
 }
+func (u *unit) ActiveLeases(_ context.Context, limit int) ([]domain.Lease, error) {
+	if limit <= 0 || limit > 101 {
+		limit = 101
+	}
+	out := make([]domain.Lease, 0, limit)
+	for _, lease := range u.s.leases {
+		if lease.Status == domain.LeaseActive {
+			out = append(out, lease)
+			if len(out) > limit {
+				break
+			}
+		}
+	}
+	return out, nil
+}
 func (u *unit) ExecutionByLease(_ context.Context, leaseID string) (domain.Execution, bool, error) {
 	for _, execution := range u.s.executions {
 		if execution.LeaseID.String() == leaseID {
@@ -329,6 +344,37 @@ func (u *unit) ExecutionByLease(_ context.Context, leaseID string) (domain.Execu
 		}
 	}
 	return domain.Execution{}, false, nil
+}
+func (u *unit) PendingControlProgresses(_ context.Context, limit int) ([]domain.ControlProgress, error) {
+	if limit <= 0 || limit > 100 {
+		limit = 100
+	}
+	out := make([]domain.ControlProgress, 0, limit)
+	for _, p := range u.s.controlProgress {
+		if p.Verification == domain.VerificationPending {
+			out = append(out, p)
+			if len(out) == limit {
+				break
+			}
+		}
+	}
+	return out, nil
+}
+func (u *unit) OutboxResolution(_ context.Context, leaseID string) (application.OutboxResolution, error) {
+	var result application.OutboxResolution
+	for _, item := range u.s.outbox {
+		if item.LeaseID != leaseID {
+			continue
+		}
+		switch item.Status {
+		case application.OutboxDelivered, application.OutboxConfirmed, application.OutboxSuperseded:
+		case application.OutboxAmbiguous, application.OutboxReconciling, application.OutboxNeedsInput, application.OutboxDead:
+			result.Ambiguous = true
+		default:
+			result.Pending = true
+		}
+	}
+	return result, nil
 }
 func (u *unit) LatestLeaseForIncrement(_ context.Context, id string) (domain.Lease, bool, error) {
 	var latest domain.Lease

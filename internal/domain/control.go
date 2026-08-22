@@ -73,6 +73,24 @@ type ControlProgress struct {
 	EffectiveAt    time.Time
 	VerifiedAt     time.Time
 	EvidenceRef    string
+	Verification   VerificationState
+	Targets        []ControlTargetSnapshot
+}
+
+type VerificationState string
+
+const (
+	VerificationPending            VerificationState = "pending"
+	VerificationVerified           VerificationState = "verified"
+	VerificationBlockedUnreachable VerificationState = "blocked-unreachable"
+	VerificationBlockedAmbiguous   VerificationState = "blocked-ambiguous"
+)
+
+type ControlTargetSnapshot struct {
+	Target       ControlTarget `json:"target"`
+	LeaseID      LeaseID       `json:"lease_id,omitempty"`
+	ExecutionID  ExecutionID   `json:"execution_id,omitempty"`
+	FencingToken FencingToken  `json:"fencing_token,omitempty"`
 }
 
 type ControlTarget struct {
@@ -162,6 +180,7 @@ func EffectiveControl(intents []ControlIntent, target ControlTarget) EffectiveCo
 	}
 	return best
 }
+func ControlApplies(scope ControlScope, target ControlTarget) bool { return matches(scope, target) }
 
 type PermitKind string
 

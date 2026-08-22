@@ -230,20 +230,21 @@ func nextAction(status domain.RequirementStatus, incs []domain.Increment, execs 
 }
 
 type ControlReadModel struct {
-	Scope          domain.ControlScope `json:"scope"`
-	Mode           domain.ControlMode  `json:"mode"`
-	Revision       domain.Revision     `json:"revision"`
-	Requested      bool                `json:"requested"`
-	Acknowledged   bool                `json:"acknowledged"`
-	Effective      bool                `json:"effective"`
-	Verified       bool                `json:"verified"`
-	At             string              `json:"at,omitempty"`
-	Reason         string              `json:"reason,omitempty"`
-	RequestedAt    string              `json:"requested_at,omitempty"`
-	AcknowledgedAt string              `json:"acknowledged_at,omitempty"`
-	EffectiveAt    string              `json:"effective_at,omitempty"`
-	VerifiedAt     string              `json:"verified_at,omitempty"`
-	EvidenceRef    string              `json:"evidence_ref,omitempty"`
+	Scope          domain.ControlScope      `json:"scope"`
+	Mode           domain.ControlMode       `json:"mode"`
+	Revision       domain.Revision          `json:"revision"`
+	Requested      bool                     `json:"requested"`
+	Acknowledged   bool                     `json:"acknowledged"`
+	Effective      bool                     `json:"effective"`
+	Verified       bool                     `json:"verified"`
+	At             string                   `json:"at,omitempty"`
+	Reason         string                   `json:"reason,omitempty"`
+	RequestedAt    string                   `json:"requested_at,omitempty"`
+	AcknowledgedAt string                   `json:"acknowledged_at,omitempty"`
+	EffectiveAt    string                   `json:"effective_at,omitempty"`
+	VerifiedAt     string                   `json:"verified_at,omitempty"`
+	EvidenceRef    string                   `json:"evidence_ref,omitempty"`
+	Verification   domain.VerificationState `json:"verification"`
 }
 
 func (s *Service) ListControls(ctx context.Context, limit int) ([]ControlReadModel, error) {
@@ -286,7 +287,11 @@ func controlRead(c domain.ControlIntent, p domain.ControlProgress) ControlReadMo
 		}
 		return t.UTC().Format(time.RFC3339Nano)
 	}
-	return ControlReadModel{Scope: c.Scope, Mode: c.Mode, Revision: c.Revision, Requested: p.State != "", Acknowledged: p.State == domain.ControlAcknowledged || p.State == domain.ControlEffective || p.State == domain.ControlVerified, Effective: p.State == domain.ControlEffective || p.State == domain.ControlVerified, Verified: p.State == domain.ControlVerified, At: f(c.At), RequestedAt: f(p.RequestedAt), AcknowledgedAt: f(p.AcknowledgedAt), EffectiveAt: f(p.EffectiveAt), VerifiedAt: f(p.VerifiedAt), EvidenceRef: p.EvidenceRef, Reason: c.Reason}
+	effectiveAt := p.EffectiveAt
+	if effectiveAt.IsZero() {
+		effectiveAt = c.EffectiveAt
+	}
+	return ControlReadModel{Scope: c.Scope, Mode: c.Mode, Revision: c.Revision, Requested: p.State != "", Acknowledged: p.State == domain.ControlAcknowledged || p.State == domain.ControlEffective || p.State == domain.ControlVerified, Effective: p.State == domain.ControlEffective || p.State == domain.ControlVerified, Verified: p.State == domain.ControlVerified, At: f(c.At), RequestedAt: f(p.RequestedAt), AcknowledgedAt: f(p.AcknowledgedAt), EffectiveAt: f(effectiveAt), VerifiedAt: f(p.VerifiedAt), EvidenceRef: p.EvidenceRef, Verification: p.Verification, Reason: c.Reason}
 }
 
 type QueueSummary struct {

@@ -870,6 +870,13 @@ func (s *Service) Claim(ctx context.Context, req ClaimRequest) (out ClaimRespons
 			}
 			return restoreResponse(prior, &out)
 		}
+		active, e := u.ActiveLeases(ctx, 100)
+		if e != nil {
+			return e
+		}
+		if len(active) >= 100 {
+			return errors.New("active lease safety limit reached")
+		}
 		inc, ok, e := u.Increment(ctx, req.IncrementID)
 		if e != nil {
 			return e
@@ -1045,7 +1052,27 @@ func (s *Service) Control(ctx context.Context, req ControlRequest) (out ControlR
 		if e = u.SaveControl(ctx, intent, revision-1); e != nil {
 			return e
 		}
-		if e = u.SaveControlProgress(ctx, domain.ControlProgress{Revision: revision, State: domain.ControlRequested, RequestedAt: at}, ""); e != nil {
+		leases, e := u.ActiveLeases(ctx, 101)
+		if e != nil {
+			return e
+		}
+		if len(leases) > 100 {
+			return errors.New("active lease safety limit exceeded")
+		}
+		snapshots := make([]domain.ControlTargetSnapshot, 0, len(leases))
+		for _, lease := range leases {
+			target, found, x := u.CanonicalTarget(ctx, lease.IncrementID.String(), lease.RunnerID.String())
+			if x != nil {
+				return x
+			}
+			if !found {
+				target = domain.ControlTarget{InstallationID: s.config.InstallationID, RepositoryID: s.config.RepositoryID, IncrementID: lease.IncrementID, RunnerID: lease.RunnerID}
+			}
+			if domain.ControlApplies(req.Scope, target) {
+				snapshots = append(snapshots, domain.ControlTargetSnapshot{Target: target, LeaseID: lease.ID, ExecutionID: lease.ExecutionID, FencingToken: lease.FencingToken})
+			}
+		}
+		if e = u.SaveControlProgress(ctx, domain.ControlProgress{Revision: revision, State: domain.ControlRequested, RequestedAt: at, EffectiveAt: at, Verification: domain.VerificationPending, Targets: snapshots}, ""); e != nil {
 			return e
 		}
 		out = ControlResponse{Revision: revision, Mode: req.Mode, State: domain.ControlRequested}

@@ -61,3 +61,22 @@ image digest の rollback は、既知の正常 digest を `image_digest` に戻
 Cloud Run と Firestore は `prevent_destroy`/`deletion_protection` で保護され、destroy は
 通常の経路では拒否される。緊急削除は別途明示承認、state backup、影響範囲の記録を先に
 完了し、`tofu state rm` で保護を迂回しない。
+# Optional reconcile Scheduler
+
+Cloud Scheduler is disabled by default (`enable_reconcile_scheduler=false`).
+Google's current pricing page states three jobs per billing account are free,
+then `$0.10/job/31 days`; the account-level free-tier usage is not observable
+from this repository, so enabling the job requires
+`reconcile_cost_preflight_approved=true` and an existing custom IAP audience.
+Checked 2026-08-22: [Cloud Scheduler pricing](https://cloud.google.com/scheduler/pricing).
+
+When explicitly enabled, IaC creates only the dedicated
+`agentic-loop-reconciler` service account, grants it
+`roles/iap.httpsResourceAccessor`, and configures a POST OIDC target to
+`/internal/reconcile`. Cloud Run's direct-IAP service-agent invoker binding is
+unchanged; the scheduler account does not receive direct `roles/run.invoker`.
+`RECONCILE_IDENTITY` is injected from the service-account email and the
+application accepts only that normalized IAP assertion. The OIDC audience must
+be a custom IAP OAuth audience because Google-managed default IAP clients are
+not assumed programmatic-safe. See [Cloud Scheduler HTTP target auth](https://cloud.google.com/scheduler/docs/http-target-auth)
+and [IAP programmatic authentication](https://docs.cloud.google.com/iap/docs/authentication-howto).

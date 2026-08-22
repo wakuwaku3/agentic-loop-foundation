@@ -1,6 +1,7 @@
 package api_test
 
 import (
+	"context"
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
@@ -63,6 +64,27 @@ func TestHealthAndFailClosed(t *testing.T) {
 	w = call(h, http.MethodPost, "/v1/requirements", `{}`, "")
 	if w.Code != http.StatusServiceUnavailable {
 		t.Fatal(w.Code)
+	}
+}
+
+func TestInternalReconcileRequiresDedicatedIAPIdentity(t *testing.T) {
+	called := false
+	h := api.New(api.Config{ReconcileIdentity: "reconciler@example.iam.gserviceaccount.com", InternalReconcile: func(context.Context) error { called = true; return nil }})
+	req := httptest.NewRequest(http.MethodPost, "/internal/reconcile", nil)
+	req.Header.Set("X-Goog-Authenticated-User-Email", "accounts.google.com:reconciler@example.iam.gserviceaccount.com")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusAccepted || !called {
+		t.Fatalf("status=%d called=%v body=%s", w.Code, called, w.Body.String())
+	}
+	called = false
+	req = httptest.NewRequest(http.MethodPost, "/internal/reconcile", nil)
+	req.Header.Set("X-Goog-Authenticated-User-Email", "accounts.google.com:reconciler@example.iam.gserviceaccount.com")
+	req.Header.Set("X-Agentic-Runner-Session", "spoof")
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusUnauthorized || called {
+		t.Fatalf("runner credential reached internal reconcile: status=%d called=%v", w.Code, called)
 	}
 }
 func TestStrictJSONAuthRoleAndSpoof(t *testing.T) {

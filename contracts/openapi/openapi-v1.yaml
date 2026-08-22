@@ -7,6 +7,11 @@ info:
     control intents. Increment decomposition/planning is intentionally not a
     public owner operation; it remains a loop scheduler responsibility.
 paths:
+  /internal/reconcile:
+    post:
+      operationId: triggerInternalReconcile
+      security: [{reconcileScheduler: []}]
+      responses: {'202': {description: reconciliation accepted}, '401': {$ref: '#/components/responses/Error'}, '503': {$ref: '#/components/responses/Error'}}
   /healthz:
     get:
       operationId: healthz
@@ -116,6 +121,7 @@ components:
   securitySchemes:
     iapOwner: {type: apiKey, in: header, name: X-Goog-Authenticated-User-Email}
     runnerSession: {type: apiKey, in: header, name: X-Agentic-Runner-Session}
+    reconcileScheduler: {type: apiKey, in: header, name: X-Goog-Authenticated-User-Email}
   responses:
     Error: {description: error, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
   schemas:

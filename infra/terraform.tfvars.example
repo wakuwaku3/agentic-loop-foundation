@@ -5,3 +5,9 @@ image_digest        = "0123456789abcdef0123456789abcdef0123456789abcdef012345678
 installation_id     = "my-agentic-loop"
 owner_emails        = ["owner@example.com"]
 owner_origins       = ["https://agentic-loop-example-uc.a.run.app"]
+
+# Cost-gated optional scheduler. Keep disabled until account-level free-tier
+# usage and the custom IAP audience are verified in the deployment preflight.
+enable_reconcile_scheduler       = false
+reconcile_cost_preflight_approved = false
+# reconcile_iap_audience = "existing-custom-iap-oauth-client-id"

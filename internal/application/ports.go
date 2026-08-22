@@ -152,8 +152,21 @@ type LeaseRepository interface {
 	MaxFencingToken(ctx context.Context, incrementID string) (domain.FencingToken, error)
 }
 type LeaseReconcileRepository interface {
+	ActiveLeases(ctx context.Context, limit int) ([]domain.Lease, error)
 	ExpiredActiveLeases(ctx context.Context, at time.Time, cursor string, limit int) ([]domain.Lease, string, error)
 	ExecutionByLease(ctx context.Context, leaseID string) (domain.Execution, bool, error)
+}
+type VerificationRepository interface {
+	PendingControlProgresses(ctx context.Context, limit int) ([]domain.ControlProgress, error)
+	OutboxResolution(ctx context.Context, leaseID string) (OutboxResolution, error)
+}
+
+// OutboxResolution distinguishes work that may still settle from an external
+// effect whose outcome cannot safely be inferred. Control verification must
+// wait for the former and fail closed for the latter.
+type OutboxResolution struct {
+	Pending   bool
+	Ambiguous bool
 }
 type TargetRepository interface {
 	CanonicalTarget(ctx context.Context, incrementID, runnerID string) (domain.ControlTarget, bool, error)
@@ -194,6 +207,7 @@ type UnitOfWork interface {
 	ExecutionRepository
 	LeaseRepository
 	LeaseReconcileRepository
+	VerificationRepository
 	TargetRepository
 	ControlRepository
 	ControlProgressRepository

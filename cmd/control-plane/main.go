@@ -16,6 +16,7 @@ import (
 
 	"github.com/takushi/agentic-loop-foundation/v2/internal/api"
 	"github.com/takushi/agentic-loop-foundation/v2/internal/application"
+	"github.com/takushi/agentic-loop-foundation/v2/internal/reconciler"
 	"github.com/takushi/agentic-loop-foundation/v2/internal/runner"
 	"github.com/takushi/agentic-loop-foundation/v2/internal/store/firestore"
 )
@@ -103,11 +104,26 @@ func run() error {
 	if len(origins) == 0 {
 		return errors.New("OWNER_ORIGINS must not be empty")
 	}
+	reconcileIdentity, err := requiredEnv("RECONCILE_IDENTITY")
+	if err != nil {
+		return err
+	}
 	service, err := application.NewServiceWithConfig(store, productionClock{}, &productionIDs{}, application.ServiceConfig{InstallationID: installation, LeaseTTL: time.Minute})
 	if err != nil {
 		return err
 	}
-	h := api.New(api.Config{Authenticator: api.CombinedAuthenticator{Runner: runnerEnrollment, OwnerEmails: owners}, Service: service, RunnerEnrollment: runnerEnrollment, AllowedOrigins: origins})
+	clock := productionClock{}
+	leaseReconciler := &reconciler.Reconciler{Tx: store, Clock: clock}
+	verificationReconciler := &reconciler.VerificationReconciler{Tx: store, Clock: clock, Deadline: time.Minute}
+	h := api.New(api.Config{Authenticator: api.CombinedAuthenticator{Runner: runnerEnrollment, OwnerEmails: owners}, Service: service, RunnerEnrollment: runnerEnrollment, AllowedOrigins: origins, ReconcileIdentity: strings.ToLower(reconcileIdentity), InternalReconcile: func(callCtx context.Context) error {
+		tickCtx, cancel := context.WithTimeout(callCtx, 5*time.Second)
+		defer cancel()
+		if _, _, err := leaseReconciler.Tick(tickCtx, ""); err != nil {
+			return err
+		}
+		_, err := verificationReconciler.Tick(tickCtx)
+		return err
+	}})
 	addr := ":8080"
 	if value := strings.TrimSpace(os.Getenv("PORT")); value != "" {
 		addr = ":" + value
