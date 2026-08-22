@@ -1,0 +1,21 @@
+version: 1
+tasks:
+  - id: V2-002
+    status: complete
+    owner: luna
+    scope: white-slate bootstrap and tracked design baseline
+    evidence: make format lint test docs (Go gates require Devbox)
+  - id: V2-003
+    status: queued
+    owner: terra
+  - id: V2-004
+    status: complete
+    owner: luna
+    scope: pinned development environment, Go scaffold, common validation entrypoint
+    evidence: make check and make smoke in Devbox
+  - id: V2-005
+    status: queued
+    owner: terra
+  - id: V2-006
+    status: queued
+    owner: sol

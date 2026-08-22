@@ -1,19 +1,23 @@
 {
   "$schema": "https://raw.githubusercontent.com/jetify-com/devbox/0.17.2/.schema/devbox.schema.json",
   "packages": [
-    "bash@latest",
-    "coreutils@latest",
-    "findutils@latest",
-    "gawk@latest",
-    "git@latest",
+    "bash@5.3p15",
+    "actionlint@1.7.12",
+    "coreutils@9.11",
+    "curl@8.17.0",
+    "findutils@4.11.0",
+    "gawk@5.4.1",
+    "git@2.55.0",
     "gitleaks@8.30.1",
-    "gnugrep@latest",
-    "jq@latest",
-    "gnumake@latest",
-    "gnused@latest",
-    "shellcheck@latest",
-    "util-linux@latest",
-    "yq-go@latest"
+    "gnugrep@3.12",
+    "gnumake@4.4.1",
+    "gnused@4.10",
+    "go@1.24.13",
+    "jq@1.8.2",
+    "ripgrep@15.2.0",
+    "shellcheck@0.11.0",
+    "util-linux@2.42.2",
+    "yq-go@4.53.3"
   ],
   "env": {
     "DEV_ENVIRONMENT": "agentic-loop-foundation-v2"
@@ -21,9 +25,7 @@
   "shell": {
     "scripts": {
       "check": "make check",
-      "smoke": "make smoke",
-      "affected": "make affected",
-      "affected-audit": "make affected-audit"
+      "smoke": "make smoke"
     }
   }
 }

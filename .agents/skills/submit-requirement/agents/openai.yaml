@@ -1,4 +1,0 @@
-interface:
-  display_name: "Submit Requirement"
-  short_description: "Turn a goal into an autonomous development loop"
-  default_prompt: "Use $submit-requirement to turn my goal into a verified change."

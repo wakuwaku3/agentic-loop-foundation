@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentic-loop.dev/schemas/artifact-ref-v1.json",
+  "title": "Artifact reference",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["artifact_id", "media_type", "sha256", "size_bytes"],
+  "properties": {
+    "artifact_id": {"type": "string", "minLength": 1, "maxLength": 128},
+    "media_type": {"type": "string", "minLength": 1, "maxLength": 128},
+    "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "size_bytes": {"type": "integer", "minimum": 0},
+    "uri": {"type": "string", "format": "uri", "maxLength": 2048},
+    "name": {"type": "string", "maxLength": 256}
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "all_on_change": [".github/**", "ci/**", "devbox.json", "devbox.lock", "go.mod", "go.sum", "Makefile", "scripts/**"],
+  "components": [
+    {"id":"ci","roots":["ci/**","cmd/ci-plan/**","internal/ci/**"],"public_contracts":["ci/**"],"contract_dependencies":[],"dependencies":[],"check":{"runner":"make","target":"component-ci"}},
+    {"id":"contracts","roots":["contracts/**"],"public_contracts":["contracts/**"],"contract_dependencies":[],"dependencies":[],"check":{"runner":"make","target":"component-contracts"}},
+    {"id":"control-plane","roots":["cmd/control-plane/**"],"public_contracts":["contracts/openapi.yaml"],"contract_dependencies":["contracts/openapi.yaml"],"dependencies":["domain"],"check":{"runner":"make","target":"component-control-plane"}},
+    {"id":"runner","roots":["cmd/runner/**","cmd/bootstrap/**"],"public_contracts":[],"contract_dependencies":[],"dependencies":["domain"],"check":{"runner":"make","target":"component-runner"}},
+    {"id":"domain","roots":["internal/domain/**"],"public_contracts":[],"contract_dependencies":[],"dependencies":[],"check":{"runner":"make","target":"component-domain"}},
+    {"id":"internal-contracts","roots":["internal/contracts/**"],"public_contracts":[],"contract_dependencies":["contracts/**"],"dependencies":["contracts"],"check":{"runner":"make","target":"component-contracts"}},
+    {"id":"docs","roots":["docs/**","README.md","AGENTS.md"],"public_contracts":[],"contract_dependencies":[],"dependencies":[],"check":{"runner":"make","target":"component-docs"}},
+    {"id":"tests","roots":["test/**"],"public_contracts":[],"contract_dependencies":[],"dependencies":[],"check":{"runner":"make","target":"component-test"}},
+    {"id":"infra","roots":["infra/**"],"public_contracts":[],"contract_dependencies":[],"dependencies":[],"check":{"runner":"make","target":"component-infra"}},
+    {"id":"tooling","roots":[".editorconfig",".gitignore"],"public_contracts":[],"contract_dependencies":[],"dependencies":[],"check":{"runner":"make","target":"component-tooling"}},
+    {"id":"environment","roots":["devbox.json","devbox.lock","go.mod","go.sum","Makefile","scripts/**",".github/**"],"public_contracts":[],"contract_dependencies":[],"dependencies":[],"check":{"runner":"make","target":"component-tooling"}},
+    {"id":"repository-meta","roots":[".codex/**"],"public_contracts":[],"contract_dependencies":[],"dependencies":[],"check":{"runner":"make","target":"component-tooling"}},
+    {"id":"task-ledger","roots":[".agents/**"],"public_contracts":[],"contract_dependencies":[],"dependencies":[],"check":{"runner":"make","target":"component-tooling"}}
+  ]
+}

@@ -1,3 +1,0 @@
-#!/usr/bin/env bash
-set -euo pipefail
-exec "$(git rev-parse --show-toplevel)/.agentic-loop/guard-secrets.sh" --staged

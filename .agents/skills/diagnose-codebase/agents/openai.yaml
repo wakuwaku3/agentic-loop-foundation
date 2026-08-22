@@ -1,4 +1,0 @@
-interface:
-  display_name: "Diagnose Codebase"
-  short_description: "Audit repository drift and file actionable Issues"
-  default_prompt: "Use $diagnose-codebase to audit this repository and file actionable GitHub Issues without modifying code."

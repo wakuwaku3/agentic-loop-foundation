@@ -1,0 +1,1 @@
+{"schema_version":"v1","id":"rc-001","kind":"release-contract","created_at":"2026-08-22T00:00:00Z","correlation_id":"c-001","release":"0.1.0","capabilities":[{"id":"healthz","name":"Health endpoint","status":"preview","evidence_ids":["ev-003"]}],"verification":["make check"],"rollback":{"procedure":"Redeploy previous tag","target":"0.0.0"}}

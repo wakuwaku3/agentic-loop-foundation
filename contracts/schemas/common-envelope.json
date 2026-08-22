@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentic-loop.dev/schemas/common-envelope-v1.json",
+  "title": "Common envelope",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "id", "kind", "created_at", "correlation_id"],
+  "properties": {
+    "schema_version": {"const": "v1"},
+    "id": {"type": "string", "minLength": 1, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"},
+    "kind": {"type": "string", "minLength": 1, "pattern": "^[a-z][a-z0-9.-]{1,63}$"},
+    "created_at": {"type": "string", "format": "date-time"},
+    "correlation_id": {"type": "string", "minLength": 1, "maxLength": 128},
+    "causation_id": {"type": "string", "minLength": 1, "maxLength": 128},
+    "actor": {"type": "string", "minLength": 1, "maxLength": 128},
+    "labels": {"type": "object", "additionalProperties": {"type": "string", "maxLength": 256}}
+  }
+}

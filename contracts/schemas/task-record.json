@@ -1,0 +1,5 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema", "$id": "https://agentic-loop.dev/schemas/task-record-v1.json", "title": "Task record", "type": "object", "additionalProperties": false,
+  "required": ["schema_version", "id", "kind", "created_at", "correlation_id", "task_id", "status", "owner", "scope"],
+  "properties": {"schema_version": {"const": "v1"}, "id": {"type": "string", "minLength": 1}, "kind": {"const": "task-record"}, "created_at": {"type": "string", "format": "date-time"}, "correlation_id": {"type": "string", "minLength": 1}, "task_id": {"type": "string", "pattern": "^V2-[0-9]{3}$"}, "status": {"enum": ["queued", "running", "blocked", "complete", "failed"]}, "owner": {"type": "string", "minLength": 1}, "scope": {"type": "string", "minLength": 1}, "evidence_ids": {"type": "array", "items": {"type": "string"}}}
+}

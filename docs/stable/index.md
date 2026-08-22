@@ -1,0 +1,4 @@
+# Stable
+
+Stable利用者向け文書の入口です。最初の利用可能なcapabilityはrelease
+contractの検証後にここへ追加します。

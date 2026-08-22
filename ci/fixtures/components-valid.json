@@ -1,0 +1,1 @@
+{"version":1,"all_on_change":["ci/**"],"components":[{"id":"a","roots":["a/**"],"public_contracts":["a/api.json"],"contract_dependencies":[],"dependencies":[],"check":{"runner":"make","target":"component-ci"}},{"id":"b","roots":["b/**"],"public_contracts":[],"contract_dependencies":["a/api.json"],"dependencies":["a"],"check":{"runner":"make","target":"component-runner"}}]}

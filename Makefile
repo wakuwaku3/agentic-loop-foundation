@@ -1,28 +1,74 @@
-.DEFAULT_GOAL := check
+.PHONY: check environment format lint test contracts docs secrets smoke clean component-plan affected candidate component ownership component-ci component-contracts component-control-plane component-runner component-domain component-docs component-test component-infra component-tooling
 
-.PHONY: environment format lint test check smoke affected affected-audit
+GO ?= go
+EVIDENCE_DIR ?= build/evidence
 
+check: environment format lint test contracts docs secrets ownership
+
+component-plan:
+	@go run ./cmd/ci-plan --changed "$$(git diff --name-only HEAD^ HEAD 2>/dev/null || true)"
+
+affected:
+	@go run ./cmd/ci-plan --execute --changed "$$(git diff --name-only HEAD^ HEAD 2>/dev/null || true)"
+
+ownership:
+	@go run ./cmd/ci-plan --tracked "$$(git ls-files --cached --others --exclude-standard | paste -sd, -)"
+
+component:
+	@test -n "$(COMPONENT)"
+	@go run ./cmd/ci-plan --execute --component "$(COMPONENT)" --evidence-out "$(EVIDENCE_DIR)"
+
+candidate:
+	@go run ./cmd/ci-plan --candidate --evidence-dir "$(EVIDENCE_DIR)"
+
+component-ci:
+	@go test ./internal/ci ./cmd/ci-plan
+component-contracts:
+	@go test ./internal/contracts
+component-control-plane:
+	@go test ./cmd/control-plane ./internal/domain
+component-runner:
+	@go test ./cmd/runner ./cmd/bootstrap ./internal/domain
+component-domain:
+	@go test ./internal/domain
+component-docs:
+	@! rg -n 'TODO\(ci\)' docs README.md
+component-test:
+	@go test ./...
+component-infra:
+	@test -d infra
+component-tooling:
+	@true
+
+# All targets are read-only checks except clean, which is intentionally local.
 environment:
-	./scripts/check-environment.sh
+	@command -v $(GO) >/dev/null || (echo "Go is required" >&2; exit 1)
+	@$(GO) version
+	@test "$$(git rev-parse --show-toplevel)" = "$$(pwd)"
 
 format:
-	./scripts/format.sh
+	@test -z "$$(gofmt -l .)" || (echo "Go files require gofmt" >&2; gofmt -l .; exit 1)
 
 lint:
-	./scripts/lint.sh
+	@$(GO) vet ./...
 
 test:
-	./tests/run-e2e.sh
+	@$(GO) test ./...
 
-check: environment lint test
+contracts:
+	@$(GO) test ./internal/contracts
+
+docs:
+	@! rg -n '\]\([^)]*01-core-principles\.md' docs README.md AGENTS.md
+	@! rg -n '\]\([^)]*(00-product-definition|02-user-facing-spec|03-release-and-documentation|04-current-feature-inventory|05-domain-model|06-logical-architecture|08-technology-selection|09-validation-strategy|10-implementation-and-migration|11-documentation-system|13-v2-work-orchestration)\.md' docs README.md AGENTS.md
+
+secrets:
+	@gitleaks git --no-banner --redact
 
 smoke:
-	./bin/agentic-loop smoke
+	@$(GO) run ./cmd/runner --version | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+-dev$$'
+	@$(GO) run ./cmd/bootstrap --version | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+-dev$$'
+	@port=18080; PORT=$$port $(GO) run ./cmd/control-plane >/tmp/agentic-loop-v2-healthz.log 2>&1 & pid=$$!; trap 'kill $$pid 2>/dev/null || true' EXIT; for i in 1 2 3 4 5; do curl -fsS "http://127.0.0.1:$$port/healthz" && exit 0; sleep 1; done; exit 1
 
-# local affected check: gateではない。編集中のfeedback短縮専用（docs/policies/
-# validation-harness.md、docs/decisions/0021-affected-check-selection.md）。
-affected:
-	./scripts/affected-check.sh
-
-affected-audit:
-	./scripts/affected-check.sh --audit
+clean:
+	@true

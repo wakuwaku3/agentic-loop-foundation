@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentic-loop.dev/schemas/problem-brief-v1.json",
+  "title": "Problem brief",
+  "type": "object", "additionalProperties": false,
+  "required": ["schema_version", "id", "kind", "created_at", "correlation_id", "title", "problem", "outcomes", "constraints"],
+  "properties": {
+    "schema_version": {"const": "v1"}, "id": {"type": "string", "minLength": 1}, "kind": {"const": "problem-brief"}, "created_at": {"type": "string", "format": "date-time"}, "correlation_id": {"type": "string", "minLength": 1},
+    "title": {"type": "string", "minLength": 1, "maxLength": 200}, "problem": {"type": "string", "minLength": 1, "maxLength": 10000},
+    "outcomes": {"type": "array", "items": {"type": "string", "minLength": 1}, "minItems": 1},
+    "constraints": {"type": "array", "items": {"type": "string"}}, "acceptance": {"type": "array", "items": {"type": "string"}},
+    "references": {"type": "array", "items": {"type": "string"}}
+  }
+}

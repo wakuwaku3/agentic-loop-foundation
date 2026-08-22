@@ -1,0 +1,5 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema", "$id": "https://agentic-loop.dev/schemas/domain-event-v1.json", "title": "Domain event", "type": "object", "additionalProperties": false,
+  "required": ["schema_version", "id", "kind", "created_at", "correlation_id", "event_type", "aggregate_id", "payload"],
+  "properties": {"schema_version": {"const": "v1"}, "id": {"type": "string", "minLength": 1}, "kind": {"const": "domain-event"}, "created_at": {"type": "string", "format": "date-time"}, "correlation_id": {"type": "string", "minLength": 1}, "event_type": {"type": "string", "pattern": "^[a-z][a-z0-9.-]{1,63}$"}, "aggregate_id": {"type": "string", "minLength": 1}, "sequence": {"type": "integer", "minimum": 0}, "payload": {"type": "object", "additionalProperties": false}}
+}

@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentic-loop.dev/schemas/evidence-v1.json",
+  "title": "Evidence",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "id", "kind", "created_at", "correlation_id", "task_id", "component", "evidence_key", "result", "checks"],
+  "properties": {
+    "schema_version": {"const": "v1"}, "id": {"type": "string", "minLength": 1}, "kind": {"const": "evidence"}, "created_at": {"type": "string", "format": "date-time"}, "correlation_id": {"type": "string", "minLength": 1}, "task_id": {"type": "string", "pattern": "^V2-[0-9]{3}$"}, "component": {"type": "string", "minLength": 1}, "evidence_key": {"type": "string", "pattern": "^[a-f0-9]{16,128}$"}, "result": {"enum": ["passed", "failed", "partial"]},
+    "checks": {"type": "array", "minItems": 1, "items": {"type": "object", "additionalProperties": false, "required": ["name", "status", "argv", "working_directory", "timeout_seconds"], "properties": {"name": {"type": "string", "minLength": 1}, "status": {"enum": ["passed", "failed", "skipped"]}, "argv": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}}, "working_directory": {"type": "string", "minLength": 1}, "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 86400}, "summary": {"type": "string"}}}},
+    "artifact_refs": {"type": "array", "items": {"$ref": "artifact-ref.json"}}, "observed_at": {"type": "string", "format": "date-time"}
+  }
+}

@@ -1,0 +1,1 @@
+{"version":1,"components":[{"id":"a","roots":["a/**"],"dependencies":[],"check":{"runner":"make","target":"a"}},{"id":"b","roots":["a/**"],"dependencies":[],"check":{"runner":"make","target":"b"}}]}

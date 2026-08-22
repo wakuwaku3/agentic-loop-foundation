@@ -1,0 +1,11 @@
+version: 1
+components:
+  control-plane:
+    paths: [cmd/control-plane, internal/domain]
+    contracts: []
+  runner:
+    paths: [cmd/runner, cmd/bootstrap]
+    contracts: []
+  docs:
+    paths: [docs, README.md, AGENTS.md]
+    contracts: []
