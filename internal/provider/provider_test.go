@@ -22,6 +22,9 @@ func TestAdaptersBuildSafeArgvAndParseMetadata(t *testing.T) {
 		if len(inv.Argv) < 3 || strings.Contains(string(inv.Stdin), "credential") {
 			t.Fatalf("unsafe invocation %#v", inv)
 		}
+		if inv.WorkingDirectory != "/workspace" {
+			t.Fatalf("workspace boundary missing: %#v", inv)
+		}
 		r, err := a.Parse([]byte(`{"status":"completed","checkpoint":"cp-1","output":"provider conversation omitted","usage":{"input_tokens":2,"output_tokens":3}}`))
 		if err != nil || !r.Succeeded || r.OutputDigest == "" || r.Usage.TotalTokens != 0 {
 			t.Fatalf("result=%#v err=%v", r, err)

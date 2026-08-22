@@ -141,9 +141,10 @@ type Provider interface {
 	Run(context.Context, Request) (Result, error)
 }
 type Invocation struct {
-	Argv        []string
-	Stdin       []byte
-	Environment []string
+	Argv             []string
+	Stdin            []byte
+	WorkingDirectory string
+	Environment      []string
 }
 
 var forbidden = regexp.MustCompile(`(?i)(raw[_ -]?conversation|raw[_ -]?prompt|credential|password|private[_ -]?key|api[_ -]?key)`)

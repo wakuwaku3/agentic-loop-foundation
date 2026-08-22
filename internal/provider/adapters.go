@@ -18,7 +18,7 @@ func (CodexAdapter) Name() string    { return "codex" }
 func (ClaudeAdapter) Name() string   { return "claude" }
 func (OpenCodeAdapter) Name() string { return "opencode" }
 
-func build(name, executable string, flags []string, req Request) (Invocation, error) {
+func build(executable string, flags []string, includeWorkspaceArg bool, req Request) (Invocation, error) {
 	if err := req.Validate(); err != nil {
 		return Invocation{}, err
 	}
@@ -27,22 +27,24 @@ func build(name, executable string, flags []string, req Request) (Invocation, er
 		return Invocation{}, ErrInvalidRequest
 	}
 	argv := append([]string{executable}, flags...)
-	argv = append(argv, req.Workspace)
+	if includeWorkspaceArg {
+		argv = append(argv, req.Workspace)
+	}
 	for _, v := range argv {
 		if strings.ContainsAny(v, "\x00\r\n") || secret.MatchString(v) {
 			return Invocation{}, ErrInvalidRequest
 		}
 	}
-	return Invocation{Argv: argv, Stdin: b}, nil
+	return Invocation{Argv: argv, Stdin: b, WorkingDirectory: req.Workspace}, nil
 }
 func (CodexAdapter) Build(req Request) (Invocation, error) {
-	return build("codex", "codex", []string{"exec", "--json", "--workspace"}, req)
+	return build("codex", []string{"exec", "--json", "--ephemeral", "-C"}, true, req)
 }
 func (ClaudeAdapter) Build(req Request) (Invocation, error) {
-	return build("claude", "claude", []string{"--output-format", "json", "--cwd"}, req)
+	return build("claude", []string{"--print", "--output-format", "json", "--no-session-persistence"}, false, req)
 }
 func (OpenCodeAdapter) Build(req Request) (Invocation, error) {
-	return build("opencode", "opencode", []string{"run", "--format", "json", "--dir"}, req)
+	return build("opencode", []string{"run", "--pure", "--format", "json", "--dir"}, true, req)
 }
 
 func (CodexAdapter) Parse(b []byte) (Result, error)      { return parseFixture("codex", b) }

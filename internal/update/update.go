@@ -86,7 +86,8 @@ func Install(root string, bundle Bundle, publicKey ed25519.PublicKey, currentSch
 			return Manifest{}, errors.New("existing version target is not a directory")
 		}
 		existing, readErr := os.ReadFile(filepath.Join(target, "runner"))
-		if readErr != nil || sha256.Sum256(existing) != sha256.Sum256(bundle.Binary) {
+		existingManifest, manifestErr := os.ReadFile(filepath.Join(target, "manifest.json"))
+		if readErr != nil || manifestErr != nil || sha256.Sum256(existing) != sha256.Sum256(bundle.Binary) || !bytes.Equal(existingManifest, bundle.Manifest) {
 			return Manifest{}, errors.New("existing immutable version differs")
 		}
 		return manifest, nil

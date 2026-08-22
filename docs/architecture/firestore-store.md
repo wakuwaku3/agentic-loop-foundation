@@ -34,18 +34,19 @@ Firestore を直接読ませない。`firebase.json` と `scripts/firestore-emul
 
 ## Query と index
 
-M2 の canonical correctness を優先し、lease query は transaction snapshot から最大 1000 documents
-だけを読み、上限超過を `ErrQueryLimit` として fail closed する。domain type に decode して predicate を
-適用し、未コミット staged value も同じ predicate に通すため read-your-writes が保たれる。候補量が
-上限へ近づく前に、公開 projection と `firestore.indexes.json` を追加し、query read budget を計測した
-上で置き換える。
+M2の汎用queryも1000 documentsでfail closedするが、運用hot pathは公開projectionとindexへ移行済みで
+ある。期限切れleaseはstatus/expiry、active leaseはstatus、control検証候補はverification、実行と
+outbox照合はlease IDで直接queryし、各境界は100件（安全上限確認だけlimit+1）に制限する。全件scanへ
+fallbackしない。未コミットstaged valueを含むaggregate内検索は同じpredicateを通しread-your-writesを
+維持する。index追加は`firestore.indexes.json`、emulator、read quota reservationを同じ変更で更新する。
 
 emulator integration test は rollback、aggregate/event/outbox/idempotency の atomicity、codec corruption
 を検証する。テストは `FIRESTORE_EMULATOR_HOST` がない環境では skip し、production endpoint へ接続しない。
 
 ### Outbox delivery
 
-Outbox は `pending`、`delivering`、`waiting`、`delivered`、`dead` のいずれかを持つ。
+Outboxは配送中状態に加え、外部作用の`ambiguous`、`reconciling`、`confirmed`、`not-observed`、
+`superseded`、`needs-input`を持つ。
 Dispatcher は候補を transaction で一件ずつ claim し、短い delivery lease を記録してから
 transaction の外で `EffectSink` を呼ぶ。effect の直前には別 transaction で outbox の所有権、
 最新 control revision、active lease、fencing token を読み直すため、停止後や古い Runner の
@@ -56,7 +57,7 @@ scope の最新 revision と一致することを検証する。それ以外の�
 `PermitKind`、Increment、Lease、fencing token が揃わない限り malformed として `dead` に収束する。
 
 sink の失敗は bounded exponential backoff と jitter で `waiting` に戻し、上限到達時だけ
-`dead` とする。配送の idempotency key は Operation ID で固定する。effect 成功後の ack 前に
-dispatcher が落ちても、次の orphan recovery は同じ key を再送するので、sink 側の
-at-least-once/idempotency 契約で重複確定を防ぐ。`firestore.indexes.json` の outbox projection
+`dead` とする。配送の idempotency key は Operation ID で固定する。effect成功後のack前に
+dispatcherが落ちた場合は盲目的に再送せず、同じOperation IDをobserverで照合する。confirmedなら
+確定、未観測なら同じIDで再送、観測不能ならneeds-inputとして隔離する。`firestore.indexes.json` の outbox projection
 は candidate query の status／next-attempt 順序を保つための公開 projection である。
