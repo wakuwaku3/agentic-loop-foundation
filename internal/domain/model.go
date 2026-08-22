@@ -483,6 +483,7 @@ const (
 	IncrementRelease   IncrementCommandKind = "release"
 	IncrementAbandon   IncrementCommandKind = "abandon"
 	IncrementCancel    IncrementCommandKind = "cancel"
+	IncrementRecover   IncrementCommandKind = "recover"
 )
 
 type IncrementCommand struct {
@@ -577,6 +578,11 @@ func DecideIncrement(current Increment, command IncrementCommand) (Increment, er
 			return current, ErrInvalidTransition
 		}
 		next.Status = IncrementCancelled
+	case IncrementRecover:
+		if !ok(IncrementLeased, IncrementExecuting, IncrementFailed) {
+			return current, ErrInvalidTransition
+		}
+		next.Status = IncrementReady
 	default:
 		return current, fmt.Errorf("unknown increment command %q", command.Kind)
 	}

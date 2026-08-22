@@ -302,6 +302,34 @@ func (u *unit) ActiveLeaseForIncrementAt(_ context.Context, id string, at time.T
 	}
 	return domain.Lease{}, false, nil
 }
+func (u *unit) ExpiredActiveLeases(_ context.Context, at time.Time, cursor string, limit int) ([]domain.Lease, string, error) {
+	if limit <= 0 || limit > 100 {
+		limit = 100
+	}
+	rows := make([]domain.Lease, 0)
+	for _, lease := range u.s.leases {
+		if lease.Status == domain.LeaseActive && !lease.ExpiresAt.After(at) && lease.ID.String() > cursor {
+			rows = append(rows, lease)
+		}
+	}
+	sort.Slice(rows, func(i, j int) bool { return rows[i].ID.String() < rows[j].ID.String() })
+	if len(rows) > limit {
+		rows = rows[:limit]
+	}
+	next := ""
+	if len(rows) == limit {
+		next = rows[len(rows)-1].ID.String()
+	}
+	return rows, next, nil
+}
+func (u *unit) ExecutionByLease(_ context.Context, leaseID string) (domain.Execution, bool, error) {
+	for _, execution := range u.s.executions {
+		if execution.LeaseID.String() == leaseID {
+			return execution, true, nil
+		}
+	}
+	return domain.Execution{}, false, nil
+}
 func (u *unit) LatestLeaseForIncrement(_ context.Context, id string) (domain.Lease, bool, error) {
 	var latest domain.Lease
 	found := false
@@ -439,7 +467,7 @@ func (u *unit) Outboxes(_ context.Context, now time.Time, limit int) ([]applicat
 		if status == "" {
 			status = application.OutboxPending
 		}
-		ready := status == application.OutboxPending || (status == application.OutboxWaiting && (v.NextAttemptAt.IsZero() || !v.NextAttemptAt.After(now))) || (status == application.OutboxDelivering && !v.DeliveryLeaseUntil.IsZero() && !v.DeliveryLeaseUntil.After(now))
+		ready := status == application.OutboxPending || status == application.OutboxAmbiguous || status == application.OutboxReconciling || (status == application.OutboxWaiting && (v.NextAttemptAt.IsZero() || !v.NextAttemptAt.After(now))) || (status == application.OutboxDelivering && !v.DeliveryLeaseUntil.IsZero() && !v.DeliveryLeaseUntil.After(now))
 		if ready {
 			v.Status = status
 			v.Payload = append([]byte(nil), v.Payload...)

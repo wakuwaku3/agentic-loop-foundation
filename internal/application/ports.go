@@ -51,6 +51,8 @@ type OutboxItem struct {
 	DeliveryLeaseUntil time.Time
 	LastError          string
 	DeliveredAt        time.Time
+	Observation        OutboxObservation
+	ObservedAt         time.Time
 	// IncrementID is retained so dispatch can revalidate the latest lease and
 	// fencing token immediately before an external effect. Legacy records may
 	// omit it, but are rejected as malformed; only an explicit control-changed
@@ -66,16 +68,30 @@ type OutboxItem struct {
 type OutboxStatus string
 
 const (
-	OutboxPending    OutboxStatus = "pending"
-	OutboxDelivering OutboxStatus = "delivering"
-	OutboxDelivered  OutboxStatus = "delivered"
-	OutboxDead       OutboxStatus = "dead"
-	OutboxWaiting    OutboxStatus = "waiting"
+	OutboxPending     OutboxStatus = "pending"
+	OutboxDelivering  OutboxStatus = "delivering"
+	OutboxDelivered   OutboxStatus = "delivered"
+	OutboxDead        OutboxStatus = "dead"
+	OutboxWaiting     OutboxStatus = "waiting"
+	OutboxAmbiguous   OutboxStatus = "ambiguous"
+	OutboxReconciling OutboxStatus = "reconciling"
+	OutboxConfirmed   OutboxStatus = "confirmed"
+	OutboxNotObserved OutboxStatus = "not-observed"
+	OutboxSuperseded  OutboxStatus = "superseded"
+	OutboxNeedsInput  OutboxStatus = "needs-input"
+)
+
+type OutboxObservation string
+
+const (
+	ObservationUnknown     OutboxObservation = "unknown"
+	ObservationConfirmed   OutboxObservation = "confirmed"
+	ObservationNotObserved OutboxObservation = "not-observed"
 )
 
 func (s OutboxStatus) Valid() bool {
 	switch s {
-	case "", OutboxPending, OutboxDelivering, OutboxDelivered, OutboxDead, OutboxWaiting:
+	case "", OutboxPending, OutboxDelivering, OutboxDelivered, OutboxDead, OutboxWaiting, OutboxAmbiguous, OutboxReconciling, OutboxConfirmed, OutboxNotObserved, OutboxSuperseded, OutboxNeedsInput:
 		return true
 	default:
 		return false
@@ -135,6 +151,10 @@ type LeaseRepository interface {
 	LatestLeaseForIncrement(ctx context.Context, incrementID string) (domain.Lease, bool, error)
 	MaxFencingToken(ctx context.Context, incrementID string) (domain.FencingToken, error)
 }
+type LeaseReconcileRepository interface {
+	ExpiredActiveLeases(ctx context.Context, at time.Time, cursor string, limit int) ([]domain.Lease, string, error)
+	ExecutionByLease(ctx context.Context, leaseID string) (domain.Execution, bool, error)
+}
 type TargetRepository interface {
 	CanonicalTarget(ctx context.Context, incrementID, runnerID string) (domain.ControlTarget, bool, error)
 	SaveCanonicalTarget(ctx context.Context, incrementID string, target domain.ControlTarget) error
@@ -173,6 +193,7 @@ type UnitOfWork interface {
 	IncrementRepository
 	ExecutionRepository
 	LeaseRepository
+	LeaseReconcileRepository
 	TargetRepository
 	ControlRepository
 	ControlProgressRepository

@@ -95,6 +95,19 @@ func ExpireLease(current Lease, at time.Time) (Lease, error) {
 	return next, nil
 }
 
+func MarkExecutionLost(execution Execution, lease Lease) (Execution, error) {
+	if execution.LeaseID != lease.ID || execution.FencingToken != lease.FencingToken || execution.ID != lease.ExecutionID {
+		return execution, ErrStaleFence
+	}
+	if execution.Status == ExecutionSucceeded || execution.Status == ExecutionFailed || execution.Status == ExecutionTerminated {
+		return execution, ErrInvalidTransition
+	}
+	next := execution
+	next.Status = ExecutionLost
+	next.Version++
+	return next, nil
+}
+
 type ExecutionResult struct {
 	ExecutionID     ExecutionID
 	LeaseID         LeaseID

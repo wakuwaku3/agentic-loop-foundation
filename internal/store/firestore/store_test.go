@@ -293,3 +293,46 @@ func TestFirestoreApplicationAtomicityConflictAndControl(t *testing.T) {
 		t.Fatalf("concurrent claims=%d errors=%v", successes, claimErrors)
 	}
 }
+
+func TestFirestoreExpiredLeaseAndExecutionIndexes(t *testing.T) {
+	s := emulatorStore(t)
+	ctx := context.Background()
+	now := time.Unix(1700000200, 0).UTC()
+	for _, suffix := range []string{"a", "b"} {
+		lease := domain.Lease{ID: domain.LeaseID("lease-" + suffix), ExecutionID: domain.ExecutionID("exec-" + suffix), IncrementID: domain.IncrementID("inc-" + suffix), RunnerID: domain.RunnerID("runner"), FencingToken: 1, Status: domain.LeaseActive, IssuedAt: now.Add(-time.Minute), ExpiresAt: now.Add(-time.Second), Version: 1}
+		execution := domain.Execution{ID: lease.ExecutionID, IncrementID: lease.IncrementID, RunnerID: lease.RunnerID, LeaseID: lease.ID, FencingToken: lease.FencingToken, Status: domain.ExecutionRunning, Version: 1}
+		if err := s.Transact(ctx, func(u application.UnitOfWork) error {
+			if err := u.SaveLease(ctx, lease, 0); err != nil {
+				return err
+			}
+			return u.SaveExecution(ctx, execution, 0)
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var first, second []domain.Lease
+	var cursor string
+	if err := s.Transact(ctx, func(u application.UnitOfWork) error {
+		var err error
+		first, cursor, err = u.ExpiredActiveLeases(ctx, now, "", 1)
+		return err
+	}); err != nil || len(first) != 1 || cursor == "" {
+		t.Fatalf("first page=%#v cursor=%q err=%v", first, cursor, err)
+	}
+	if err := s.Transact(ctx, func(u application.UnitOfWork) error {
+		var err error
+		second, _, err = u.ExpiredActiveLeases(ctx, now, cursor, 1)
+		return err
+	}); err != nil || len(second) != 1 || second[0].ID == first[0].ID {
+		t.Fatalf("second page=%#v err=%v", second, err)
+	}
+	if err := s.Transact(ctx, func(u application.UnitOfWork) error {
+		execution, ok, err := u.ExecutionByLease(ctx, first[0].ID.String())
+		if err != nil || !ok || execution.LeaseID != first[0].ID {
+			t.Fatalf("execution lookup=%#v ok=%v err=%v", execution, ok, err)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}

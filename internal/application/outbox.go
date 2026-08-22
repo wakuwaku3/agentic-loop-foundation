@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"net"
 	"sort"
 	"strings"
 	"time"
@@ -65,6 +66,9 @@ type EffectDelivery struct {
 // on a duplicate call.
 type EffectSink interface {
 	Deliver(context.Context, EffectDelivery) error
+}
+type EffectObserver interface {
+	Observe(context.Context, EffectDelivery) (OutboxObservation, error)
 }
 
 // EffectSinkFunc adapts a function to EffectSink, useful for small adapters
@@ -139,6 +143,7 @@ type DispatcherConfig struct {
 	BatchSize   int
 	Retry       RetryPolicy
 	AfterEffect func(OutboxItem) error
+	Observer    EffectObserver
 }
 
 type DispatchReport struct {
@@ -203,6 +208,28 @@ func (d *OutboxDispatcher) Dispatch(ctx context.Context) (DispatchReport, error)
 	}
 	sort.SliceStable(candidates, func(i, j int) bool { return candidates[i].ID < candidates[j].ID })
 	for _, candidate := range candidates {
+		if candidate.Status == OutboxAmbiguous || candidate.Status == OutboxReconciling {
+			if d.config.Observer == nil {
+				report.Waiting++
+				continue
+			}
+			observation, observeErr := d.config.Observer.Observe(ctx, EffectDelivery{OutboxID: candidate.ID, OperationID: candidate.OperationID, IdempotencyKey: candidate.OperationID, RequestID: candidate.RequestID, Kind: candidate.Kind, Target: candidate.Target, Payload: append([]byte(nil), candidate.Payload...)})
+			if observeErr != nil {
+				report.Failed++
+				continue
+			}
+			if err := d.resolveObservation(ctx, candidate.ID, observation); err != nil {
+				return report, err
+			}
+			if observation == ObservationConfirmed {
+				report.Delivered++
+			} else if observation == ObservationNotObserved {
+				report.Waiting++
+			} else {
+				report.Failed++
+			}
+			continue
+		}
 		claimed, err := d.claim(ctx, candidate.ID, now)
 		if err != nil {
 			if errors.Is(err, domain.ErrStaleVersion) || errors.Is(err, ErrOutboxLeaseLost) {
@@ -432,12 +459,51 @@ func (d *OutboxDispatcher) fail(ctx context.Context, id string, cause error, cou
 		}
 		item.LastError = outboxErrorCode(cause)
 		item.DeliveryOwner, item.DeliveryLeaseUntil = "", time.Time{}
-		if errors.Is(cause, domain.ErrStaleFence) || errors.Is(cause, ErrOutboxNotReady) {
+		if isAmbiguous(cause) {
+			item.Status = OutboxAmbiguous
+			item.Observation = ObservationUnknown
+		} else if errors.Is(cause, domain.ErrStaleFence) || errors.Is(cause, domain.ErrControlDenied) || errors.Is(cause, domain.ErrLeaseNotOwned) {
+			item.Status = OutboxSuperseded
+		} else if errors.Is(cause, ErrOutboxNotReady) {
 			item.Status = OutboxDead
 		} else if item.Attempts >= d.config.Retry.MaxAttempts {
 			item.Status = OutboxDead
 		} else {
 			item.Status, item.NextAttemptAt = OutboxWaiting, now.Add(d.config.Retry.delay(item.Attempts))
+		}
+		return u.SaveOutbox(ctx, item, item.Version)
+	})
+}
+
+func isAmbiguous(err error) bool {
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) || errors.Is(err, net.ErrClosed) {
+		return true
+	}
+	var n net.Error
+	return errors.As(err, &n) && (n.Timeout() || n.Temporary())
+}
+func (d *OutboxDispatcher) resolveObservation(ctx context.Context, id string, observation OutboxObservation) error {
+	return d.tx.Transact(ctx, func(u UnitOfWork) error {
+		item, ok, err := u.Outbox(ctx, id)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return ErrOutboxNotReady
+		}
+		item.Observation = observation
+		item.ObservedAt = d.clock.Now()
+		switch observation {
+		case ObservationConfirmed:
+			item.Status = OutboxConfirmed
+			item.DeliveredAt = item.ObservedAt
+		case ObservationNotObserved:
+			// Retry through the normal claim path with the same immutable
+			// operation/idempotency ID only after absence was observed.
+			item.Status = OutboxPending
+			item.NextAttemptAt = time.Time{}
+		default:
+			item.Status = OutboxNeedsInput
 		}
 		return u.SaveOutbox(ctx, item, item.Version)
 	})

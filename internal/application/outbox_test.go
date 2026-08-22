@@ -147,6 +147,55 @@ func TestOutboxDispatcherConcurrentClaimHasOneOwner(t *testing.T) {
 	}
 }
 
+type fakeObserver struct {
+	status application.OutboxObservation
+	calls  int
+}
+
+func (o *fakeObserver) Observe(context.Context, application.EffectDelivery) (application.OutboxObservation, error) {
+	o.calls++
+	return o.status, nil
+}
+
+type deadlineSink struct{ calls int }
+
+func (s *deadlineSink) Deliver(context.Context, application.EffectDelivery) error {
+	s.calls++
+	return context.DeadlineExceeded
+}
+
+func TestOutboxAmbiguousRequiresObservationBeforeAnyRedelivery(t *testing.T) {
+	st, clock := memory.New(), &outboxTestClock{now: time.Unix(1700000000, 0).UTC()}
+	seedOutbox(t, st, clock.Now(), "outbox-ambiguous")
+	sink := &deadlineSink{}
+	first, _ := application.NewOutboxDispatcher(st, clock, sink, application.DispatcherConfig{Owner: "first"})
+	if _, err := first.Dispatch(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	item, _ := st.OutboxByID("outbox-ambiguous")
+	if item.Status != application.OutboxAmbiguous || sink.calls != 1 {
+		t.Fatalf("status=%s deliveries=%d", item.Status, sink.calls)
+	}
+	// Without an observer an ambiguous effect must remain parked and must not
+	// be delivered a second time.
+	second, _ := application.NewOutboxDispatcher(st, clock, sink, application.DispatcherConfig{Owner: "second"})
+	if _, err := second.Dispatch(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if sink.calls != 1 {
+		t.Fatalf("ambiguous operation was redelivered: %d", sink.calls)
+	}
+	observer := &fakeObserver{status: application.ObservationConfirmed}
+	third, _ := application.NewOutboxDispatcher(st, clock, sink, application.DispatcherConfig{Owner: "third", Observer: observer})
+	if _, err := third.Dispatch(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	item, _ = st.OutboxByID("outbox-ambiguous")
+	if observer.calls != 1 || sink.calls != 1 || item.Status != application.OutboxConfirmed {
+		t.Fatalf("observe-first failed: observer=%d deliveries=%d status=%s", observer.calls, sink.calls, item.Status)
+	}
+}
+
 func TestOutboxDispatcherRejectsStaleFenceAndStop(t *testing.T) {
 	st, clock := memory.New(), &outboxTestClock{now: time.Unix(1700000000, 0).UTC()}
 	l := seedLease(t, st, clock.Now(), "increment-stale")
@@ -187,7 +236,7 @@ func TestOutboxDispatcherRejectsStaleFenceAndStop(t *testing.T) {
 		t.Fatal("stop-protected effect reached sink")
 	}
 	item, _ = st.OutboxByID("outbox-stop")
-	if item.Status != application.OutboxWaiting {
+	if item.Status != application.OutboxSuperseded {
 		t.Fatalf("stop status=%s", item.Status)
 	}
 }
@@ -220,7 +269,7 @@ func TestOutboxDispatcherUsesFreshTimeBeforeEffect(t *testing.T) {
 		t.Fatal(err)
 	}
 	item, _ := st.OutboxByID("outbox-time")
-	if sink.count() != 0 || item.Status != application.OutboxDead || item.LastError != "stale_fence" {
+	if sink.count() != 0 || item.Status != application.OutboxSuperseded || item.LastError != "stale_fence" {
 		t.Fatalf("stale pre-effect sink/status=%d/%#v", sink.count(), item)
 	}
 }

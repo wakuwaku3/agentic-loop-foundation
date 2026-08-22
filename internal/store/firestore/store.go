@@ -93,6 +93,9 @@ type document struct {
 	OutboxNextAttemptAt string `firestore:"outbox_next_attempt_at,omitempty"`
 	OutboxLeaseUntil    string `firestore:"outbox_lease_until,omitempty"`
 	IndexIncrementID    string `firestore:"index_increment_id,omitempty"`
+	IndexLeaseID        string `firestore:"index_lease_id,omitempty"`
+	LeaseStatus         string `firestore:"lease_status,omitempty"`
+	LeaseExpiresAt      string `firestore:"lease_expires_at,omitempty"`
 }
 
 type requirementRecord struct {
@@ -123,6 +126,13 @@ func encodeDocument(kind string, value any) (document, error) {
 	d := document{RecordSchema: RecordSchema, Kind: kind, Payload: string(b)}
 	if v, ok := value.(domain.Execution); ok {
 		d.IndexIncrementID = v.IncrementID.String()
+		d.IndexLeaseID = v.LeaseID.String()
+	}
+	if v, ok := value.(domain.Lease); ok {
+		d.LeaseStatus = string(v.Status)
+		if !v.ExpiresAt.IsZero() {
+			d.LeaseExpiresAt = v.ExpiresAt.UTC().Format(time.RFC3339Nano)
+		}
 	}
 	if kind == "outbox" {
 		v, ok := value.(application.OutboxItem)
@@ -686,6 +696,75 @@ func (u *unit) ActiveLeaseForIncrementAt(ctx context.Context, id string, at time
 	}
 	return v, v.ActiveAt(at), nil
 }
+func (u *unit) ExpiredActiveLeases(ctx context.Context, at time.Time, cursor string, limit int) ([]domain.Lease, string, error) {
+	if limit <= 0 || limit > 100 {
+		limit = 100
+	}
+	path, err := CollectionPath(u.store.installation, "leases")
+	if err != nil {
+		return nil, "", err
+	}
+	q := u.store.client.Collection(path).
+		Where("lease_status", "==", string(domain.LeaseActive)).
+		Where("lease_expires_at", "<=", at.UTC().Format(time.RFC3339Nano)).
+		OrderBy("lease_expires_at", cloudfirestore.Asc).
+		OrderBy(cloudfirestore.DocumentID, cloudfirestore.Asc)
+	if cursor != "" {
+		decoded, decodeErr := base64.RawURLEncoding.DecodeString(cursor)
+		parts := strings.SplitN(string(decoded), "\n", 2)
+		if decodeErr != nil || len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+			return nil, "", errors.New("invalid lease reconciliation cursor")
+		}
+		q = q.StartAfter(parts[0], parts[1])
+	}
+	snaps, err := u.tx.Documents(q.Limit(limit + 1)).GetAll()
+	if err != nil {
+		return nil, "", err
+	}
+	more := len(snaps) > limit
+	if more {
+		snaps = snaps[:limit]
+	}
+	out := make([]domain.Lease, 0, len(snaps))
+	for _, snap := range snaps {
+		var v domain.Lease
+		if decodeDocument(snap, "lease", &v) != nil {
+			return nil, "", ErrInvalidSchema
+		}
+		out = append(out, v)
+	}
+	next := ""
+	if more && len(snaps) > 0 {
+		last := snaps[len(snaps)-1]
+		var d document
+		if last.DataTo(&d) != nil || d.LeaseExpiresAt == "" {
+			return nil, "", ErrInvalidSchema
+		}
+		next = base64.RawURLEncoding.EncodeToString([]byte(d.LeaseExpiresAt + "\n" + last.Ref.ID))
+	}
+	return out, next, nil
+}
+func (u *unit) ExecutionByLease(ctx context.Context, leaseID string) (domain.Execution, bool, error) {
+	path, err := CollectionPath(u.store.installation, "executions")
+	if err != nil {
+		return domain.Execution{}, false, err
+	}
+	snaps, err := u.tx.Documents(u.store.client.Collection(path).Where("index_lease_id", "==", leaseID).Limit(2)).GetAll()
+	if err != nil {
+		return domain.Execution{}, false, err
+	}
+	if len(snaps) == 0 {
+		return domain.Execution{}, false, nil
+	}
+	if len(snaps) != 1 {
+		return domain.Execution{}, false, ErrInvalidSchema
+	}
+	var v domain.Execution
+	if decodeDocument(snaps[0], "execution", &v) != nil {
+		return domain.Execution{}, false, ErrInvalidSchema
+	}
+	return v, true, nil
+}
 func (u *unit) LatestLeaseForIncrement(ctx context.Context, id string) (domain.Lease, bool, error) {
 	rows, err := u.queryWhere(ctx, "leases", "lease", "increment_id", id, "", "")
 	if err != nil {
@@ -934,7 +1013,7 @@ func (u *unit) Outboxes(ctx context.Context, now time.Time, limit int) ([]applic
 		if v.Version == 0 {
 			v.Version = 1
 		}
-		ready := v.Status == application.OutboxPending || (v.Status == application.OutboxWaiting && (v.NextAttemptAt.IsZero() || !v.NextAttemptAt.After(now))) || (v.Status == application.OutboxDelivering && !v.DeliveryLeaseUntil.IsZero() && !v.DeliveryLeaseUntil.After(now))
+		ready := v.Status == application.OutboxPending || v.Status == application.OutboxAmbiguous || v.Status == application.OutboxReconciling || (v.Status == application.OutboxWaiting && (v.NextAttemptAt.IsZero() || !v.NextAttemptAt.After(now))) || (v.Status == application.OutboxDelivering && !v.DeliveryLeaseUntil.IsZero() && !v.DeliveryLeaseUntil.After(now))
 		if ready {
 			out = append(out, v)
 		}
