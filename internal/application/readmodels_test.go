@@ -2,6 +2,7 @@ package application_test
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -96,5 +97,30 @@ func TestControlReadModelDoesNotInferObservation(t *testing.T) {
 	}
 	if !rows[0].Acknowledged || rows[0].Effective || rows[0].Verified {
 		t.Fatalf("ack progress=%#v", rows)
+	}
+}
+
+func TestHeartbeatPersistsBoundedRunnerObservation(t *testing.T) {
+	st := memory.New()
+	svc, err := application.NewServiceWithConfig(st, clock{}, &ids{}, application.ServiceConfig{InstallationID: "i"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := application.ContextWithCaller(context.Background(), application.Caller{Role: application.RoleRunner, Subject: "runner", RunnerID: "r"})
+	_, err = svc.Heartbeat(ctx, application.HeartbeatRequest{RequestID: "hb", ControlRevision: 3, Processes: []domain.ProcessObservation{{ProcessID: "p", State: "running", At: clock{}.Now()}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got domain.RunnerObservation
+	err = st.Transact(context.Background(), func(u application.UnitOfWork) error {
+		var ok bool
+		got, ok, err = u.RunnerObservation(context.Background(), "r")
+		if !ok {
+			return errors.New("observation missing")
+		}
+		return err
+	})
+	if err != nil || got.AppliedRevision != 3 || len(got.Processes) != 1 {
+		t.Fatalf("observation=%#v err=%v", got, err)
 	}
 }

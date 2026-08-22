@@ -148,6 +148,10 @@ type ControlProgressRepository interface {
 	ControlProgress(ctx context.Context, revision domain.Revision) (domain.ControlProgress, bool, error)
 	SaveControlProgress(ctx context.Context, value domain.ControlProgress, expected domain.ControlState) error
 }
+type RunnerObservationRepository interface {
+	RunnerObservation(ctx context.Context, runnerID string) (domain.RunnerObservation, bool, error)
+	SaveRunnerObservation(ctx context.Context, value domain.RunnerObservation) error
+}
 type IdempotencyRepository interface {
 	Idempotency(ctx context.Context, requestID string, operation string) (IdempotentResponse, bool, error)
 	SaveIdempotency(ctx context.Context, value IdempotentResponse) error
@@ -172,6 +176,7 @@ type UnitOfWork interface {
 	TargetRepository
 	ControlRepository
 	ControlProgressRepository
+	RunnerObservationRepository
 	RequirementReadRepository
 	EventReadRepository
 	QueueSummaryRepository

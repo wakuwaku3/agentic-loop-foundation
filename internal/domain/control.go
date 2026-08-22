@@ -35,12 +35,31 @@ type ControlScope struct {
 	Value string           `json:"value"`
 }
 type ControlIntent struct {
-	Scope    ControlScope
-	Mode     ControlMode
-	Revision Revision
-	Actor    ActorID
-	At       time.Time
-	Reason   string
+	Scope       ControlScope
+	Mode        ControlMode
+	Revision    Revision
+	Actor       ActorID
+	At          time.Time
+	EffectiveAt time.Time
+	Reason      string
+}
+
+// ProcessObservation is bounded runner evidence, never an execution command.
+type ProcessObservation struct {
+	ProcessID string    `json:"process_id"`
+	State     string    `json:"state"`
+	At        time.Time `json:"at"`
+}
+
+type RunnerObservation struct {
+	RunnerID          RunnerID             `json:"runner_id"`
+	Target            ControlTarget        `json:"target"`
+	AppliedRevision   Revision             `json:"applied_revision"`
+	LatestRevision    Revision             `json:"latest_revision"`
+	LatestEffectiveAt time.Time            `json:"latest_effective_at,omitempty"`
+	Reachable         bool                 `json:"reachable"`
+	Processes         []ProcessObservation `json:"processes,omitempty"`
+	ObservedAt        time.Time            `json:"observed_at"`
 }
 
 // ControlProgress is durable observation, not an inference from an intent.

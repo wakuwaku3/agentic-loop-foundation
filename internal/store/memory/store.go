@@ -19,22 +19,23 @@ import (
 var ErrOptimisticConflict = domain.ErrStaleVersion
 
 type state struct {
-	requirements    map[string]domain.Requirement
-	increments      map[string]domain.Increment
-	executions      map[string]domain.Execution
-	leases          map[string]domain.Lease
-	controls        []domain.ControlIntent
-	controlProgress map[domain.Revision]domain.ControlProgress
-	requests        map[string]application.IdempotentResponse
-	texts           map[string]string
-	targets         map[string]domain.ControlTarget
-	events          []application.Event
-	outbox          []application.OutboxItem
-	quota           quota.Counter
+	requirements       map[string]domain.Requirement
+	increments         map[string]domain.Increment
+	executions         map[string]domain.Execution
+	leases             map[string]domain.Lease
+	controls           []domain.ControlIntent
+	controlProgress    map[domain.Revision]domain.ControlProgress
+	runnerObservations map[string]domain.RunnerObservation
+	requests           map[string]application.IdempotentResponse
+	texts              map[string]string
+	targets            map[string]domain.ControlTarget
+	events             []application.Event
+	outbox             []application.OutboxItem
+	quota              quota.Counter
 }
 
 func newState() state {
-	return state{requirements: map[string]domain.Requirement{}, increments: map[string]domain.Increment{}, executions: map[string]domain.Execution{}, leases: map[string]domain.Lease{}, requests: map[string]application.IdempotentResponse{}, texts: map[string]string{}, targets: map[string]domain.ControlTarget{}, controlProgress: map[domain.Revision]domain.ControlProgress{}}
+	return state{requirements: map[string]domain.Requirement{}, increments: map[string]domain.Increment{}, executions: map[string]domain.Execution{}, leases: map[string]domain.Lease{}, requests: map[string]application.IdempotentResponse{}, texts: map[string]string{}, targets: map[string]domain.ControlTarget{}, controlProgress: map[domain.Revision]domain.ControlProgress{}, runnerObservations: map[string]domain.RunnerObservation{}}
 }
 func (s state) clone() state {
 	n := newState()
@@ -54,6 +55,10 @@ func (s state) clone() state {
 	n.controls = append([]domain.ControlIntent(nil), s.controls...)
 	for k, v := range s.controlProgress {
 		n.controlProgress[k] = v
+	}
+	for k, v := range s.runnerObservations {
+		v.Processes = append([]domain.ProcessObservation(nil), v.Processes...)
+		n.runnerObservations[k] = v
 	}
 	for k, v := range s.requests {
 		n.requests[k] = v
@@ -363,6 +368,16 @@ func (u *unit) SaveControlProgress(_ context.Context, value domain.ControlProgre
 		return domain.ErrStaleVersion
 	}
 	u.s.controlProgress[value.Revision] = value
+	return nil
+}
+func (u *unit) RunnerObservation(_ context.Context, runnerID string) (domain.RunnerObservation, bool, error) {
+	v, ok := u.s.runnerObservations[runnerID]
+	v.Processes = append([]domain.ProcessObservation(nil), v.Processes...)
+	return v, ok, nil
+}
+func (u *unit) SaveRunnerObservation(_ context.Context, value domain.RunnerObservation) error {
+	value.Processes = append([]domain.ProcessObservation(nil), value.Processes...)
+	u.s.runnerObservations[value.RunnerID.String()] = value
 	return nil
 }
 func (u *unit) Idempotency(_ context.Context, id, op string) (application.IdempotentResponse, bool, error) {

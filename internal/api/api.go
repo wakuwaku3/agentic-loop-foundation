@@ -385,13 +385,14 @@ type heartbeatBody struct {
 
 func (h *Handler) heartbeat(w http.ResponseWriter, r *http.Request) {
 	var b struct {
-		RequestID       string          `json:"request_id"`
-		ControlRevision domain.Revision `json:"control_revision"`
+		RequestID       string                      `json:"request_id"`
+		ControlRevision domain.Revision             `json:"control_revision"`
+		Processes       []domain.ProcessObservation `json:"process_observations"`
 	}
 	if !h.decode(w, r, &b) {
 		return
 	}
-	out, e := h.config.Service.Heartbeat(r.Context(), application.HeartbeatRequest{RequestID: b.RequestID, ControlRevision: b.ControlRevision})
+	out, e := h.config.Service.Heartbeat(r.Context(), application.HeartbeatRequest{RequestID: b.RequestID, ControlRevision: b.ControlRevision, Processes: b.Processes})
 	if e != nil {
 		h.domainError(w, r, e)
 		return

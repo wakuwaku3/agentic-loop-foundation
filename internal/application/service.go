@@ -155,7 +155,11 @@ type CaptureResponse struct {
 	Version       domain.Version `json:"version"`
 }
 type LifecycleResponse struct {
-	Accepted bool `json:"accepted"`
+	Accepted            bool                        `json:"accepted"`
+	AppliedRevision     domain.Revision             `json:"applied_revision,omitempty"`
+	LatestRevision      domain.Revision             `json:"latest_revision,omitempty"`
+	LatestEffectiveAt   time.Time                   `json:"latest_effective_at,omitempty"`
+	ProcessObservations []domain.ProcessObservation `json:"process_observations,omitempty"`
 }
 type RenewRequest struct {
 	RequestID, LeaseID   string
@@ -342,6 +346,7 @@ func (s *Service) Start(ctx context.Context, req StartRequest) (out StartRespons
 type HeartbeatRequest struct {
 	RequestID       string
 	ControlRevision domain.Revision
+	Processes       []domain.ProcessObservation
 }
 type CheckpointRequest struct {
 	RequestID, ExecutionID, LeaseID string
@@ -382,6 +387,21 @@ func (s *Service) Heartbeat(ctx context.Context, req HeartbeatRequest) (out Life
 			}
 			return restoreResponse(p, &out)
 		}
+		if len(req.Processes) > 32 {
+			return errors.New("at most 32 process observations are allowed")
+		}
+		for i := range req.Processes {
+			if req.Processes[i].ProcessID == "" || len(req.Processes[i].ProcessID) > 128 {
+				return errors.New("process observation id is invalid")
+			}
+			switch req.Processes[i].State {
+			case "running", "checkpointed", "terminated", "unknown":
+			default:
+				return errors.New("process observation state is invalid")
+			}
+			// Runner clocks and caller-provided timestamps are not authoritative.
+			req.Processes[i].At = authorityAt
+		}
 		if req.ControlRevision != 0 {
 			{
 				progress, exists, e := u.ControlProgress(ctx, req.ControlRevision)
@@ -400,7 +420,24 @@ func (s *Service) Heartbeat(ctx context.Context, req HeartbeatRequest) (out Life
 				}
 			}
 		}
-		out = LifecycleResponse{Accepted: true}
+		controls, e := u.Controls(ctx)
+		if e != nil {
+			return e
+		}
+		target := domain.ControlTarget{InstallationID: s.config.InstallationID, RepositoryID: s.config.RepositoryID, RunnerID: runner}
+		effective := domain.EffectiveControl(controls, target)
+		latest := effective.Revision
+		var deadline time.Time
+		for _, control := range controls {
+			if control.Revision == effective.Revision && control.EffectiveAt.After(deadline) {
+				deadline = control.EffectiveAt
+			}
+		}
+		observation := domain.RunnerObservation{RunnerID: runner, Target: target, AppliedRevision: req.ControlRevision, LatestRevision: latest, LatestEffectiveAt: deadline, Reachable: true, Processes: append([]domain.ProcessObservation(nil), req.Processes...), ObservedAt: authorityAt}
+		if e = u.SaveRunnerObservation(ctx, observation); e != nil {
+			return e
+		}
+		out = LifecycleResponse{Accepted: true, AppliedRevision: req.ControlRevision, LatestRevision: latest, LatestEffectiveAt: deadline, ProcessObservations: observation.Processes}
 		return s.record(ctx, u, eid, oid, fp, req.RequestID, "heartbeat", "runner", runner.String(), 1, "runner.heartbeat", actor.String(), nil, out)
 	})
 	return out, err
@@ -1004,7 +1041,7 @@ func (s *Service) Control(ctx context.Context, req ControlRequest) (out ControlR
 		if at.IsZero() {
 			return errors.New("control requires timestamp")
 		}
-		intent := domain.ControlIntent{Scope: req.Scope, Mode: req.Mode, Revision: revision, Actor: actor, At: at, Reason: req.Reason}
+		intent := domain.ControlIntent{Scope: req.Scope, Mode: req.Mode, Revision: revision, Actor: actor, At: at, EffectiveAt: at, Reason: req.Reason}
 		if e = u.SaveControl(ctx, intent, revision-1); e != nil {
 			return e
 		}

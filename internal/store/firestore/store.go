@@ -808,6 +808,22 @@ func (u *unit) SaveControlProgress(ctx context.Context, value domain.ControlProg
 	}
 	return u.stage(ref, "control-progress", value, !ok)
 }
+func (u *unit) RunnerObservation(ctx context.Context, runnerID string) (domain.RunnerObservation, bool, error) {
+	ref, err := u.store.path("runner_observations", runnerID)
+	if err != nil {
+		return domain.RunnerObservation{}, false, err
+	}
+	var v domain.RunnerObservation
+	ok, err := u.value(ref, "runner-observation", &v)
+	return v, ok, err
+}
+func (u *unit) SaveRunnerObservation(ctx context.Context, value domain.RunnerObservation) error {
+	ref, err := u.store.path("runner_observations", value.RunnerID.String())
+	if err != nil {
+		return err
+	}
+	return u.stage(ref, "runner-observation", value, false)
+}
 func (u *unit) Idempotency(ctx context.Context, requestID, operation string) (application.IdempotentResponse, bool, error) {
 	ref, err := u.store.path("idempotency", requestID)
 	if err != nil {
