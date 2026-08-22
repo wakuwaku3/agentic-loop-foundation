@@ -1,4 +1,4 @@
-.PHONY: check environment format lint test contracts docs secrets smoke clean component-plan affected candidate candidate-affected component ownership component-ci component-contracts component-control-plane component-runner component-domain component-application component-store-memory component-store-firestore component-api component-web component-docs component-test component-infra component-tooling
+.PHONY: check environment format lint test contracts docs secrets smoke clean infra-policy infra-lint infra-validate component-plan affected candidate candidate-affected component ownership component-ci component-contracts component-control-plane component-runner component-domain component-application component-store-memory component-store-firestore component-api component-web component-docs component-test component-infra component-tooling
 
 GO ?= go
 EVIDENCE_DIR ?= build/evidence
@@ -50,7 +50,8 @@ component-docs:
 component-test:
 	@go test ./...
 component-infra:
-	@test -d infra
+	@scripts/infra-policy.sh
+	@if command -v tofu >/dev/null 2>&1; then scripts/infra-validate.sh; else echo 'tofu not installed; policy-only infra check'; fi
 component-tooling:
 	@true
 
@@ -83,6 +84,15 @@ smoke:
 	@$(GO) run ./cmd/runner --version | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+-dev$$'
 	@$(GO) run ./cmd/bootstrap --version | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+-dev$$'
 	@port=18080; PORT=$$port $(GO) run ./cmd/control-plane >/tmp/agentic-loop-v2-healthz.log 2>&1 & pid=$$!; trap 'kill $$pid 2>/dev/null || true' EXIT; for i in 1 2 3 4 5; do curl -fsS "http://127.0.0.1:$$port/healthz" && exit 0; sleep 1; done; exit 1
+
+infra-policy:
+	@scripts/infra-policy.sh
+
+infra-lint:
+	@scripts/infra-lint.sh
+
+infra-validate:
+	@scripts/infra-validate.sh
 
 clean:
 	@true

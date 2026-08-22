@@ -1,0 +1,43 @@
+name: v2 explicit GCP deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  deploy:
+    # A main push is only a trigger. No repository secret/variable means no
+    # authentication and therefore no cloud mutation.
+    if: vars.GCP_DEPLOY_ENABLED == 'true' && vars.GCP_PROJECT_ID != ''
+    runs-on: ubuntu-latest
+    environment: production
+    env:
+      GCP_WORKLOAD_IDENTITY_PROVIDER: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+      GCP_SERVICE_ACCOUNT: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: jetify-com/devbox-install-action@22c0f5500b14df4ea357ce673fbd4ced940ed6a1 # v0.13.0
+      - name: Cost and policy preflight
+        run: |
+          test -n "$GCP_WORKLOAD_IDENTITY_PROVIDER" || { echo 'WIF credential is not configured'; exit 1; }
+          test -n "$GCP_SERVICE_ACCOUNT" || { echo 'deploy service account is not configured'; exit 1; }
+          devbox run --pure -- scripts/infra-policy.sh
+      - name: Authenticate with explicit workload identity
+        uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2.1.13
+        with:
+          workload_identity_provider: ${{ env.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ env.GCP_SERVICE_ACCOUNT }}
+      - name: Plan
+        env:
+          TFVARS_FILE: ${{ vars.GCP_TFVARS_FILE }}
+        run: devbox run --pure -- scripts/infra-plan.sh
+      - name: Apply only when explicitly enabled
+        if: vars.GCP_APPLY_ENABLED == 'true'
+        env:
+          TFVARS_FILE: ${{ vars.GCP_TFVARS_FILE }}
+        run: cd infra && tofu apply -input=false -auto-approve -var-file="$TFVARS_FILE"

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/takushi/agentic-loop-foundation/v2/internal/domain"
+	"github.com/takushi/agentic-loop-foundation/v2/internal/quota"
 )
 
 var (
@@ -104,7 +105,29 @@ func (s *Service) transact(ctx context.Context, fn func(UnitOfWork) error) error
 	if at.IsZero() {
 		return errors.New("clock returned zero time")
 	}
-	return s.tx.Transact(withAuthorityTime(ctx, at), fn)
+	return s.tx.Transact(withAuthorityTime(ctx, at), func(u UnitOfWork) error {
+		if err := u.ReserveQuota(ctx, fmt.Sprintf("read:%s:%d", s.config.InstallationID, at.UnixNano()), at, quota.ReadTransactionUsage); err != nil {
+			return err
+		}
+		return fn(u)
+	})
+}
+
+// mutate reserves the conservative mutation-boundary maximum before the
+// callback can stage any aggregate, event, or outbox change. Firestore retries
+// the callback atomically, so an over-budget request cannot leave a partial
+// mutation.
+func (s *Service) mutate(ctx context.Context, key string, fn func(UnitOfWork) error) error {
+	at := s.clock.Now()
+	if at.IsZero() {
+		return errors.New("clock returned zero time")
+	}
+	return s.tx.Transact(withAuthorityTime(ctx, at), func(u UnitOfWork) error {
+		if err := u.ReserveQuota(ctx, "mutation:"+s.config.InstallationID+":"+key, at, quota.MutationUsage); err != nil {
+			return err
+		}
+		return fn(u)
+	})
 }
 
 type ServiceConfig struct {
@@ -174,7 +197,7 @@ func (s *Service) Renew(ctx context.Context, req RenewRequest) (out RenewRespons
 	if e != nil {
 		return out, e
 	}
-	err = s.transact(ctx, func(u UnitOfWork) error {
+	err = s.mutate(ctx, "renew:"+req.RequestID, func(u UnitOfWork) error {
 		if p, ok, x := u.Idempotency(ctx, req.RequestID, "renew"); x != nil {
 			return x
 		} else if ok {
@@ -256,7 +279,7 @@ func (s *Service) Start(ctx context.Context, req StartRequest) (out StartRespons
 	if e != nil {
 		return out, e
 	}
-	err = s.transact(ctx, func(u UnitOfWork) error {
+	err = s.mutate(ctx, "start:"+req.RequestID, func(u UnitOfWork) error {
 		if p, ok, x := u.Idempotency(ctx, req.RequestID, "start"); x != nil {
 			return x
 		} else if ok {
@@ -350,7 +373,7 @@ func (s *Service) Heartbeat(ctx context.Context, req HeartbeatRequest) (out Life
 	if e != nil {
 		return out, e
 	}
-	err = s.transact(ctx, func(u UnitOfWork) error {
+	err = s.mutate(ctx, "heartbeat:"+req.RequestID, func(u UnitOfWork) error {
 		if p, ok, x := u.Idempotency(ctx, req.RequestID, "heartbeat"); x != nil {
 			return x
 		} else if ok {
@@ -406,7 +429,7 @@ func (s *Service) Checkpoint(ctx context.Context, req CheckpointRequest) (out Li
 	if e != nil {
 		return out, e
 	}
-	err = s.transact(ctx, func(u UnitOfWork) error {
+	err = s.mutate(ctx, "checkpoint:"+req.RequestID, func(u UnitOfWork) error {
 		if p, ok, x := u.Idempotency(ctx, req.RequestID, "checkpoint"); x != nil {
 			return x
 		} else if ok {
@@ -538,7 +561,7 @@ func (s *Service) Capture(ctx context.Context, req CaptureRequest) (out CaptureR
 	if err != nil {
 		return out, err
 	}
-	err = s.transact(ctx, func(u UnitOfWork) error {
+	err = s.mutate(ctx, "capture:"+req.RequestID, func(u UnitOfWork) error {
 		if prior, ok, e := u.Idempotency(ctx, req.RequestID, "capture"); e != nil {
 			return e
 		} else if ok {
@@ -623,7 +646,7 @@ func (s *Service) Plan(ctx context.Context, req PlanRequest) (out PlanResponse, 
 	if err != nil {
 		return out, err
 	}
-	err = s.transact(ctx, func(u UnitOfWork) error {
+	err = s.mutate(ctx, "plan:"+req.RequestID, func(u UnitOfWork) error {
 		if prior, ok, e := u.Idempotency(ctx, req.RequestID, "plan"); e != nil {
 			return e
 		} else if ok {
@@ -727,7 +750,7 @@ func (s *Service) Claim(ctx context.Context, req ClaimRequest) (out ClaimRespons
 		return out, errors.New("clock returned zero time")
 	}
 	expiresAt := issuedAt.Add(s.config.LeaseTTL)
-	err = s.transact(ctx, func(u UnitOfWork) error {
+	err = s.mutate(ctx, "claim:"+req.RequestID, func(u UnitOfWork) error {
 		if prior, ok, e := u.Idempotency(ctx, req.RequestID, "claim"); e != nil {
 			return e
 		} else if ok {
@@ -889,7 +912,7 @@ func (s *Service) Control(ctx context.Context, req ControlRequest) (out ControlR
 	if err != nil {
 		return out, err
 	}
-	err = s.transact(ctx, func(u UnitOfWork) error {
+	err = s.mutate(ctx, "control:"+req.RequestID, func(u UnitOfWork) error {
 		if prior, ok, e := u.Idempotency(ctx, req.RequestID, "control"); e != nil {
 			return e
 		} else if ok {
@@ -1001,7 +1024,7 @@ func (s *Service) AcceptResult(ctx context.Context, req AcceptResultRequest) (ou
 	if err != nil {
 		return out, err
 	}
-	err = s.transact(ctx, func(u UnitOfWork) error {
+	err = s.mutate(ctx, "accept-result:"+req.RequestID, func(u UnitOfWork) error {
 		if prior, ok, e := u.Idempotency(ctx, req.RequestID, "accept-result"); e != nil {
 			return e
 		} else if ok {

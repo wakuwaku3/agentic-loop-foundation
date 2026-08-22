@@ -1,0 +1,5 @@
+project_id          = "existing-project-id"
+region              = "us-central1"
+artifact_repository = "existing-repository"
+image_digest        = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+iap_owner_members   = ["user:owner@example.com"]

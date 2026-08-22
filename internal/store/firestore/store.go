@@ -23,6 +23,7 @@ import (
 
 	"github.com/takushi/agentic-loop-foundation/v2/internal/application"
 	"github.com/takushi/agentic-loop-foundation/v2/internal/domain"
+	"github.com/takushi/agentic-loop-foundation/v2/internal/quota"
 )
 
 const MaxWrites = 400
@@ -103,6 +104,12 @@ type queueCounter struct {
 	Requirements     map[string]int `json:"requirements"`
 	Increments       map[string]int `json:"increments"`
 	ActiveExecutions int            `json:"active_executions"`
+}
+
+type quotaRecord struct {
+	Day    string                    `json:"day"`
+	Total  quota.Usage               `json:"total"`
+	Shards [quota.Shards]quota.Usage `json:"shards"`
 }
 
 func encodeDocument(kind string, value any) (document, error) {
@@ -236,6 +243,29 @@ func (s *Store) Transact(ctx context.Context, fn func(application.UnitOfWork) er
 // AuthorityContext lets application event recording reuse the timestamp
 // captured before a transaction callback, including Firestore retry attempts.
 func (u *unit) AuthorityContext() context.Context { return u.ctx }
+
+// ReserveQuota keeps a daily aggregate and 32 accounting buckets in the same
+// Firestore transaction as the caller's mutation. The aggregate is the sole
+// hard-budget source of truth; buckets are audit dimensions in that document,
+// not a claim of Firestore contention sharding.
+func (u *unit) ReserveQuota(ctx context.Context, key string, at time.Time, usage quota.Usage) error {
+	ref, err := u.store.path("quota", quota.Day(at))
+	if err != nil {
+		return err
+	}
+	var record quotaRecord
+	if ok, err := u.value(ref, "quota", &record); err != nil {
+		return err
+	} else if !ok {
+		record.Day = quota.Day(at)
+	}
+	counter := quota.Counter{Day: record.Day, Total: record.Total, Shards: record.Shards}
+	if err := counter.Reserve(at, key, usage, quota.DefaultBudget); err != nil {
+		return err
+	}
+	record = quotaRecord{Day: counter.Day, Total: counter.Total, Shards: counter.Shards}
+	return u.stage(ref, "quota", record, false)
+}
 func (u *unit) read(ref *cloudfirestore.DocumentRef) (*cloudfirestore.DocumentSnapshot, error) {
 	if v, ok := u.cache[ref.Path]; ok {
 		return v, nil

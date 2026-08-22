@@ -11,6 +11,7 @@ import (
 
 	"github.com/takushi/agentic-loop-foundation/v2/internal/application"
 	"github.com/takushi/agentic-loop-foundation/v2/internal/domain"
+	"github.com/takushi/agentic-loop-foundation/v2/internal/quota"
 )
 
 // ErrOptimisticConflict is an adapter spelling of the domain's stale-version
@@ -29,6 +30,7 @@ type state struct {
 	targets         map[string]domain.ControlTarget
 	events          []application.Event
 	outbox          []application.OutboxItem
+	quota           quota.Counter
 }
 
 func newState() state {
@@ -63,6 +65,7 @@ func (s state) clone() state {
 		n.targets[k] = v
 	}
 	n.events = append([]application.Event(nil), s.events...)
+	n.quota = s.quota
 	for _, v := range s.outbox {
 		v.Payload = append([]byte(nil), v.Payload...)
 		n.outbox = append(n.outbox, v)
@@ -87,6 +90,10 @@ func (c Clock) Now() time.Time { return c.NowValue }
 type unit struct {
 	s   *state
 	ctx context.Context
+}
+
+func (u *unit) ReserveQuota(_ context.Context, key string, at time.Time, usage quota.Usage) error {
+	return u.s.quota.Reserve(at, key, usage, quota.DefaultBudget)
 }
 
 func (m *Store) Transact(ctx context.Context, fn func(application.UnitOfWork) error) error {

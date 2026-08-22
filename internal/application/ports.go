@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/takushi/agentic-loop-foundation/v2/internal/domain"
+	"github.com/takushi/agentic-loop-foundation/v2/internal/quota"
 )
 
 var ErrInvalidOutbox = errors.New("invalid outbox item")
@@ -152,6 +153,13 @@ type IdempotencyRepository interface {
 	SaveIdempotency(ctx context.Context, value IdempotentResponse) error
 }
 
+// QuotaRepository reserves the bounded daily Firestore budget inside the same
+// transaction as the caller's mutation. Implementations must fail closed when
+// the reservation would exceed the 80% budget.
+type QuotaRepository interface {
+	ReserveQuota(ctx context.Context, key string, at time.Time, usage quota.Usage) error
+}
+
 // UnitOfWork is deliberately expressed in application terms. Persistence
 // adapters can map these records to SQL, Firestore, or another store without
 // exposing storage DTOs to the domain package.
@@ -168,6 +176,7 @@ type UnitOfWork interface {
 	EventReadRepository
 	QueueSummaryRepository
 	IdempotencyRepository
+	QuotaRepository
 	Outbox(ctx context.Context, id string) (OutboxItem, bool, error)
 	Outboxes(ctx context.Context, now time.Time, limit int) ([]OutboxItem, error)
 	SaveOutbox(ctx context.Context, value OutboxItem, expected domain.Version) error

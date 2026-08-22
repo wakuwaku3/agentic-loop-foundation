@@ -11,7 +11,9 @@
 /bin/bootstrap
 /coverage.out
 /build/
+/infra/build/
 /tmp/
+.terraform/
 *-debug.log
 
 # Devbox local state

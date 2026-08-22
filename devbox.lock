@@ -1012,6 +1012,44 @@
         }
       }
     },
+    "opentofu@1.12.5": {
+      "last_modified": "2026-08-12T11:28:58Z",
+      "resolved": "github:NixOS/nixpkgs/044bfe75bfe4c7bbe043dc17b5e42ea823b84a09#opentofu",
+      "source": "devbox-search",
+      "version": "1.12.5",
+      "systems": {
+        "aarch64-darwin": {
+          "outputs": [
+            {
+              "name": "out",
+              "path": "/nix/store/ldwhssjz05z8qzwf2nhnqcn11qp9rbw7-opentofu-1.12.5",
+              "default": true
+            }
+          ],
+          "store_path": "/nix/store/ldwhssjz05z8qzwf2nhnqcn11qp9rbw7-opentofu-1.12.5"
+        },
+        "aarch64-linux": {
+          "outputs": [
+            {
+              "name": "out",
+              "path": "/nix/store/c7mig06jysmj88fg6k1hdz23hsywgg7h-opentofu-1.12.5",
+              "default": true
+            }
+          ],
+          "store_path": "/nix/store/c7mig06jysmj88fg6k1hdz23hsywgg7h-opentofu-1.12.5"
+        },
+        "x86_64-linux": {
+          "outputs": [
+            {
+              "name": "out",
+              "path": "/nix/store/v8n4x020rdfr57a0s3xdq46a3mdd5bk7-opentofu-1.12.5",
+              "default": true
+            }
+          ],
+          "store_path": "/nix/store/v8n4x020rdfr57a0s3xdq46a3mdd5bk7-opentofu-1.12.5"
+        }
+      }
+    },
     "ripgrep@15.2.0": {
       "last_modified": "2026-08-12T11:28:58Z",
       "resolved": "github:NixOS/nixpkgs/044bfe75bfe4c7bbe043dc17b5e42ea823b84a09#ripgrep",

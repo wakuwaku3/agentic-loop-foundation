@@ -17,6 +17,7 @@
     "go@1.25.0",
     "jq@1.8.2",
     "ripgrep@15.2.0",
+    "opentofu@1.12.5",
     "shellcheck@0.11.0",
     "util-linux@2.42.2",
     "yq-go@4.53.3"
@@ -27,7 +28,10 @@
   "shell": {
     "scripts": {
       "check": "make check",
-      "smoke": "make smoke"
+      "smoke": "make smoke",
+      "infra-policy": "scripts/infra-policy.sh",
+      "infra-lint": "scripts/infra-lint.sh",
+      "infra-validate": "scripts/infra-validate.sh"
     }
   }
 }
