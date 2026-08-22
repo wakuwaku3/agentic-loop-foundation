@@ -83,9 +83,12 @@ func DecodeRecord(data []byte, expectedKind string, out any) error {
 }
 
 type document struct {
-	RecordSchema string `firestore:"record_schema"`
-	Kind         string `firestore:"kind"`
-	Payload      string `firestore:"payload"`
+	RecordSchema        string `firestore:"record_schema"`
+	Kind                string `firestore:"kind"`
+	Payload             string `firestore:"payload"`
+	OutboxStatus        string `firestore:"outbox_status,omitempty"`
+	OutboxNextAttemptAt string `firestore:"outbox_next_attempt_at,omitempty"`
+	OutboxLeaseUntil    string `firestore:"outbox_lease_until,omitempty"`
 }
 
 type requirementRecord struct {
@@ -101,7 +104,28 @@ func encodeDocument(kind string, value any) (document, error) {
 	if err != nil {
 		return document{}, err
 	}
-	return document{RecordSchema: RecordSchema, Kind: kind, Payload: string(b)}, nil
+	d := document{RecordSchema: RecordSchema, Kind: kind, Payload: string(b)}
+	if kind == "outbox" {
+		v, ok := value.(application.OutboxItem)
+		if !ok {
+			return document{}, ErrInvalidSchema
+		}
+		status := v.Status
+		if status == "" {
+			status = application.OutboxPending
+		}
+		if !status.Valid() {
+			return document{}, application.ErrInvalidOutbox
+		}
+		d.OutboxStatus = string(status)
+		if !v.NextAttemptAt.IsZero() {
+			d.OutboxNextAttemptAt = v.NextAttemptAt.UTC().Format(time.RFC3339Nano)
+		}
+		if !v.DeliveryLeaseUntil.IsZero() {
+			d.OutboxLeaseUntil = v.DeliveryLeaseUntil.UTC().Format(time.RFC3339Nano)
+		}
+	}
+	return d, nil
 }
 func decodeDocument(snap *cloudfirestore.DocumentSnapshot, expectedKind string, out any) error {
 	if snap == nil || !snap.Exists() {
@@ -570,6 +594,130 @@ func (u *unit) SaveIdempotency(ctx context.Context, value application.Idempotent
 	}
 	return u.stage(ref, "idempotency", value, true)
 }
+
+func (u *unit) Outbox(ctx context.Context, id string) (application.OutboxItem, bool, error) {
+	ref, err := u.store.path("outbox", id)
+	if err != nil {
+		return application.OutboxItem{}, false, err
+	}
+	var v application.OutboxItem
+	ok, err := u.value(ref, "outbox", &v)
+	if err != nil || !ok {
+		return v, ok, err
+	}
+	if !v.Status.Valid() {
+		return application.OutboxItem{}, false, application.ErrInvalidOutbox
+	}
+	if v.Status == "" {
+		v.Status = application.OutboxPending
+	}
+	if v.Version == 0 {
+		v.Version = 1
+	}
+	return v, true, nil
+}
+
+func (u *unit) Outboxes(ctx context.Context, now time.Time, limit int) ([]application.OutboxItem, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+	path, err := CollectionPath(u.store.installation, "outbox")
+	if err != nil {
+		return nil, err
+	}
+	// The projection fields are indexed separately from the JSON payload. This
+	// keeps candidate reads bounded even when the payload itself grows, while
+	// retaining the payload envelope as the canonical record.
+	query := u.store.client.Collection(path).
+		Where("outbox_status", "in", []string{string(application.OutboxPending), string(application.OutboxWaiting), string(application.OutboxDelivering)}).
+		OrderBy("outbox_status", cloudfirestore.Asc).
+		OrderBy("outbox_next_attempt_at", cloudfirestore.Asc).
+		Limit(MaxQueryRows + 1)
+	snaps, err := u.tx.Documents(query).GetAll()
+	if err != nil {
+		return nil, err
+	}
+	if len(snaps) > MaxQueryRows {
+		return nil, ErrQueryLimit
+	}
+	seen := map[string]bool{}
+	rows := make([][]byte, 0, len(snaps))
+	for _, snap := range snaps {
+		seen[snap.Ref.Path] = true
+		var d document
+		if snap.DataTo(&d) != nil || d.RecordSchema != RecordSchema || d.Kind != "outbox" {
+			return nil, ErrInvalidSchema
+		}
+		rows = append(rows, []byte(d.Payload))
+	}
+	// Preserve read-your-writes for an outbox staged in this transaction.
+	for p, v := range u.values {
+		if v.doc.Kind == "outbox" && !seen[p] {
+			rows = append(rows, []byte(v.doc.Payload))
+		}
+	}
+	out := make([]application.OutboxItem, 0, len(rows))
+	for _, b := range rows {
+		var v application.OutboxItem
+		if json.Unmarshal(b, &v) != nil {
+			return nil, ErrInvalidSchema
+		}
+		if !v.Status.Valid() {
+			return nil, application.ErrInvalidOutbox
+		}
+		if v.Status == "" {
+			v.Status = application.OutboxPending
+		}
+		if v.Version == 0 {
+			v.Version = 1
+		}
+		ready := v.Status == application.OutboxPending || (v.Status == application.OutboxWaiting && (v.NextAttemptAt.IsZero() || !v.NextAttemptAt.After(now))) || (v.Status == application.OutboxDelivering && !v.DeliveryLeaseUntil.IsZero() && !v.DeliveryLeaseUntil.After(now))
+		if ready {
+			out = append(out, v)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].CreatedAt.Equal(out[j].CreatedAt) {
+			return out[i].ID < out[j].ID
+		}
+		return out[i].CreatedAt.Before(out[j].CreatedAt)
+	})
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
+}
+
+func (u *unit) SaveOutbox(ctx context.Context, value application.OutboxItem, expected domain.Version) error {
+	if value.ID == "" || !value.Status.Valid() {
+		return application.ErrInvalidOutbox
+	}
+	if value.Status == "" {
+		value.Status = application.OutboxPending
+	}
+	ref, err := u.store.path("outbox", value.ID)
+	if err != nil {
+		return err
+	}
+	var old application.OutboxItem
+	got, err := u.value(ref, "outbox", &old)
+	if err != nil {
+		return err
+	}
+	current := domain.Version(0)
+	if got {
+		current = old.Version
+		if current == 0 {
+			current = 1
+		}
+	}
+	if current != expected {
+		return domain.ErrStaleVersion
+	}
+	value.Version = current + 1
+	return u.stage(ref, "outbox", value, !got)
+}
+
 func (u *unit) Record(event application.Event, outbox *application.OutboxItem) error {
 	ref, err := u.store.path("events", event.ID)
 	if err != nil {
@@ -583,7 +731,14 @@ func (u *unit) Record(event application.Event, outbox *application.OutboxItem) e
 		if err != nil {
 			return err
 		}
-		if err = u.stage(ref, "outbox", *outbox, true); err != nil {
+		item := *outbox
+		if item.Status == "" {
+			item.Status = application.OutboxPending
+		}
+		if item.Version == 0 {
+			item.Version = 1
+		}
+		if err = u.stage(ref, "outbox", item, true); err != nil {
 			return err
 		}
 	}

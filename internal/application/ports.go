@@ -2,10 +2,13 @@ package application
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/takushi/agentic-loop-foundation/v2/internal/domain"
 )
+
+var ErrInvalidOutbox = errors.New("invalid outbox item")
 
 // Clock and IDGenerator are the only sources of time and identifiers used by
 // application services.  Keeping them as ports makes retries deterministic.
@@ -36,6 +39,46 @@ type OutboxItem struct {
 	ControlRevision domain.Revision
 	Payload         []byte
 	CreatedAt       time.Time
+	// Delivery state is owned by the outbox dispatcher. Version is the
+	// optimistic-concurrency version of this record (zero is the legacy
+	// pending value and is normalised on first claim).
+	Status             OutboxStatus
+	Version            domain.Version
+	Attempts           uint32
+	NextAttemptAt      time.Time
+	DeliveryOwner      string
+	DeliveryLeaseUntil time.Time
+	LastError          string
+	DeliveredAt        time.Time
+	// IncrementID is retained so dispatch can revalidate the latest lease and
+	// fencing token immediately before an external effect. Legacy records may
+	// omit it, but are rejected as malformed; only an explicit control-changed
+	// item is allowed to be non-fence-bound.
+	IncrementID   string
+	LeaseID       string
+	RunnerID      string
+	ControlTarget domain.ControlTarget
+	ControlScope  domain.ControlScope
+	PermitKind    domain.PermitKind
+}
+
+type OutboxStatus string
+
+const (
+	OutboxPending    OutboxStatus = "pending"
+	OutboxDelivering OutboxStatus = "delivering"
+	OutboxDelivered  OutboxStatus = "delivered"
+	OutboxDead       OutboxStatus = "dead"
+	OutboxWaiting    OutboxStatus = "waiting"
+)
+
+func (s OutboxStatus) Valid() bool {
+	switch s {
+	case "", OutboxPending, OutboxDelivering, OutboxDelivered, OutboxDead, OutboxWaiting:
+		return true
+	default:
+		return false
+	}
 }
 
 type IdempotentResponse struct {
@@ -97,6 +140,9 @@ type UnitOfWork interface {
 	TargetRepository
 	ControlRepository
 	IdempotencyRepository
+	Outbox(ctx context.Context, id string) (OutboxItem, bool, error)
+	Outboxes(ctx context.Context, now time.Time, limit int) ([]OutboxItem, error)
+	SaveOutbox(ctx context.Context, value OutboxItem, expected domain.Version) error
 	Record(event Event, outbox *OutboxItem) error
 }
 type Transactor interface {

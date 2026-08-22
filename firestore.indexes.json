@@ -1,1 +1,1 @@
-{"indexes":[],"fieldOverrides":[]}
+{"indexes":[{"collectionGroup":"outbox","queryScope":"COLLECTION","fields":[{"fieldPath":"outbox_status","order":"ASCENDING"},{"fieldPath":"outbox_next_attempt_at","order":"ASCENDING"}]}],"fieldOverrides":[]}

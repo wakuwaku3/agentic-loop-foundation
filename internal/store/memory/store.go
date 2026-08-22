@@ -5,6 +5,7 @@ package memory
 
 import (
 	"context"
+	"sort"
 	"sync"
 	"time"
 
@@ -261,9 +262,95 @@ func (u *unit) Record(e application.Event, o *application.OutboxItem) error {
 	u.s.events = append(u.s.events, e)
 	if o != nil {
 		v := *o
+		if !v.Status.Valid() {
+			return application.ErrInvalidOutbox
+		}
+		if v.Version == 0 {
+			v.Version = 1
+		}
+		if v.Status == "" {
+			v.Status = application.OutboxPending
+		}
 		v.Payload = append([]byte(nil), o.Payload...)
 		u.s.outbox = append(u.s.outbox, v)
 	}
+	return nil
+}
+
+func (u *unit) Outbox(_ context.Context, id string) (application.OutboxItem, bool, error) {
+	for _, v := range u.s.outbox {
+		if v.ID == id {
+			if !v.Status.Valid() {
+				return application.OutboxItem{}, false, application.ErrInvalidOutbox
+			}
+			v.Payload = append([]byte(nil), v.Payload...)
+			return v, true, nil
+		}
+	}
+	return application.OutboxItem{}, false, nil
+}
+
+func (u *unit) Outboxes(_ context.Context, now time.Time, limit int) ([]application.OutboxItem, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+	rows := make([]application.OutboxItem, 0, len(u.s.outbox))
+	for _, v := range u.s.outbox {
+		if !v.Status.Valid() {
+			return nil, application.ErrInvalidOutbox
+		}
+		status := v.Status
+		if status == "" {
+			status = application.OutboxPending
+		}
+		ready := status == application.OutboxPending || (status == application.OutboxWaiting && (v.NextAttemptAt.IsZero() || !v.NextAttemptAt.After(now))) || (status == application.OutboxDelivering && !v.DeliveryLeaseUntil.IsZero() && !v.DeliveryLeaseUntil.After(now))
+		if ready {
+			v.Status = status
+			v.Payload = append([]byte(nil), v.Payload...)
+			rows = append(rows, v)
+		}
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].CreatedAt.Equal(rows[j].CreatedAt) {
+			return rows[i].ID < rows[j].ID
+		}
+		return rows[i].CreatedAt.Before(rows[j].CreatedAt)
+	})
+	if len(rows) > limit {
+		rows = rows[:limit]
+	}
+	return rows, nil
+}
+
+func (u *unit) SaveOutbox(_ context.Context, value application.OutboxItem, expected domain.Version) error {
+	if value.ID == "" || !value.Status.Valid() {
+		return application.ErrInvalidOutbox
+	}
+	if value.Status == "" {
+		value.Status = application.OutboxPending
+	}
+	for i, old := range u.s.outbox {
+		if old.ID != value.ID {
+			continue
+		}
+		if old.Version == 0 {
+			old.Version = 1
+		}
+		if expected != old.Version {
+			return domain.ErrStaleVersion
+		}
+		value.Version = old.Version + 1
+		value.Payload = append([]byte(nil), value.Payload...)
+		u.s.outbox[i] = value
+		return nil
+	}
+	if expected != 0 {
+		return domain.ErrStaleVersion
+	}
+	if value.Version == 0 {
+		value.Version = 1
+	}
+	u.s.outbox = append(u.s.outbox, value)
 	return nil
 }
 
@@ -312,6 +399,18 @@ func (m *Store) Outbox() []application.OutboxItem {
 		out = append(out, v)
 	}
 	return out
+}
+
+func (m *Store) OutboxByID(id string) (application.OutboxItem, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, v := range m.data.outbox {
+		if v.ID == id {
+			v.Payload = append([]byte(nil), v.Payload...)
+			return v, true
+		}
+	}
+	return application.OutboxItem{}, false
 }
 func (m *Store) Controls() []domain.ControlIntent {
 	m.mu.Lock()

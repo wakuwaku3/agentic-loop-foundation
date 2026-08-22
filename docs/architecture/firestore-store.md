@@ -42,3 +42,21 @@ M2 の canonical correctness を優先し、lease query は transaction snapshot
 
 emulator integration test は rollback、aggregate/event/outbox/idempotency の atomicity、codec corruption
 を検証する。テストは `FIRESTORE_EMULATOR_HOST` がない環境では skip し、production endpoint へ接続しない。
+
+### Outbox delivery
+
+Outbox は `pending`、`delivering`、`waiting`、`delivered`、`dead` のいずれかを持つ。
+Dispatcher は候補を transaction で一件ずつ claim し、短い delivery lease を記録してから
+transaction の外で `EffectSink` を呼ぶ。effect の直前には別 transaction で outbox の所有権、
+最新 control revision、active lease、fencing token を読み直すため、停止後や古い Runner の
+intent は送信されない。Firestore transaction callback 内で外部 I/O は行わない。
+
+`control-changed` だけは lease/fence を持たない制御伝播用の outbox として明示的に許可し、対象
+scope の最新 revision と一致することを検証する。それ以外の配送は保存された `ControlTarget`、
+`PermitKind`、Increment、Lease、fencing token が揃わない限り malformed として `dead` に収束する。
+
+sink の失敗は bounded exponential backoff と jitter で `waiting` に戻し、上限到達時だけ
+`dead` とする。配送の idempotency key は Operation ID で固定する。effect 成功後の ack 前に
+dispatcher が落ちても、次の orphan recovery は同じ key を再送するので、sink 側の
+at-least-once/idempotency 契約で重複確定を防ぐ。`firestore.indexes.json` の outbox projection
+は candidate query の status／next-attempt 順序を保つための公開 projection である。

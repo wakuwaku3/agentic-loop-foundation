@@ -894,7 +894,7 @@ func (s *Service) Control(ctx context.Context, req ControlRequest) (out ControlR
 			return e
 		}
 		out = ControlResponse{Revision: revision, Mode: req.Mode}
-		return s.record(ctx, u, eventID, operationID, fingerprint, req.RequestID, "control", "control", req.Scope.Value, domain.Version(revision), "control.changed", actor.String(), &OutboxItem{ID: outboxID, Kind: "control-changed", Target: req.Scope.Value, ExpectedVersion: domain.Version(revision), ControlRevision: revision}, out)
+		return s.record(ctx, u, eventID, operationID, fingerprint, req.RequestID, "control", "control", req.Scope.Value, domain.Version(revision), "control.changed", actor.String(), &OutboxItem{ID: outboxID, Kind: "control-changed", Target: req.Scope.Value, ControlScope: req.Scope, ExpectedVersion: domain.Version(revision), ControlRevision: revision}, out)
 	})
 	return out, err
 }
@@ -1051,12 +1051,15 @@ func (s *Service) AcceptExecutionResult(ctx context.Context, req AcceptResultReq
 // records. It re-reads policy and fence immediately before durable intent is
 // recorded, then obtains the opaque domain Effect permit.
 func (s *Service) effectOutbox(ctx context.Context, u UnitOfWork, outboxID, operationID, requestID string, kind domain.PermitKind, target domain.ControlTarget, expected domain.Version, fence domain.FencingToken, revision domain.Revision, outboxKind, resource string) (*OutboxItem, error) {
+	var latest domain.Lease
 	if target.IncrementID != "" {
-		latestFence, err := u.MaxFencingToken(ctx, target.IncrementID.String())
+		var found bool
+		var err error
+		latest, found, err = u.LatestLeaseForIncrement(ctx, target.IncrementID.String())
 		if err != nil {
 			return nil, err
 		}
-		if latestFence != fence {
+		if !found || latest.FencingToken != fence {
 			return nil, domain.ErrStaleFence
 		}
 	}
@@ -1088,7 +1091,7 @@ func (s *Service) effectOutbox(ctx context.Context, u UnitOfWork, outboxID, oper
 	if err != nil {
 		return nil, err
 	}
-	return &OutboxItem{ID: outboxID, OperationID: effect.OperationID.String(), Kind: outboxKind, Target: effect.Target, ExpectedVersion: effect.ExpectedVersion, FencingToken: effect.FencingToken, ControlRevision: effect.ControlRevision}, nil
+	return &OutboxItem{ID: outboxID, OperationID: effect.OperationID.String(), Kind: outboxKind, Target: effect.Target, ExpectedVersion: effect.ExpectedVersion, FencingToken: effect.FencingToken, ControlRevision: effect.ControlRevision, IncrementID: target.IncrementID.String(), LeaseID: latest.ID.String(), RunnerID: target.RunnerID.String(), ControlTarget: target, PermitKind: kind}, nil
 }
 
 func (s *Service) record(ctx context.Context, u UnitOfWork, eventID, operationID, fingerprint, requestID, operation, aggregateType, aggregateID string, version domain.Version, typ, actor string, outbox *OutboxItem, value any) error {
