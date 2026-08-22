@@ -2,14 +2,15 @@
 
 GO ?= go
 EVIDENCE_DIR ?= build/evidence
+BASE ?= HEAD^
 
 check: environment format lint test contracts docs secrets ownership
 
 component-plan:
-	@go run ./cmd/ci-plan --changed "$$(git diff --name-only HEAD^ HEAD 2>/dev/null || true)"
+	@go run ./cmd/ci-plan --changed "$$(scripts/affected.sh --list "$(BASE)")"
 
 affected:
-	@go run ./cmd/ci-plan --execute --changed "$$(git diff --name-only HEAD^ HEAD 2>/dev/null || true)"
+	@scripts/affected.sh "$(BASE)"
 
 ownership:
 	@go run ./cmd/ci-plan --tracked "$$(git ls-files --cached --others --exclude-standard | paste -sd, -)"
