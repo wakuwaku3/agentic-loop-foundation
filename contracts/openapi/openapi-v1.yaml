@@ -1,0 +1,205 @@
+openapi: 3.1.0
+info:
+  title: Agentic Loop Control Plane API
+  version: 1.0.0
+  description: |
+    Public transport contract. Human callers capture requirements and issue
+    control intents. Increment decomposition/planning is intentionally not a
+    public owner operation; it remains a loop scheduler responsibility.
+paths:
+  /healthz:
+    get:
+      operationId: healthz
+      responses:
+        '200': {description: healthy, content: {application/json: {schema: {$ref: '#/components/schemas/HealthResponse'}}}}
+  /v1/requirements:
+    get:
+      operationId: listRequirements
+      security: [{bearerAuth: []}]
+      responses: {'200': {description: requirements, content: {application/json: {schema: {$ref: '#/components/schemas/RequirementListResponse'}}}}, '401': {$ref: '#/components/responses/Error'}, '403': {$ref: '#/components/responses/Error'}, '404': {$ref: '#/components/responses/Error'}, '405': {$ref: '#/components/responses/Error'}, '500': {$ref: '#/components/responses/Error'}, '503': {$ref: '#/components/responses/Error'}}
+    post:
+      operationId: captureRequirement
+      security: [{bearerAuth: []}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/CaptureRequest'}}}}
+      responses: {'201': {description: captured, content: {application/json: {schema: {$ref: '#/components/schemas/CaptureResponse'}}}}, '400': {$ref: '#/components/responses/Error'}, '401': {$ref: '#/components/responses/Error'}, '403': {$ref: '#/components/responses/Error'}, '405': {$ref: '#/components/responses/Error'}, '413': {$ref: '#/components/responses/Error'}, '415': {$ref: '#/components/responses/Error'}, '500': {$ref: '#/components/responses/Error'}, '503': {$ref: '#/components/responses/Error'}}
+  /v1/requirements/{requirement_id}:
+    get:
+      operationId: getRequirement
+      security: [{bearerAuth: []}]
+      parameters: [{name: requirement_id, in: path, required: true, schema: {type: string}}]
+      responses: {'200': {description: requirement, content: {application/json: {schema: {$ref: '#/components/schemas/RequirementResponse'}}}}, '401': {$ref: '#/components/responses/Error'}, '403': {$ref: '#/components/responses/Error'}, '404': {$ref: '#/components/responses/Error'}}
+  /v1/controls:
+    post:
+      operationId: setControl
+      security: [{bearerAuth: []}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/ControlRequest'}}}}
+      responses: {'200': {description: changed, content: {application/json: {schema: {$ref: '#/components/schemas/ControlResponse'}}}}, '400': {$ref: '#/components/responses/Error'}, '401': {$ref: '#/components/responses/Error'}, '403': {$ref: '#/components/responses/Error'}, '405': {$ref: '#/components/responses/Error'}, '413': {$ref: '#/components/responses/Error'}, '415': {$ref: '#/components/responses/Error'}, '500': {$ref: '#/components/responses/Error'}, '503': {$ref: '#/components/responses/Error'}}
+  /v1/runner/claims:acquire:
+    post:
+      operationId: claim
+      security: [{bearerAuth: []}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/ClaimRequest'}}}}
+      responses: {'200': {description: claimed, content: {application/json: {schema: {$ref: '#/components/schemas/ClaimResponse'}}}}, '400': {$ref: '#/components/responses/Error'}, '401': {$ref: '#/components/responses/Error'}, '403': {$ref: '#/components/responses/Error'}, '409': {$ref: '#/components/responses/Error'}, '500': {$ref: '#/components/responses/Error'}, '503': {$ref: '#/components/responses/Error'}}
+  /v1/runner/permits:check:
+    post:
+      operationId: permit
+      security: [{bearerAuth: []}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/PermitRequest'}}}}
+      responses: {'200': {description: decided, content: {application/json: {schema: {$ref: '#/components/schemas/PermitResponse'}}}}, '400': {$ref: '#/components/responses/Error'}, '401': {$ref: '#/components/responses/Error'}, '403': {$ref: '#/components/responses/Error'}, '409': {$ref: '#/components/responses/Error'}, '500': {$ref: '#/components/responses/Error'}, '503': {$ref: '#/components/responses/Error'}}
+  /v1/executions/result:
+    post:
+      operationId: acceptResult
+      security: [{bearerAuth: []}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/ResultRequest'}}}}
+      responses: {'200': {description: accepted, content: {application/json: {schema: {$ref: '#/components/schemas/ResultResponse'}}}}, '400': {$ref: '#/components/responses/Error'}, '401': {$ref: '#/components/responses/Error'}, '403': {$ref: '#/components/responses/Error'}, '409': {$ref: '#/components/responses/Error'}, '500': {$ref: '#/components/responses/Error'}, '503': {$ref: '#/components/responses/Error'}}
+  /v1/runner/heartbeat:
+    post:
+      operationId: heartbeat
+      security: [{bearerAuth: []}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/HeartbeatRequest'}}}}
+      responses: {'200': {description: accepted, content: {application/json: {schema: {$ref: '#/components/schemas/LifecycleResponse'}}}}, '400': {$ref: '#/components/responses/Error'}, '401': {$ref: '#/components/responses/Error'}, '403': {$ref: '#/components/responses/Error'}, '405': {$ref: '#/components/responses/Error'}, '500': {$ref: '#/components/responses/Error'}, '503': {$ref: '#/components/responses/Error'}}
+  /v1/runner/checkpoints:
+    post:
+      operationId: checkpoint
+      security: [{bearerAuth: []}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/CheckpointRequest'}}}}
+      responses: {'200': {description: accepted, content: {application/json: {schema: {$ref: '#/components/schemas/LifecycleResponse'}}}}, '400': {$ref: '#/components/responses/Error'}, '401': {$ref: '#/components/responses/Error'}, '403': {$ref: '#/components/responses/Error'}, '404': {$ref: '#/components/responses/Error'}, '409': {$ref: '#/components/responses/Error'}, '500': {$ref: '#/components/responses/Error'}, '503': {$ref: '#/components/responses/Error'}}
+  /v1/leases/{lease_id}:renew:
+    post:
+      operationId: renewLease
+      security: [{bearerAuth: []}]
+      parameters: [{name: lease_id, in: path, required: true, schema: {type: string}}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/RenewRequest'}}}}
+      responses: {'200': {description: renewed, content: {application/json: {schema: {$ref: '#/components/schemas/RenewResponse'}}}}, '400': {$ref: '#/components/responses/Error'}, '401': {$ref: '#/components/responses/Error'}, '403': {$ref: '#/components/responses/Error'}, '409': {$ref: '#/components/responses/Error'}, '500': {$ref: '#/components/responses/Error'}, '503': {$ref: '#/components/responses/Error'}}
+  /v1/executions/{execution_id}:start:
+    post:
+      operationId: startExecution
+      security: [{bearerAuth: []}]
+      parameters: [{name: execution_id, in: path, required: true, schema: {type: string}}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/StartRequest'}}}}
+      responses: {'200': {description: started, content: {application/json: {schema: {$ref: '#/components/schemas/StartResponse'}}}}, '400': {$ref: '#/components/responses/Error'}, '401': {$ref: '#/components/responses/Error'}, '403': {$ref: '#/components/responses/Error'}, '409': {$ref: '#/components/responses/Error'}, '500': {$ref: '#/components/responses/Error'}, '503': {$ref: '#/components/responses/Error'}}
+components:
+  securitySchemes:
+    bearerAuth: {type: http, scheme: bearer}
+  responses:
+    Error: {description: error, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+  schemas:
+    HealthResponse:
+      type: object
+      additionalProperties: false
+      required: [status, schema_version]
+      properties: {status: {const: ok}, schema_version: {const: v1}}
+    Error:
+      type: object
+      additionalProperties: false
+      required: [error, message, schema_version, correlation_id]
+      properties:
+        error: {type: string}
+        message: {type: string}
+        schema_version: {const: v1}
+        correlation_id: {type: string}
+    CaptureRequest:
+      type: object
+      additionalProperties: false
+      required: [request_id, text]
+      properties: {request_id: {type: string}, requirement_id: {type: string}, text: {type: string}}
+    ControlRequest:
+      type: object
+      additionalProperties: false
+      required: [request_id, scope_kind, scope_value, mode]
+      properties: {request_id: {type: string}, scope_kind: {type: string}, scope_value: {type: string}, mode: {type: string}, reason: {type: string}}
+    ClaimRequest:
+      type: object
+      additionalProperties: false
+      required: [request_id, increment_id, expected_increment_version, control_revision]
+      properties: {request_id: {type: string}, increment_id: {type: string}, expected_increment_version: {type: integer}, control_revision: {type: integer}, target: {$ref: '#/components/schemas/Target'}}
+    PermitRequest:
+      type: object
+      additionalProperties: false
+      required: [request_id, kind, control_revision, fencing_token, resource]
+      properties: {request_id: {type: string}, kind: {type: string}, control_revision: {type: integer}, fencing_token: {type: integer}, expected_fencing_token: {type: integer}, resource: {type: string}, target: {$ref: '#/components/schemas/Target'}}
+    ResultRequest:
+      type: object
+      additionalProperties: false
+      required: [request_id, execution_id, lease_id, expected_execution_version, fencing_token, control_revision, succeeded]
+      properties: {request_id: {type: string}, execution_id: {type: string}, lease_id: {type: string}, expected_execution_version: {type: integer}, fencing_token: {type: integer}, control_revision: {type: integer}, succeeded: {type: boolean}, target: {$ref: '#/components/schemas/Target'}}
+    CaptureResponse:
+      type: object
+      additionalProperties: false
+      required: [requirement_id, version]
+      properties: {requirement_id: {type: string}, version: {type: integer}}
+    RequirementResponse:
+      type: object
+      additionalProperties: false
+      required: [requirement_id, status, version, increment_ids]
+      properties: {requirement_id: {type: string}, status: {type: string}, version: {type: integer}, increment_ids: {type: array, items: {type: string}}, text: {type: string}}
+    RequirementListResponse:
+      type: object
+      additionalProperties: false
+      required: [requirements]
+      properties: {requirements: {type: array, items: {$ref: '#/components/schemas/RequirementResponse'}}}
+    ControlResponse:
+      type: object
+      additionalProperties: false
+      required: [revision, mode]
+      properties: {revision: {type: integer}, mode: {type: string}}
+    ClaimResponse:
+      type: object
+      additionalProperties: false
+      required: [increment_id, execution_id, lease_id, runner_id, version, fencing_token]
+      properties: {increment_id: {type: string}, execution_id: {type: string}, lease_id: {type: string}, runner_id: {type: string}, version: {type: integer}, fencing_token: {type: integer}}
+    PermitResponse:
+      type: object
+      additionalProperties: false
+      required: [allowed, revision, reason]
+      properties: {allowed: {type: boolean}, revision: {type: integer}, reason: {type: string}}
+    ResultResponse:
+      type: object
+      additionalProperties: false
+      required: [execution_id, status, version]
+      properties: {execution_id: {type: string}, status: {type: string}, version: {type: integer}}
+    LifecycleResponse:
+      type: object
+      additionalProperties: false
+      required: [accepted]
+      properties: {accepted: {type: boolean}}
+    RenewResponse:
+      type: object
+      additionalProperties: false
+      required: [lease_id, expires_at, version]
+      properties: {lease_id: {type: string}, expires_at: {type: string, format: date-time}, version: {type: integer}}
+    StartResponse:
+      type: object
+      additionalProperties: false
+      required: [execution_id, status, version]
+      properties: {execution_id: {type: string}, status: {type: string}, version: {type: integer}}
+    Target:
+      type: object
+      additionalProperties: false
+      properties:
+        installation_id: {type: string}
+        repository_id: {type: string}
+        requirement_id: {type: string}
+        increment_id: {type: string}
+        runner_id: {type: string}
+        channel: {type: string}
+    HeartbeatRequest:
+      type: object
+      additionalProperties: false
+      required: [request_id]
+      properties: {request_id: {type: string}}
+    CheckpointRequest:
+      type: object
+      additionalProperties: false
+      required: [request_id, execution_id, lease_id, fencing_token, control_revision]
+      properties: {request_id: {type: string}, execution_id: {type: string}, lease_id: {type: string}, fencing_token: {type: integer}, control_revision: {type: integer}}
+    RenewRequest:
+      type: object
+      additionalProperties: false
+      required: [request_id, expected_lease_version, fencing_token, control_revision]
+      properties: {request_id: {type: string}, expected_lease_version: {type: integer}, fencing_token: {type: integer}, control_revision: {type: integer}}
+    StartRequest:
+      type: object
+      additionalProperties: false
+      required: [request_id, expected_execution_version, control_revision]
+      properties: {request_id: {type: string}, expected_execution_version: {type: integer}, control_revision: {type: integer}}

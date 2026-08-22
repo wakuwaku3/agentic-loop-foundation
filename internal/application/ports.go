@@ -48,6 +48,7 @@ type IdempotentResponse struct {
 
 type RequirementRepository interface {
 	Requirement(ctx context.Context, id string) (domain.Requirement, bool, error)
+	Requirements(ctx context.Context) ([]domain.Requirement, error)
 	SaveRequirement(ctx context.Context, value domain.Requirement, expected domain.Version) error
 }
 type RequirementTextRepository interface {

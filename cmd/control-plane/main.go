@@ -5,14 +5,16 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+
+	"github.com/takushi/agentic-loop-foundation/v2/internal/api"
 )
 
 func main() {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		_, _ = w.Write([]byte("ok\n"))
-	})
+	// Authentication and application wiring are intentionally absent until a
+	// production identity provider is configured. API routes fail closed while
+	// healthz remains available for platform probes.
+	mux.Handle("/", api.New(api.Config{}))
 	addr := ":8080"
 	if value := os.Getenv("PORT"); value != "" {
 		addr = ":" + value

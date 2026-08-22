@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/takushi/agentic-loop-foundation/v2/internal/domain"
@@ -111,8 +112,370 @@ func NewServiceWithConfig(tx Transactor, clock Clock, ids IDGenerator, config Se
 
 type CaptureRequest struct{ RequestID, RequirementID, Text string }
 type CaptureResponse struct {
-	RequirementID string
-	Version       domain.Version
+	RequirementID string         `json:"requirement_id"`
+	Version       domain.Version `json:"version"`
+}
+type LifecycleResponse struct {
+	Accepted bool `json:"accepted"`
+}
+type RenewRequest struct {
+	RequestID, LeaseID   string
+	ExpectedLeaseVersion domain.Version
+	FencingToken         domain.FencingToken
+	ControlRevision      domain.Revision
+}
+type RenewResponse struct {
+	LeaseID   string         `json:"lease_id"`
+	ExpiresAt time.Time      `json:"expires_at"`
+	Version   domain.Version `json:"version"`
+}
+
+func (s *Service) Renew(ctx context.Context, req RenewRequest) (out RenewResponse, err error) {
+	_, actor, runner, e := runnerCaller(ctx)
+	if e != nil {
+		return out, e
+	}
+	if e = requireRequest(req.RequestID); e != nil {
+		return out, e
+	}
+	now := s.clock.Now()
+	if now.IsZero() {
+		return out, errors.New("clock returned zero time")
+	}
+	fp, e := requestFingerprint("renew", req)
+	if e != nil {
+		return out, e
+	}
+	eid, e := s.ids.Next("event")
+	if e != nil {
+		return out, e
+	}
+	oid, e := s.ids.Next("operation")
+	if e != nil {
+		return out, e
+	}
+	xid, e := s.ids.Next("outbox")
+	if e != nil {
+		return out, e
+	}
+	err = s.tx.Transact(ctx, func(u UnitOfWork) error {
+		if p, ok, x := u.Idempotency(ctx, req.RequestID, "renew"); x != nil {
+			return x
+		} else if ok {
+			if p.Fingerprint != fp {
+				return ErrIdempotencyConflict
+			}
+			return restoreResponse(p, &out)
+		}
+		lease, ok, x := u.Lease(ctx, req.LeaseID)
+		if x != nil {
+			return x
+		}
+		if !ok {
+			return ErrNotFound
+		}
+		if lease.Version != req.ExpectedLeaseVersion || lease.RunnerID != runner {
+			return domain.ErrStaleVersion
+		}
+		target, found, x := u.CanonicalTarget(ctx, lease.IncrementID.String(), runner.String())
+		if x != nil {
+			return x
+		}
+		if !found {
+			target = domain.ControlTarget{IncrementID: lease.IncrementID, RunnerID: runner}
+		}
+		controls, x := u.Controls(ctx)
+		if x != nil {
+			return x
+		}
+		next, x := domain.RenewLease(lease, lease.ExecutionID, runner, req.FencingToken, now, now.Add(s.config.LeaseTTL), domain.EffectiveControl(controls, target))
+		if x != nil {
+			return x
+		}
+		if x = u.SaveLease(ctx, next, lease.Version); x != nil {
+			return x
+		}
+		out = RenewResponse{LeaseID: req.LeaseID, ExpiresAt: next.ExpiresAt, Version: next.Version}
+		effect, x := s.effectOutbox(ctx, u, xid, oid, req.RequestID, domain.PermitProcess, target, next.Version, next.FencingToken, req.ControlRevision, "lease-renewed", req.LeaseID)
+		if x != nil {
+			return x
+		}
+		return s.record(ctx, u, eid, oid, fp, req.RequestID, "renew", "lease", req.LeaseID, next.Version, "lease.renewed", actor.String(), effect, out)
+	})
+	return out, err
+}
+
+type StartRequest struct {
+	RequestID, ExecutionID   string
+	ExpectedExecutionVersion domain.Version
+	ControlRevision          domain.Revision
+}
+type StartResponse struct {
+	ExecutionID string                 `json:"execution_id"`
+	Status      domain.ExecutionStatus `json:"status"`
+	Version     domain.Version         `json:"version"`
+}
+
+func (s *Service) Start(ctx context.Context, req StartRequest) (out StartResponse, err error) {
+	_, actor, runner, e := runnerCaller(ctx)
+	if e != nil {
+		return out, e
+	}
+	if e = requireRequest(req.RequestID); e != nil {
+		return out, e
+	}
+	now := s.clock.Now()
+	if now.IsZero() {
+		return out, errors.New("clock returned zero time")
+	}
+	fp, e := requestFingerprint("start", req)
+	if e != nil {
+		return out, e
+	}
+	eid, e := s.ids.Next("event")
+	if e != nil {
+		return out, e
+	}
+	oid, e := s.ids.Next("operation")
+	if e != nil {
+		return out, e
+	}
+	err = s.tx.Transact(ctx, func(u UnitOfWork) error {
+		if p, ok, x := u.Idempotency(ctx, req.RequestID, "start"); x != nil {
+			return x
+		} else if ok {
+			if p.Fingerprint != fp {
+				return ErrIdempotencyConflict
+			}
+			return restoreResponse(p, &out)
+		}
+		exec, ok, x := u.Execution(ctx, req.ExecutionID)
+		if x != nil {
+			return x
+		}
+		if !ok {
+			return ErrNotFound
+		}
+		if exec.Version != req.ExpectedExecutionVersion || exec.RunnerID != runner {
+			return domain.ErrStaleVersion
+		}
+		lease, ok, x := u.Lease(ctx, exec.LeaseID.String())
+		if x != nil {
+			return x
+		}
+		if !ok {
+			return ErrNotFound
+		}
+		if exec.LeaseID != lease.ID || lease.ExecutionID != exec.ID || lease.RunnerID != runner {
+			return domain.ErrLeaseNotOwned
+		}
+		if exec.ControlRevision != req.ControlRevision {
+			return domain.ErrControlDenied
+		}
+		target, found, x := u.CanonicalTarget(ctx, exec.IncrementID.String(), runner.String())
+		if x != nil {
+			return x
+		}
+		if !found {
+			target = domain.ControlTarget{IncrementID: exec.IncrementID, RunnerID: runner}
+		}
+		controls, x := u.Controls(ctx)
+		if x != nil {
+			return x
+		}
+		effective := domain.EffectiveControl(controls, target)
+		if _, x = domain.Permit(effective, domain.PermitRequest{Kind: domain.PermitProcess, Target: target, ControlRevision: req.ControlRevision, FencingToken: exec.FencingToken, ExpectedFencingToken: lease.FencingToken, Resource: req.ExecutionID}); x != nil {
+			return x
+		}
+		next, x := domain.StartExecution(exec, lease, now, effective)
+		if x != nil {
+			return x
+		}
+		if x = u.SaveExecution(ctx, next, exec.Version); x != nil {
+			return x
+		}
+		out = StartResponse{ExecutionID: req.ExecutionID, Status: next.Status, Version: next.Version}
+		return s.record(ctx, u, eid, oid, fp, req.RequestID, "start", "execution", req.ExecutionID, next.Version, "execution.started", actor.String(), nil, out)
+	})
+	return out, err
+}
+
+type HeartbeatRequest struct{ RequestID string }
+type CheckpointRequest struct {
+	RequestID, ExecutionID, LeaseID string
+	FencingToken                    domain.FencingToken
+	ControlRevision                 domain.Revision
+}
+
+func (s *Service) Heartbeat(ctx context.Context, req HeartbeatRequest) (out LifecycleResponse, err error) {
+	_, actor, runner, e := runnerCaller(ctx)
+	if e != nil {
+		return out, e
+	}
+	if e = requireRequest(req.RequestID); e != nil {
+		return out, e
+	}
+	fp, e := requestFingerprint("heartbeat", req)
+	if e != nil {
+		return out, e
+	}
+	eid, e := s.ids.Next("event")
+	if e != nil {
+		return out, e
+	}
+	oid, e := s.ids.Next("operation")
+	if e != nil {
+		return out, e
+	}
+	err = s.tx.Transact(ctx, func(u UnitOfWork) error {
+		if p, ok, x := u.Idempotency(ctx, req.RequestID, "heartbeat"); x != nil {
+			return x
+		} else if ok {
+			if p.Fingerprint != fp {
+				return ErrIdempotencyConflict
+			}
+			return restoreResponse(p, &out)
+		}
+		out = LifecycleResponse{Accepted: true}
+		return s.record(ctx, u, eid, oid, fp, req.RequestID, "heartbeat", "runner", runner.String(), 1, "runner.heartbeat", actor.String(), nil, out)
+	})
+	return out, err
+}
+func (s *Service) Checkpoint(ctx context.Context, req CheckpointRequest) (out LifecycleResponse, err error) {
+	_, actor, runner, e := runnerCaller(ctx)
+	if e != nil {
+		return out, e
+	}
+	if e = requireRequest(req.RequestID); e != nil {
+		return out, e
+	}
+	fp, e := requestFingerprint("checkpoint", req)
+	if e != nil {
+		return out, e
+	}
+	eid, e := s.ids.Next("event")
+	if e != nil {
+		return out, e
+	}
+	oid, e := s.ids.Next("operation")
+	if e != nil {
+		return out, e
+	}
+	err = s.tx.Transact(ctx, func(u UnitOfWork) error {
+		if p, ok, x := u.Idempotency(ctx, req.RequestID, "checkpoint"); x != nil {
+			return x
+		} else if ok {
+			if p.Fingerprint != fp {
+				return ErrIdempotencyConflict
+			}
+			return restoreResponse(p, &out)
+		}
+		exec, ok, x := u.Execution(ctx, req.ExecutionID)
+		if x != nil {
+			return x
+		}
+		if !ok {
+			return ErrNotFound
+		}
+		lease, ok, x := u.Lease(ctx, req.LeaseID)
+		if x != nil {
+			return x
+		}
+		if !ok {
+			return ErrNotFound
+		}
+		now := s.clock.Now()
+		if now.IsZero() {
+			return errors.New("clock returned zero time")
+		}
+		if exec.LeaseID != lease.ID || lease.ExecutionID != exec.ID || exec.RunnerID != runner || lease.RunnerID != runner || !lease.ActiveAt(now) {
+			return domain.ErrLeaseNotOwned
+		}
+		if req.FencingToken != lease.FencingToken {
+			return domain.ErrStaleFence
+		}
+		target, found, x := u.CanonicalTarget(ctx, exec.IncrementID.String(), runner.String())
+		if x != nil {
+			return x
+		}
+		if !found {
+			target = domain.ControlTarget{IncrementID: exec.IncrementID, RunnerID: runner}
+		}
+		controls, x := u.Controls(ctx)
+		if x != nil {
+			return x
+		}
+		effective := domain.EffectiveControl(controls, target)
+		if _, x = domain.Permit(effective, domain.PermitRequest{Kind: domain.PermitCheckpoint, Target: target, ControlRevision: req.ControlRevision, FencingToken: req.FencingToken, ExpectedFencingToken: lease.FencingToken, Resource: req.ExecutionID}); x != nil {
+			return x
+		}
+		out = LifecycleResponse{Accepted: true}
+		return s.record(ctx, u, eid, oid, fp, req.RequestID, "checkpoint", "execution", req.ExecutionID, exec.Version, "execution.checkpointed", actor.String(), nil, out)
+	})
+	return out, err
+}
+
+type RequirementView struct {
+	RequirementID string                   `json:"requirement_id"`
+	Status        domain.RequirementStatus `json:"status"`
+	Version       domain.Version           `json:"version"`
+	IncrementIDs  []string                 `json:"increment_ids"`
+	Text          string                   `json:"text,omitempty"`
+}
+
+func (s *Service) ListRequirements(ctx context.Context) ([]RequirementView, error) {
+	if _, _, err := callerActor(ctx, RoleOwner); err != nil {
+		return nil, err
+	}
+	var out []RequirementView
+	err := s.tx.Transact(ctx, func(u UnitOfWork) error {
+		rows, err := u.Requirements(ctx)
+		if err != nil {
+			return err
+		}
+		sort.Slice(rows, func(i, j int) bool { return rows[i].ID.String() < rows[j].ID.String() })
+		for _, r := range rows {
+			text, _, e := u.RequirementText(ctx, r.ID.String())
+			if e != nil {
+				return e
+			}
+			ids := make([]string, len(r.Increments))
+			for i, id := range r.Increments {
+				ids[i] = id.String()
+			}
+			out = append(out, RequirementView{RequirementID: r.ID.String(), Status: r.Status, Version: r.Version, IncrementIDs: ids, Text: text})
+		}
+		return nil
+	})
+	return out, err
+}
+func (s *Service) GetRequirement(ctx context.Context, id string) (RequirementView, bool, error) {
+	if _, _, err := callerActor(ctx, RoleOwner); err != nil {
+		return RequirementView{}, false, err
+	}
+	var out RequirementView
+	var found bool
+	err := s.tx.Transact(ctx, func(u UnitOfWork) error {
+		r, ok, e := u.Requirement(ctx, id)
+		if e != nil {
+			return e
+		}
+		found = ok
+		if !ok {
+			return nil
+		}
+		text, _, e := u.RequirementText(ctx, id)
+		if e != nil {
+			return e
+		}
+		ids := make([]string, len(r.Increments))
+		for i, x := range r.Increments {
+			ids[i] = x.String()
+		}
+		out = RequirementView{RequirementID: r.ID.String(), Status: r.Status, Version: r.Version, IncrementIDs: ids, Text: text}
+		return nil
+	})
+	return out, found, err
 }
 
 func (s *Service) Capture(ctx context.Context, req CaptureRequest) (out CaptureResponse, err error) {
@@ -195,8 +558,9 @@ type PlanRequest struct {
 	ExpectedRequirementVersion            domain.Version
 }
 type PlanResponse struct {
-	RequirementID, IncrementID string
-	Version                    domain.Version
+	RequirementID string         `json:"requirement_id"`
+	IncrementID   string         `json:"increment_id"`
+	Version       domain.Version `json:"version"`
 }
 
 func (s *Service) Plan(ctx context.Context, req PlanRequest) (out PlanResponse, err error) {
@@ -285,9 +649,12 @@ type ClaimRequest struct {
 	Target                   domain.ControlTarget
 }
 type ClaimResponse struct {
-	IncrementID, ExecutionID, LeaseID, RunnerID string
-	Version                                     domain.Version
-	FencingToken                                domain.FencingToken
+	IncrementID  string              `json:"increment_id"`
+	ExecutionID  string              `json:"execution_id"`
+	LeaseID      string              `json:"lease_id"`
+	RunnerID     string              `json:"runner_id"`
+	Version      domain.Version      `json:"version"`
+	FencingToken domain.FencingToken `json:"fencing_token"`
 }
 
 func (s *Service) Claim(ctx context.Context, req ClaimRequest) (out ClaimResponse, err error) {
@@ -454,8 +821,8 @@ type ControlRequest struct {
 	At        time.Time
 }
 type ControlResponse struct {
-	Revision domain.Revision
-	Mode     domain.ControlMode
+	Revision domain.Revision    `json:"revision"`
+	Mode     domain.ControlMode `json:"mode"`
 }
 
 func (s *Service) Control(ctx context.Context, req ControlRequest) (out ControlResponse, err error) {
@@ -528,9 +895,9 @@ type PermitRequest struct {
 	Resource                           string
 }
 type PermitResponse struct {
-	Allowed  bool
-	Revision domain.Revision
-	Reason   string
+	Allowed  bool            `json:"allowed"`
+	Revision domain.Revision `json:"revision"`
+	Reason   string          `json:"reason"`
 }
 
 func (s *Service) Permit(ctx context.Context, req PermitRequest) (out PermitResponse, err error) {
@@ -564,9 +931,9 @@ type AcceptResultRequest struct {
 	Target                          domain.ControlTarget
 }
 type AcceptResultResponse struct {
-	ExecutionID string
-	Status      domain.ExecutionStatus
-	Version     domain.Version
+	ExecutionID string                 `json:"execution_id"`
+	Status      domain.ExecutionStatus `json:"status"`
+	Version     domain.Version         `json:"version"`
 }
 
 func (s *Service) AcceptResult(ctx context.Context, req AcceptResultRequest) (out AcceptResultResponse, err error) {

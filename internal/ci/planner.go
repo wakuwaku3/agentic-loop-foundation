@@ -276,6 +276,9 @@ func evidenceKey(root string, c Component, all []Component) (string, error) {
 		}
 		b, e := os.ReadFile(filepath.Join(root, p))
 		if e != nil {
+			if os.IsNotExist(e) {
+				continue
+			} // deleted files remain in git index during migration
 			return "", e
 		}
 		h.Write([]byte(p))

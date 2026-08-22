@@ -14,6 +14,20 @@ func reqID(t *testing.T, value string) RequirementID {
 	}
 	return v
 }
+
+func TestCheckpointPermitStopMatrix(t *testing.T) {
+	target := ControlTarget{InstallationID: "install"}
+	for _, mode := range []ControlMode{ControlGracefulStop, ControlImmediateStop, ControlEmergencyStop} {
+		decision, err := Permit(EffectiveControlResult{Found: true, Mode: mode, Revision: 4, Scope: ControlScope{Kind: ScopeInstallation, Value: "install"}}, PermitRequest{Kind: PermitCheckpoint, Target: target, ControlRevision: 4, Resource: "exec"})
+		if mode == ControlGracefulStop {
+			if err != nil || !decision.Allowed() {
+				t.Fatalf("graceful stop should permit checkpoint: %v", err)
+			}
+		} else if err == nil || decision.Allowed() {
+			t.Fatalf("%s should deny checkpoint", mode)
+		}
+	}
+}
 func incID(t *testing.T, value string) IncrementID {
 	t.Helper()
 	v, err := NewIncrementID(value)

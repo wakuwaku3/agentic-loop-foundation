@@ -142,6 +142,7 @@ const (
 	PermitIntegration    PermitKind = "integration"
 	PermitPreviewDeploy  PermitKind = "preview-deploy"
 	PermitPromotion      PermitKind = "promotion"
+	PermitCheckpoint     PermitKind = "checkpoint"
 )
 
 func (k PermitKind) SideEffect() bool {
@@ -205,7 +206,7 @@ func permitDenied(revision Revision, reason string, request PermitRequest, contr
 }
 func validPermitKind(k PermitKind) bool {
 	switch k {
-	case PermitIntake, PermitClaim, PermitCredential, PermitProcess, PermitExternalEffect, PermitIntegration, PermitPreviewDeploy, PermitPromotion:
+	case PermitIntake, PermitClaim, PermitCredential, PermitProcess, PermitExternalEffect, PermitIntegration, PermitPreviewDeploy, PermitPromotion, PermitCheckpoint:
 		return true
 	}
 	return false
@@ -219,7 +220,9 @@ func permitAllowed(mode ControlMode, kind PermitKind) bool {
 		return kind != PermitIntake
 	case ControlPauseClaim:
 		return kind != PermitClaim
-	case ControlGracefulStop, ControlImmediateStop, ControlEmergencyStop, ControlCancel:
+	case ControlGracefulStop:
+		return kind == PermitCheckpoint
+	case ControlImmediateStop, ControlEmergencyStop, ControlCancel:
 		return false
 	default:
 		return false

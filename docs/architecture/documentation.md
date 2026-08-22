@@ -49,7 +49,7 @@ docs/runbooks/                  # 異常時に実行する手順
 └─ firestore-restore.md
 
 contracts/                      # 機械可読な正本
-├─ openapi.yaml
+├─ openapi/openapi-v1.yaml
 ├─ events/
 ├─ work-packet/
 └─ release-contract/

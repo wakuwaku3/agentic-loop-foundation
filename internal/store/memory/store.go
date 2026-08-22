@@ -103,6 +103,14 @@ func (u *unit) Requirement(_ context.Context, id string) (domain.Requirement, bo
 	}
 	return v, ok, nil
 }
+func (u *unit) Requirements(_ context.Context) ([]domain.Requirement, error) {
+	out := make([]domain.Requirement, 0, len(u.s.requirements))
+	for _, v := range u.s.requirements {
+		v.Increments = append([]domain.IncrementID(nil), v.Increments...)
+		out = append(out, v)
+	}
+	return out, nil
+}
 func (u *unit) SaveRequirement(_ context.Context, v domain.Requirement, expected domain.Version) error {
 	key := v.ID.String()
 	old, ok := u.s.requirements[key]
