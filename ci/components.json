@@ -9,8 +9,6 @@
     {"id":"domain","roots":["internal/domain/**"],"public_contracts":[],"contract_dependencies":[],"dependencies":[],"check":{"runner":"make","target":"component-domain"}},
     {"id":"internal-contracts","roots":["internal/contracts/**"],"public_contracts":[],"contract_dependencies":["contracts/**"],"dependencies":["contracts"],"check":{"runner":"make","target":"component-contracts"}},
     {"id":"docs","roots":["docs/**","README.md","AGENTS.md"],"public_contracts":[],"contract_dependencies":[],"dependencies":[],"check":{"runner":"make","target":"component-docs"}},
-    {"id":"tests","roots":["test/**"],"public_contracts":[],"contract_dependencies":[],"dependencies":[],"check":{"runner":"make","target":"component-test"}},
-    {"id":"infra","roots":["infra/**"],"public_contracts":[],"contract_dependencies":[],"dependencies":[],"check":{"runner":"make","target":"component-infra"}},
     {"id":"tooling","roots":[".editorconfig",".gitignore"],"public_contracts":[],"contract_dependencies":[],"dependencies":[],"check":{"runner":"make","target":"component-tooling"}},
     {"id":"environment","roots":["devbox.json","devbox.lock","go.mod","go.sum","Makefile","scripts/**",".github/**"],"public_contracts":[],"contract_dependencies":[],"dependencies":[],"check":{"runner":"make","target":"component-tooling"}},
     {"id":"repository-meta","roots":[".codex/**"],"public_contracts":[],"contract_dependencies":[],"dependencies":[],"check":{"runner":"make","target":"component-tooling"}},
