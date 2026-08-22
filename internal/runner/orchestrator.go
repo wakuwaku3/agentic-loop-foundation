@@ -17,6 +17,10 @@ type Orchestrator struct {
 	Workspace *Workspace
 	Journal   *Journal
 	RunnerID  string
+	// Hooks are test-only/local guards immediately before external effects.
+	// Production wiring leaves them nil and relies on the application permit.
+	BeforeProvider func(context.Context, domain.ControlTarget) error
+	BeforeAccept   func(context.Context, domain.ControlTarget) error
 }
 type JourneyRequest struct{ RequestID, Text string }
 type JourneyResult struct {
@@ -72,15 +76,26 @@ func (o *Orchestrator) RunFakeJourney(ctx context.Context, req JourneyRequest) (
 	if !permit.Allowed {
 		return JourneyResult{}, fmt.Errorf("process permit denied: %s", permit.Reason)
 	}
-	result, err := o.Provider.Run(ctx, ProviderRequest{OperationID: claim.ExecutionID, Workspace: ws})
+	result, pending, err := o.pendingResult(req.RequestID)
 	if err != nil {
-		return JourneyResult{}, fmt.Errorf("provider: %w", err)
+		return JourneyResult{}, fmt.Errorf("pending journal: %w", err)
 	}
-	if err := o.journal("result_pending", req.RequestID, map[string]any{"execution_id": claim.ExecutionID, "succeeded": result.Succeeded}); err != nil {
-		return JourneyResult{}, fmt.Errorf("result journal: %w", err)
-	}
-	if _, err := o.Service.Checkpoint(runnerCtx, application.CheckpointRequest{RequestID: req.RequestID + ":checkpoint", ExecutionID: claim.ExecutionID, LeaseID: claim.LeaseID, FencingToken: claim.FencingToken}); err != nil {
-		return JourneyResult{}, fmt.Errorf("checkpoint: %w", err)
+	if !pending {
+		if o.BeforeProvider != nil {
+			if err := o.BeforeProvider(ctx, target); err != nil {
+				return JourneyResult{}, fmt.Errorf("provider guard: %w", err)
+			}
+		}
+		result, err = o.Provider.Run(ctx, ProviderRequest{OperationID: claim.ExecutionID, Workspace: ws})
+		if err != nil {
+			return JourneyResult{}, fmt.Errorf("provider: %w", err)
+		}
+		if _, err := o.Service.Checkpoint(runnerCtx, application.CheckpointRequest{RequestID: req.RequestID + ":checkpoint", ExecutionID: claim.ExecutionID, LeaseID: claim.LeaseID, FencingToken: claim.FencingToken}); err != nil {
+			return JourneyResult{}, fmt.Errorf("checkpoint: %w", err)
+		}
+		if err := o.journal("result_pending", req.RequestID, map[string]any{"execution_id": claim.ExecutionID, "succeeded": result.Succeeded, "checkpoint": result.Checkpoint}); err != nil {
+			return JourneyResult{}, fmt.Errorf("result journal: %w", err)
+		}
 	}
 	resultPermit, err := o.Service.Permit(runnerCtx, application.PermitRequest{RequestID: req.RequestID + ":result-permit", Kind: domain.PermitExternalEffect, Target: target, FencingToken: claim.FencingToken, ExpectedFencingToken: claim.FencingToken, Resource: claim.ExecutionID})
 	if err != nil {
@@ -89,11 +104,40 @@ func (o *Orchestrator) RunFakeJourney(ctx context.Context, req JourneyRequest) (
 	if !resultPermit.Allowed {
 		return JourneyResult{}, fmt.Errorf("result permit denied: %s", resultPermit.Reason)
 	}
+	if o.BeforeAccept != nil {
+		if err := o.BeforeAccept(ctx, target); err != nil {
+			return JourneyResult{}, fmt.Errorf("accept guard: %w", err)
+		}
+	}
 	accepted, err := o.Service.AcceptResult(runnerCtx, application.AcceptResultRequest{RequestID: req.RequestID + ":accept", ExecutionID: claim.ExecutionID, LeaseID: claim.LeaseID, ExpectedExecutionVersion: start.Version, FencingToken: claim.FencingToken, Succeeded: result.Succeeded, Target: target})
 	if err != nil {
 		return JourneyResult{}, fmt.Errorf("accept: %w", err)
 	}
+	if err := o.journal("result_accepted", req.RequestID, map[string]any{"execution_id": claim.ExecutionID, "status": accepted.Status}); err != nil {
+		return JourneyResult{}, fmt.Errorf("accepted journal: %w", err)
+	}
 	return JourneyResult{RequirementID: cap.RequirementID, IncrementID: plan.IncrementID, ExecutionID: claim.ExecutionID, LeaseID: claim.LeaseID, Status: accepted.Status, Checkpoint: result.Checkpoint}, nil
+}
+
+func (o *Orchestrator) pendingResult(id string) (ProviderResult, bool, error) {
+	events, err := o.Journal.Replay()
+	if err != nil {
+		return ProviderResult{}, false, err
+	}
+	for _, event := range events {
+		if event.ID != id+":result_pending" {
+			continue
+		}
+		var p struct {
+			Succeeded  bool   `json:"succeeded"`
+			Checkpoint string `json:"checkpoint"`
+		}
+		if err := json.Unmarshal(event.Payload, &p); err != nil {
+			return ProviderResult{}, false, ErrJournalCorrupt
+		}
+		return ProviderResult{Succeeded: p.Succeeded, Checkpoint: p.Checkpoint}, true, nil
+	}
+	return ProviderResult{}, false, nil
 }
 func (o *Orchestrator) journal(kind, id string, payload any) error {
 	b, err := json.Marshal(payload)

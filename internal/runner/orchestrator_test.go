@@ -60,6 +60,9 @@ func TestOrchestratorFakeJourney(t *testing.T) {
 	if result.Status != domain.ExecutionSucceeded || result.Checkpoint != "checkpoint-1" {
 		t.Fatalf("unexpected journey result: %#v", result)
 	}
+	if _, err := o.RunFakeJourney(context.Background(), JourneyRequest{RequestID: "journey-1", Text: "build the fixture"}); err != nil {
+		t.Fatalf("retry journey: %v", err)
+	}
 	if len(provider.Calls) != 1 || provider.Calls[0].Prompt != "" {
 		t.Fatalf("provider boundary leaked prompt or called unexpectedly: %#v", provider.Calls)
 	}
@@ -67,7 +70,7 @@ func TestOrchestratorFakeJourney(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(events) != 2 || events[0].Kind != "assignment" || events[1].Kind != "result_pending" {
+	if len(events) != 3 || events[0].Kind != "assignment" || events[1].Kind != "result_pending" || events[2].Kind != "result_accepted" {
 		t.Fatalf("unexpected journal: %#v", events)
 	}
 }
