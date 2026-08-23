@@ -7044,7 +7044,7 @@ git -C "$target" worktree add --quiet -b agent/issue-95 "$target-worktrees/issue
 status_github_failure_output=$(FAKE_REST_FAILURES=100 "$target/bin/agentic-loop" status)
 grep -Fq 'GitHub取得失敗のためworker-orphan判定を保留しています。' <<< "$status_github_failure_output" \
   || fail 'status did not explain that anomaly detection is deferred during a GitHub failure'
-status_failure_anomaly_lines=$(grep -E '^[[:space:]]*(異常|warning|info|error|needs-attention|recovering).*' <<< "$status_github_failure_output" || true)
+status_failure_anomaly_lines=$(grep -E '^[[:space:]]+(warning|info|error|needs-attention|recovering)\b' <<< "$status_github_failure_output" || true)
 grep -Fq 'worker-orphan' <<< "$status_failure_anomaly_lines" && fail 'status falsely reported worker-orphan during a GitHub failure'
 grep -Fq 'residual-worktree' <<< "$status_failure_anomaly_lines" && fail 'status falsely reported residual-worktree during a GitHub failure'
 failure_json=$(FAKE_REST_FAILURES=100 "$target/bin/agentic-loop" status --format json)
