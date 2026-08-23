@@ -388,7 +388,20 @@ worker_pid_live() {
 # worker for the same Issue.  A live but unrelated pid is a stale pidfile
 # (including after host restart and pid reuse), never a worker to stop or count.
 worker_pid_owned() {
-  worker_alive "$1"
+  local issue=$1 pid pidfile pid_pgid worker_pid worker_pgid
+  worker_alive "$issue" && return 0
+  pidfile="$STATE_ROOT/workers/$issue.pid"
+  [[ -r $pidfile ]] || return 1
+  read -r pid < "$pidfile" || return 1
+  [[ $pid =~ ^[0-9]+$ ]] || return 1
+  pid_pgid=$(process_group_of "$pid") || return 1
+  [[ $pid_pgid =~ ^[0-9]+$ ]] || return 1
+  while IFS=$'\t' read -r worker_issue worker_pid; do
+    [[ $worker_issue == "$issue" ]] || continue
+    worker_pgid=$(process_group_of "$worker_pid") || continue
+    [[ $worker_pgid == "$pid_pgid" ]] && return 0
+  done < <(live_worker_processes)
+  return 1
 }
 
 # Remove stale local state before maintenance can derive elapsed time or
