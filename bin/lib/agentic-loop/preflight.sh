@@ -481,7 +481,11 @@ preflight_gate() {
 preflight_reevaluate_diff() {
   local issue=$1 head=$2 default_branch=$3 mode=${PREFLIGHT:-warn} measured signal token declared plan_manifest
   [[ $mode == off ]] && return 0
-  measured=$(git -C "$REPO_ROOT" diff --name-only "origin/$default_branch" "$head" 2>/dev/null | sed 's#^#path:#' | sort -u)
+  # Use the candidate branch's divergence point. A diff against the current
+  # default tip includes unrelated commits merged after this Issue branched.
+  local base
+  base=$(git -C "$REPO_ROOT" merge-base "origin/$default_branch" "$head" 2>/dev/null) || return 0
+  measured=$(git -C "$REPO_ROOT" diff --name-only "$base" "$head" 2>/dev/null | sed 's#^#path:#' | sort -u)
   [[ -n $measured ]] && worker_update_scope "$issue" "$(scope_apply_exclusive_paths "$measured")"
   preflight_signal_class "$REPO_ROOT" "$issue"
   signal=$PREFLIGHT_SIGNAL_CLASS

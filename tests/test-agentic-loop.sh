@@ -6468,6 +6468,52 @@ reason = "preflight test fixture"
 change_requires = "approval"
 CAPTOML
 
+# 10) Re-evaluation is based on the candidate branch's merge-base. A
+# protected-path commit merged by another Issue after branching must not
+# contaminate the candidate scope.
+write_queue_config "$target/.agentic-loop.toml" PREFLIGHT=warn TRACEABILITY=off
+pf_base=$(git -C "$target" rev-parse origin/main)
+git -C "$target" worktree add --quiet "$target-worktrees/default-234" "$pf_base"
+printf 'default-only-preflight-test\n' >> "$target-worktrees/default-234/devbox.lock"
+git -C "$target-worktrees/default-234" add devbox.lock
+git -C "$target-worktrees/default-234" commit --quiet -m 'other Issue protected change'
+pf_default_head=$(git -C "$target-worktrees/default-234" rev-parse HEAD)
+git -C "$target" update-ref refs/remotes/origin/main "$pf_default_head"
+printf '7115 running open\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+git -C "$target" worktree add --quiet -b agent/issue-7115 "$target-worktrees/issue-7115" "$pf_base"
+printf 'unrelated-candidate-change\n' > "$target-worktrees/issue-7115/README.md"
+git -C "$target-worktrees/issue-7115" add README.md
+git -C "$target-worktrees/issue-7115" commit --quiet -m 'candidate unrelated change'
+pf_unrelated_head=$(git -C "$target-worktrees/issue-7115" rev-parse HEAD)
+FAKE_RESUME_MERGED_PR=7115 FAKE_RESUME_MERGED_SHA=$pf_unrelated_head FAKE_RESUME_MERGED_URL="https://github.example/acme/installed-project/pull/7115" \
+  "$target/bin/agentic-loop" _worker 7115 preflight-merge-base-unrelated-worker
+grep -Eq '^7115 completed closed' "$state" || fail 'a default-branch-only protected change contaminated candidate scope'
+git -C "$target" worktree remove --force "$target-worktrees/default-234"
+git -C "$target" update-ref refs/remotes/origin/main "$pf_base"
+
+# Identical content on the default branch (as after a squash merge) must not
+# hide the candidate's own protected-path history from re-evaluation.
+printf '7115 running open\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+git -C "$target" worktree add --quiet -b agent/issue-7115b "$target-worktrees/issue-7115b" "$pf_base"
+printf 'candidate-protected-change\n' >> "$target-worktrees/issue-7115b/devbox.lock"
+git -C "$target-worktrees/issue-7115b" add devbox.lock
+git -C "$target-worktrees/issue-7115b" commit --quiet -m 'candidate protected change'
+pf_candidate_head=$(git -C "$target-worktrees/issue-7115b" rev-parse HEAD)
+git -C "$target" worktree add --quiet "$target-worktrees/default-234b" "$pf_base"
+printf 'candidate-protected-change\n' >> "$target-worktrees/default-234b/devbox.lock"
+git -C "$target-worktrees/default-234b" add devbox.lock
+git -C "$target-worktrees/default-234b" commit --quiet -m 'squash-equivalent protected change'
+pf_squash_head=$(git -C "$target-worktrees/default-234b" rev-parse HEAD)
+git -C "$target" update-ref refs/remotes/origin/main "$pf_squash_head"
+FAKE_RESUME_MERGED_PR=7115 FAKE_RESUME_MERGED_SHA=$pf_candidate_head FAKE_RESUME_MERGED_URL="https://github.example/acme/installed-project/pull/7115" \
+  "$target/bin/agentic-loop" _worker 7115 preflight-merge-base-protected-worker
+grep -Eq '^7115 needs-input open' "$state" || fail 'a candidate protected change was hidden by identical default-branch content'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'reason=preflight-escalation' 'merge-base protected change did not trigger escalation'
+git -C "$target" worktree remove --force "$target-worktrees/default-234b"
+git -C "$target" update-ref refs/remotes/origin/main "$pf_base"
+
 # 11) A missing record is never a free pass: when the declared scope touches a
 # protected, approval-requiring path, even warn mode gates (signal-mismatch).
 write_queue_config "$target/.agentic-loop.toml" PREFLIGHT=warn TRACEABILITY=off
