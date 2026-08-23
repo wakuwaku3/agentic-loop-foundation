@@ -81,8 +81,8 @@ func TestCanonicalTaskStateMigration(t *testing.T) {
 		t.Error("V2-006 must be blocked for sol")
 	}
 	for _, id := range []string{"V2-008", "V2-009"} {
-		if states[id]["status"] != "blocked" || states[id]["next_owner"] != "terra" {
-			t.Errorf("%s must be blocked for terra", id)
+		if states[id]["status"] != "queued" || states[id]["next_owner"] != "terra" {
+			t.Errorf("%s must be queued for terra", id)
 		}
 		assertStringSlice(t, states[id]["dependencies"], []string{"V2-025"})
 	}
