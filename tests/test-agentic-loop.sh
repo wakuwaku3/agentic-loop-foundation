@@ -7034,6 +7034,30 @@ rm -rf "$state_root/workers"
 : > "$state"
 : > "$FAKE_GH_ROOT/$state_key.comments"
 
+# Scenario: a GitHub snapshot failure must not turn a live local worker into a
+# false orphan. Local worker state remains visible, while cross-checks that
+# require the snapshot are explicitly deferred (Issue #231).
+printf '95 running open\n' > "$state"
+mkdir -p "$state_root/workers"
+printf '%s\n' "$$" > "$state_root/workers/95.pid"
+git -C "$target" worktree add --quiet -b agent/issue-95 "$target-worktrees/issue-95" origin/main
+status_github_failure_output=$(FAKE_REST_FAILURES=100 "$target/bin/agentic-loop" status)
+grep -Fq 'GitHub取得失敗のためworker-orphan判定を保留しています。' <<< "$status_github_failure_output" \
+  || fail 'status did not explain that anomaly detection is deferred during a GitHub failure'
+status_failure_anomaly_lines=$(grep -E '^[[:space:]]+(warning|info|error|needs-attention|recovering)\b' <<< "$status_github_failure_output" || true)
+grep -Fq 'worker-orphan' <<< "$status_failure_anomaly_lines" && fail 'status falsely reported worker-orphan during a GitHub failure'
+grep -Fq 'residual-worktree' <<< "$status_failure_anomaly_lines" && fail 'status falsely reported residual-worktree during a GitHub failure'
+failure_json=$(FAKE_REST_FAILURES=100 "$target/bin/agentic-loop" status --format json)
+[[ $(printf '%s' "$failure_json" | yq -p json '.github_available') == false ]] \
+  || fail 'status did not report github_available:false during a GitHub failure'
+[[ $(printf '%s' "$failure_json" | yq -p json '[.anomalies[] | select(.code == "worker-orphan" or .code == "residual-worktree" or .code == "residual-branch")] | length') -eq 0 ]] \
+  || fail 'status reported snapshot-dependent anomalies during a GitHub failure'
+git -C "$target" worktree remove --force "$target-worktrees/issue-95"
+git -C "$target" branch -D agent/issue-95 >/dev/null
+rm -rf "$state_root/workers"
+: > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+
 # Structural check: every anomaly a running scenario produces carries both a
 # non-empty action and classification (Issue #212's requirement that every
 # displayed line has a next step), checked mechanically instead of per-code.

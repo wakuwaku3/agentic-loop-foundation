@@ -493,25 +493,27 @@ status_collect_anomalies() {
 
   shopt -s nullglob
   local pidfile
-  for pidfile in "$STATE_ROOT"/workers/*.pid; do
-    issue=$(basename "$pidfile" .pid)
-    if worker_pid_live "$issue" && [[ $running_csv != *",$issue,"* ]]; then
-      if (( WORKER_ORPHAN_GRACE_SECONDS == 0 )); then
-        anomaly_add warning worker-orphan "#$issue" "local workerは生存していますが、GitHub上ではagent:runningではありません。queue.worker_orphan_grace_seconds=0 のため自動停止は無効です。" 'queue.worker_orphan_grace_seconds を設定して自動停止を有効化するか、対象workerを停止してください（worker_timeout_seconds 到達までは停止しません）。' "$(status_file_elapsed "$pidfile")" needs-attention
-        continue
+  if (( STATUS_GITHUB_OK )); then
+    for pidfile in "$STATE_ROOT"/workers/*.pid; do
+      issue=$(basename "$pidfile" .pid)
+      if worker_pid_live "$issue" && [[ $running_csv != *",$issue,"* ]]; then
+        if (( WORKER_ORPHAN_GRACE_SECONDS == 0 )); then
+          anomaly_add warning worker-orphan "#$issue" "local workerは生存していますが、GitHub上ではagent:runningではありません。queue.worker_orphan_grace_seconds=0 のため自動停止は無効です。" 'queue.worker_orphan_grace_seconds を設定して自動停止を有効化するか、対象workerを停止してください（worker_timeout_seconds 到達までは停止しません）。' "$(status_file_elapsed "$pidfile")" needs-attention
+          continue
+        fi
+        orphan_since=''
+        if [[ -r $(worker_orphan_since_file "$issue") ]]; then
+          read -r orphan_since < "$(worker_orphan_since_file "$issue")" || orphan_since=''
+        fi
+        if [[ $orphan_since =~ ^[0-9]+$ ]]; then
+          orphan_elapsed=$(status_elapsed_since "$orphan_since")
+          anomaly_add info worker-orphan "#$issue" "local workerは生存していますが、GitHub上ではagent:runningではありません（grace ${WORKER_ORPHAN_GRACE_SECONDS}秒、観測 ${orphan_elapsed}秒）。" "grace ${WORKER_ORPHAN_GRACE_SECONDS}秒を超えた次pollでworkerを自動停止します。" "$orphan_elapsed" recovering
+        else
+          anomaly_add info worker-orphan "#$issue" "local workerは生存していますが、GitHub上ではagent:runningではありません（grace ${WORKER_ORPHAN_GRACE_SECONDS}秒、観測 0秒）。" "次pollからgrace ${WORKER_ORPHAN_GRACE_SECONDS}秒の観測を開始します。" 0 recovering
+        fi
       fi
-      orphan_since=''
-      if [[ -r $(worker_orphan_since_file "$issue") ]]; then
-        read -r orphan_since < "$(worker_orphan_since_file "$issue")" || orphan_since=''
-      fi
-      if [[ $orphan_since =~ ^[0-9]+$ ]]; then
-        orphan_elapsed=$(status_elapsed_since "$orphan_since")
-        anomaly_add info worker-orphan "#$issue" "local workerは生存していますが、GitHub上ではagent:runningではありません（grace ${WORKER_ORPHAN_GRACE_SECONDS}秒、観測 ${orphan_elapsed}秒）。" "grace ${WORKER_ORPHAN_GRACE_SECONDS}秒を超えた次pollでworkerを自動停止します。" "$orphan_elapsed" recovering
-      else
-        anomaly_add info worker-orphan "#$issue" "local workerは生存していますが、GitHub上ではagent:runningではありません（grace ${WORKER_ORPHAN_GRACE_SECONDS}秒、観測 0秒）。" "次pollからgrace ${WORKER_ORPHAN_GRACE_SECONDS}秒の観測を開始します。" 0 recovering
-      fi
-    fi
-  done
+    done
+  fi
   shopt -u nullglob
 
   if [[ -r $STATE_ROOT/project-pending ]]; then
@@ -690,6 +692,7 @@ status_render_text() {
 
   if (( STATUS_GITHUB_OK == 0 )); then
     say 'GitHub: 取得できません（localの情報のみ表示します）。'
+    say '異常検出: GitHub取得失敗のためworker-orphan判定を保留しています。'
   else
     local claimable=0 rank1 rank2 created num shown=0
     while IFS=$'\t' read -r rank1 rank2 created num title; do
