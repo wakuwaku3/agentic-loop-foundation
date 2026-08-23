@@ -3845,7 +3845,7 @@ for invalid_decomposition_manifest in \
     "$target/bin/agentic-loop" _worker 701 decomposition-invalid-worker
   grep -Eq '^701 needs-input open' "$state" || fail 'invalid decomposition manifest was accepted'
   tail -n "+$((calls_before + 1))" "$FAKE_GH_ROOT/calls" > "$TEST_ROOT/decomposition-invalid-calls.log"
-  grep -q '/sub_issues\|/dependencies/blocked_by' "$TEST_ROOT/decomposition-invalid-calls.log" && fail 'invalid decomposition manifest reached native dependency materialization'
+  grep -Eq -- '--method POST .*(/sub_issues|/dependencies/blocked_by)' "$TEST_ROOT/decomposition-invalid-calls.log" && fail 'invalid decomposition manifest reached native dependency materialization'
 done
 
 # decomposition_validate is a rejecting validator: every malformed dependency
