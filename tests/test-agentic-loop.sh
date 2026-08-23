@@ -6876,7 +6876,7 @@ now=$(date +%s)
 printf '%s\n' "$((now - 120))" > "$state_root/workers/30.started"
 printf 'worktree-ready\n' > "$state_root/workers/30.phase"
 printf '111\t%s\t%s\n' "$((now + 300))" "$now" > "$state_root/workers/30.lease"
-printf 'pr-open\tagent/issue-30\t6\thttps://github.example/acme/installed-project/pull/6\topen\tsuccess\t0\t0\n' > "$state_root/workers/30.resume"
+printf 'pr-open\037agent/issue-30\0376\037https://github.example/acme/installed-project/pull/6\037open\037success\0370\0370\n' > "$state_root/workers/30.resume"
 printf '%s\n' "$((now - 10))" > "$state_root/workers/31.started"
 printf 'fresh\n' > "$state_root/workers/31.phase"
 status_output=$("$target/bin/agentic-loop" status)
@@ -6892,6 +6892,12 @@ multi_json=$("$target/bin/agentic-loop" status --format json)
 [[ $(printf '%s' "$multi_json" | yq -p json '.workers[] | select(.issue == 30) | .pr') -eq 6 ]] || fail 'multi-worker status --format json did not report the cached PR number'
 [[ $(printf '%s' "$multi_json" | yq -p json '.workers[] | select(.issue == 30) | .timeout_at') -eq $((now - 120 + 14400)) ]] || fail 'multi-worker status --format json did not compute the worker-timeout deadline from the default worker_timeout_seconds'
 [[ $(printf '%s' "$multi_json" | yq -p json '.workers[] | select(.issue == 30) | .timeout_exceeded') == false ]] || fail 'multi-worker status --format json falsely reported the worker-timeout deadline as exceeded'
+printf '224 running open none 2026-01-02T00:00:00Z\n' > "$state"
+printf 'pr-open\037agent/issue-224\037\037\037\037\0371\0370\n' > "$state_root/workers/224.resume"
+status_output=$("$target/bin/agentic-loop" status)
+grep -Fq 'pr: none state= checks=unknown' <<< "$status_output" || fail 'empty cached PR fields shifted into a false PR number'
+grep -Fq 'dirty: true diverged: false' <<< "$status_output" || fail 'empty cached PR fields lost dirty/diverged values'
+rm -f "$state_root/workers/224.resume"
 rm -rf "$state_root/workers"
 
 # Scenario: queued Issues are counted, ordered exactly like claim_next
