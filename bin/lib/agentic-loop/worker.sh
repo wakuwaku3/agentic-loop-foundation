@@ -590,6 +590,12 @@ resume_handoff_write() {
 worker_resume_read() {
   local file="$(worker_resume_file "$1")"
   [[ -r $file ]] || return 1
+  # The previous format used tab, which is Bash IFS whitespace and therefore
+  # cannot preserve empty columns.  Never reinterpret such a cache: doing so
+  # could present a later dirty/diverged value as a false PR field.
+  if grep -q $'\t' "$file" 2>/dev/null; then
+    return 1
+  fi
   IFS=$'\037' read -r RESUME_LOCAL_PHASE RESUME_LOCAL_BRANCH RESUME_LOCAL_PR RESUME_LOCAL_PR_URL RESUME_LOCAL_PR_STATE RESUME_LOCAL_CHECKS RESUME_LOCAL_DIRTY RESUME_LOCAL_DIVERGED < "$file"
 }
 

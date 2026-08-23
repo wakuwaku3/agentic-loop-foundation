@@ -673,7 +673,13 @@ status_render_text() {
       fi
       if (( STATUS_RUN_WORKTREE_EXISTS )); then suffix+=" (worktree: $STATUS_RUN_WORKTREE, dirty=${STATUS_RUN_DIRTY:-0}, diverged=${STATUS_RUN_DIVERGED:-0})"
       else suffix+=" (worktree: $STATUS_RUN_WORKTREE なし)"; fi
-      [[ -n $STATUS_RUN_PR ]] && suffix+=" (pr: #$STATUS_RUN_PR state=${STATUS_RUN_PR_STATE:-unknown} checks=${STATUS_RUN_CHECKS:-unknown})"
+      if [[ -n $STATUS_RUN_PR || -n $RESUME_LOCAL_PHASE ]]; then
+        if [[ -n $STATUS_RUN_PR ]]; then
+          suffix+=" (pr: #$STATUS_RUN_PR state=${STATUS_RUN_PR_STATE:-unknown} checks=${STATUS_RUN_CHECKS:-unknown})"
+        else
+          suffix+=" (pr: none state=$STATUS_RUN_PR_STATE checks=${STATUS_RUN_CHECKS:-unknown})"
+        fi
+      fi
       (( STATUS_RUN_LOCAL )) || suffix+=' (worker: 不明。別ホストが担当している可能性があります)'
       printf '#%s %s%s\n' "$issue" "$title" "$suffix"
     done

@@ -6898,6 +6898,11 @@ status_output=$("$target/bin/agentic-loop" status)
 grep -Fq 'pr: none state= checks=unknown' <<< "$status_output" || fail 'empty cached PR fields shifted into a false PR number'
 grep -Fq 'dirty: true diverged: false' <<< "$status_output" || fail 'empty cached PR fields lost dirty/diverged values'
 rm -f "$state_root/workers/224.resume"
+printf 'pr-open\tagent/issue-224\t\t\t\t\t1\t0\n' > "$state_root/workers/224.resume"
+status_output=$("$target/bin/agentic-loop" status)
+! grep -Fq 'pr: #1' <<< "$status_output" || fail 'legacy tab cache was reinterpreted as a PR'
+! grep -Fq 'dirty: true diverged: false' <<< "$status_output" || fail 'legacy tab cache leaked shifted dirty/diverged values'
+rm -f "$state_root/workers/224.resume"
 rm -rf "$state_root/workers"
 
 # Scenario: queued Issues are counted, ordered exactly like claim_next
