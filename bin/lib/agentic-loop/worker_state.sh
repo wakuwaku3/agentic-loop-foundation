@@ -365,7 +365,11 @@ worker_alive() {
   [[ $pid =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null || return 1
   [[ -r /proc/$pid/cmdline ]] || return 1
   command_line=$(tr '\0' ' ' < "/proc/$pid/cmdline") || return 1
-  [[ $command_line == "$PROGRAM_PATH _worker $issue "* ]]
+  # A worker started through the script's shebang has argv[0]=bash and the
+  # absolute program path in argv[1].  Accept both forms while keeping the
+  # program path and complete Issue number as token boundaries.
+  [[ $command_line == "$PROGRAM_PATH _worker $issue "* ||
+    $command_line == *"$PROGRAM_PATH _worker $issue "* ]]
 }
 
 
