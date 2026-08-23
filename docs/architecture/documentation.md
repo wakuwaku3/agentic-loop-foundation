@@ -174,7 +174,7 @@ white-slate branchでは、長い会話を引き継ぎ媒体にせず、次をv2
 
 - product／architecture／decision documents
 - component ownershipとcontract dependency manifest
-- task ledgerとprovider-neutral work packet
+- canonical task stateとprovider-neutral work packet
 - validation evidenceのindexとrelease candidate manifest
 - cutover／rollback runbook
 

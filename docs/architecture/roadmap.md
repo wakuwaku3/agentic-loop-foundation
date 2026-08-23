@@ -38,7 +38,7 @@ docs/stable/
 docs/preview/
 docs/architecture/
 test/journeys/
-.agents/v2/                  # task ledger、work packet、evidence index
+.agents/v2/                  # canonical task state、work packet、evidence index
 .codex/agents/               # bootstrap期間のproject-scoped agent role
 ```
 
@@ -327,4 +327,4 @@ branch 作成と大量削除の実行時には、対象 branch、worktree、復�
 - 変更済み file、成功／失敗 evidence、現在の blocker
 - 次の agent が安全に始められる一つの action
 
-分析、詳細設計、実装、検証の各境界で checkpoint commit を作る。agent が token 枯渇、停止、障害で終了しても、次の agent は branch、task ledger、evidence、必要なら限定された dirty diff だけから再開できなければならない。raw conversation transcript は補助情報であり正本にしない。
+分析、詳細設計、実装、検証の各境界で checkpoint commit を作る。agent が token 枯渇、停止、障害で終了しても、次の agent は branch、canonical task state、Evidence index、必要なら限定された dirty diff だけから再開できなければならない。raw conversation transcript は補助情報であり正本にしない。

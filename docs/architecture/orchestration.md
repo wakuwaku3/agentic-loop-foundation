@@ -74,4 +74,4 @@ Sol が task dependency DAG を作り、独立 task の Design Packet を Terra 
 
 ## 9. Bootstrap期間の制約
 
-Codex subagentの並列実行は速度向上の手段であり、無条件には使わない。read-heavyな独立調査は並列化し、write-heavyな作業はcomponentごとに同時writerを一つに制限する。各agentの終了前に結果をtask ledgerへcheckpointし、親threadの要約だけに依存しない。
+Codex subagentの並列実行は速度向上の手段であり、無条件には使わない。read-heavyな独立調査は並列化し、write-heavyな作業はcomponentごとに同時writerを一つに制限する。各agentの終了前に結果をcanonical task stateとEvidence indexへcheckpointし、親threadの要約だけに依存しない。

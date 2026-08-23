@@ -1,0 +1,1 @@
+{"schema_version":"v1","kind":"evidence-index","release_eligible":false,"entries":[{"id":"ev-v2-023-contracts","task_id":"V2-023","component":"contracts","result":"passed","release_eligible":false,"evidence_hash":"1a48de3d4eced73d795254769b51e01f410d1996028691cf37b48172e4c6f8c4","path":".agents/v2/evidence/V2-023-contracts.json"}]}

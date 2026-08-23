@@ -1,6 +1,7 @@
 package contracts
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"net/url"
@@ -20,7 +21,195 @@ func Validate(schema, value []byte, resolver func(string) ([]byte, error)) error
 	if err := json.Unmarshal(value, &v); err != nil {
 		return fmt.Errorf("value: %w", err)
 	}
-	return validate(s, v, "", resolver)
+	if err := validate(s, v, "", resolver); err != nil {
+		return err
+	}
+	obj, ok := v.(map[string]any)
+	if !ok {
+		return nil
+	}
+	switch obj["kind"] {
+	case "canonical-task-state":
+		return validateTaskState(obj)
+	case "evidence-index", "historical-evidence-index":
+		return validateEvidenceIndex(obj)
+	}
+	return nil
+}
+
+func validateTaskState(state map[string]any) error {
+	taskID := stringValue(state["task_id"])
+	if state["id"] != "ts-"+strings.ToLower(taskID) {
+		return fmt.Errorf("/id: does not match task_id")
+	}
+	for _, field := range []string{"dependencies", "repair_of"} {
+		if raw, present := state[field]; present {
+			if err := uniqueTaskIDs(raw, taskID, "/"+field); err != nil {
+				return err
+			}
+		}
+	}
+	if state["status"] == "blocked" && stringValue(state["block_reason"]) == "" {
+		return fmt.Errorf("/block_reason: required for blocked state")
+	}
+	if err := checkBudget(state["retry_budget"], "/retry_budget"); err != nil {
+		return err
+	}
+	transitions, ok := state["transitions"].([]any)
+	if !ok || len(transitions) == 0 {
+		return fmt.Errorf("/transitions: empty")
+	}
+	var previous string
+	var previousBudget map[string]any
+	for i, raw := range transitions {
+		transition, ok := raw.(map[string]any)
+		if !ok {
+			return fmt.Errorf("/transitions/%d: invalid", i)
+		}
+		sequence, ok := transition["sequence"].(float64)
+		if !ok || int(sequence) != i+1 {
+			return fmt.Errorf("/transitions/%d/sequence: must be contiguous", i)
+		}
+		from, to := transition["from_status"], stringValue(transition["to_status"])
+		if i == 0 {
+			if from != nil {
+				return fmt.Errorf("/transitions/0/from_status: must be null")
+			}
+		} else {
+			if stringValue(from) != previous {
+				return fmt.Errorf("/transitions/%d/from_status: disconnected", i)
+			}
+			if !allowedTaskTransition(previous, to) {
+				return fmt.Errorf("/transitions/%d: illegal %s -> %s", i, previous, to)
+			}
+		}
+		for _, refs := range []struct{ field, hash string }{{"input_refs", "input_hash"}, {"output_refs", "output_hash"}} {
+			digest, err := refsDigest(transition[refs.field])
+			if err != nil {
+				return fmt.Errorf("/transitions/%d/%s: %w", i, refs.field, err)
+			}
+			if digest != stringValue(transition[refs.hash]) {
+				return fmt.Errorf("/transitions/%d/%s: does not match refs", i, refs.hash)
+			}
+		}
+		budget, ok := transition["retry_budget"].(map[string]any)
+		if !ok {
+			return fmt.Errorf("/transitions/%d/retry_budget: invalid", i)
+		}
+		if err := checkBudget(budget, fmt.Sprintf("/transitions/%d/retry_budget", i)); err != nil {
+			return err
+		}
+		if previousBudget != nil && (number(budget["max_attempts"]) != number(previousBudget["max_attempts"]) || number(budget["attempts_used"]) < number(previousBudget["attempts_used"])) {
+			return fmt.Errorf("/transitions/%d/retry_budget: cannot restore attempts", i)
+		}
+		previous, previousBudget = to, budget
+	}
+	last := transitions[len(transitions)-1].(map[string]any)
+	for _, field := range []string{"status", "actor", "input_refs", "input_hash", "output_refs", "output_hash", "owner", "next_owner", "retry_budget"} {
+		lastField := field
+		if field == "status" {
+			lastField = "to_status"
+		}
+		if !equal(state[field], last[lastField]) {
+			return fmt.Errorf("/%s: must project the last transition", field)
+		}
+	}
+	status := stringValue(state["status"])
+	if (status == "complete" || status == "failed") && state["next_owner"] != nil {
+		return fmt.Errorf("/next_owner: terminal state")
+	}
+	if status == "failed" && number(state["retry_budget"].(map[string]any)["remaining"]) != 0 {
+		return fmt.Errorf("/retry_budget: failed state has remaining attempts")
+	}
+	return nil
+}
+
+func uniqueTaskIDs(raw any, self, path string) error {
+	values, ok := raw.([]any)
+	if !ok {
+		return fmt.Errorf("%s: invalid", path)
+	}
+	seen := map[string]bool{}
+	for _, rawID := range values {
+		id := stringValue(rawID)
+		if id == "" || id == self || seen[id] {
+			return fmt.Errorf("%s: empty, self, or duplicate reference", path)
+		}
+		seen[id] = true
+	}
+	return nil
+}
+
+func refsDigest(raw any) (string, error) {
+	values, ok := raw.([]any)
+	if !ok {
+		return "", fmt.Errorf("invalid")
+	}
+	refs := make([]string, len(values))
+	seen := map[string]bool{}
+	for i, rawRef := range values {
+		ref, ok := rawRef.(string)
+		if !ok || ref == "" || seen[ref] {
+			return "", fmt.Errorf("empty or duplicate reference")
+		}
+		seen[ref] = true
+		refs[i] = ref
+	}
+	b, err := json.Marshal(refs)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%x", sha256.Sum256(b)), nil
+}
+
+func checkBudget(raw any, path string) error {
+	budget, ok := raw.(map[string]any)
+	if !ok {
+		return fmt.Errorf("%s: invalid", path)
+	}
+	max, used, remaining := number(budget["max_attempts"]), number(budget["attempts_used"]), number(budget["remaining"])
+	if max < 1 || used < 0 || used > max || remaining != max-used {
+		return fmt.Errorf("%s: inconsistent", path)
+	}
+	return nil
+}
+
+func allowedTaskTransition(from, to string) bool {
+	switch from {
+	case "queued":
+		return to == "running" || to == "blocked" || to == "failed"
+	case "running":
+		return to == "complete" || to == "blocked" || to == "failed"
+	case "blocked":
+		return to == "queued" || to == "failed"
+	}
+	return false
+}
+
+func validateEvidenceIndex(index map[string]any) error {
+	entries, ok := index["entries"].([]any)
+	if !ok {
+		return fmt.Errorf("/entries: invalid")
+	}
+	seen := map[string]bool{}
+	for i, raw := range entries {
+		entry, ok := raw.(map[string]any)
+		if !ok || stringValue(entry["id"]) == "" || seen[stringValue(entry["id"])] {
+			return fmt.Errorf("/entries/%d: duplicate or invalid id", i)
+		}
+		seen[stringValue(entry["id"])] = true
+	}
+	return nil
+}
+
+func stringValue(value any) string {
+	text, _ := value.(string)
+	return text
+}
+
+func number(value any) float64 {
+	n, _ := value.(float64)
+	return n
 }
 
 func validate(s, v any, path string, resolver func(string) ([]byte, error)) error {
@@ -55,6 +244,17 @@ func validate(s, v any, path string, resolver func(string) ([]byte, error)) erro
 	}
 	if typ, ok := m["type"].(string); ok && !typeOK(typ, v) {
 		return fmt.Errorf("%s: want %s", path, typ)
+	}
+	if types, ok := m["type"].([]any); ok {
+		matched := false
+		for _, rawType := range types {
+			if typ, ok := rawType.(string); ok && typeOK(typ, v) {
+				matched = true
+			}
+		}
+		if !matched {
+			return fmt.Errorf("%s: want one of declared types", path)
+		}
 	}
 	if req, ok := m["required"].([]any); ok {
 		obj, isObj := v.(map[string]any)
