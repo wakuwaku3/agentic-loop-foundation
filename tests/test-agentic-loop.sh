@@ -3227,6 +3227,23 @@ assert_contains "$TEST_ROOT/decomposition-calls.log" "issues/$child_b/dependenci
 grep -q -- '-f sub_issue_id=\|-f issue_id=' "$TEST_ROOT/decomposition-calls.log" && fail 'decomposition_materialize still sends sub_issue_id/issue_id as an untyped -f string parameter'
 grep -Eq -- "issue_id=($child_a|$child_b)([^0-9]|\$)" "$TEST_ROOT/decomposition-calls.log" && fail 'decomposition_materialize sent a child Issue number instead of its database id'
 
+# DAG validation must reject forward references, including cycles and a
+# self-dependency, before materialization can create native dependencies.
+for invalid_decomposition_manifest in \
+  '{"schema":1,"mode":"children","integration_acceptance_criteria":"integration ok","children":[{"key":"child-a","title":"Child A","purpose":"purpose a","acceptance_criteria":"crit a","scope":"paths=docs/child-a","depends_on":["child-b"]},{"key":"child-b","title":"Child B","purpose":"purpose b","acceptance_criteria":"crit b","scope":"paths=docs/child-b","depends_on":["child-a"]}]}' \
+  '{"schema":1,"mode":"children","integration_acceptance_criteria":"integration ok","children":[{"key":"child-a","title":"Child A","purpose":"purpose a","acceptance_criteria":"crit a","scope":"paths=docs/child-a","depends_on":["child-a"]},{"key":"child-b","title":"Child B","purpose":"purpose b","acceptance_criteria":"crit b","scope":"paths=docs/child-b","depends_on":[]}]}'; do
+  printf '701 running open\n' > "$state"
+  : > "$FAKE_GH_ROOT/$state_key.comments"
+  calls_before=$(wc -l < "$FAKE_GH_ROOT/calls")
+  if FAKE_CODEX_RESULT=$'計画: 無効な分解\n```agentic-loop:decomposition\n'"$invalid_decomposition_manifest"$'\n```' \
+    "$target/bin/agentic-loop" _worker 701 decomposition-invalid-worker; then
+    fail 'invalid decomposition manifest did not fail the worker'
+  fi
+  grep -Eq '^701 failed open' "$state" || fail 'invalid decomposition manifest was accepted'
+  tail -n "+$((calls_before + 1))" "$FAKE_GH_ROOT/calls" > "$TEST_ROOT/decomposition-invalid-calls.log"
+  grep -q '/sub_issues\|/dependencies/blocked_by' "$TEST_ROOT/decomposition-invalid-calls.log" && fail 'invalid decomposition manifest reached native dependency materialization'
+done
+
 # doctor rejects an invalid unknown_scope value.
 cp "$target/.agentic-loop.toml" "$target/.agentic-loop.toml.valid"
 printf '[queue]\nunknown_scope = "sometimes"\n' > "$target/.agentic-loop.toml"

@@ -252,9 +252,13 @@ decomposition_validate() {
   done < <(yq -p json -r '.children[].depends_on[]? // ""' <<< "$manifest" 2>/dev/null)
   # A dependency can only point to an earlier key: this is both a cheap DAG
   # proof and makes materialization/retry deterministic.
-  local seen=''
+  local seen='' deps
   while IFS= read -r key; do
-    while IFS= read -r dep; do [[ -z $dep ]] || grep -Fxq "$dep" <<< "$seen" || return 1; done < <(yq -p json -r --arg k "$key" '.children[] | select(.key == $k) | .depends_on[]? // ""' <<< "$manifest")
+    # mikefarah/yq does not support jq's --arg.  Pass the key through its
+    # documented env() expression and capture the command so a yq failure
+    # cannot be hidden by process substitution.
+    deps=$(k="$key" yq -p json -r '.children[] | select(.key == env(k)) | .depends_on[]? // ""' <<< "$manifest" 2>/dev/null) || return 1
+    while IFS= read -r dep; do [[ -z $dep ]] || grep -Fxq "$dep" <<< "$seen" || return 1; done <<< "$deps"
     seen+="$key"$'\n'
   done <<< "$keys"
 }
