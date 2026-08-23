@@ -6896,12 +6896,17 @@ printf '224 running open none 2026-01-02T00:00:00Z\n' > "$state"
 printf 'pr-open\037agent/issue-224\037\037\037\037\0371\0370\n' > "$state_root/workers/224.resume"
 status_output=$("$target/bin/agentic-loop" status)
 grep -Fq 'pr: none state= checks=unknown' <<< "$status_output" || fail 'empty cached PR fields shifted into a false PR number'
-grep -Fq 'dirty=1, diverged=0' <<< "$status_output" || fail 'empty cached PR fields lost dirty/diverged values'
+status_json=$("$target/bin/agentic-loop" status --format json)
+[[ $(printf '%s' "$status_json" | yq -p json '.workers[] | select(.issue == 224) | .dirty') == true ]] || fail 'empty cached PR fields lost dirty value'
+[[ $(printf '%s' "$status_json" | yq -p json '.workers[] | select(.issue == 224) | .diverged') == false ]] || fail 'empty cached PR fields lost diverged value'
 rm -f "$state_root/workers/224.resume"
 printf 'pr-open\tagent/issue-224\t\t\t\t\t1\t0\n' > "$state_root/workers/224.resume"
 status_output=$("$target/bin/agentic-loop" status)
 ! grep -Fq 'pr: #1' <<< "$status_output" || fail 'legacy tab cache was reinterpreted as a PR'
-! grep -Fq 'dirty=1, diverged=0' <<< "$status_output" || fail 'legacy tab cache leaked shifted dirty/diverged values'
+status_json=$("$target/bin/agentic-loop" status --format json)
+[[ $(printf '%s' "$status_json" | yq -p json '.workers[] | select(.issue == 224) | .pr') == null ]] || fail 'legacy tab cache leaked shifted PR value'
+[[ $(printf '%s' "$status_json" | yq -p json '.workers[] | select(.issue == 224) | .dirty') == false ]] || fail 'legacy tab cache leaked shifted dirty value'
+[[ $(printf '%s' "$status_json" | yq -p json '.workers[] | select(.issue == 224) | .diverged') == false ]] || fail 'legacy tab cache leaked shifted diverged value'
 rm -f "$state_root/workers/224.resume"
 rm -rf "$state_root/workers"
 
