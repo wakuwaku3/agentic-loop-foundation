@@ -2287,7 +2287,8 @@ printf '7 queued open none 2026-01-01T00:00:00Z\n' > "$state"
 : > "$FAKE_GH_ROOT/$state_key.comments"
 : > "$FAKE_GH_ROOT/claude-calls"
 AGENT_PROVIDER=claude AGENTIC_LOOP_RUN_ONCE=1 FAKE_CLAUDE_SLEEP=1 "$target/bin/agentic-loop" _supervise
-grep -Eq '^7 completed closed' "$state" || fail 'claude provider did not complete the Issue'
+wait_for 'claude provider completed the Issue' --timeout 15 grep -Eq '^7 completed closed' "$state" \
+  || fail 'claude provider did not complete the Issue'
 assert_contains "$FAKE_GH_ROOT/claude-calls" '--print' 'claude worker did not run non-interactively'
 assert_contains "$FAKE_GH_ROOT/claude-calls" '--dangerously-skip-permissions' 'claude worker did not skip permission prompts'
 assert_contains "$FAKE_GH_ROOT/claude-calls" "--add-dir $target/.git" 'claude worker did not grant its exact Git common directory'
@@ -2311,7 +2312,8 @@ rm -f "$FAKE_GH_ROOT/claude-json-count"
 printf 'stale raw content with rate limit\n' > "$state_root/issue-270-result.txt.raw.999999"
 printf '{"type":"result"}\n' > "$state_root/issue-270-result.txt.final.999999"
 AGENT_PROVIDER=claude AGENTIC_LOOP_RUN_ONCE=1 FAKE_CLAUDE_SLEEP=1 "$target/bin/agentic-loop" _supervise
-grep -Eq '^270 completed closed' "$state" || fail 'claude provider with stale stage output residue did not complete'
+wait_for 'claude provider completed after stale stage cleanup' --timeout 15 grep -Eq '^270 completed closed' "$state" \
+  || fail 'claude provider with stale stage output residue did not complete'
 [[ ! -e $state_root/issue-270-result.txt.raw.999999 ]] || fail 'stale .raw output from a prior killed stage run was not cleared at stage start'
 [[ ! -e $state_root/issue-270-result.txt.final.999999 ]] || fail 'stale .final output from a prior killed stage run was not cleared at stage start'
 
