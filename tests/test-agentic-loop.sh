@@ -3841,11 +3841,9 @@ for invalid_decomposition_manifest in \
   printf '701 running open\n' > "$state"
   : > "$FAKE_GH_ROOT/$state_key.comments"
   calls_before=$(wc -l < "$FAKE_GH_ROOT/calls")
-  if FAKE_CODEX_RESULT=$'計画: 無効な分解\n```agentic-loop:decomposition\n'"$invalid_decomposition_manifest"$'\n```' \
-    "$target/bin/agentic-loop" _worker 701 decomposition-invalid-worker; then
-    fail 'invalid decomposition manifest did not fail the worker'
-  fi
-  grep -Eq '^701 failed open' "$state" || fail 'invalid decomposition manifest was accepted'
+  FAKE_CODEX_RESULT=$'計画: 無効な分解\n```agentic-loop:decomposition\n'"$invalid_decomposition_manifest"$'\n```' \
+    "$target/bin/agentic-loop" _worker 701 decomposition-invalid-worker
+  grep -Eq '^701 needs-input open' "$state" || fail 'invalid decomposition manifest was accepted'
   tail -n "+$((calls_before + 1))" "$FAKE_GH_ROOT/calls" > "$TEST_ROOT/decomposition-invalid-calls.log"
   grep -q '/sub_issues\|/dependencies/blocked_by' "$TEST_ROOT/decomposition-invalid-calls.log" && fail 'invalid decomposition manifest reached native dependency materialization'
 done
