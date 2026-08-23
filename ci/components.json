@@ -24,6 +24,6 @@
     {"id":"environment","roots":["devbox.json","devbox.lock","go.mod","go.sum","Makefile","scripts/**","firebase.json",".github/**","Containerfile"],"public_contracts":[],"contract_dependencies":[],"dependencies":[],"check":{"runner":"make","target":"component-tooling"}},
     {"id":"infra","roots":["infra/**","internal/quota/**"],"public_contracts":[],"contract_dependencies":[],"dependencies":["store-firestore"],"check":{"runner":"make","target":"component-infra"}},
     {"id":"repository-meta","roots":[".codex/**"],"public_contracts":[],"contract_dependencies":[],"dependencies":[],"check":{"runner":"make","target":"component-tooling"}},
-    {"id":"task-ledger","roots":[".agents/**"],"public_contracts":[],"contract_dependencies":[],"dependencies":[],"check":{"runner":"make","target":"component-tooling"}}
+    {"id":"task-ledger","roots":[".agents/**"],"public_contracts":[],"contract_dependencies":["contracts/schemas/task-state.json","contracts/schemas/task-state-transition.json","contracts/schemas/task-state-retry.json","contracts/schemas/evidence-index.json","contracts/schemas/historical-evidence-index.json","contracts/schemas/evidence.json"],"dependencies":["contracts"],"check":{"runner":"make","target":"component-contracts"}}
   ]
 }
