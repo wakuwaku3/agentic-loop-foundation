@@ -59,7 +59,7 @@ func TestCanonicalTaskStateMigration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	expectedIDs := []string{"V2-000", "V2-001", "V2-002", "V2-003", "V2-004", "V2-005", "V2-006", "V2-007", "V2-008", "V2-009", "V2-023", "V2-024"}
+	expectedIDs := []string{"V2-000", "V2-001", "V2-002", "V2-003", "V2-004", "V2-005", "V2-006", "V2-007", "V2-008", "V2-009", "V2-023", "V2-024", "V2-025"}
 	if got := taskIDsFromPaths(paths); !reflect.DeepEqual(got, expectedIDs) {
 		t.Fatalf("canonical task-state files = %v, want %v", got, expectedIDs)
 	}
@@ -76,7 +76,7 @@ func TestCanonicalTaskStateMigration(t *testing.T) {
 		states[id] = state
 	}
 	assertDependencyDAG(t, states)
-	assertStringSlice(t, states["V2-006"]["dependencies"], []string{"V2-024", "V2-008", "V2-009"})
+	assertStringSlice(t, states["V2-006"]["dependencies"], []string{"V2-025", "V2-008", "V2-009"})
 	if states["V2-006"]["next_owner"] != "sol" {
 		t.Error("V2-006 must be blocked for sol")
 	}
@@ -84,7 +84,7 @@ func TestCanonicalTaskStateMigration(t *testing.T) {
 		if states[id]["status"] != "blocked" || states[id]["next_owner"] != "terra" {
 			t.Errorf("%s must be blocked for terra", id)
 		}
-		assertStringSlice(t, states[id]["dependencies"], []string{"V2-024"})
+		assertStringSlice(t, states[id]["dependencies"], []string{"V2-025"})
 	}
 	for _, id := range []string{"V2-007", "V2-023"} {
 		state := states[id]
@@ -97,11 +97,19 @@ func TestCanonicalTaskStateMigration(t *testing.T) {
 	v24 := states["V2-024"]
 	assertStringSlice(t, v24["dependencies"], []string{})
 	assertStringSlice(t, v24["repair_of"], []string{"V2-007", "V2-023"})
-	assertBudget(t, v24, 1, 1, 0)
-	transitions := v24["transitions"].([]any)
-	if got := []string{transitions[0].(map[string]any)["to_status"].(string), transitions[1].(map[string]any)["to_status"].(string), transitions[2].(map[string]any)["to_status"].(string)}; !reflect.DeepEqual(got, []string{"queued", "running", "complete"}) {
-		t.Errorf("V2-024 transitions = %v", got)
+	if v24["status"] != "failed" || v24["actor"] != "terra" || v24["next_owner"] != nil {
+		t.Error("V2-024 must be a terminal terra failure")
 	}
+	assertBudget(t, v24, 1, 1, 0)
+	v25 := states["V2-025"]
+	assertStringSlice(t, v25["dependencies"], []string{})
+	assertStringSlice(t, v25["repair_of"], []string{"V2-024"})
+	assertBudget(t, v25, 1, 1, 0)
+	transitions := v25["transitions"].([]any)
+	if got := []string{transitions[0].(map[string]any)["to_status"].(string), transitions[1].(map[string]any)["to_status"].(string), transitions[2].(map[string]any)["to_status"].(string)}; !reflect.DeepEqual(got, []string{"queued", "running", "complete"}) {
+		t.Errorf("V2-025 transitions = %v", got)
+	}
+	assertStringSlice(t, v25["output_refs"], []string{"V2-025", "ev-v2-025-contracts"})
 	if _, err := os.Stat(filepath.Join(root, ".agents", "v2", "records")); !os.IsNotExist(err) {
 		Fatalf(t, "legacy records path remains: %v", err)
 	}
