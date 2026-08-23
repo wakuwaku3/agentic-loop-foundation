@@ -101,24 +101,37 @@ readonly DECOMPOSITION_MAX_DESCENDANTS=20
 # legitimate work (plan+exec+PR review can easily take an hour); doctor warns
 # but does not fail, since some deployments may accept the risk deliberately.
 readonly WORKER_TIMEOUT_MIN_SAFE_SECONDS=1800
-# Local-only progress observability (see docs/decisions/0005): a worker marks
-# its stage boundaries in workers/<issue>.progress and mirrors a safe enum row
-# into events.log; status reads the markers while tail and status --watch stream
-# events.log (the worker log's mtime is a secondary stall signal in status),
-# all with zero GitHub calls. A worker whose last progress is older than
-# STATUS_STALL_SECONDS is surfaced as stalled (observation only -- automatic
-# termination stays the worker_timeout_seconds domain of ADR 0006).
-readonly STATUS_STALL_SECONDS=300
+# Local-only progress observability (see docs/decisions/0005 and 0031): a
+# worker marks its stage boundaries in workers/<issue>.progress and mirrors a
+# safe enum row into events.log; status reads the markers while tail and
+# status --watch stream events.log (a stage output file's mtime is a secondary
+# stall signal in status), all with zero GitHub calls. A worker whose last
+# progress is older than its stage's stall threshold (STALL_SECONDS for
+# non-provider stages, PROVIDER_STALL_SECONDS for plan/exec/replan -- see
+# status_stall_threshold) is surfaced as stalled (observation only --
+# automatic termination stays the worker_timeout_seconds domain of ADR 0006).
 # Legacy `status --watch [N]` interval: still parsed and validated for backward
 # compatibility, but ignored because --watch now follows events.log instead of
 # re-rendering on a timer.
 readonly STATUS_WATCH_DEFAULT_SECONDS=2
 readonly STATUS_GITHUB_TTL_SECONDS=60
 readonly TAIL_MAX_LINES=100
+# Calibration of stall thresholds against locally-observed stage durations
+# (Issue #280, ADR 0032): events_stage_duration_samples reads at most this
+# many of the newest events.log lines (host-local, zero GitHub calls -- see
+# docs/policies/resource-scalability.md's bound requirement).
+readonly EVENTS_CALIBRATION_MAX_LINES=2000
+# Below this many samples for a band, doctor and metrics report the band as
+# unmeasured rather than risk a p90 estimate from too few points.
+readonly CALIBRATION_MIN_SAMPLES=20
 # Only enum stages are persisted, so a provider's free-form text can never be
 # smuggled into local state or the events stream (secret boundary).
-readonly PROGRESS_STAGES=(claim resume worktree plan preflight exec replan checks review merge cleanup 'done' failed needs-input queued blocked stopped)
+readonly PROGRESS_STAGES=(claim resume worktree plan plan-failed preflight exec replan checks review merge cleanup 'done' failed needs-input queued blocked stopped)
 readonly EVENTS_LOG="$STATE_ROOT/events.log"
+readonly SUPERVISOR_CONTEXT_FILE="$STATE_ROOT/supervisor.context"
+readonly SUPERVISOR_LAST_EXIT_FILE="$STATE_ROOT/supervisor.last-exit"
+readonly SUPERVISOR_TERMINATIONS_LOG="$STATE_ROOT/supervisor-terminations.log"
+readonly SUPERVISOR_TERMINATIONS_MAX_LINES=100
 readonly PROJECT_OPERATION_BUDGET=25
 readonly PROJECT_RECONCILE_BATCH=10
 
@@ -140,6 +153,13 @@ MAX_ATTEMPTS=3
 RETRY_COOLDOWN_SECONDS=600
 WORKER_TIMEOUT_SECONDS=14400
 WORKER_ORPHAN_GRACE_SECONDS=120
+# Stall thresholds (see docs/decisions/0031): non-provider stages (claim,
+# worktree, checks, merge, ...) use STALL_SECONDS; the provider stages
+# (plan/exec/replan) that block on one long CLI call use the wider
+# PROVIDER_STALL_SECONDS instead (status_stall_threshold picks between them).
+# Zero disables stall detection for that band.
+STALL_SECONDS=300
+PROVIDER_STALL_SECONDS=3600
 UNKNOWN_SCOPE=isolated
 EXCLUSIVE_PATHS=''
 TRACEABILITY=off
@@ -202,6 +222,8 @@ source "$SCRIPT_ROOT/bin/lib/agentic-loop/trace.sh"
 source "$SCRIPT_ROOT/bin/lib/agentic-loop/supervisor.sh"
 # shellcheck source=lib/agentic-loop/worker.sh
 source "$SCRIPT_ROOT/bin/lib/agentic-loop/worker.sh"
+# shellcheck source=lib/agentic-loop/smoke.sh
+source "$SCRIPT_ROOT/bin/lib/agentic-loop/smoke.sh"
 
 # Resolve configuration once, up front, for every command. doctor tolerates
 # an unreadable config so it can diagnose the very environment that broke it.
@@ -209,7 +231,7 @@ load_config || { [[ ${1:-} == doctor ]] || fail "$CONFIG_ERROR"; }
 
 usage() {
   cat >&2 <<EOF
-Usage: $PROGRAM_NAME {setup|sync-issue ISSUE|dispose ISSUE --reason cancelled|superseded|duplicate|merged [--target ISSUE]|resume ISSUE|pause ISSUE [--reason TEXT]|abort ISSUE [--reason TEXT]|priority ISSUE N|start|stop|status [--format json] [--watch [N]]|doctor [--format json]|metrics [--days N] [--as-of EPOCH] [--format json]|tail [--issue N] [--follow]|trace ISSUE [--format json]|trace --audit [--days N] [--format json]|capabilities [--format json]|preflight ISSUE [--format json]|preflight ISSUE --approve --token TOKEN [--note TEXT]|workload [--format json]|flaky [--format json]|flaky report [--record PATH]|postmortem create --kind K --subject S --title T [--summary S] [--evidence-file PATH] [--category C]|postmortem link ISSUE ACTION_ISSUE...|postmortem status ISSUE|postmortem complete ISSUE|upgrade [--source PATH|--revision SHA] [--apply] [--approve] [--rollback] [--skip-verify] [--overwrite PATH]... [--format json]}
+Usage: $PROGRAM_NAME {setup|sync-issue ISSUE|dispose ISSUE --reason cancelled|superseded|duplicate|merged [--target ISSUE]|resume ISSUE|pause ISSUE [--reason TEXT]|abort ISSUE [--reason TEXT]|priority ISSUE N|start|stop|status [--format json] [--watch [N]]|doctor [--format json]|metrics [--days N] [--as-of EPOCH] [--format json]|tail [--issue N] [--follow]|trace ISSUE [--format json]|trace --audit [--days N] [--format json]|capabilities [--format json]|preflight ISSUE [--format json]|preflight ISSUE --approve --token TOKEN [--note TEXT]|workload [--format json]|flaky [--format json]|flaky report [--record PATH]|postmortem create --kind K --subject S --title T [--summary S] [--evidence-file PATH] [--category C]|postmortem link ISSUE ACTION_ISSUE...|postmortem status ISSUE|postmortem complete ISSUE|upgrade [--source PATH|--revision SHA] [--apply] [--approve] [--rollback] [--skip-verify] [--overwrite PATH]... [--format json]|smoke [--issue N]}
 
   setup   Create or reuse this repository's labels and Project
   sync-issue  Add one Issue to the Project now, or queue a retry
@@ -233,6 +255,7 @@ Usage: $PROGRAM_NAME {setup|sync-issue ISSUE|dispose ISSUE --reason cancelled|su
   flaky   Read-only flaky-test registry status (exit 1 on an expired or invalid tests/flaky-registry.toml entry); flaky report creates/reuses repair Issues from the last run-e2e.sh record
   postmortem  Closed-loop postmortem learning (see docs/policies/postmortem.md, docs/decisions/0026-postmortem-closed-loop.md): create (dedup-checked, explicit request), link (native sub-issue + dependency to action items, moves to agent:blocked), status (read-only action-item completion report), complete (gate: all action items verified + body filled in; marks the Issue ready for worker.sh's terminal close)
   upgrade Preview (default) or apply a Foundation update; see docs/operations/upgrade.md
+  smoke   Host-shell-only check against the real GitHub API and provider CLI (never part of check/CI/merge gate; see docs/policies/validation-harness.md); [--issue N] overrides the default target
 EOF
 }
 
@@ -258,6 +281,7 @@ main() {
     flaky) cmd_flaky "${@:2}" ;;
     postmortem) cmd_postmortem "${@:2}" ;;
     upgrade) cmd_upgrade "$@" ;;
+    smoke) cmd_smoke "${@:2}" ;;
     _service) [[ $# -eq 1 ]] || exit 2; cmd_service ;;
     _supervise) supervise ;;
     # A single synchronous reap_orphan_workers pass, with no polling loop
@@ -275,6 +299,7 @@ main() {
     # live poll loop's wall-clock cadence.
     _prune-worktrees) prune_residual_worktrees ;;
     _pick-tier) [[ $# -eq 2 ]] || exit 2; agent_pick_tier "$2" || exit $? ;;
+    _timing-check) cmd_timing_check "$@" ;;
     _worker) [[ $# -eq 3 ]] || exit 2; worker "$2" "$3" ;;
     *) usage; exit 2 ;;
   esac

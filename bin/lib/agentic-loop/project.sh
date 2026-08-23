@@ -18,12 +18,13 @@ queue_project_sync() {
   # This file is deliberately only a wake-up hint.  Desired Project values are
   # never persisted locally: they are derived from a fresh GitHub Issue read
   # immediately before a mutation.
-  local hint=$1 issue occurrences
+  local hint=$1 issue occurrences was_empty=0 appended=0
   if [[ $hint =~ ^([a-z-]+[[:space:]]+)?([1-9][0-9]*) ]]; then issue=${BASH_REMATCH[2]};
   elif [[ $hint =~ /issues/([1-9][0-9]*)$ ]]; then issue=${BASH_REMATCH[1]};
   else return 0; fi
   mkdir -p "$STATE_ROOT"
   ( flock 9
+    [[ -s $STATE_ROOT/project-pending ]] || was_empty=1
     occurrences=$(grep -Fxc -- "$issue" "$STATE_ROOT/project-pending" 2>/dev/null || true); occurrences=${occurrences:-0}
     # An entry being reconciled remains in project-pending.  A second enqueue
     # for it is deliberately retained (but capped at one extra copy, not
@@ -33,10 +34,31 @@ queue_project_sync() {
     if grep -Fxq -- "$issue" "$STATE_ROOT/project-pending.inflight" 2>/dev/null; then
       if (( occurrences < 2 )); then
         printf '%s\n' "$issue" >> "$STATE_ROOT/project-pending"
+        appended=1
       fi
     elif (( occurrences == 0 )); then
       printf '%s\n' "$issue" >> "$STATE_ROOT/project-pending"
+      appended=1
     fi
+    # .since records when the pending queue first became non-empty, not this
+    # entry's own timestamp, so `status` can show elapsed time against the
+    # oldest unresolved retry instead of resetting on every enqueue/ack (see
+    # docs/decisions/0005).
+    if (( appended )) && (( was_empty )); then date +%s > "$STATE_ROOT/project-pending.since"; fi
+  ) 9> "$STATE_ROOT/project-pending.lock"
+}
+
+
+# A probe is a best-effort drift check, not a retry.  Keeping it separate from
+# project-pending prevents the normal open-Issue drift scan from making status
+# report a permanently non-empty retry queue.
+queue_project_probe() {
+  local issue=$1
+  [[ $issue =~ ^[1-9][0-9]*$ ]] || return 0
+  mkdir -p "$STATE_ROOT"
+  ( flock 9
+    grep -Fxq -- "$issue" "$STATE_ROOT/project-probes" 2>/dev/null ||
+      printf '%s\n' "$issue" >> "$STATE_ROOT/project-probes"
   ) 9> "$STATE_ROOT/project-pending.lock"
 }
 
@@ -70,6 +92,28 @@ load_project_context() {
 }
 
 
+# `pageInfo` is a field of the projectItems *connection*, never of the
+# ProjectV2Item nodes it returns.  Nesting it inside nodes{} made every call
+# fail with "Field 'pageInfo' doesn't exist on type 'ProjectV2Item'", so
+# load_project_content always returned 1 and project-pending never drained
+# (#268).  Kept as a function so the query structure is testable without a
+# live GraphQL call.
+project_content_query() {
+  printf '%s' 'query($owner:String!,$repo:String!,$number:Int!,$cursor:String){repository(owner:$owner,name:$repo){content:'"$1"'(number:$number){projectItems(first:20,after:$cursor,includeArchived:false){nodes{id project{id} fieldValues(first:20){nodes{... on ProjectV2ItemFieldSingleSelectValue{name field{... on ProjectV2SingleSelectField{name}}} ... on ProjectV2ItemFieldTextValue{text field{... on ProjectV2Field{name}}}}}} pageInfo{hasNextPage endCursor}}}}}'
+}
+
+
+# Reads the connection-level pageInfo the query above selects: one \x1f-joined
+# row for the item that belongs to $1 (the Project id), then a NEXT<US><cursor>
+# / END trailer.  A GraphQL `errors` payload is turned into a jq error so the
+# caller sees a retryable failure, never an empty "not a member" result.  The
+# outer if/else needs its own `end`: without it the program does not even
+# compile, which was the second half of #268.
+project_content_jq() {
+  printf '%s' 'if (.errors or .data.repository == null or .data.repository.content == null) then error("Project content query failed") else .data.repository.content.projectItems as $items | ($items.nodes[] | select(.project.id == "'"$1"'") | [.id, ([.fieldValues.nodes[] | select(.field.name == "Agent status") | .name][0] // ""), ([.fieldValues.nodes[] | select(.field.name == "Category") | .name][0] // ""), ([.fieldValues.nodes[] | select(.field.name == "Blocked by") | .text][0] // "")] | join("\u001f")), (if $items.pageInfo.hasNextPage then "NEXT\u001f" + ($items.pageInfo.endCursor // "") else "END" end) end'
+}
+
+
 load_project_content() {
   local url=$1 kind number query row item_id agent_status category blocked_by cursor=''
   load_project_context || return 1
@@ -83,9 +127,9 @@ load_project_content() {
   # content.projectItems is paginated.  A successful empty result means "not
   # a member" (return 2); malformed/GraphQL-error responses are failures.
   while :; do
-    query='query($owner:String!,$repo:String!,$number:Int!,$cursor:String){repository(owner:$owner,name:$repo){content:'"$kind"'(number:$number){projectItems(first:20,after:$cursor,includeArchived:false){nodes{id project{id} fieldValues(first:20){nodes{... on ProjectV2ItemFieldSingleSelectValue{name field{... on ProjectV2SingleSelectField{name}}} ... on ProjectV2ItemFieldTextValue{text field{... on ProjectV2Field{name}}}}} pageInfo{hasNextPage endCursor}}}}}}'
+    query=$(project_content_query "$kind")
     # workload-boundary: best-effort Projects (GraphQL) item lookup, not a REST core operation
-    row=$(gh api graphql -f query="$query" -F owner="$(repo_name | cut -d/ -f1)" -F repo="$(repo_name | cut -d/ -f2)" -F number="$number" -f cursor="$cursor" --jq 'if (.errors or .data.repository == null or .data.repository.content == null) then error("Project content query failed") else .data.repository.content.projectItems as $items | ($items.nodes[] | select(.project.id == "'"$PROJECT_ID"'") | [.id, ([.fieldValues.nodes[] | select(.field.name == "Agent status") | .name][0] // ""), ([.fieldValues.nodes[] | select(.field.name == "Category") | .name][0] // ""), ([.fieldValues.nodes[] | select(.field.name == "Blocked by") | .text][0] // "")] | join("\u001f")), (if $items.pageInfo.hasNextPage then "NEXT\u001f" + ($items.pageInfo.endCursor // "") else "END" end)' 2>/dev/null) || return 1
+    row=$(gh api graphql -f query="$query" -F owner="$(repo_name | cut -d/ -f1)" -F repo="$(repo_name | cut -d/ -f2)" -F number="$number" -f cursor="$cursor" --jq "$(project_content_jq "$PROJECT_ID")" 2>/dev/null) || return 1
     item_id=$(head -n 1 <<< "$row")
     if [[ $item_id != END && $item_id != NEXT$'\x1f'* ]]; then row=$item_id; break; fi
     cursor=$(tail -n 1 <<< "$row"); [[ $cursor == NEXT$'\x1f'* ]] || return 2
@@ -180,7 +224,15 @@ project_reconcile_issue() {
     case $field_id in 'Agent status') desired=$PROJECT_DESIRED_STATE;; Category) desired=$PROJECT_DESIRED_CATEGORY;; *) desired=$note;; esac
     [[ ${PROJECT_ITEM_VALUES["$url:$field_id"]:-} == "$desired" ]] && continue
     if [[ $field_id == 'Blocked by' ]]; then
-      gh project item-edit --id "$item_id" --project-id "$project_id" --field-id "${PROJECT_FIELD_IDS[$field_id]:-}" --text "$desired" >/dev/null 2>&1 || return 1
+      # An empty desired value means "no blocker any more", which is a removal:
+      # `--text ''` is rejected by gh as "no changes to make", so every Issue
+      # whose blocker cleared failed reconciliation forever and stayed in
+      # project-pending (#268).
+      if [[ -n $desired ]]; then
+        gh project item-edit --id "$item_id" --project-id "$project_id" --field-id "${PROJECT_FIELD_IDS[$field_id]:-}" --text "$desired" >/dev/null 2>&1 || return 1
+      else
+        gh project item-edit --id "$item_id" --project-id "$project_id" --field-id "${PROJECT_FIELD_IDS[$field_id]:-}" --clear >/dev/null 2>&1 || return 1
+      fi
     else
       option_id=${PROJECT_OPTION_IDS["$field_id:$desired"]:-}; [[ -n $option_id ]] || return 1
       gh project item-edit --id "$item_id" --project-id "$project_id" --field-id "${PROJECT_FIELD_IDS[$field_id]:-}" --single-select-option-id "$option_id" >/dev/null 2>&1 || return 1
@@ -216,13 +268,34 @@ project_add_pull_requests() {
 }
 
 
+# Removes one occurrence of a pending hint line, and the matching in-flight
+# marker when an Issue was claimed for it, under the queue lock.
+project_pending_ack() {
+  local hint=$1 inflight=${2:-} issue=${3:-}
+  ( flock 9
+    awk -v n="$hint" 'BEGIN { removed=0 } $0 == n && !removed { removed=1; next } { print }' "$STATE_ROOT/project-pending" > "$STATE_ROOT/project-pending.ack.$$" && mv "$STATE_ROOT/project-pending.ack.$$" "$STATE_ROOT/project-pending"
+    if [[ -n $inflight && -n $issue ]]; then sed -i "0,/^$issue$/d" "$inflight"; fi
+  ) 9> "$STATE_ROOT/project-pending.lock"
+}
+
+
 reconcile_pending_project() {
   [[ -s $STATE_ROOT/project-pending ]] || return 0
   graphql_budget_allows "$((GRAPHQL_RESERVE + PROJECT_OPERATION_BUDGET))" || return 0
-  local issue processed=0 rc snapshot="$STATE_ROOT/project-pending.snapshot.$$" inflight="$STATE_ROOT/project-pending.inflight"
+  local hint issue processed=0 rc snapshot="$STATE_ROOT/project-pending.snapshot.$$" inflight="$STATE_ROOT/project-pending.inflight"
   ( flock 9; cp "$STATE_ROOT/project-pending" "$snapshot"; : > "$inflight" ) 9> "$STATE_ROOT/project-pending.lock"
-  while read -r issue _; do
-    [[ $issue =~ ^[1-9][0-9]*$ ]] || continue
+  while IFS= read -r hint; do
+    [[ -n $hint ]] || continue
+    # Hints written before #115 carried the whole event ("conflict 110 <b64>",
+    # "state 155 running") rather than the bare Issue number this queue holds
+    # today.  Matching only bare numbers left every such line unacknowledged
+    # forever, so one legacy entry pinned status's project-sync-pending on
+    # permanently; read the Issue out of them the way queue_project_sync does.
+    issue=''
+    [[ $hint =~ ^([a-z-]+[[:space:]]+)?([1-9][0-9]*)([[:space:]]|$) ]] && issue=${BASH_REMATCH[2]}
+    # A hint carrying no Issue number can never be acted on: keeping it would
+    # make the queue permanently non-empty for no possible work.
+    if [[ -z $issue ]]; then project_pending_ack "$hint"; continue; fi
     if (( processed >= PROJECT_RECONCILE_BATCH )); then continue; fi
     ( flock 9; printf '%s\n' "$issue" >> "$inflight" ) 9> "$STATE_ROOT/project-pending.lock"
     rc=0
@@ -230,18 +303,29 @@ reconcile_pending_project() {
     # rc 0 (converged) and rc 2 (confirmed non-member / invalid labels, no
     # mutation to make) are both acknowledgement-worthy; only rc 1 is a
     # retryable failure that must remain so a crash cannot drop the entry.
-    if (( rc == 0 || rc == 2 )); then
-      # Remove only the snapshot occurrence.  Any duplicate appended while
-      # this Issue was in-flight remains as the next reconciliation hint.
-      ( flock 9
-        awk -v n="$issue" 'BEGIN { removed=0 } $0 == n && !removed { removed=1; next } { print }' "$STATE_ROOT/project-pending" > "$STATE_ROOT/project-pending.ack.$$" && mv "$STATE_ROOT/project-pending.ack.$$" "$STATE_ROOT/project-pending"
-        sed -i "0,/^$issue$/d" "$inflight"
-      ) 9> "$STATE_ROOT/project-pending.lock"
-    fi
+    # Remove only the snapshot occurrence.  Any duplicate appended while this
+    # Issue was in-flight remains as the next reconciliation hint.
+    if (( rc == 0 || rc == 2 )); then project_pending_ack "$hint" "$inflight" "$issue"; fi
     processed=$((processed + 1))
   done < "$snapshot"
   rm -f "$snapshot"
-  [[ -s $STATE_ROOT/project-pending ]] || rm -f "$STATE_ROOT/project-pending"
+  [[ -s $STATE_ROOT/project-pending ]] || rm -f "$STATE_ROOT/project-pending" "$STATE_ROOT/project-pending.since"
+}
+
+
+reconcile_project_probes() {
+  [[ -s $STATE_ROOT/project-probes ]] || return 0
+  local issue rc probes="$STATE_ROOT/project-probes" snapshot="$STATE_ROOT/project-probes.snapshot.$$"
+  ( flock 9; cp "$probes" "$snapshot"; : > "$probes" ) 9> "$STATE_ROOT/project-pending.lock"
+  while IFS= read -r issue; do
+    [[ $issue =~ ^[1-9][0-9]*$ ]] || continue
+    rc=0
+    project_reconcile_issue "$issue" || rc=$?
+    # A failed probe becomes a real retry; a successful probe is simply
+    # acknowledged and will be scheduled again by the next poll.
+    (( rc == 1 )) && queue_project_sync "issue $issue"
+  done < "$snapshot"
+  rm -f "$snapshot"
 }
 
 
@@ -265,7 +349,13 @@ rebuild_project_hints() {
   # also projected when they are already Project members.
   if [[ $source == open ]]; then
     [[ -n $SUPERVISOR_SNAPSHOT && -r $SUPERVISOR_SNAPSHOT ]] || return 1
-    while IFS=$'\t' read -r issue _; do [[ $issue =~ ^[1-9][0-9]*$ ]] && queue_project_sync "issue $issue"; done < "$SUPERVISOR_SNAPSHOT"
+    local probes_next="$STATE_ROOT/project-probes.next.$$"
+    : > "$probes_next"
+    while IFS=$'\t' read -r issue _; do
+      [[ $issue =~ ^[1-9][0-9]*$ ]] && printf '%s\n' "$issue" >> "$probes_next"
+    done < "$SUPERVISOR_SNAPSHOT"
+    sort -un "$probes_next" -o "$probes_next"
+    mv "$probes_next" "$STATE_ROOT/project-probes"
     return 0
   fi
   local rows

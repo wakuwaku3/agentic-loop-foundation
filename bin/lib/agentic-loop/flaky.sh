@@ -240,26 +240,25 @@ cmd_flaky() {
 # Deliberately separate from every test-execution path (make check never
 # calls this): only an explicit `flaky report` invocation touches GitHub.
 flaky_report_one() {
-  local unit=$1 fingerprint=$2 verdict=$3 marker query search_json existing_open existing_closed title body new_issue
+  local unit=$1 fingerprint=$2 verdict=$3 marker query search_json existing_open title body new_issue
   marker="agentic-loop:flaky unit=$unit fingerprint=$fingerprint"
   # One search-index lookup, not an enumeration of every open/closed Issue:
   # its cost does not grow with the repository's cumulative Issue count
   # (Issue #198). `in:body` only searches the Issue body, matching exactly
   # where the marker is embedded below, never a comment.
-  query="repo:$(repo_name) \"$marker\" in:body"
-  search_json=$(search_issues_api --method GET -f q="$query" -f per_page=5 --jq '[.items[] | {number, state}]' 2>/dev/null) || search_json='[]'
+  query="repo:$(repo_name) \"$marker\" in:body state:open"
+  if ! search_json=$(search_issues_api --method GET -f q="$query" -f per_page=5 --jq '[.items[] | {number, state}]' 2>/dev/null); then
+    say "flaky report: 修復Issueの既存検索に失敗したため、安全のため作成を中止しました（unit=$unit）。" >&2
+    return 1
+  fi
   existing_open=$(yq -p json -r '[.[] | select(.state == "open")][0].number // ""' <<< "$search_json" 2>/dev/null)
   if [[ $existing_open =~ ^[1-9][0-9]*$ ]]; then
     comment_issue "$existing_open" "<!-- agentic-loop:flaky-recurred unit=$unit fingerprint=$fingerprint -->\\nflaky testの再発を検出しました（unit: \`$unit\`、fingerprint: \`$fingerprint\`、verdict: \`$verdict\`）。" || true
     say "既存のflaky修復Issue #$existing_open を再利用しました（unit=$unit）。"
     return 0
   fi
-  existing_closed=$(yq -p json -r '[.[] | select(.state == "closed")][0].number // ""' <<< "$search_json" 2>/dev/null)
   title="flaky testを修復する: $unit ($fingerprint)"
   body="## 目的\\n\\nE2E検証単位 \`$unit\` がverdict=\`$verdict\`（fingerprint: \`$fingerprint\`）としてflaky判定されました。原因を特定し、隔離に依存せず決定的に成功するよう修復します。\\n\\n## 完了条件\\n\\n同一fingerprintの隔離entryが無くても該当unitが安定して成功する。\\n\\n"
-  if [[ $existing_closed =~ ^[1-9][0-9]*$ ]]; then
-    body+="同一fingerprintの過去のIssue #$existing_closed はclose済みです。再発のため新規に作成します。\\n\\n"
-  fi
   body+="<!-- $marker -->\\n<!-- agentic-loop:scope paths=tests/test-agentic-loop.sh,tests/run-e2e.sh env=unknown -->"
   new_issue=$(repo_api issues --method POST -f title="$title" -f body="$(unfold_body "$body")" --jq .number 2>/dev/null) || { say "flaky report: 修復Issueを作成できませんでした（unit=$unit）。" >&2; return 1; }
   [[ $new_issue =~ ^[1-9][0-9]*$ ]] || { say "flaky report: 修復Issueの番号を確認できませんでした（unit=$unit）。" >&2; return 1; }

@@ -8,6 +8,7 @@
     "git@latest",
     "gitleaks@8.30.1",
     "gnugrep@latest",
+    "jq@latest",
     "gnumake@latest",
     "gnused@latest",
     "shellcheck@latest",
@@ -20,6 +21,7 @@
   "shell": {
     "scripts": {
       "check": "make check",
+      "smoke": "make smoke",
       "affected": "make affected",
       "affected-audit": "make affected-audit"
     }

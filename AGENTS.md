@@ -11,6 +11,7 @@
 ## 要求のルーティング
 
 - 対話中のAgentが通常のbuild・変更要求を受けた場合、メインworktreeを直接編集せず、Issueキューがセットアップ済みでGitHub Issueのread/writeと登録後状態を検証できるなら `submit-requirement` のqueue-first intakeへ載せる。必要最小限のactive Issue確認で同一要求を再利用または作成し、要求実態に対応する排他的な `category:*` 1個と `agent:queued` を付け、queuedまたはrunningを確認して終了する。
+- ただし、repository-localかつgit管理外（gitignore対象）の `.agentic-loop.local.toml` など、既存のtracked設定を変更せずに実行時overlayだけを調整する要求は通常のbuild・変更要求ではない。先に `git ls-files --error-unmatch PATH` と設定の解決順を確認し、利用者がローカル設定変更を明示している場合だけ、対象overlayを直接・最小限に変更する。tracked file、未確定の解決順、またはコード・文書・共有設定を伴う要求はこの例外に含めず、queue-first intakeへ載せる。
 - 利用者が「Issueを作って」など新規Issue作成を明示した場合は重複検索を省略する。ただし、既存Issueの再利用・重複確認も明示された場合と、コード診断・定期監査では検索する。
 - `agent:running` Issueを専用worktreeで処理中のworkerは受付を再実行しない。代替Issueを作らず、調査・変更・検証・PR・checks・review・merge・cleanupを完遂する。
 - 利用者が同期実行または直接実装を明示した場合は、その指示を優先してworker手順を実行する。
@@ -36,3 +37,4 @@
 - [文書ポリシー](docs/policies/documentation.md)に従い、文書の対象読者と責務境界を守り、同じ事実を複数の文書へ重複させない。
 - [有限資源とスケーラビリティのポリシー](docs/policies/resource-scalability.md)に従い、処理量・外部I/O量・入力規模に対する増加率を設計と検証の対象にする。
 - [ポストモーテムポリシー](docs/policies/postmortem.md)に従い、重大な事故・near miss・反復失敗・資源枯渇から学び、非難せず、action itemが検証済みになるまでポストモーテムを未完了として追跡する。
+- GitHubのIssue本文・commentをfileから渡す場合は `gh --body-file PATH` を使う。`gh --body "@path"` は展開されず内容が失われる（[ADR 0030](docs/decisions/0030-lost-requirement-detection.md)）。`gh api` の型付き値には `-f` ではなく `-F` を使う。

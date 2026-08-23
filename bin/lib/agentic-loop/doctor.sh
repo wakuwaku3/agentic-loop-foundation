@@ -53,6 +53,26 @@ doctor_residual_belongs_to_running() {
 }
 
 
+# Compare a band's real observed stage-duration distribution (from
+# events_stage_duration_samples, see worker_state.sh) against the currently
+# applied stall threshold (Issue #280, ADR 0032). Below CALIBRATION_MIN_SAMPLES
+# this stays a success ("not enough evidence yet"), never a silent skip, so a
+# fresh install is not misread as calibrated. threshold=0 (band disabled) is
+# also left as success -- there is nothing to calibrate.
+doctor_calibration_check() {
+  local band_label=$1 dist=$2 threshold=$3 threshold_name=$4 n mean p50 p90 max
+  IFS=$'\t' read -r n mean p50 p90 max <<< "$dist"
+  n=${n:-0}
+  if (( n < CALIBRATION_MIN_SAMPLES )); then
+    doctor_add success "stall閾値の実測整合（${band_label}）" "実測sampleが${CALIBRATION_MIN_SAMPLES}件未満のため判定していません（n=${n}）。" '対応は不要です。events.logにsampleが積み重なると自動的に判定されます。'
+  elif (( threshold > 0 && p90 >= threshold )); then
+    doctor_add warning "stall閾値の実測整合（${band_label}）" "実測 n=${n} mean=${mean}s p50=${p50}s p90=${p90}s max=${max}s に対し、現在の${threshold_name}=${threshold}秒はp90以下で、誤ってstalledと通知される恐れがあります。" "docs/operations/issue-queue.md を確認し、${threshold_name} を実測p90（${p90}秒）より大きい値へ見直してください。"
+  else
+    doctor_add success "stall閾値の実測整合（${band_label}）" "実測 n=${n} p90=${p90}s は現在の${threshold_name}=${threshold}秒と整合しています。" '対応は不要です。'
+  fi
+}
+
+
 doctor_collect() {
   local origin='' default_branch='' hooks='' unit_dir unit issue_worktrees='' agent_branches='' log_files=''
   if [[ -n $CONFIG_ERROR ]]; then
@@ -65,10 +85,40 @@ doctor_collect() {
     doctor_non_negative_config API_RETRY_BASE_SECONDS "$API_RETRY_BASE_SECONDS"
     doctor_positive_config MAX_ATTEMPTS "$MAX_ATTEMPTS"; doctor_non_negative_config RETRY_COOLDOWN_SECONDS "$RETRY_COOLDOWN_SECONDS"
     doctor_non_negative_config WORKER_TIMEOUT_SECONDS "$WORKER_TIMEOUT_SECONDS"
-    if (( WORKER_TIMEOUT_SECONDS > 0 && WORKER_TIMEOUT_SECONDS < WORKER_TIMEOUT_MIN_SAFE_SECONDS )); then
-      doctor_add warning '設定値: WORKER_TIMEOUT_SECONDS' '正常に進行中のworkerを誤って停止する恐れがあります。' "docs/operations/issue-queue.md を確認し、worker_timeout_seconds を ${WORKER_TIMEOUT_MIN_SAFE_SECONDS}秒以上、または実測の所要時間に基づく値へ見直してください。"
-    fi
     doctor_non_negative_config WORKER_ORPHAN_GRACE_SECONDS "$WORKER_ORPHAN_GRACE_SECONDS"
+    doctor_non_negative_config STALL_SECONDS "$STALL_SECONDS"
+    doctor_non_negative_config PROVIDER_STALL_SECONDS "$PROVIDER_STALL_SECONDS"
+    # Time constant invariants (Issue #280, ADR 0032): timing_invariant_violations
+    # is the single source of truth, also used by `_timing-check --committed`
+    # (scripts/lint.sh's hard gate) and by tests. Here it runs against the live
+    # merged config (CONFIG_LOCAL included), and every violation stays a
+    # warning -- doctor never fails the queue over a tunable timing value.
+    local timing_name timing_detail timing_remedy timing_label timing_violations=0
+    while IFS=$'\t' read -r timing_name timing_detail timing_remedy; do
+      [[ -n $timing_name ]] || continue
+      timing_violations=$((timing_violations + 1))
+      case $timing_name in
+        stall-before-timeout) timing_label='設定値: STALL_SECONDS' ;;
+        provider-stall-before-timeout | stall-band-order) timing_label='設定値: PROVIDER_STALL_SECONDS' ;;
+        worker-timeout-too-low) timing_label='設定値: WORKER_TIMEOUT_SECONDS' ;;
+        heartbeat-lease-margin) timing_label='設定値: LEASE_SECONDS' ;;
+        pause-grace-before-timeout) timing_label='設定値: PAUSE_GRACE_SECONDS' ;;
+        poll-backoff-order) timing_label='設定値: POLL_SECONDS' ;;
+        exhaustion-backoff-order) timing_label='設定値: EXHAUSTION_BACKOFF_MAX_SECONDS' ;;
+        orphan-grace-before-timeout) timing_label='設定値: WORKER_ORPHAN_GRACE_SECONDS' ;;
+        *) timing_label='設定値: 時間定数' ;;
+      esac
+      doctor_add warning "$timing_label" "$timing_detail" "$timing_remedy"
+    done < <(timing_invariant_violations "$STALL_SECONDS" "$PROVIDER_STALL_SECONDS" "$WORKER_TIMEOUT_SECONDS" "$LEASE_SECONDS" "$PAUSE_GRACE_SECONDS" "$POLL_SECONDS" "$POLL_MAX_SECONDS" "$WORKER_ORPHAN_GRACE_SECONDS")
+    if (( timing_violations == 0 )); then
+      doctor_add success '時間定数の不変条件' '時間定数間の既知の関係はすべて健全です。' '対応は不要です。'
+    fi
+    local calib_samples calib_provider_dist calib_nonprovider_dist
+    calib_samples=$(events_stage_duration_samples)
+    calib_provider_dist=$(awk -F'\t' '$1 == "provider" { print $2 }' <<< "$calib_samples" | metrics_distribution)
+    calib_nonprovider_dist=$(awk -F'\t' '$1 == "non-provider" { print $2 }' <<< "$calib_samples" | metrics_distribution)
+    doctor_calibration_check 'provider stage' "$calib_provider_dist" "$PROVIDER_STALL_SECONDS" 'queue.provider_stall_seconds'
+    doctor_calibration_check '非providerのstage' "$calib_nonprovider_dist" "$STALL_SECONDS" 'queue.stall_seconds'
     doctor_enum_config UNKNOWN_SCOPE "$UNKNOWN_SCOPE" isolated exclusive open
     doctor_enum_config TRACEABILITY "$TRACEABILITY" require warn off
     if [[ $TRACEABILITY == require || $TRACEABILITY == warn || $TRACEABILITY == off ]]; then
@@ -122,12 +172,18 @@ doctor_collect() {
   # Tiers schema validation (Issue #155): unknown providers and invalid
   # max_usage_percent are failures; a tier with no models is a warning (it
   # silently contributes no candidates).
-  local tier_phase tier_provider tier_max tier_i tier_empty=0
+  local tier_phase tier_provider tier_effort tier_max tier_i tier_empty=0
   for tier_phase in plan exec diagnose; do
-    while IFS="$CAND_FS" read -r _ _ _ tier_provider _ _ tier_max; do
+    while IFS="$CAND_FS" read -r _ _ _ tier_provider _ tier_effort tier_max; do
       [[ -n $tier_provider ]] || continue
       if ! provider_valid "$tier_provider"; then
         doctor_add failure "tiers設定 ($tier_phase)" "tierのprovider $tier_provider は未対応です。" 'agent.*.tiers[].provider を codex、claude、opencode のいずれかに設定してください。'
+      fi
+      # claude receives the declared effort as `--effort` (Issue #265), so a
+      # level its CLI does not accept is a configuration error rather than a
+      # silently ignored key.
+      if [[ $tier_provider == claude && -n $tier_effort ]] && ! claude_effort_valid "$tier_effort"; then
+        doctor_add failure "tiers設定 ($tier_phase)" "claudeのreasoning_effort $tier_effort は未対応です。" 'reasoning_effort を low、medium、high、xhigh、max のいずれかに設定してください。'
       fi
       if [[ -n $tier_max ]] && { ! [[ $tier_max =~ ^[0-9]+(\.[0-9]+)?$ ]] || ! awk -v m="$tier_max" 'BEGIN { exit !(m >= 0 && m <= 100) }'; }; then
         doctor_add failure "tiers設定 ($tier_phase)" "models[].max_usage_percent は0〜100の数値にしてください（現在: ${tier_max:-空}）。" 'agent.*.tiers[].models[].max_usage_percent を0〜100の数値に修正してください。'
@@ -143,6 +199,11 @@ doctor_collect() {
       fi
     fi
   done
+  local stage_cap
+  stage_cap=$(config_value 'budget.max_stage_cost_usd')
+  if [[ -n $stage_cap ]] && { ! [[ $stage_cap =~ ^[0-9]+(\.[0-9]+)?$ ]] || ! awk -v c="$stage_cap" 'BEGIN { exit !(c > 0) }'; }; then
+    doctor_add failure 'stageコスト上限' "budget.max_stage_cost_usd は正の数値にしてください（現在: $stage_cap）。" 'budget.max_stage_cost_usd を正の数値に修正するか、キー自体を削除してください（削除で上限なし）。'
+  fi
   if agent_used_providers | grep -qx opencode; then
     local go_auth go_has=0
     go_auth="${XDG_DATA_HOME:-$HOME/.local/share}/opencode/auth.json"
@@ -314,6 +375,42 @@ doctor_collect() {
   # under set -e before it ever prints a report.
   if (( flaky_rc == 0 )); then
     doctor_add success 'flaky test registry' '隔離entryは検証済み、または宣言がありません。' '対応は不要です。'
+  fi
+
+  # gh --body "@path" silently drops the requirement instead of expanding it
+  # (Issue #272). status_snapshot_fetch is the shared open-Issue read (see
+  # its own doc comment in status.sh); reuse the single result here rather
+  # than issuing a second open-Issue list call for this check.
+  # workload-unbounded: on-demand read; bound=open Issue count
+  local snapshot_raw='' body_issue_hits=0 snap_num _snap_title _snap_state _snap_rank1 _snap_rank2 _snap_created snap_body_b64 snap_body
+  if snapshot_raw=$(status_snapshot_fetch); then
+    while IFS=$'\t' read -r snap_num _snap_title _snap_state _snap_rank1 _snap_rank2 _snap_created snap_body_b64; do
+      [[ -n $snap_num ]] || continue
+      [[ ${snap_body_b64:-} != '-' && -n ${snap_body_b64:-} ]] || continue
+      snap_body=$(base64 -d <<< "$snap_body_b64" 2>/dev/null || true)
+      body_unexpanded_file_reference "$snap_body" && body_issue_hits=$((body_issue_hits + 1))
+    done <<< "$snapshot_raw"
+  fi
+  if (( body_issue_hits > 0 )); then
+    doctor_add warning '要求本文の欠落' "open Issueのうち ${body_issue_hits}件で本文が単一行のファイル参照のみです（gh --body \"@path\" は展開されません）。要求内容が失われています。" 'bin/agentic-loop status で issue-body-unexpanded anomalyの対象Issueを確認し、gh issue edit <番号> --body-file <正しい本文のファイル> を実行してください。'
+  else
+    doctor_add success '要求本文の欠落' 'open Issueの本文はファイル参照のみではありません。' '対応は不要です。'
+  fi
+
+  # Direct (no --paginate), best-effort read of the newest 100 comments
+  # repository-wide -- same bounded, non-exhaustive policy as
+  # status_stale_fetch (see its doc comment), not a per-Issue sweep.
+  local comment_raw='' comment_hit=0 comment_b64 comment_body
+  comment_raw=$(repo_api issues/comments --method GET -f per_page=100 --jq '.[] | (.body // "" | @base64)' 2>/dev/null || true)
+  while IFS= read -r comment_b64; do
+    [[ -n $comment_b64 ]] || continue
+    comment_body=$(base64 -d <<< "$comment_b64" 2>/dev/null || true)
+    if body_unexpanded_file_reference "$comment_body"; then comment_hit=1; break; fi
+  done <<< "$comment_raw"
+  if (( comment_hit )); then
+    doctor_add warning '要求コメントの欠落' '直近のコメント（最大100件、repository全体）に単一行のファイル参照のみの本文があります（gh --body "@path" は展開されません）。' '対象のコメントを確認し、正しい内容を再投稿してください。'
+  else
+    doctor_add success '要求コメントの欠落' '直近コメントの本文はファイル参照のみではありません。' '対応は不要です。'
   fi
 }
 

@@ -8,7 +8,10 @@ provider = "codex"
 # Each Issue runs a flagship plan phase, then a cheaper exec phase. Set provider
 # and model per phase to mix tools, e.g. plan with Codex and exec with opencode.
 # model is empty by default (the CLI default); opencode models use "provider/model".
-# reasoning_effort applies to Codex only (default high for plan, low for exec).
+# reasoning_effort is passed to Codex (-c model_reasoning_effort) and to Claude
+# (--effort, levels low|medium|high|xhigh|max). Declaring nothing leaves the
+# provider CLI default in place, except for Codex which keeps its historical
+# fallback (plan=high / exec=low). opencode exposes no equivalent flag.
 #
 # To declare ordered pool/model fallback (Issue #155), replace a phase's scalar
 # keys with `[[agent.<phase>.tiers]]`: each tier binds one subscription `pool`
@@ -59,6 +62,12 @@ model = "gpt-5.6-terra"
 reasoning_effort = "low"
 
 [budget]
+# Optional ceiling on how much ONE stage execution (a single plan or exec
+# provider call) may spend, in USD. Claude receives it as --max-budget-usd;
+# reaching it ends that stage as an ordinary retryable failure (the pool is not
+# marked exhausted) and the Issue follows the usual bounded retry path. Unset
+# (commented out) means no ceiling.
+# max_stage_cost_usd = 5
 # Leave an emergency reserve: pause claiming new Issues while the weekly usage
 # exceeds (100 - this percent). Only Codex exposes usage without a session, so
 # the guard is best-effort for other providers. Zero disables it.
@@ -114,6 +123,19 @@ worker_timeout_seconds = 14400
 # window between a normal completion's Label update and process exit) is the
 # worker actually reaped. Zero disables it.
 worker_orphan_grace_seconds = 120
+# Stall observability thresholds (see docs/decisions/0031, observation only --
+# automatic termination is worker_timeout_seconds above). Non-provider stages
+# (claim/worktree/checks/merge/...) compare their last progress marker against
+# stall_seconds. The provider stages (plan/exec/replan) block on one long CLI
+# call and use the wider provider_stall_seconds instead, so normal reasoning
+# time is never misreported as a stall. Tune both from each Issue's
+# agentic-loop:usage comment (所要=Ns); zero disables stall detection for that
+# band. `bin/agentic-loop _timing-check --committed` (a hard gate in
+# scripts/lint.sh) and `doctor` cross-check these two values against the
+# other time constants above and against events.log's real observed stage
+# durations -- see docs/decisions/0032.
+stall_seconds = 300
+provider_stall_seconds = 3600
 # Change-scope conflict avoidance: an Issue may declare the paths/environments
 # it touches with an `agentic-loop:scope` marker (see docs/operations/issue-queue.md).
 # Only hard conflicts serialize: structural changes (rename/move, declared with

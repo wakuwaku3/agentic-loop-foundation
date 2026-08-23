@@ -16,6 +16,18 @@ recent_lease_since() {
 }
 
 
+# `gh api --paginate --jq` evaluates jq once per response page. Keep the
+# per-comment filter, then fold the page outputs in the shell so the newest
+# lease is selected across the complete response rather than only the last
+# page (Issue #238).
+latest_lease_body() {
+  local issue=$1 since=$2 output
+  # workload-unbounded: Issueに紐づく有限のコメント件数からleaseを全件走査; bound=Issue comment count; track=#238
+  output=$(repo_api "issues/$issue/comments" --method GET -f since="$since" -f per_page=100 --paginate --jq '.[] | .body | select(contains("agentic-loop:lease"))' 2>/dev/null) || return 1
+  awk 'NF { value=$0 } END { if (value != "") print value }' <<< "$output"
+}
+
+
 lease_file() { printf '%s\n' "$STATE_ROOT/workers/$1.lease"; }
 
 worker_started_file() { printf '%s/workers/%s.started' "$STATE_ROOT" "$1"; }
@@ -75,6 +87,41 @@ progress_write() {
 progress_touch() { progress_write "$1" "$2" || true; }
 
 
+# --- stall-threshold calibration against real stage durations (Issue #280,
+# ADR 0032) -- host-local read of the shared events.log, zero GitHub calls.
+# For each subject, the gap between two consecutive `progress` rows is the
+# duration status's stall detection measures for the *departing* stage (its
+# last progress marker's age at the moment of the next transition). Bounded
+# to the newest EVENTS_CALIBRATION_MAX_LINES lines. A subject's final observed
+# stage is never sampled (it has no next transition, so its duration is
+# unknown -- still running or the log rotated mid-attempt). A gap exceeding
+# worker_timeout_seconds is dropped: it is host/timeout-attributable, not a
+# stage's natural duration, and would otherwise corrupt p90. Prints
+# band<TAB>seconds, one row per sample; band is "provider" for the stages
+# status_stall_threshold widens (plan/exec/replan), "non-provider" otherwise.
+events_stage_duration_samples() {
+  [[ -r $EVENTS_LOG ]] || return 0
+  local epoch subject code stage band delta
+  local -A last_epoch=() last_stage=()
+  while IFS=$'\t' read -r epoch subject code stage; do
+    [[ $code == progress ]] || continue
+    [[ $epoch =~ ^[0-9]+$ ]] || continue
+    if [[ -n ${last_epoch[$subject]:-} ]]; then
+      delta=$((epoch - last_epoch[$subject]))
+      if (( delta > 0 )) && { (( WORKER_TIMEOUT_SECONDS == 0 )) || (( delta <= WORKER_TIMEOUT_SECONDS )); }; then
+        case ${last_stage[$subject]} in
+          plan | exec | replan) band=provider ;;
+          *) band=non-provider ;;
+        esac
+        printf '%s\t%s\n' "$band" "$delta"
+      fi
+    fi
+    last_epoch[$subject]=$epoch
+    last_stage[$subject]=$stage
+  done < <(tail -n "$EVENTS_CALIBRATION_MAX_LINES" "$EVENTS_LOG")
+}
+
+
 # Read the local progress marker into PROGRESS_EPOCH / PROGRESS_STAGE. Returns
 # 1 (leaving both empty) when absent or corrupt.
 progress_read() {
@@ -94,6 +141,35 @@ worker_log_mtime() {
   local mtime
   mtime=$(stat -c %Y "$STATE_ROOT/logs/issue-$1.log" 2>/dev/null) || return 1
   printf '%s\n' "$mtime"
+}
+
+
+# Secondary progress signal (see docs/decisions/0031): the newest mtime among
+# this Issue's stage output files -- the worker log plus the plan/result
+# files agent_run_stage writes, including their in-flight `.raw.*`/`.final.*`
+# siblings written while a provider CLI is still streaming a stage. Only
+# mtimes are read, never content, so a provider's in-progress output can never
+# leak into status/tail (secret boundary, same as worker_log_mtime). Returns
+# failure only when none of these paths exist yet.
+worker_stage_output_mtime() {
+  local issue=$1 latest='' mtime path
+  shopt -s nullglob
+  local -a paths=(
+    "$STATE_ROOT/logs/issue-$issue.log"
+    "$STATE_ROOT/issue-$issue-plan.txt"
+    "$STATE_ROOT/issue-$issue-result.txt"
+    "$STATE_ROOT/issue-$issue-plan.txt".raw.*
+    "$STATE_ROOT/issue-$issue-plan.txt".final.*
+    "$STATE_ROOT/issue-$issue-result.txt".raw.*
+    "$STATE_ROOT/issue-$issue-result.txt".final.*
+  )
+  shopt -u nullglob
+  for path in "${paths[@]}"; do
+    mtime=$(stat -c %Y "$path" 2>/dev/null) || continue
+    if [[ -z $latest ]] || (( mtime > latest )); then latest=$mtime; fi
+  done
+  [[ -n $latest ]] || return 1
+  printf '%s\n' "$latest"
 }
 
 
@@ -305,6 +381,55 @@ worker_pid_live() {
 }
 
 
+# The process-group id of `pid`, read from /proc at call time (procps is not a
+# pinned dependency of this repository, so `ps -o pgid=` is deliberately not
+# used). Field 2 of /proc/<pid>/stat is the parenthesized comm, which may
+# itself contain spaces and ')', so the remainder is taken after the *last*
+# ') ' -- what follows is "state ppid pgrp ...".
+process_group_of() {
+  local pid=$1 stat rest
+  local -a fields
+  [[ $pid =~ ^[0-9]+$ ]] || return 1
+  [[ -r /proc/$pid/stat ]] || return 1
+  read -r stat < "/proc/$pid/stat" || return 1
+  rest=${stat##*') '}
+  read -r -a fields <<< "$rest"
+  [[ ${fields[2]:-} =~ ^[0-9]+$ ]] || return 1
+  printf '%s\n' "${fields[2]}"
+}
+
+
+# Signal a worker's whole process tree, given the pid recorded in its pidfile.
+#
+# Every worker-stop path (graceful shutdown, timeout enforcement, orphan reap,
+# pause/abort drain, dispose) must take the provider CLI child down with the
+# worker, so the signal goes to a process *group*. The pidfile's pid used to be
+# passed straight to `kill -TERM "-$pid"`, which assumes that pid is its own
+# group leader. It usually is (claim spawns workers via `setsid`), but not
+# always: reconcile_worker_pidfiles repairs a lost pidfile from the live /proc
+# scan (Issue #219) and legitimately records a *descendant* of the group
+# leader. `-$pid` then names a process group that does not exist, kill fails
+# with ESRCH, and every call site swallows it with `|| true` -- so the worker
+# survives every stop attempt and holds its MAX_WORKERS slot forever (Issue
+# #292: #251's pid 2688428 / pgid 2688254 was "reaped" once per poll for
+# 8h50m while 46 queued Issues were never claimed).
+#
+# Resolve the real group at signal time instead, and never group-signal our own
+# group: a worker that was not setsid'd into its own group would otherwise take
+# the supervisor (or this CLI) down with it. When the group is unknown or is
+# ours, fall back to signalling the single pid.
+signal_process_tree() {
+  local pid=$1 signal=$2 pgid self_pgid
+  [[ $pid =~ ^[0-9]+$ ]] || return 0
+  pgid=$(process_group_of "$pid") || pgid=''
+  self_pgid=$(process_group_of "$$") || self_pgid=''
+  if [[ $pgid =~ ^[0-9]+$ && $pgid != "$self_pgid" ]]; then
+    kill "-$signal" "-$pgid" 2>/dev/null && return 0
+  fi
+  kill "-$signal" "$pid" 2>/dev/null || true
+}
+
+
 # Enumerate this repository's actually-live `_worker <issue> <worker-id>`
 # processes straight from /proc, independent of workers/*.pid bookkeeping
 # (Issue #219): a pidfile is this host's own record of what it spawned, and
@@ -326,9 +451,8 @@ live_worker_processes() {
     # every caller here does) is exec'd by the kernel's #!/usr/bin/env bash
     # shebang handling, which rewrites argv[0] to the interpreter and shifts
     # PROGRAM_PATH into argv[1] -- so cmdline reads "bash <PROGRAM_PATH>
-    # _worker ..." rather than starting with PROGRAM_PATH itself. Mirrors the
-    # same substring check pid_alive() and worker_alive() already use for
-    # this exact reason.
+    # _worker ..." rather than starting with PROGRAM_PATH itself. The
+    # repository cwd/common-dir match below supplies the repository identity.
     [[ $command_line == *"$PROGRAM_PATH"' _worker '* ]] || continue
     issue=${command_line#*"$PROGRAM_PATH"' _worker '}
     issue=${issue%% *}
@@ -419,7 +543,10 @@ recover_expired() {
       clear_worker_local "$issue"
     else
       # workload-unbounded: one per-Issue lease lookup per running Issue lacking a local pidfile, no batched multi-Issue endpoint exists; bound=running Issue count
-      body=$(repo_api "issues/$issue/comments" --method GET -f since="$since" -f per_page=100 --paginate --jq '[.[].body | select(contains("agentic-loop:lease"))] | last // ""' 2>/dev/null | tail -n 1 || true)
+      if ! body=$(latest_lease_body "$issue" "$since"); then
+        # An unreadable lease must be honored conservatively; retry next poll.
+        continue
+      fi
       expires=$(printf '%s\n' "$body" | sed -n 's/.*expires=\([0-9][0-9]*\).*/\1/p' | head -n 1)
       [[ -n $expires && $expires -ge $now ]] && continue
     fi
@@ -482,10 +609,10 @@ enforce_worker_timeout() {
     (( elapsed >= WORKER_TIMEOUT_SECONDS )) || continue
     read -r pid < "$pidfile" || continue
     [[ $pid =~ ^[0-9]+$ ]] || continue
-    kill -TERM "-$pid" 2>/dev/null || true
+    signal_process_tree "$pid" TERM
     waited=0
     while (( waited < 5 )) && kill -0 "$pid" 2>/dev/null; do sleep 1; waited=$((waited + 1)); done
-    kill -0 "$pid" 2>/dev/null && kill -KILL "-$pid" 2>/dev/null || true
+    kill -0 "$pid" 2>/dev/null && signal_process_tree "$pid" KILL || true
     lease_release "$issue" timeout
     clear_worker_local "$issue"
     scope_cache_clear "$issue"
@@ -592,10 +719,10 @@ reap_orphan_workers() {
     fi
     read -r pid < "$pidfile" || continue
     [[ $pid =~ ^[0-9]+$ ]] || continue
-    kill -TERM "-$pid" 2>/dev/null || true
+    signal_process_tree "$pid" TERM
     waited=0
     while (( waited < 5 )) && kill -0 "$pid" 2>/dev/null; do sleep 1; waited=$((waited + 1)); done
-    kill -0 "$pid" 2>/dev/null && kill -KILL "-$pid" 2>/dev/null || true
+    kill -0 "$pid" 2>/dev/null && signal_process_tree "$pid" KILL || true
     lease_release "$issue" orphan
     clear_worker_local "$issue"
     scope_cache_clear "$issue"

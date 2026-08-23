@@ -249,6 +249,23 @@ metrics_dist_json() {
 }
 
 
+# Stall-threshold calibration verdict for one band (Issue #280, ADR 0032),
+# reusing the plan/exec distributions metrics already computed from the
+# fleet-wide `usage` markers -- no additional GitHub calls. Below
+# CALIBRATION_MIN_SAMPLES the verdict is insufficient-samples (not a
+# judgement); threshold=0 (band disabled) is reported as ok (nothing to
+# calibrate against).
+metrics_calibration_verdict() {
+  local dist=$1 threshold=$2 n p90
+  IFS=$'\t' read -r n _ _ p90 _ <<< "$dist"
+  n=${n:-0}
+  if (( n < CALIBRATION_MIN_SAMPLES )); then printf 'insufficient-samples'
+  elif (( threshold > 0 && p90 >= threshold )); then printf 'undersized'
+  else printf 'ok'
+  fi
+}
+
+
 metrics_render_unavailable() {
   local format=$1
   if [[ $format == json ]]; then
@@ -300,6 +317,7 @@ metrics_render_text() {
     say '  なし（窓内作成Issueにpriority markerがありません）'
   fi
   printf 'worker稼働率: %s（max_workers=%s, 対象期間=%s秒, 稼働=%s秒。個人やworker単位の速度ではなく設備全体の占有率です）\n' "$UTIL_RATIO" "$MAX_WORKERS" "$((WINDOW_END - WINDOW_START))" "$UTIL_SUM"
+  printf 'stall閾値の実測整合: plan=%s exec=%s（provider_stall_seconds=%s秒）\n' "$CALIB_PLAN_VERDICT" "$CALIB_EXEC_VERDICT" "$PROVIDER_STALL_SECONDS"
   if (( ${#WARNINGS[@]} > 0 )); then
     printf '警告:\n'
     local w; for w in "${WARNINGS[@]}"; do printf '  %s\n' "$w"; done
@@ -332,6 +350,17 @@ metrics_render_json() {
   printf '},'
   printf '"utilization":{"max_workers":%s,"window_seconds":%s,"busy_seconds":%s,"ratio":%s},' \
     "$MAX_WORKERS" "$((WINDOW_END - WINDOW_START))" "$UTIL_SUM" "$UTIL_RATIO"
+  local plan_n plan_p90 exec_n exec_p90 overall_verdict
+  IFS=$'\t' read -r plan_n _ _ plan_p90 _ <<< "$DIST_PLANSEC"
+  IFS=$'\t' read -r exec_n _ _ exec_p90 _ <<< "$DIST_EXECSEC"
+  (( ${plan_n:-0} > 0 )) || plan_p90=null
+  (( ${exec_n:-0} > 0 )) || exec_p90=null
+  if [[ $CALIB_PLAN_VERDICT == undersized || $CALIB_EXEC_VERDICT == undersized ]]; then overall_verdict=undersized
+  elif [[ $CALIB_PLAN_VERDICT == insufficient-samples || $CALIB_EXEC_VERDICT == insufficient-samples ]]; then overall_verdict=insufficient-samples
+  else overall_verdict=ok
+  fi
+  printf '"stall_calibration":{"stall_seconds":%s,"provider_stall_seconds":%s,"plan_p90":%s,"exec_p90":%s,"verdict":"%s"},' \
+    "$STALL_SECONDS" "$PROVIDER_STALL_SECONDS" "$plan_p90" "$exec_p90" "$overall_verdict"
   printf '"by_category":{'
   sep=''
   for key in "${CATEGORY_LABELS[@]}"; do printf '%s"%s":%s' "$sep" "$key" "${CATCOUNT[$key]}"; sep=','; done
@@ -477,6 +506,12 @@ cmd_metrics() {
   DIST_PLANSEC=$(printf '%s\n' "${DUR_PLANSEC[@]}" | sed '/^$/d' | metrics_distribution)
   DIST_EXECSEC=$(printf '%s\n' "${DUR_EXECSEC[@]}" | sed '/^$/d' | metrics_distribution)
   DIST_PRWAIT=$(printf '%s\n' "${DUR_PRWAIT[@]}" | sed '/^$/d' | metrics_distribution)
+
+  declare -g CALIB_PLAN_VERDICT CALIB_EXEC_VERDICT
+  CALIB_PLAN_VERDICT=$(metrics_calibration_verdict "$DIST_PLANSEC" "$PROVIDER_STALL_SECONDS")
+  CALIB_EXEC_VERDICT=$(metrics_calibration_verdict "$DIST_EXECSEC" "$PROVIDER_STALL_SECONDS")
+  [[ $CALIB_PLAN_VERDICT == undersized ]] && WARNINGS+=("stall_calibration: plan_secondsの実測p90がqueue.provider_stall_seconds(${PROVIDER_STALL_SECONDS}秒)以上です。stall誤検知の恐れがあるため見直してください。")
+  [[ $CALIB_EXEC_VERDICT == undersized ]] && WARNINGS+=("stall_calibration: exec_secondsの実測p90がqueue.provider_stall_seconds(${PROVIDER_STALL_SECONDS}秒)以上です。stall誤検知の恐れがあるため見直してください。")
 
   declare -g UTIL_RATIO
   UTIL_RATIO=$(awk -v s="$UTIL_SUM" -v w="$MAX_WORKERS" -v sec="$((WINDOW_END - WINDOW_START))" 'BEGIN { if (w > 0 && sec > 0) printf "%.4f", s / (w * sec); else print "0" }')

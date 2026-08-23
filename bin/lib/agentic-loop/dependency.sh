@@ -41,6 +41,9 @@ dependency_note_failure() {
 # or a URL), which this feature does not support.
 dependency_refs_from_body() {
   local body=$1 count line token
+  # GitHub本文はWeb UI/API経由ではCRLFになることがある。行末CRを
+  # 構文判定の前に除去し、同一repositoryの依存を誤ってcross-repo扱いしない。
+  body=${body//$'\r'/}
   count=$(grep -c '^Blocked by:' <<< "$body" || true)
   (( count == 0 )) && return 0
   (( count == 1 )) || return 1
@@ -79,7 +82,8 @@ dependency_native_refs() {
     fi
   fi
   error="$(dependency_state_dir)/native-error.$$"
-  if out=$(repo_api "issues/$issue/dependencies/blocked_by" --jq '.[].number' 2>"$error"); then
+  # workload-unbounded: native依存一覧はIssueに紐づく有限のblocked_by件数を全件取得; bound=blocked_by count; track=#237
+  if out=$(repo_api "issues/$issue/dependencies/blocked_by" --paginate --jq '.[].number' 2>"$error"); then
     rm -f "$error"
     { printf '%s\t0\n' "$now"; [[ -z $out ]] || printf '%s\n' "$out"; } > "$cache"
     printf '%s\n' "$out"; return 0

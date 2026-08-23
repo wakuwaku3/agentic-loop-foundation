@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# shellcheck disable=SC2155,SC2209,SC2016
+# shellcheck disable=SC2155,SC2209,SC2016,SC2030,SC2031
 set -euo pipefail
 
 readonly PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -14,6 +14,111 @@ case "$TEST_GROUP" in all|queue|lifecycle|auxiliary|upgrade) ;; *) printf 'Unkno
 
 fail() { printf 'FAIL: %s\n' "$1" >&2; exit 1; }
 assert_contains() { grep -Fq -- "$2" "$1" || fail "$3"; }
+
+# Wait-for-condition helpers (Issue #327): E2E assertions about supervisor/
+# worker state can't use a fixed sleep budget, because the state transition
+# being awaited (e.g. a poll that forks/execs a fake gh and fake provider many
+# times) takes CPU-bound wall-clock time that a busy CI runner can inflate far
+# past what a quiet workstation needs. All non-negative-assertion waits below
+# poll on a wall-clock deadline instead of a fixed iteration count, so a slow
+# machine gets more polls rather than a premature "did not happen" failure.
+# scripts/lint.sh forbids reintroducing fixed-iteration-count `seq`-based wait
+# loops in this file; use wait_for/wait_gone/wait_polls instead.
+readonly WAIT_TIMEOUT_SECONDS=60
+
+# wait_for DESC [--timeout N] CMD... -> poll CMD (a command or function name,
+# args allowed) until it exits 0 or the deadline elapses. Runs in the current
+# shell (no subshell), so a predicate function that assigns a variable leaves
+# that assignment visible to the caller. Returns 0/1; never calls fail itself,
+# so callers keep their own cleanup-then-fail (e.g. killing a supervisor pid)
+# on timeout. On timeout, diagnostics go to stderr *before* any caller's fail
+# message, so scripts/flaky.sh's sha256-of-first-line fingerprint (see
+# docs/operations/flaky-tests.md) stays keyed on the unchanged `fail` text.
+wait_for() {
+  local desc=$1 budget=$WAIT_TIMEOUT_SECONDS
+  shift
+  if [[ ${1:-} == --timeout ]]; then budget=$2; shift 2; fi
+  local start=$EPOCHSECONDS elapsed=0 interval
+  while :; do
+    if "$@" >/dev/null 2>&1; then
+      [[ -z ${AGENTIC_LOOP_TEST_WAIT_TRACE:-} ]] || printf 'wait: %s %ds\n' "$desc" "$elapsed" >&2
+      return 0
+    fi
+    elapsed=$(( EPOCHSECONDS - start ))
+    (( elapsed < budget )) || break
+    interval=0.1; (( elapsed < 5 )) || interval=0.5
+    sleep "$interval"
+  done
+  {
+    printf 'timed out after %ds waiting for: %s\n' "$budget" "$desc"
+    printf 'predicate: %s\n' "$*"
+    "$@" || true
+    printf -- '--- state ---\n'; tail -n 20 "${state:-/dev/null}" 2>/dev/null || true
+    printf -- '--- workers ---\n'; ls -l "${state_root:-}/workers" 2>/dev/null || true
+    printf -- '--- poll-interval ---\n'; cat "${state_root:-}/poll-interval" 2>/dev/null || true
+    printf -- '--- recent logs ---\n'; tail -n 20 "${state_root:-}"/logs/issue-*.log 2>/dev/null || true
+    printf -- '--- load ---\n'; nproc 2>/dev/null || true; cat /proc/loadavg 2>/dev/null || true
+  } >&2
+  return 1
+}
+
+# wait_gone DESC PID [--timeout N] -> poll until PID no longer answers `kill -0`.
+__wait_gone_check() { ! kill -0 "$1" 2>/dev/null; }
+wait_gone() {
+  local desc=$1 pid=$2
+  shift 2
+  wait_for "$desc" "$@" __wait_gone_check "$pid"
+}
+
+# wait_polls DESC [N=2] -> wait for N full supervisor poll cycles to complete,
+# using the poll-interval marker supervisor.sh writes at the tail of every
+# poll (after any claim attempt). Deleting it and waiting for it to reappear N
+# times (default 2, since the first reappearance may belong to a poll that was
+# already underway before the delete) proves N complete poll bodies ran,
+# without relying on a fixed sleep to "probably" cover that many polls.
+wait_polls() {
+  local desc=$1 n=${2:-2} i
+  for (( i = 0; i < n; i++ )); do
+    rm -f "$state_root/poll-interval"
+    wait_for "$desc (poll $((i + 1))/$n)" test -e "$state_root/poll-interval" || return 1
+  done
+  return 0
+}
+
+# --- wait_for/wait_gone/wait_polls self-test (Issue #327), runs in every group ---
+{
+  __selftest_flag="$TEST_ROOT/selftest-wait-flag"
+  rm -f "$__selftest_flag"
+  ( sleep 0.3; : > "$__selftest_flag" ) &
+  __selftest_bg=$!
+  __selftest_flag_check() { [[ -e $__selftest_flag ]]; }
+  wait_for 'self-test: delayed condition' --timeout 5 __selftest_flag_check \
+    || fail 'wait_for self-test: a condition satisfied after a short delay was not observed within its budget'
+  wait "$__selftest_bg" 2>/dev/null || true
+
+  __selftest_capture=''
+  __selftest_capture_check() { __selftest_capture=ok; return 0; }
+  wait_for 'self-test: predicate side effect visibility' --timeout 5 __selftest_capture_check \
+    || fail 'wait_for self-test: predicate did not run'
+  [[ $__selftest_capture == ok ]] || fail 'wait_for self-test: a predicate function'"'"'s variable assignment did not persist to the caller (it ran in a subshell)'
+
+  __selftest_never() { return 1; }
+  if wait_for 'self-test: condition that never becomes true' --timeout 1 __selftest_never; then
+    fail 'wait_for self-test: a predicate that never succeeds returned success'
+  fi
+
+  setsid sleep 60 & __selftest_alive_pid=$!
+  if wait_gone 'self-test: alive pid falsely reported gone' "$__selftest_alive_pid" --timeout 1; then
+    fail 'wait_gone self-test: a live pid was reported as gone'
+  fi
+  kill -TERM "-$__selftest_alive_pid" 2>/dev/null || true
+  wait "$__selftest_alive_pid" 2>/dev/null || true
+
+  ( exit 0 ) & __selftest_gone_pid=$!
+  wait "$__selftest_gone_pid" 2>/dev/null || true
+  wait_gone 'self-test: exited pid observed as gone' "$__selftest_gone_pid" --timeout 5 \
+    || fail 'wait_gone self-test: an already-exited pid was not observed as gone'
+}
 
 # write_queue_config FILE KEY=VAL ... -> render a [queue] TOML config. A
 # purely numeric VAL is emitted bare (existing numeric queue.* keys); any
@@ -173,6 +278,38 @@ workload_plan_body() { printf '## 計画\n\n```agentic-loop:workload\n%s\n```\n\
 
 mkdir -p "$FAKE_BIN" "$FAKE_GH_ROOT"
 
+# External CLI contract lint: detect known-invalid forms while allowing
+# typed flags, body files, literal @ text, and Markdown examples.
+cli_contract_fixture="$TEST_ROOT/cli-contracts.sh"
+cat > "$cli_contract_fixture" <<'EOF'
+yq --arg k a '.children[]'
+gh issue create --body "@/tmp/issue_body.md"
+gh api -f count=3
+gh issue create --body-file body.txt
+printf '%s\n' 'email@example.test and @path are literal text'
+```sh
+gh issue create --body "@path"
+```
+gh issue create --body="@x.md"
+gh pr comment 1 -b "@x.md"
+gh issue comment 1 --body "こんにちは、これは正当な本文です"
+EOF
+cli_contract_output=$("$PROJECT_ROOT/scripts/lint-cli-contracts.sh" "$cli_contract_fixture")
+grep -Fq 'yq flag --arg' <<< "$cli_contract_output" || fail 'CLI contract lint missed yq --arg fixture'
+grep -Fq 'gh --body の @path' <<< "$cli_contract_output" || fail 'CLI contract lint missed gh --body @path fixture'
+grep -Fq 'gh api の型付き値' <<< "$cli_contract_output" || fail 'CLI contract lint missed gh api -f typed value fixture'
+if grep -Fq "$cli_contract_fixture:5:" <<< "$cli_contract_output"; then
+  fail 'CLI contract lint falsely flagged valid @ text or body-file'
+fi
+if grep -Fq "$cli_contract_fixture:7:" <<< "$cli_contract_output"; then
+  fail 'CLI contract lint falsely flagged Markdown code block'
+fi
+grep -Fq "$cli_contract_fixture:9:" <<< "$cli_contract_output" || fail 'CLI contract lint missed gh --body=@path (no space)'
+grep -Fq "$cli_contract_fixture:10:" <<< "$cli_contract_output" || fail 'CLI contract lint missed gh -b "@path"'
+if grep -Fq "$cli_contract_fixture:11:" <<< "$cli_contract_output"; then
+  fail 'CLI contract lint falsely flagged an ordinary --body value'
+fi
+
 # Disable git auto-maintenance globally for the whole harness: commit, push,
 # and receive-pack spawn `git maintenance run --auto --detach` in the
 # background, which repacks fixture repos while a later step clones them and
@@ -319,6 +456,12 @@ case "${1:-} ${2:-}" in
       # collection B's repo-wide comments read matched just below (this
       # branch must come first, since both share the issues/comments endpoint).
       [[ -n ${FAKE_TRACE_AUDIT_EVENTS:-} ]] && cat "$FAKE_TRACE_AUDIT_EVENTS" 2>/dev/null || true
+    elif [[ $endpoint == issues/comments && $* == *'(.body // "" | @base64)'* ]]; then
+      # bin/agentic-loop doctor's repo-wide, single-page (no --paginate)
+      # body_unexpanded_file_reference comment scan (Issue #272): distinct
+      # from metrics collection B matched just below, which shares the
+      # issues/comments endpoint but uses a different --jq shape.
+      [[ -n ${FAKE_DOCTOR_COMMENTS:-} ]] && cat "$FAKE_DOCTOR_COMMENTS" 2>/dev/null || true
     elif [[ $endpoint == issues/comments ]]; then
       # bin/agentic-loop metrics collection B (repo-wide comments): distinct
       # from the per-Issue issues/N/comments endpoint matched further below.
@@ -410,7 +553,8 @@ case "${1:-} ${2:-}" in
         else if ($2 == "parked") state="parked"
         else if ($2 == "in-review") state="in-review"
         else if ($2 == "blocked") state="blocked"
-        print $1 "\t" "Fake issue " $1 "\t" state "\t" priority "\t" category "\t" created
+        body_b64=($8 == "" ? "-" : $8)
+        print $1 "\t" "Fake issue " $1 "\t" state "\t" priority "\t" category "\t" created "\t" body_b64
       }' "$state" 2>/dev/null || true
     elif [[ $endpoint == issues && $method == GET ]]; then
       case $wanted in
@@ -699,9 +843,14 @@ case "${1:-} ${2:-}" in
         # resume_probe's open-PR detail jq matched in the else branch below.
         [[ -n ${FAKE_PR_BODY_FILE:-} && -r $FAKE_PR_BODY_FILE ]] && cat "$FAKE_PR_BODY_FILE"
       else
-        printf '%s\x1f%s\x1f%s\x1f%s\x1f%s\n' \
-          "${FAKE_RESUME_BASE_REF:-main}" "${FAKE_RESUME_BASE_SHA:-}" "${FAKE_RESUME_HEAD_SHA:-}" \
-          "${FAKE_RESUME_MERGEABLE:-null}" "${FAKE_RESUME_MERGEABLE_STATE:-unknown}"
+        # resume_probe must substitute SEP in its jq program before executing
+        # it. Returning literal SEP for an unconverted program makes this
+        # fixture preserve the production parser's empty-field regression.
+        detail_sep=SEP
+        [[ $jqarg == *$'\x1f'* ]] && detail_sep=$'\x1f'
+        printf '%s%s%s%s%s%s%s%s%s\n' \
+          "${FAKE_RESUME_BASE_REF:-main}" "$detail_sep" "${FAKE_RESUME_BASE_SHA:-}" "$detail_sep" "${FAKE_RESUME_HEAD_SHA:-}" "$detail_sep" \
+          "${FAKE_RESUME_MERGEABLE:-null}" "$detail_sep" "${FAKE_RESUME_MERGEABLE_STATE:-unknown}"
       fi
     elif [[ $endpoint == pulls && $* == *'resume-probe-prs'* ]]; then
       printf '%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\n' \
@@ -736,8 +885,11 @@ case "${1:-} ${2:-}" in
     ;;
   'api graphql')
     if [[ $* == *'projectItems(first:20'* ]]; then
-      number=''; cursor=''
+      number=''; cursor=''; jq_expr='.'; read_jq=0
       for arg in "$@"; do [[ $arg == number=* ]] && number=${arg#number=}; [[ $arg == cursor=* ]] && cursor=${arg#cursor=}; done
+      for arg in "$@"; do
+        if (( read_jq )); then jq_expr=$arg; read_jq=0; elif [[ $arg == --jq ]]; then read_jq=1; fi
+      done
       if [[ ${FAKE_PROJECT_CONTENT_FAIL:-0} == 1 || ( -n ${FAKE_PROJECT_CONTENT_FAIL_ISSUE:-} && $number == "$FAKE_PROJECT_CONTENT_FAIL_ISSUE" ) ]]; then
         printf '{"errors":[{"message":"forced GraphQL failure"}]}\n'
         exit 1
@@ -746,17 +898,18 @@ case "${1:-} ${2:-}" in
         # A member is resolved immediately (possibly after one cursor hop when
         # the fixture lists it on the second page).
         if [[ -r $project_page2 ]] && grep -Fxq "$number" "$project_page2" && [[ -z $cursor ]]; then
-          printf 'NEXT\x1fpage2cursor\n'
+          printf '{"data":{"repository":{"content":{"projectItems":{"nodes":[],"pageInfo":{"hasNextPage":true,"endCursor":"page2cursor"}}}}}}\n' | jq -r "$jq_expr"
         else
           status=''; category=''; blocked_b64=''
           IFS=$'\t' read -r status category blocked_b64 < <(awk -F '\t' -v n="$number" '$1 == n {print $2 "\t" $3 "\t" $4; exit}' "$project_values" 2>/dev/null || true)
           blocked=''; [[ -z $blocked_b64 ]] || blocked=$(base64 -d <<< "$blocked_b64")
-          printf 'PVTI_%s\x1f%s\x1f%s\x1f%s\nEND\n' "$number" "$status" "$category" "$blocked"
+          printf '{"data":{"repository":{"content":{"projectItems":{"nodes":[{"id":"PVTI_%s","project":{"id":"PVT_fake"},"fieldValues":{"nodes":[{},{"name":"%s","field":{"name":"Title"}},{"name":"%s","field":{"name":"Agent status"}},{"name":"%s","field":{"name":"Category"}},{"text":"%s","field":{"name":"Blocked by"}}]}}],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}}\n' \
+            "$number" "issue $number" "$status" "$category" "$blocked" | jq -r "$jq_expr"
         fi
       else
         # A confirmed non-member is a successful empty result (END), distinct
         # from the forced failure above.  The real jq always emits this trailer.
-        printf 'END\n'
+        printf '{"data":{"repository":{"content":{"projectItems":{"nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}}\n' | jq -r "$jq_expr"
       fi
     elif [[ $* == *'repositories(first:100)'* ]]; then
       [[ -e $project_link ]] && cat "$project_link"
@@ -805,14 +958,19 @@ case "${1:-} ${2:-}" in
     name=''; for ((i=1; i<=$#; i++)); do [[ ${!i} == --name ]] && { j=$((i+1)); name=${!j}; }; done
     grep -Fxq "$name" "$project_fields" 2>/dev/null || printf '%s\n' "$name" >> "$project_fields" ;;
   'project item-edit')
-    item_id='' option_id='' text=''
+    item_id='' option_id='' text='' clear=0 text_given=0
     for ((i=1; i<=$#; i++)); do
       case ${!i} in
         --id) j=$((i+1)); item_id=${!j} ;;
         --single-select-option-id) j=$((i+1)); option_id=${!j} ;;
-        --text) j=$((i+1)); text=${!j} ;;
+        --text) j=$((i+1)); text=${!j}; text_given=1 ;;
+        --clear) clear=1 ;;
       esac
     done
+    # Real gh rejects an empty --text with "no changes to make" (exit 1);
+    # removing a text value requires --clear.  Accepting it here hid #268's
+    # "blocker cleared" reconciliation failure completely.
+    if (( text_given )) && [[ -z $text ]]; then printf 'error: no changes to make\n' >&2; exit 1; fi
     item_number=${item_id#PVTI_}
     status=''; category=''; blocked_b64=''
     IFS=$'\t' read -r status category blocked_b64 < <(awk -F '\t' -v n="$item_number" '$1 == n {print $2 "\t" $3 "\t" $4; exit}' "$project_values" 2>/dev/null || true)
@@ -823,7 +981,7 @@ case "${1:-} ${2:-}" in
       PVTFO_blocked) status=Blocked ;; PVTFO_improvement) category=Improvement ;;
       PVTFO_feature) category=Feature ;;
     esac
-    [[ -z $text ]] || blocked_b64=$(printf '%s' "$text" | base64 -w0)
+    if (( clear )); then blocked_b64=''; elif [[ -n $text ]]; then blocked_b64=$(printf '%s' "$text" | base64 -w0); fi
     awk -F '\t' -v n="$item_number" '$1 != n' "$project_values" 2>/dev/null > "$project_values.$$.tmp" || true
     printf '%s\t%s\t%s\t%s\n' "$item_number" "$status" "$category" "$blocked_b64" >> "$project_values.$$.tmp"
     mv "$project_values.$$.tmp" "$project_values" ;;
@@ -980,7 +1138,19 @@ if [[ $* == *'Use $diagnose-codebase'* ]]; then
     "$worktree/bin/agentic-loop" sync-issue 99 >/dev/null
   fi
 fi
-if [[ ${FAKE_CODEX_GIT_OPERATIONS:-0} == 1 ]]; then
+# --add-dir is only ever passed on the workspace-write (exec) call (see
+# agent.sh's plan/exec codex_args split); the plan call is --sandbox
+# read-only and cannot perform Git writes in real Codex either. Gate this
+# fixture the same way so a plan-stage call never falsely trips the
+# missing-add-dir check as a plan failure.
+plan_or_exec_workspace_write=0
+for ((gi=1; gi<=$#; gi++)); do
+  if [[ ${!gi} == --sandbox ]] && (( gi < $# )); then
+    gj=$((gi + 1))
+    [[ ${!gj} == workspace-write ]] && plan_or_exec_workspace_write=1
+  fi
+done
+if [[ ${FAKE_CODEX_GIT_OPERATIONS:-0} == 1 ]] && (( plan_or_exec_workspace_write )); then
   expected=$(git -C "$worktree" rev-parse --path-format=absolute --git-common-dir)
   [[ " $add_dirs " == *" $expected "* ]] || { printf 'missing Git add-dir: %s (expected %s)\n' "$add_dirs" "$expected" >&2; exit 3; }
   [[ " $add_dirs " == *" $worktree/.agents "* ]] || { printf 'missing .agents add-dir: %s\n' "$add_dirs" >&2; exit 3; }
@@ -1087,29 +1257,62 @@ printf '%s\n' "$*" >> "$FAKE_GH_ROOT/claude-calls"
 [[ ${1:-} == --version || ${1:-} == --help ]] && { printf 'claude 1.0.0\n'; exit 0; }
 [[ $* == *--print* ]] || { printf 'claude worker must run non-interactively\n' >&2; exit 2; }
 [[ $* == *--dangerously-skip-permissions* ]] || { printf 'claude worker must not block on permissions\n' >&2; exit 2; }
+# Real claude CLI contract (measured directly, Issue #273): stream-json under
+# --print requires --verbose, and fails fast with no stdout otherwise.
+if [[ $* == *'--output-format stream-json'* && $* != *--verbose* ]]; then
+  printf 'Error: When using --print, --output-format=stream-json requires --verbose\n' >&2
+  exit 1
+fi
 sleep "${FAKE_CLAUDE_SLEEP:-0}"
 # Per-invocation result override so a test can give the plan stage and the exec
 # stage different outputs (e.g. a plan that discusses rate limits, then an exec
-# that completes). Each --output-format json call increments a counter and
-# prefers FAKE_CLAUDE_RESULT_<n>, falling back to the scalar FAKE_CLAUDE_RESULT.
+# that completes). Each --output-format stream-json call increments a counter
+# and prefers FAKE_CLAUDE_RESULT_<n>, falling back to the scalar
+# FAKE_CLAUDE_RESULT.
 claude_result=${FAKE_CLAUDE_RESULT:-AGENTIC_LOOP_RESULT=completed}
-if [[ $* == *'--output-format json'* ]]; then
+if [[ $* == *'--output-format stream-json'* ]]; then
   claude_count_file="$FAKE_GH_ROOT/claude-json-count"
   claude_count=$(($(cat "$claude_count_file" 2>/dev/null || printf 0) + 1))
   printf '%s\n' "$claude_count" > "$claude_count_file"
   seq_var="FAKE_CLAUDE_RESULT_$claude_count"
   if [[ -v $seq_var ]]; then claude_result=${!seq_var}; fi
 fi
+# Stage-level transport failures model provider failures observed in production:
+# empty output, stderr-only non-zero exit, and a successful process that
+# violates the JSON output contract.
+case ${FAKE_CLAUDE_STAGE_MODE:-} in
+  empty-nonzero) : > "$FAKE_GH_ROOT/claude-stage-mode"; exit 1 ;;
+  stderr-nonzero) printf '%s\n' "${FAKE_CLAUDE_STAGE_STDERR:-provider failed}" >&2; : > "$FAKE_GH_ROOT/claude-stage-mode"; exit 1 ;;
+  nonjson-zero) printf '%s\n' "${FAKE_CLAUDE_STAGE_OUTPUT:-not json}"; : > "$FAKE_GH_ROOT/claude-stage-mode"; exit 0 ;;
+esac
 # The Claude worker captures the final message from stdout into the result file.
-# With --output-format json the sentinel stays inside .result and usage fields
-# accompany it for the token analysis record.
+# With --output-format stream-json the sentinel stays inside the terminal
+# event's .result and usage fields accompany it for the token analysis record.
 #
 # Real Claude usage-limit path: the CLI still exits zero under --print
-# --output-format json but sets is_error true and reports the limit through
-# api_error_status plus the message in .result. FAKE_CLAUDE_IS_ERROR=1 models
-# that envelope so tests exercise the structured-error classification instead of
-# substring-matching the plan text.
-if [[ $* == *'--output-format json'* ]]; then
+# --output-format stream-json but sets is_error true on the terminal event and
+# reports the limit through api_error_status plus the message in .result.
+# FAKE_CLAUDE_IS_ERROR=1 models that envelope so tests exercise the
+# structured-error classification instead of substring-matching the plan text.
+if [[ $* == *'--output-format stream-json'* ]]; then
+  # Model the real stream shape (measured directly, Issue #273): an init
+  # event, an assistant event, a rate_limit_event whose text would trip the
+  # pool-exhaustion regex if ever copied whole into result_file, a non-JSON
+  # noise line (observed in practice from MCP tool logging), then the
+  # terminal result event -- the only line the worker must parse.
+  printf '{"type":"system","subtype":"init"}\n'
+  printf '{"type":"assistant","message":{"content":[{"type":"text","text":"working"}]}}\n'
+  printf '{"type":"rate_limit_event","rate_limit_info":{"status":"allowed"}}\n'
+  printf 'Client.listTools() called but server is not initialized\n'
+  # FAKE_CLAUDE_OMIT_TERMINAL=1 models a stream killed mid-run (or a CLI that
+  # never emits a terminal event): stdout has only non-terminal lines, and the
+  # failure surfaces on stderr instead, exercising agent_run_stage's existing
+  # empty-result_file-falls-back-to-stderr path with no raw stream ever
+  # entering result_file (Issue #273).
+  if [[ ${FAKE_CLAUDE_OMIT_TERMINAL:-0} == 1 ]]; then
+    printf 'stage killed before completion\n' >&2
+    exit 1
+  fi
   if [[ ${FAKE_CLAUDE_IS_ERROR:-0} == 1 ]]; then
     printf '{"type":"result","is_error":true,"api_error_status":"%s","result":"%s","usage":{"input_tokens":123,"output_tokens":45,"cache_read_input_tokens":10},"total_cost_usd":0.0123}\n' "${FAKE_CLAUDE_API_ERROR_STATUS:-429}" "$claude_result"
   else
@@ -1152,6 +1355,11 @@ if [[ $* == *'--format json'* ]]; then
 else
   printf '%s\n' "$opencode_result"
 fi
+exit_var=FAKE_OPENCODE_EXIT
+if [[ $* == *--auto* && -v FAKE_OPENCODE_EXEC_EXIT_$auto_count ]]; then
+  exit_var="FAKE_OPENCODE_EXEC_EXIT_$auto_count"
+fi
+exit "${!exit_var:-0}"
 FAKE_OPENCODE
 cat > "$FAKE_BIN/systemctl" <<'FAKE_SYSTEMCTL'
 #!/usr/bin/env bash
@@ -1284,8 +1492,10 @@ done
 assert_contains "$target/.agents/skills/submit-requirement/SKILL.md" 'in Japanese' 'installed submission skill did not require Japanese GitHub content'
 assert_contains "$target/.agents/skills/diagnose-codebase/SKILL.md" 'without modifying' 'diagnosis skill did not prohibit code changes'
 assert_contains "$target/AGENTS.md" '通常のbuild・変更要求' 'installed AGENTS.md lacks queue-first routing'
+assert_contains "$target/AGENTS.md" 'git管理外（gitignore対象）' 'installed AGENTS.md lacks the local overlay intake exception'
 assert_contains "$target/AGENTS.md" 'agent:running' 'installed AGENTS.md lacks the worker exception'
 assert_contains "$target/.agents/skills/submit-requirement/SKILL.md" 'Queue-first intake' 'installed skill lacks queue-first routing'
+assert_contains "$target/.agents/skills/submit-requirement/SKILL.md" 'git-ignored, repository-local overlay' 'installed submission skill lacks the local overlay intake exception'
 assert_contains "$target/.agents/skills/submit-requirement/SKILL.md" 'Non-recursive worker exception' 'installed skill lacks the worker exception'
 assert_contains "$target/AGENTS.md" '新規Issue作成を明示した場合は重複検索を省略' 'installed AGENTS.md does not bypass duplicate search for explicit Issue creation'
 assert_contains "$target/.agents/skills/submit-requirement/SKILL.md" 'do not search for duplicates and create a new Issue' 'installed skill does not bypass duplicate search for explicit Issue creation'
@@ -1299,6 +1509,7 @@ assert_contains "$target/docs/operations/issue-queue.md" 'open・closed Issueを
 assert_contains "$target/docs/operations/issue-queue.md" 'Supervisorが停止中であること' 'installed docs do not require stopped-Supervisor reporting'
 assert_contains "$target/docs/operations/issue-queue.md" 'Supervisor停止はこのfallbackと区別する' 'installed docs conflate a stopped Supervisor with GitHub verification failure'
 assert_contains "$target/docs/operations/issue-queue.md" '安全なfallback' 'installed docs lack safe fallback'
+assert_contains "$target/docs/operations/issue-queue.md" 'repository-local設定overlayの扱い' 'installed docs lack local overlay routing guidance'
 timer="$XDG_CONFIG_HOME/systemd/user/agentic-loop-main-sync-$(printf '%s' "${target#/}" | tr '/' '-').timer"
 service=${timer%.timer}.service
 [[ -f $timer && -f $service ]] || fail 'install did not create the periodic main update units'
@@ -1563,7 +1774,16 @@ tail -n "+$((calls_before + 1))" "$FAKE_GH_ROOT/calls" > "$TEST_ROOT/sync-issue-
 [[ $(grep -c $'\tproject field-list ' "$TEST_ROOT/sync-issue-project-calls.log" || true) -le 1 ]] || fail 'one Issue sync fetched Project fields repeatedly'
 pending_project="$(git -C "$target" rev-parse --absolute-git-dir)/agentic-loop/project-pending"
 assert_contains "$pending_project" '91' 'temporary Project failure was not persisted as an Issue hint'
+pending_project_since="${pending_project}.since"
+[[ -r $pending_project_since ]] || fail 'the first pending Project retry did not record a .since timestamp'
+first_since=$(cat "$pending_project_since")
+[[ $first_since =~ ^[0-9]+$ ]] || fail '.since did not record a numeric epoch'
 FAKE_PROJECT_FAILURES=1 "$target/bin/agentic-loop" sync-issue 91 >/dev/null
+# .since must keep recording the oldest unresolved retry, not reset on
+# every touch of project-pending (regression: status used to read
+# project-pending's own mtime, which reconcile_pending_project's awk+mv ack
+# and every enqueue both reset).
+[[ $(cat "$pending_project_since") == "$first_since" ]] || fail '.since advanced while the pending entry was still unresolved'
 [[ $(grep -Fxc 'https://github.com/acme/installed-project/issues/91' "$FAKE_GH_ROOT/$state_key.project-items") -eq 1 ]] || fail 'repeated immediate synchronization duplicated the Issue item'
 printf '91 needs-input open none 2026-01-01T00:00:00Z none improvement\n92 needs-input open none 2026-01-01T00:00:00Z none improvement\n' > "$FAKE_GH_ROOT/$state_key.state"
 AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _supervise
@@ -1594,6 +1814,42 @@ if [[ -e $pending_project ]] && grep -Fxq '93' "$pending_project"; then
   cat "$pending_project" >&2
   fail 'recovered reconciliation did not acknowledge the pending entry'
 fi
+
+# Legacy hint lines (issue #268): before #115 the queue held whole events
+# ("conflict 93 <b64>", "state 93 running") instead of bare Issue numbers.
+# Those lines matched nothing, were never acknowledged, and kept
+# project-sync-pending displayed forever even once every real entry drained.
+# A line carrying no Issue at all is unactionable and must not pin the queue
+# either.
+rm -f "$(git -C "$target" rev-parse --absolute-git-dir)/agentic-loop/graphql-rate-limit" "$pending_project"
+printf '93 needs-input open none 2026-01-01T00:00:00Z none improvement\n' > "$FAKE_GH_ROOT/$state_key.state"
+printf 'conflict 93 Cg==\nstate 93 running\nnot-an-issue\n' > "$pending_project"
+AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _supervise
+if [[ -e $pending_project ]]; then
+  cat "$pending_project" >&2
+  fail 'legacy/unactionable Project hints were never acknowledged and pinned project-sync-pending on'
+fi
+
+# Clearing a Blocked by (issue #268): once an Issue's blocker is gone the
+# desired text is empty, and gh accepts a removal only as --clear ("--text ''"
+# is rejected with "no changes to make").  Such an Issue therefore failed
+# reconciliation on every poll and stayed in project-pending forever.
+rm -f "$(git -C "$target" rev-parse --absolute-git-dir)/agentic-loop/graphql-rate-limit" "$pending_project"
+printf '98 needs-input open none 2026-01-01T00:00:00Z none improvement\n' > "$FAKE_GH_ROOT/$state_key.state"
+printf 'https://github.com/acme/installed-project/issues/98\n' >> "$FAKE_GH_ROOT/$state_key.project-items"
+printf '98\tNeeds input\tImprovement\t%s\n' "$(printf '依存: #7' | base64 -w0)" >> "$FAKE_GH_ROOT/$state_key.project-values"
+calls_before=$(wc -l < "$FAKE_GH_ROOT/calls")
+AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _supervise
+tail -n "+$((calls_before + 1))" "$FAKE_GH_ROOT/calls" > "$TEST_ROOT/blocked-clear-calls.log"
+[[ $(grep -c -- '--clear' "$TEST_ROOT/blocked-clear-calls.log" || true) -ge 1 ]] || fail 'a blocker that no longer applies was not removed with --clear'
+last_98_blocked=$(awk -F '\t' -v n=98 '$1 == n { v = $4 } END { print v }' "$FAKE_GH_ROOT/$state_key.project-values")
+[[ -z $last_98_blocked ]] || fail 'the stale Blocked by text survived reconciliation'
+if [[ -e $pending_project ]] && grep -Fxq '98' "$pending_project"; then
+  cat "$pending_project" >&2
+  fail 'an Issue whose blocker cleared was never acknowledged and stayed pending forever'
+fi
+# Restore the snapshot the following E4 case reads.
+printf '93 needs-input open none 2026-01-01T00:00:00Z none improvement\n' > "$FAKE_GH_ROOT/$state_key.state"
 
 # API failure is distinct from "not a member" (E4): a GraphQL error performs no
 # item-add/item-edit and the hint is retried, not acknowledged as a no-op.
@@ -1655,6 +1911,8 @@ calls_before=$(wc -l < "$FAKE_GH_ROOT/calls")
 AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _supervise
 tail -n "+$((calls_before + 1))" "$FAKE_GH_ROOT/calls" > "$TEST_ROOT/hints-rebuild-calls.log"
 [[ $(grep -c $'\tproject item-edit ' "$TEST_ROOT/hints-rebuild-calls.log" || true) -ge 1 ]] || fail 'deleted hint was not rebuilt and reconverged'
+[[ ! -e "$pending_project" ]] || fail 'a converged open-Issue drift probe leaked into project-pending'
+[[ ! -s "$(git -C "$target" rev-parse --absolute-git-dir)/agentic-loop/project-probes" ]] || fail 'a completed drift probe was not acknowledged'
 
 # Bounded degradation (issue #195): while one Issue's Projects reconciliation
 # fails permanently, project-pending must stay bounded (not grow every poll),
@@ -1883,6 +2141,60 @@ assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'category-reconciled reason=
   [[ $(triage_category_from_text '個人情報が漏洩した疑いがある') == '' ]] || fail 'triage guessed an incident category from free text (incidents require verified harm, never a keyword guess)'
 )
 
+# Project membership query structure (issue #268).  `pageInfo` is a field of
+# the projectItems *connection*; selecting it inside nodes{} makes GitHub
+# answer "Field 'pageInfo' doesn't exist on type 'ProjectV2Item'", and an
+# outer if/else without `end` makes the reducer fail to compile.  Either one
+# turns every load_project_content call into rc=1, so project-pending never
+# drains and Agent status/Category/Blocked by stop converging.  jq is now
+# pinned and the fake-gh fixture below evaluates the real --jq reducer against
+# a schema-shaped fixture, but the fake still cannot validate GitHub's actual
+# GraphQL schema (e.g. that pageInfo really is unavailable inside nodes{}), so
+# this structural guard on the query/reducer text stays as a second,
+# fake-independent layer alongside `bin/agentic-loop smoke`'s real boundary.
+(
+  set -euo pipefail
+  # shellcheck source=/dev/null
+  . "$PROJECT_ROOT/bin/lib/agentic-loop/project.sh"
+
+  # Depth of each selection's parent: the brace nesting immediately before the
+  # named field opens its own selection set (or its arguments).
+  selection_depth_of() {
+    awk -v q="$1" -v field="$2" '
+      BEGIN {
+        depth = 0
+        for (i = 1; i <= length(q); i++) {
+          c = substr(q, i, 1)
+          if (c == "{") { depth++; continue }
+          if (c == "}") { depth--; continue }
+          if (i > 1 && index("{} ", substr(q, i - 1, 1)) == 0) continue
+          if (substr(q, i, length(field)) != field) continue
+          following = substr(q, i + length(field), 1)
+          if (following == "{" || following == "(") print depth
+        }
+      }'
+  }
+
+  content_query=$(project_content_query issue)
+  [[ $content_query == *'content:issue(number:$number)'* ]] || fail 'the Project content query no longer selects the Issue by number'
+  [[ $(project_content_query pullRequest) == *'content:pullRequest(number:$number)'* ]] || fail 'the Project content query no longer supports pull requests'
+  balance=$(awk -v q="$content_query" 'BEGIN { d = 0; for (i = 1; i <= length(q); i++) { c = substr(q, i, 1); if (c == "{") d++; else if (c == "}") d-- } print d }')
+  [[ $balance == 0 ]] || fail "the Project content query has unbalanced braces (depth=$balance)"
+  items_depth=$(selection_depth_of "$content_query" projectItems)
+  page_depth=$(selection_depth_of "$content_query" pageInfo)
+  [[ $items_depth =~ ^[0-9]+$ ]] || fail 'the Project content query no longer selects projectItems'
+  [[ $page_depth =~ ^[0-9]+$ ]] || fail 'the Project content query no longer paginates projectItems (pageInfo is gone)'
+  (( page_depth == items_depth + 1 )) || fail "pageInfo is not a direct child of the projectItems connection (projectItems parent depth=$items_depth, pageInfo parent depth=$page_depth)"
+
+  content_jq=$(project_content_jq PVT_fixture)
+  [[ $content_jq == *'.project.id == "PVT_fixture"'* ]] || fail 'the Project content reducer no longer filters items by the Project id'
+  [[ $content_jq == *'$items.pageInfo.hasNextPage'* && $content_jq == *'$items.pageInfo.endCursor'* ]] || fail 'the Project content reducer no longer reads the connection-level pageInfo the query selects'
+  [[ $content_jq == *'.errors'* ]] || fail 'the Project content reducer no longer turns a GraphQL errors payload into a retryable failure'
+  jq_ifs=$(grep -o '\bif\b' <<< "$content_jq" | wc -l)
+  jq_ends=$(grep -o '\bend\b' <<< "$content_jq" | wc -l)
+  (( jq_ifs > 0 && jq_ifs == jq_ends )) || fail "the Project content reducer has unterminated if statements (if=$jq_ifs end=$jq_ends)"
+)
+
 # triage_issue_content end-to-end via the real fake-gh harness (title, body,
 # and empty comments all feed the same classifier): Issue 205's body has no
 # keyword family at all, so only a custom fixture title (an escape hatch the
@@ -1918,6 +2230,16 @@ candidate_order=$(printf '%s' "$queue_json" | yq -p json '.queue.candidates[].is
 # unknown_scope=open: this fixture also declares no scope and exercises the
 # worker limit and priority ordering, not scope conflict avoidance. The two
 # highest-priority Issues (90, 90) are claimed first; the lower ones stay queued.
+#
+# The installed-project fixture is a detection-only seed with no Makefile
+# (see the capability manifest scenario below, which asserts that absence).
+# Issue #266's worker-prompt assertions need a declared affected_check/
+# impact_map, so overlay them onto capabilities.toml just for this block and
+# restore the detection-only manifest immediately after (same pattern as the
+# preflight capability_orig backup/restore further down).
+queue_capabilities_orig="$TEST_ROOT/queue-capabilities-orig.toml"
+cp "$target/.agentic-loop/capabilities.toml" "$queue_capabilities_orig"
+sed -i '/^\[validation\]$/a affected_check = "devbox run --pure affected"\nimpact_map = "tests/impact-map.toml"' "$target/.agentic-loop/capabilities.toml"
 write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=2 LEASE_SECONDS=3 STOP_TIMEOUT=10 STALE_DAYS=30
 printf 'unknown_scope = "open"\n' >> "$target/.agentic-loop.toml"
 prio90=$(printf '<!-- agentic-loop:priority 90 -->' | base64 -w0)
@@ -1947,10 +2269,15 @@ assert_contains "$FAKE_GH_ROOT/codex-calls" 'GitHubのIssue、PR' 'worker prompt
 assert_contains "$FAKE_GH_ROOT/codex-calls" '実在しない承認コマンド・設定・権限フローを創作して停止してはいけません' 'worker prompt did not forbid fabricating nonexistent approval mechanisms (Issue #191)'
 assert_contains "$FAKE_GH_ROOT/codex-calls" 'devbox.lock' 'worker prompt did not clarify that toolchain lock changes need no worker pre-approval (Issue #191)'
 assert_contains "$FAKE_GH_ROOT/codex-calls" '変更の重大さについての自己判断だけを理由にaxisをhighにしたりapproval.required=trueにしないでください' 'plan prompt did not forbid self-invented approval requirements (Issue #191)'
+assert_contains "$FAKE_GH_ROOT/codex-calls" '影響範囲検証（反復の短縮専用、push/merge gateではない）' 'worker prompt did not expose the declared affected check (Issue #266)'
+assert_contains "$FAKE_GH_ROOT/codex-calls" '影響範囲map: tests/impact-map.toml' 'worker prompt did not expose the declared impact map (Issue #266)'
+assert_contains "$FAKE_GH_ROOT/codex-calls" 'このworkerの実行時間予算: 上限=' 'worker prompt did not expose the observed time budget (Issue #266)'
+assert_contains "$FAKE_GH_ROOT/codex-calls" '本題外のflaky・CI固有失敗を見つけたら' 'worker prompt did not define the out-of-scope failure stop rule (Issue #266)'
 assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'のハートビートです' 'supervisor did not write its Issue comments in Japanese'
 if grep -Eq 'danger-full-access|OPENAI_API_KEY|--add-dir /($| )|--add-dir /home($| )' "$FAKE_GH_ROOT/codex-calls"; then fail 'worker used forbidden Codex configuration or a broad writable path'; fi
 [[ ! -e $state_root/worktrees ]] || fail 'worker worktrees were placed inside Git metadata'
 assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'Token使用量（分析用）: provider=codex' 'codex worker did not record a token usage analysis entry'
+cp "$queue_capabilities_orig" "$target/.agentic-loop/capabilities.toml"
 
 # AGENT_PROVIDER=claude routes the worker to the Claude CLI, confining writes to the worktree.
 [[ -f $target/.claude/skills/submit-requirement/SKILL.md ]] || fail 'install did not add the Claude submit-requirement skill'
@@ -1965,11 +2292,164 @@ assert_contains "$FAKE_GH_ROOT/claude-calls" '--print' 'claude worker did not ru
 assert_contains "$FAKE_GH_ROOT/claude-calls" '--dangerously-skip-permissions' 'claude worker did not skip permission prompts'
 assert_contains "$FAKE_GH_ROOT/claude-calls" "--add-dir $target/.git" 'claude worker did not grant its exact Git common directory'
 assert_contains "$FAKE_GH_ROOT/claude-calls" "--add-dir $target-worktrees/issue-7/.agents" 'claude worker did not grant its exact protected .agents directory'
-assert_contains "$FAKE_GH_ROOT/claude-calls" '--output-format json' 'claude worker did not request a machine-readable usage payload'
+assert_contains "$FAKE_GH_ROOT/claude-calls" '--output-format stream-json' 'claude worker did not request a machine-readable streaming usage payload'
+assert_contains "$FAKE_GH_ROOT/claude-calls" '--verbose' 'claude worker did not pass --verbose, required by --print --output-format stream-json'
 assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'Token使用量（分析用）: provider=claude' 'claude worker did not record its token usage on the Issue'
 assert_contains "$FAKE_GH_ROOT/$state_key.comments" '入力=123tok' 'claude usage record lacked input token count'
 # shellcheck disable=SC2016 # The dollar sign is a literal currency prefix in the recorded usage line.
 assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'cost=$0.0123' 'claude usage record lacked the reported cost'
+
+# Residual `.raw.*`/`.final.*` stage output from a killed prior run of the
+# same stage (e.g. a worker_timeout kill mid-stream, before agent_run_stage's
+# own cleanup could run) must be cleared at the next run of that stage,
+# keeping disk usage bounded to the stage currently in flight (Issue #273).
+write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=3 STOP_TIMEOUT=10 STALE_DAYS=30
+printf '270 queued open none 2026-01-01T00:00:00Z\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+: > "$FAKE_GH_ROOT/claude-calls"
+rm -f "$FAKE_GH_ROOT/claude-json-count"
+printf 'stale raw content with rate limit\n' > "$state_root/issue-270-result.txt.raw.999999"
+printf '{"type":"result"}\n' > "$state_root/issue-270-result.txt.final.999999"
+AGENT_PROVIDER=claude AGENTIC_LOOP_RUN_ONCE=1 FAKE_CLAUDE_SLEEP=1 "$target/bin/agentic-loop" _supervise
+grep -Eq '^270 completed closed' "$state" || fail 'claude provider with stale stage output residue did not complete'
+[[ ! -e $state_root/issue-270-result.txt.raw.999999 ]] || fail 'stale .raw output from a prior killed stage run was not cleared at stage start'
+[[ ! -e $state_root/issue-270-result.txt.final.999999 ]] || fail 'stale .final output from a prior killed stage run was not cleared at stage start'
+
+# The fake claude CLI mirrors the real CLI's measured contract (Issue #273):
+# --print --output-format stream-json requires --verbose and fails fast with
+# no stdout otherwise. Exercised directly against the harness so a future
+# change to agent.sh's claude_args cannot silently drop --verbose without a
+# test noticing (the worker-level test above only proves --verbose is present
+# when the fake CLI already accepts stream-json).
+if "$FAKE_BIN/claude" --print --output-format stream-json --dangerously-skip-permissions 'hi' >"$TEST_ROOT/claude-no-verbose.out" 2>&1; then
+  fail 'fake claude accepted --output-format stream-json without --verbose'
+fi
+[[ ! -s $TEST_ROOT/claude-no-verbose.out ]] || grep -Fq 'requires --verbose' "$TEST_ROOT/claude-no-verbose.out" || fail 'fake claude rejection did not mention the --verbose requirement'
+rm -f "$TEST_ROOT/claude-no-verbose.out"
+
+# A stream with no terminal `{"type":"result",...}` event (killed mid-run, or
+# a CLI exiting before ever emitting one) must not be re-parsed as a whole:
+# the extraction leaves final_result empty, and agent_run_stage's existing
+# empty-result_file fallback copies stderr in instead (Issue #273) -- the
+# Issue is retried through the ordinary transient-failure path, not
+# misclassified as pool exhaustion (no rate-limit/quota text on stderr here).
+write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=3 STOP_TIMEOUT=10 STALE_DAYS=30 MAX_ATTEMPTS=3 RETRY_COOLDOWN_SECONDS=0
+printf '271 queued open none 2026-01-01T00:00:00Z\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+rm -f "$state_root/pools/claude/exhausted" "$FAKE_GH_ROOT/claude-json-count"
+AGENT_PROVIDER=claude AGENTIC_LOOP_RUN_ONCE=1 FAKE_CLAUDE_SLEEP=1 FAKE_CLAUDE_OMIT_TERMINAL=1 "$target/bin/agentic-loop" _supervise
+grep -Eq '^271 (queued open|failed)' "$state" || fail 'a claude stream with no terminal event was not treated as an ordinary stage failure'
+[[ ! -r $state_root/pools/claude/exhausted ]] || fail 'a claude stream with no terminal event must not mark the claude pool exhausted'
+assert_contains "$state_root/issue-271-plan.txt" 'stage killed before completion' 'the missing-terminal-event fallback did not surface the stderr content'
+rm -f "$state_root/pools/claude/exhausted"
+
+# --- Declared reasoning effort and per-stage cost ceiling reach claude (Issue #265) ---
+# A declared reasoning_effort must arrive as the claude CLI's --effort (it was
+# previously assembled only for Codex and silently dropped here), be observable
+# on the Issue's usage comment, and budget.max_stage_cost_usd must arrive as
+# --max-budget-usd. The fake claude records every argument it was given.
+cat > "$target/.agentic-loop.toml" <<'EFFORT_TOML'
+[agent]
+provider = "claude"
+
+[agent.plan]
+model = "opus"
+reasoning_effort = "xhigh"
+
+[agent.exec]
+model = "sonnet"
+reasoning_effort = "medium"
+
+[budget]
+max_stage_cost_usd = 3.5
+
+[queue]
+poll_seconds = 1
+max_workers = 1
+lease_seconds = 3
+stop_timeout = 10
+stale_days = 30
+EFFORT_TOML
+printf '265 queued open none 2026-01-01T00:00:00Z\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+: > "$FAKE_GH_ROOT/claude-calls"
+rm -f "$FAKE_GH_ROOT/claude-json-count"
+AGENTIC_LOOP_RUN_ONCE=1 FAKE_CLAUDE_SLEEP=1 "$target/bin/agentic-loop" _supervise
+grep -Eq '^265 completed closed' "$state" || fail 'claude effort Issue did not complete'
+assert_contains "$FAKE_GH_ROOT/claude-calls" '--effort xhigh' 'plan stage did not pass its declared reasoning effort to claude'
+assert_contains "$FAKE_GH_ROOT/claude-calls" '--effort medium' 'exec stage did not pass its declared reasoning effort to claude'
+assert_contains "$FAKE_GH_ROOT/claude-calls" '--max-budget-usd 3.5' 'claude stage did not pass the configured per-stage cost ceiling'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'reasoning_effort=xhigh' 'claude usage record did not show the applied plan effort'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'reasoning_effort=medium' 'claude usage record did not show the applied exec effort'
+
+# Reaching the cost ceiling is the operator's own cap, not a spent
+# subscription: it must not mark the pool exhausted or pause claiming, and the
+# Issue must follow the ordinary bounded failure/retry path instead.
+printf '267 queued open none 2026-01-01T00:00:00Z\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+: > "$FAKE_GH_ROOT/claude-calls"
+rm -rf "$state_root/pools"
+rm -f "$state_root/agent-exhausted" "$state_root/all-pools-paused" "$FAKE_GH_ROOT/claude-json-count"
+FAKE_CLAUDE_IS_ERROR=1 FAKE_CLAUDE_API_ERROR_STATUS='' \
+  FAKE_CLAUDE_RESULT='Reached the max budget for this session (--max-budget-usd 3.5); stopping.' \
+  AGENTIC_LOOP_RUN_ONCE=1 FAKE_CLAUDE_SLEEP=1 "$target/bin/agentic-loop" _supervise
+[[ ! -e $state_root/pools/claude/exhausted ]] || fail 'a cost-ceiling stop must not mark the claude pool exhausted'
+[[ ! -e $state_root/all-pools-paused ]] || fail 'a cost-ceiling stop must not pause claiming'
+[[ ! -e $state_root/agent-exhausted ]] || fail 'a cost-ceiling stop must not set the global exhaustion marker'
+grep -Eq '^267 (failed|queued) open' "$state" || fail 'a cost-ceiling stop did not follow the ordinary failure path'
+
+# An undeclared reasoning_effort and an unset ceiling add no arguments at all,
+# leaving the claude CLI defaults in place (the Codex plan=high / exec=low
+# fallback stays Codex-only).
+cat > "$target/.agentic-loop.toml" <<'NOEFFORT_TOML'
+[agent]
+provider = "claude"
+
+[agent.plan]
+model = "opus"
+
+[agent.exec]
+model = "sonnet"
+
+[queue]
+poll_seconds = 1
+max_workers = 1
+lease_seconds = 3
+stop_timeout = 10
+stale_days = 30
+NOEFFORT_TOML
+printf '266 queued open none 2026-01-01T00:00:00Z\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+: > "$FAKE_GH_ROOT/claude-calls"
+rm -f "$FAKE_GH_ROOT/claude-json-count"
+AGENTIC_LOOP_RUN_ONCE=1 FAKE_CLAUDE_SLEEP=1 "$target/bin/agentic-loop" _supervise
+grep -Eq '^266 completed closed' "$state" || fail 'claude Issue without a declared effort did not complete'
+if grep -Fq -- '--effort' "$FAKE_GH_ROOT/claude-calls"; then fail 'an undeclared reasoning effort must leave the claude CLI default in place'; fi
+if grep -Fq -- '--max-budget-usd' "$FAKE_GH_ROOT/claude-calls"; then fail 'an unset cost ceiling must not pass --max-budget-usd'; fi
+if grep -Fq 'reasoning_effort=' "$FAKE_GH_ROOT/$state_key.comments"; then fail 'an undeclared reasoning effort must not be recorded as applied'; fi
+
+# doctor treats a level the claude CLI does not accept, and a non-positive cost
+# ceiling, as configuration errors instead of silently ignoring them.
+cat > "$target/.agentic-loop.toml" <<'BAD_EFFORT_TOML'
+[agent]
+provider = "claude"
+
+[agent.plan]
+reasoning_effort = "ultra"
+
+[budget]
+max_stage_cost_usd = 0
+
+[queue]
+poll_seconds = 1
+max_workers = 1
+lease_seconds = 3
+stop_timeout = 10
+stale_days = 30
+BAD_EFFORT_TOML
+doctor_effort_out=$("$target/bin/agentic-loop" doctor || true)
+grep -Fq '[失敗] tiers設定 (plan)' <<< "$doctor_effort_out" || fail 'doctor did not flag an unsupported claude reasoning_effort'
+grep -Fq '[失敗] stageコスト上限' <<< "$doctor_effort_out" || fail 'doctor did not flag an invalid per-stage cost ceiling'
 
 # AGENT_PROVIDER=opencode routes the worker to `opencode run`, scoped to the worktree.
 write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=3 STOP_TIMEOUT=10 STALE_DAYS=30
@@ -2004,23 +2484,85 @@ assert_contains "$FAKE_GH_ROOT/opencode-calls" 'run --auto' 'exec phase did not 
 [[ $(grep -c -- '--sandbox workspace-write' "$FAKE_GH_ROOT/codex-calls") -eq 0 ]] || fail 'exec phase unexpectedly ran on codex'
 assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'provider=codex stage=plan' 'plan usage did not record the codex provider'
 
-# Each Issue runs a read-only plan stage before the workspace-write exec stage,
-# and an exec that never satisfies completion triggers bounded re-planning.
-write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=30 STOP_TIMEOUT=10 STALE_DAYS=30
+# Each Issue runs a read-only plan stage before the workspace-write exec stage.
+# A plan whose every candidate fails must never fall through to exec with an
+# empty plan (that would bypass scope refinement, preflight, workload, and
+# decomposition simultaneously). It is retried in-turn (bounded by
+# agent.retry.plan_max) before being treated as a genuine task failure, so the
+# preflight/workload gate markers are never emitted for this turn.
+write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=30 STOP_TIMEOUT=10 STALE_DAYS=30 MAX_ATTEMPTS=3 RETRY_COOLDOWN_SECONDS=0
 printf '20 queued open none 2026-01-01T00:00:00Z\n' > "$state"
 : > "$FAKE_GH_ROOT/$state_key.comments"
 : > "$FAKE_GH_ROOT/codex-calls"
-AGENT_PLAN_MAX_RETRIES=1 FAKE_CODEX_RESULT='AGENTIC_LOOP_RESULT=failed' AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _supervise
-grep -Eq '^20 failed' "$state" || fail 'exhausted re-planning did not fail the Issue'
-plan_passes=$(grep -c -- '--sandbox read-only' "$FAKE_GH_ROOT/codex-calls")
-[[ $plan_passes -eq 2 ]] || fail "expected 2 planning passes (initial + 1 retry), got $plan_passes"
-exec_passes=$(grep -c -- '--sandbox workspace-write' "$FAKE_GH_ROOT/codex-calls")
-[[ $exec_passes -eq 2 ]] || fail "expected 2 exec passes (initial + 1 retry), got $exec_passes"
-assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'flagshipモデルで計画を見直して再実行' 're-planning was not announced on the Issue'
+: > "$state_root/events.log"
+AGENT_PLAN_MAX_RETRIES=1 FAKE_CODEX_EXIT=1 AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _supervise
+grep -Eq '^20 failed' "$state" || fail 'a plan failure exhausting its in-turn retries did not fail the Issue'
+# A terminal plan failure records its own progress stage (Issue #273): before
+# `plan-failed` joined PROGRESS_STAGES, progress_write silently discarded this
+# marker (the stage failed its enum validation, per progress_stage_valid), so
+# neither the events.log row nor the workers/<issue>.progress marker was ever
+# written for it -- the worker's own eventual clear_worker_local removes the
+# marker file itself, but the append-only events.log survives and is the
+# observable proof here.
+grep -Eq $'\t20\tprogress\tplan-failed$' "$state_root/events.log" || fail 'a terminal plan failure did not record a plan-failed progress event'
+plan_passes=$(grep -c -- '--sandbox read-only' "$FAKE_GH_ROOT/codex-calls" || true)
+[[ $plan_passes -eq 2 ]] || fail "expected the initial planning pass plus one in-turn retry, got $plan_passes"
+exec_passes=$(grep -c -- '--sandbox workspace-write' "$FAKE_GH_ROOT/codex-calls" || true)
+[[ $exec_passes -eq 0 ]] || fail 'plan failure unexpectedly started an empty-plan exec'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'reason=plan-failure' 'plan failure was not observable on the Issue'
 assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'stage=plan' 'plan stage usage was not recorded'
-assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'stage=exec' 'exec stage usage was not recorded'
+if grep -Fq 'agentic-loop:preflight' "$FAKE_GH_ROOT/$state_key.comments"; then fail 'a plan failure unexpectedly reached the preflight gate'; fi
+if grep -Fq 'agentic-loop:workload' "$FAKE_GH_ROOT/$state_key.comments"; then fail 'a plan failure unexpectedly reached the workload gate'; fi
 git -C "$target" worktree remove "$target-worktrees/issue-20" --force 2>/dev/null || true
 git -C "$target" branch -D agent/issue-20 >/dev/null 2>&1 || true
+
+# Repeated plan failures still converge on the ordinary retry_failed/parked
+# path (no new state and no infinite requeue loop): with MAX_ATTEMPTS=1 the
+# single claim already used the whole retry budget, so the next poll parks
+# the Issue directly instead of reclaiming it for another plan attempt.
+write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=30 STOP_TIMEOUT=10 STALE_DAYS=30 MAX_ATTEMPTS=1 RETRY_COOLDOWN_SECONDS=0
+printf '21 queued open none 2026-01-01T00:00:00Z\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+: > "$FAKE_GH_ROOT/codex-calls"
+rm -f "$closes"
+AGENT_PLAN_MAX_RETRIES=1 FAKE_CODEX_EXIT=1 AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _supervise
+grep -Eq '^21 failed' "$state" || fail 'a plan failure with no retry budget left did not fail the Issue'
+calls_before_park=$(wc -l < "$FAKE_GH_ROOT/codex-calls")
+AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _supervise
+grep -Eq '^21 parked open' "$state" || fail 'a plan failure at MAX_ATTEMPTS was not parked instead of requeued indefinitely'
+[[ ! -r "$closes" ]] || ! grep -Fq $'^21\t' "$closes" || fail 'a plan-failure Issue reaching MAX_ATTEMPTS must never be closed'
+calls_after_park=$(wc -l < "$FAKE_GH_ROOT/codex-calls")
+[[ $calls_after_park -eq $calls_before_park ]] || fail 'parking a retry-exhausted Issue unexpectedly reclaimed it for another plan attempt'
+git -C "$target" worktree remove "$target-worktrees/issue-21" --force 2>/dev/null || true
+git -C "$target" branch -D agent/issue-21 >/dev/null 2>&1 || true
+
+# A plan failure while a DIFFERENT declared pool is marked exhausted is
+# treated like pool exhaustion (requeued without consuming an Issue attempt),
+# not like a genuine task failure -- even though the plan stage itself
+# reported an ordinary per-candidate error (STAGE_RC=3) rather than
+# STAGE_RC=1/2, and even though the exhausted pool is not the one plan itself
+# used (agent_any_pool_marker_active is a weaker, correlation-only signal;
+# only marking every declared pool would also block a fresh claim).
+{
+  printf '[agent.plan]\nprovider = "codex"\n'
+  printf '[agent.exec]\nprovider = "opencode"\n'
+  printf '[queue]\npoll_seconds = 1\nmax_workers = 1\nlease_seconds = 30\nstop_timeout = 10\nstale_days = 30\nmax_attempts = 1\nretry_cooldown_seconds = 0\n'
+} > "$target/.agentic-loop.toml"
+printf '22 queued open none 2026-01-01T00:00:00Z\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+: > "$FAKE_GH_ROOT/codex-calls"
+rm -rf "$state_root/pools"
+mkdir -p "$state_root/pools/opencode"
+printf '%s\n' "$(( $(date +%s) + 1800 ))" > "$state_root/pools/opencode/exhausted"
+AGENT_PLAN_MAX_RETRIES=1 FAKE_CODEX_EXIT=1 AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _supervise
+grep -Eq '^22 queued' "$state" || fail 'a plan failure correlated with another pool exhaustion was not requeued'
+if grep -Eq '^22 failed' "$state"; then fail 'a plan failure correlated with pool exhaustion must not fail the Issue'; fi
+[[ ! -e "$state_root/attempts/issue-22" ]] || fail 'a plan failure correlated with pool exhaustion consumed an Issue attempt'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:exhausted' 'pool-exhaustion-correlated plan failure was not recorded as exhausted'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'reason=plan-failure' 'pool-exhaustion-correlated plan failure did not record its origin'
+rm -rf "$state_root/pools"
+git -C "$target" worktree remove "$target-worktrees/issue-22" --force 2>/dev/null || true
+git -C "$target" branch -D agent/issue-22 >/dev/null 2>&1 || true
 
 # A clean exec exit without a terminal marker is a protocol retry, not a
 # flagship replan. The second response uses the same plan and completes.
@@ -2038,7 +2580,9 @@ if grep -Fq 'agentic-loop:replan' "$FAKE_GH_ROOT/$state_key.comments"; then fail
 
 # Two clean exits without a valid terminal marker are deterministic failure;
 # text containing a marker, a trailing non-empty line, and unknown values must
-# receive the same treatment rather than being mistaken for completion.
+# receive the same treatment rather than being mistaken for completion. No PR
+# is merged for this branch (FAKE_PR_MERGED=0), so the markerless-merged
+# rescue (Issue #262) must not turn any of these into a false completion.
 for malformed in \
   $'CI monitorの報告待ちです' \
   $'説明中の AGENTIC_LOOP_RESULT=completed です' \
@@ -2049,7 +2593,7 @@ for malformed in \
   : > "$FAKE_GH_ROOT/$state_key.comments"
   : > "$FAKE_GH_ROOT/codex-calls"
   rm -f "$FAKE_GH_ROOT/codex-exec-count"
-  FAKE_CODEX_EXEC_RESULT_1="$malformed" FAKE_CODEX_EXEC_RESULT_2="$malformed" AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _supervise
+  FAKE_PR_MERGED=0 FAKE_CODEX_EXEC_RESULT_1="$malformed" FAKE_CODEX_EXEC_RESULT_2="$malformed" AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _supervise
   grep -Eq '^202 failed open' "$state" || fail "malformed terminal marker was accepted: $malformed"
   [[ $(grep -c -- '--sandbox read-only' "$FAKE_GH_ROOT/codex-calls") -eq 1 ]] || fail 'malformed terminal marker triggered replan'
   [[ $(grep -c -- '--sandbox workspace-write' "$FAKE_GH_ROOT/codex-calls") -eq 2 ]] || fail 'malformed terminal marker did not stop after one retry'
@@ -2252,6 +2796,18 @@ grep -Eq '^62 completed closed' "$state" || { echo '---DEBUG STATE---'; cat "$st
 [[ ! -e $state_root/all-pools-paused ]] || fail 'a successful plan mentioning rate limits must not pause the supervisor'
 if grep -Fq 'agentic-loop:exhausted' "$FAKE_GH_ROOT/$state_key.comments"; then fail 'plan-text rate-limit mention was recorded as exhaustion'; fi
 
+# Regression (Issue #226): a successful stage whose output discusses model
+# failures must remain successful. Model-failure matching is gated by the
+# provider exit/error state just like pool-exhaustion matching.
+model_text_result="$TEST_ROOT/model-text-result"
+printf '%s\n' 'The report explains how to detect an invalid model or overloaded provider.' > "$model_text_result"
+if ( source "$PROJECT_ROOT/bin/lib/agentic-loop/agent.sh"; agent_result_is_model_failure "$model_text_result" 0 0 ); then
+  fail 'successful output mentioning model failure was misclassified'
+fi
+if ! ( source "$PROJECT_ROOT/bin/lib/agentic-loop/agent.sh"; agent_result_is_model_failure "$model_text_result" 1 0 ); then
+  fail 'non-zero model failure was not classified'
+fi
+
 # Complement (Issue #158): a genuine Claude usage-limit response -- is_error true
 # with api_error_status set, the way the CLI really reports it under
 # --output-format json -- IS pool exhaustion. The Issue is re-queued (never
@@ -2382,7 +2938,7 @@ printf '303 queued open none 2026-01-01T00:00:00Z\n' > "$state"
 : > "$FAKE_GH_ROOT/$state_key.comments"
 : > "$FAKE_GH_ROOT/opencode-calls"
 rm -f "$FAKE_GH_ROOT/opencode-auto-count" "$FAKE_GH_ROOT/codex-exec-count"
-FAKE_OPENCODE_EXEC_RESULT_1='overloaded' FAKE_OPENCODE_EXEC_RESULT_2='AGENTIC_LOOP_RESULT=completed' AGENTIC_LOOP_RUN_ONCE=1 FAKE_CODEX_SLEEP=1 "$target/bin/agentic-loop" _supervise
+FAKE_OPENCODE_EXEC_RESULT_1='overloaded' FAKE_OPENCODE_EXEC_EXIT_1=1 FAKE_OPENCODE_EXEC_RESULT_2='AGENTIC_LOOP_RESULT=completed' AGENTIC_LOOP_RUN_ONCE=1 FAKE_CODEX_SLEEP=1 "$target/bin/agentic-loop" _supervise
 grep -Eq '^303 completed closed' "$state" || fail 'model-failure fallback Issue did not complete'
 assert_contains "$FAKE_GH_ROOT/opencode-calls" '--model opencode-go/gpt-5.6-luna' 'model-failure retry did not start on the first model'
 assert_contains "$FAKE_GH_ROOT/opencode-calls" '--model opencode-go/deepseek-v4-pro' 'model-failure retry did not switch to the next model'
@@ -2647,6 +3203,55 @@ status_json=$("$target/bin/agentic-loop" status --format json)
   || fail 'status JSON did not report the fallback exec pool'
 [[ $(printf '%s' "$status_json" | yq -p json '.next_candidates.exec.model') == opencode-go/deepseek-v4-flash ]] \
   || fail 'status JSON did not report the fallback exec model'
+
+# A single exhausted pool is degraded capacity, not a global claim pause. The
+# same fixture already proved above that _supervise actually claims via gogo;
+# status must report the same decision in both text and JSON (Issue #288).
+printf '309 queued open none 2026-01-01T00:00:00Z\n' > "$state"
+status_out=$("$target/bin/agentic-loop" status)
+grep -Fq '利用不可pool: pool=plus 枯渇' <<< "$status_out" \
+  || fail 'status text did not expose a partially exhausted pool as degraded capacity'
+! grep -Fq 'claim-paused supervisor' <<< "$status_out" \
+  || fail 'status globally paused claims when only one of two pools was exhausted'
+grep -Fq '#309 Fake issue 309 (claimable)' <<< "$status_out" \
+  || fail 'status did not agree with the supervisor that the queued Issue can use the fallback pool'
+status_json=$("$target/bin/agentic-loop" status --format json)
+[[ $(printf '%s' "$status_json" | yq -p json '.queue.claimable') -eq 1 ]] \
+  || fail 'status JSON hid a claimable Issue during partial pool exhaustion'
+[[ $(printf '%s' "$status_json" | yq -p json '[.anomalies[] | select(.code == "claim-paused")] | length') -eq 0 ]] \
+  || fail 'status JSON reported global claim-paused during partial pool exhaustion'
+
+# Even a stale transition marker must not override the currently usable pool.
+: > "$state_root/all-pools-paused"
+status_json=$("$target/bin/agentic-loop" status --format json)
+[[ $(printf '%s' "$status_json" | yq -p json '.queue.claimable') -eq 1 ]] \
+  || fail 'a stale all-pools-paused marker hid a currently usable fallback pool'
+rm -f "$state_root/all-pools-paused"
+
+# When every configured pool is exhausted, status retains the global gate.
+for exhausted_pool in gogo codex; do
+  mkdir -p "$state_root/pools/$exhausted_pool"
+  printf '%s\n' "$(( $(date +%s) + 600 ))" > "$state_root/pools/$exhausted_pool/exhausted"
+done
+status_json=$("$target/bin/agentic-loop" status --format json)
+[[ $(printf '%s' "$status_json" | yq -p json '.queue.claimable') -eq 0 ]] \
+  || fail 'status JSON exposed a claimable Issue while every pool was exhausted'
+[[ $(printf '%s' "$status_json" | yq -p json '.queue.candidates[0].withheld') == claim-paused ]] \
+  || fail 'all-pool exhaustion was not classified as claim-paused'
+[[ $(printf '%s' "$status_json" | yq -p json '[.anomalies[] | select(.code == "claim-paused")] | length') -eq 1 ]] \
+  || fail 'all-pool exhaustion did not produce the global claim-paused anomaly'
+rm -rf "$state_root/pools/gogo" "$state_root/pools/codex"
+
+# A full worker pool is a slot constraint, never a provider-exhaustion claim.
+mkdir -p "$state_root/workers"
+sleep 30 & status_slot_pid=$!
+printf '%s\n' "$status_slot_pid" > "$state_root/workers/999.pid"
+status_json=$("$target/bin/agentic-loop" status --format json)
+[[ $(printf '%s' "$status_json" | yq -p json '.queue.candidates[0].withheld') == worker-slots-full ]] \
+  || fail 'max_workers saturation was not reported as worker-slots-full'
+kill "$status_slot_pid" 2>/dev/null || true
+wait "$status_slot_pid" 2>/dev/null || true
+rm -f "$state_root/workers/999.pid"
 # Clearing the marker restores the preferred candidate.
 rm -rf "$state_root/pools"
 status_out=$("$target/bin/agentic-loop" status)
@@ -2716,9 +3321,9 @@ printf '310 queued open none 2026-01-01T00:00:00Z\n' > "$state"
 rm -rf "$state_root/pools"
 rm -f "$FAKE_GH_ROOT/codex-exec-count" "$FAKE_GH_ROOT/opencode-auto-count" \
   "$state_root/agent-exhausted" "$state_root/all-pools-paused"
-expected_reset=$(date -d 'Aug 20, 2026 9:27 PM' +%s)
+expected_reset=$(date -d 'Aug 20, 2099 9:27 PM' +%s)
 FAKE_CODEX_EXIT=1 \
-FAKE_CODEX_STDERR="ERROR: You've hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at Aug 20th, 2026 9:27 PM." \
+FAKE_CODEX_STDERR="2026-08-20T05:12:33Z ERROR: You've hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at Aug 20th, 2099 9:27 PM." \
 FAKE_OPENCODE_EXEC_RESULT_1='plan body from gogo
 <!-- agentic-loop:scope paths=bin/agentic-loop -->' \
 FAKE_OPENCODE_EXEC_RESULT_2='AGENTIC_LOOP_RESULT=completed' \
@@ -3045,13 +3650,13 @@ rm -f "$state_root/conflict/issue-91" "$state_root/stop.requested"
 "$target/bin/agentic-loop" _supervise &
 scope_supervisor_pid=$!
 scope_wait_seen=0
-for _ in $(seq 1 40); do [[ -r $state_root/conflict/issue-70 ]] && { scope_wait_seen=1; break; }; sleep 0.1; done
+wait_for 'scope wait seen' test -r "$state_root/conflict/issue-70" && scope_wait_seen=1
 (( scope_wait_seen == 1 )) || fail 'multi-host fixture did not first persist the legitimate structural scope conflict'
 printf '54 completed closed none 2026-01-01T00:00:00Z none none %s\n70 queued open none 2026-01-02T00:00:00Z none none %s\n' \
   "$(scope_field 'paths=bin/agentic-loop')" "$(scope_field 'paths=bin/agentic-loop')" > "$state.transition"
 mv "$state.transition" "$state"
 scope_claimed=0
-for _ in $(seq 1 80); do grep -Eq '^70 completed closed' "$state" && { scope_claimed=1; break; }; sleep 0.1; done
+wait_for 'scope claimed' grep -Eq '^70 completed closed' "$state" && scope_claimed=1
 : > "$state_root/stop.requested"
 wait "$scope_supervisor_pid"
 (( scope_claimed == 1 )) || fail 'queued Issue stayed blocked after the remote blocker completed'
@@ -3227,8 +3832,7 @@ assert_contains "$TEST_ROOT/decomposition-calls.log" "issues/$child_b/dependenci
 grep -q -- '-f sub_issue_id=\|-f issue_id=' "$TEST_ROOT/decomposition-calls.log" && fail 'decomposition_materialize still sends sub_issue_id/issue_id as an untyped -f string parameter'
 grep -Eq -- "issue_id=($child_a|$child_b)([^0-9]|\$)" "$TEST_ROOT/decomposition-calls.log" && fail 'decomposition_materialize sent a child Issue number instead of its database id'
 
-# DAG validation must reject forward references, including cycles and a
-# self-dependency, before materialization can create native dependencies.
+# Invalid dependency graphs must fail before native sub-issue/dependency calls.
 for invalid_decomposition_manifest in \
   '{"schema":1,"mode":"children","integration_acceptance_criteria":"integration ok","children":[{"key":"child-a","title":"Child A","purpose":"purpose a","acceptance_criteria":"crit a","scope":"paths=docs/child-a","depends_on":["child-b"]},{"key":"child-b","title":"Child B","purpose":"purpose b","acceptance_criteria":"crit b","scope":"paths=docs/child-b","depends_on":["child-a"]}]}' \
   '{"schema":1,"mode":"children","integration_acceptance_criteria":"integration ok","children":[{"key":"child-a","title":"Child A","purpose":"purpose a","acceptance_criteria":"crit a","scope":"paths=docs/child-a","depends_on":["child-a"]},{"key":"child-b","title":"Child B","purpose":"purpose b","acceptance_criteria":"crit b","scope":"paths=docs/child-b","depends_on":[]}]}'; do
@@ -3242,6 +3846,44 @@ for invalid_decomposition_manifest in \
   grep -Eq '^701 failed open' "$state" || fail 'invalid decomposition manifest was accepted'
   tail -n "+$((calls_before + 1))" "$FAKE_GH_ROOT/calls" > "$TEST_ROOT/decomposition-invalid-calls.log"
   grep -q '/sub_issues\|/dependencies/blocked_by' "$TEST_ROOT/decomposition-invalid-calls.log" && fail 'invalid decomposition manifest reached native dependency materialization'
+done
+
+# decomposition_validate is a rejecting validator: every malformed dependency
+# or scope must stop before GitHub child-Issue mutations.  Keep these cases
+# observable through the worker boundary rather than testing an implementation
+# detail by sourcing the module.
+decomposition_case_index=0
+for decomposition_case in cycle self-dependency forward-reference too-few too-many invalid-scope duplicate-key; do
+  decomposition_case_index=$((decomposition_case_index + 1))
+  decomposition_issue=$((780 + decomposition_case_index))
+  case $decomposition_case in
+    cycle) children='[{"key":"a","title":"A","purpose":"p","acceptance_criteria":"c","scope":"paths=docs/a","depends_on":["b"]},{"key":"b","title":"B","purpose":"p","acceptance_criteria":"c","scope":"paths=docs/b","depends_on":["a"]}]' ;;
+    self-dependency) children='[{"key":"a","title":"A","purpose":"p","acceptance_criteria":"c","scope":"paths=docs/a","depends_on":["a"]},{"key":"b","title":"B","purpose":"p","acceptance_criteria":"c","scope":"paths=docs/b","depends_on":[]}]' ;;
+    forward-reference) children='[{"key":"a","title":"A","purpose":"p","acceptance_criteria":"c","scope":"paths=docs/a","depends_on":["b"]},{"key":"b","title":"B","purpose":"p","acceptance_criteria":"c","scope":"paths=docs/b","depends_on":[]}]' ;;
+    too-few) children='[{"key":"a","title":"A","purpose":"p","acceptance_criteria":"c","scope":"paths=docs/a","depends_on":[]}]' ;;
+    too-many) children='[{"key":"a","title":"A","purpose":"p","acceptance_criteria":"c","scope":"paths=docs/a","depends_on":[]},{"key":"b","title":"B","purpose":"p","acceptance_criteria":"c","scope":"paths=docs/b","depends_on":[]},{"key":"c","title":"C","purpose":"p","acceptance_criteria":"c","scope":"paths=docs/c","depends_on":[]},{"key":"d","title":"D","purpose":"p","acceptance_criteria":"c","scope":"paths=docs/d","depends_on":[]},{"key":"e","title":"E","purpose":"p","acceptance_criteria":"c","scope":"paths=docs/e","depends_on":[]},{"key":"f","title":"F","purpose":"p","acceptance_criteria":"c","scope":"paths=docs/f","depends_on":[]},{"key":"g","title":"G","purpose":"p","acceptance_criteria":"c","scope":"paths=docs/g","depends_on":[]}]' ;;
+    invalid-scope) children='[{"key":"a","title":"A","purpose":"p","acceptance_criteria":"c","scope":"paths=bad$path","depends_on":[]},{"key":"b","title":"B","purpose":"p","acceptance_criteria":"c","scope":"paths=docs/b","depends_on":[]}]' ;;
+    duplicate-key) children='[{"key":"a","title":"A","purpose":"p","acceptance_criteria":"c","scope":"paths=docs/a","depends_on":[]},{"key":"a","title":"A2","purpose":"p","acceptance_criteria":"c","scope":"paths=docs/a2","depends_on":[]}]' ;;
+  esac
+  printf '%s running open\n' "$decomposition_issue" > "$state"
+  : > "$FAKE_GH_ROOT/$state_key.comments"
+  bad_manifest=$(printf '{"schema":1,"mode":"children","integration_acceptance_criteria":"integration","children":%s}' "$children")
+  FAKE_CODEX_RESULT=$'```agentic-loop:decomposition\n'"$bad_manifest"$'\n```' "$target/bin/agentic-loop" _worker "$decomposition_issue" "decomposition-$decomposition_case" >/dev/null 2>&1 || true
+  grep -Eq "^$decomposition_issue needs-input open" "$state" || fail "decomposition $decomposition_case was not rejected"
+  [[ ! -s $FAKE_GH_ROOT/issues-created ]] || fail "decomposition $decomposition_case created a child before rejection"
+done
+
+# Claude transport failures must remain provider-stage failures. In particular,
+# empty non-zero output is not quota evidence and must not create a pool marker.
+for claude_stage_mode in empty-nonzero stderr-nonzero nonjson-zero; do
+  printf '780 running open\n' > "$state"
+  rm -f "$state_root/pools/claude/exhausted" "$state_root/agent-exhausted"
+  rm -f "$FAKE_GH_ROOT/claude-stage-mode"
+  : > "$FAKE_GH_ROOT/$state_key.comments"
+  AGENT_PROVIDER=claude AGENT_PLAN_MAX_RETRIES=0 FAKE_CLAUDE_STAGE_MODE="$claude_stage_mode" \
+    AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _worker 780 "claude-stage-$claude_stage_mode" >/dev/null 2>&1 || true
+  [[ ! -e "$state_root/pools/claude/exhausted" ]] || fail "Claude $claude_stage_mode was misclassified as pool exhaustion"
+  grep -Eq '^780 failed' "$state" || fail "Claude $claude_stage_mode did not produce a terminal stage failure"
 done
 
 # doctor rejects an invalid unknown_scope value.
@@ -3272,6 +3914,13 @@ grep -Fq '"issue":262,"other":260,"reason":"structural:bin/agentic-loop"' <<< "$
 rm -f "$state_root/scope/issue-260" "$state_root/conflict/issue-261" "$state_root/conflict/issue-262"
 
 # --- Issue dependency gating (Issue #41) ---
+
+# GitHub Web UI/API may return CRLF bodies. Normalize it before parsing so a
+# same-repository dependency is not classified as cross-repository.
+crlf_dependency_body=$(printf 'Blocked by: #300\r\n' | base64 -w0)
+printf '300 completed closed\n305 queued open none 2026-01-01T00:00:00Z none none %s\n' "$crlf_dependency_body" > "$state"
+AGENTIC_LOOP_RUN_ONCE=1 FAKE_CODEX_SLEEP=1 "$target/bin/agentic-loop" _supervise
+grep -Eq '^305 completed closed' "$state" || fail 'CRLF dependency body was not normalized'
 
 write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=3 LEASE_SECONDS=3 STOP_TIMEOUT=10 STALE_DAYS=30
 printf 'unknown_scope = "open"\n' >> "$target/.agentic-loop.toml"
@@ -3402,6 +4051,35 @@ grep -Fq '#500' <<< "$status_output" || fail 'status did not name the dependency
 grep -Fq 'incomplete' <<< "$status_output" || fail 'status did not show the dependency-block reason code'
 rm -f "$state_root/dependency/blocked-500"
 rm -f "$FAKE_GH_ROOT/$state_key.dep-links"
+
+# --- gh --body "@path" silent-loss detection and pre-claim diversion (Issue #272, ADR 0030) ---
+
+# claim_next diverts a queued Issue whose whole body is nothing but an
+# unexpanded `gh --body "@path"` reference to agent:needs-input before ever
+# handing it to a worker, so no exec is spent on a lost requirement. A
+# sibling Issue with an ordinary body claims normally in the same poll.
+unexpanded_body_b64=$(printf '@/tmp/issue_body.md' | base64 -w0)
+ordinary_body_b64=$(printf 'これは正当な要求本文です。' | base64 -w0)
+printf '910 queued open none 2026-01-01T00:00:00Z none none %s\n911 queued open none 2026-01-02T00:00:00Z none none %s\n' \
+  "$unexpanded_body_b64" "$ordinary_body_b64" > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+: > "$FAKE_GH_ROOT/codex-calls"
+AGENTIC_LOOP_RUN_ONCE=1 FAKE_CODEX_SLEEP=1 "$target/bin/agentic-loop" _supervise
+grep -Eq '^910 needs-input open' "$state" || fail 'a lost-requirement Issue was not diverted to agent:needs-input before claim'
+grep -Eq '^911 completed closed' "$state" || fail 'a sibling Issue with an ordinary body was not claimed in the same poll'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:body-unexpanded' 'the diversion did not leave an explanatory comment'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" '--body-file' 'the diversion comment did not point at --body-file recovery'
+if grep -q ' 910 ' "$FAKE_GH_ROOT/codex-calls"; then fail 'a worker was started for a lost-requirement Issue'; fi
+
+# The diversion is idempotent: a second poll does not repost the comment or
+# touch the Label again (queued->needs-input already moved it out of the
+# queued bucket, so claim_next never re-evaluates it, but this also guards
+# any future direct re-check of a still-needs-input Issue).
+comments_before=$(wc -l < "$FAKE_GH_ROOT/$state_key.comments")
+AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _supervise
+comments_after=$(wc -l < "$FAKE_GH_ROOT/$state_key.comments")
+[[ $comments_before == "$comments_after" ]] || fail 'a second poll reposted the body-unexpanded comment'
+grep -Eq '^910 needs-input open' "$state" || fail 'a second poll changed the diverted Issue state'
 
 # --- Closed-loop postmortem learning (Issue #132, ADR 0026, docs/policies/postmortem.md) ---
 
@@ -3608,6 +4286,12 @@ printf '93 queued open none 2026-01-01T00:00:00Z none none %s\n91 completed clos
 assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:postmortem-verified' 'postmortem complete did not record its verification comment'
 [[ $(cat "$state_root/postmortem/turn-93" 2>/dev/null) == complete ]] || fail 'postmortem complete did not write the complete turn marker consumed by worker.sh'
 
+# CRLF headings must be recognized by the postmortem completion gate.
+gate_body_crlf=$(printf 'Blocked by: #91\r\n\r\n## 残余リスク\r\n\r\n実施しない項目はない。\r\n' | base64 -w0)
+printf '94 queued open none 2026-01-01T00:00:00Z none none %s\n91 completed closed\n' "$gate_body_crlf" > "$state"
+"$target/bin/agentic-loop" postmortem complete 94 || fail 'postmortem complete did not normalize CRLF headings'
+[[ $(cat "$state_root/postmortem/turn-94" 2>/dev/null) == complete ]] || fail 'CRLF postmortem did not write the complete marker'
+
 rm -rf "$state_root/postmortem" "$state_root/attempts" "$state_root/workers/90.lease"
 write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=2 LEASE_SECONDS=3 STOP_TIMEOUT=10 STALE_DAYS=30
 
@@ -3715,6 +4399,37 @@ FAKE_PR_HEAD_OID=0000000000000000000000000000000000000000 "$target/bin/agentic-l
 grep -Eq '^8 failed open$' "$state" || fail 'unexpected merged PR ref was accepted'
 [[ -e $target-worktrees/issue-8 ]] || fail 'unexpected ref worker worktree was removed'
 git -C "$target" show-ref --verify --quiet refs/heads/agent/issue-8 || fail 'unexpected ref local branch was removed'
+
+# A clean provider exit without a terminal marker can race with GitHub merging
+# the branch. The independently observed merge must enter the normal
+# completion/cleanup path after the single protocol retry.
+printf '9 running open\n' > "$state"
+: > "$FAKE_GH_ROOT/calls"
+rm -f "$FAKE_GH_ROOT/codex-exec-count"
+FAKE_CODEX_EXEC_RESULT_1='実行結果のみ' \
+FAKE_CODEX_EXEC_RESULT_2='実行結果のみ' \
+"$target/bin/agentic-loop" _worker 9 markerless-merged-worker
+grep -Eq '^9 completed closed$' "$state" || fail 'a markerless worker with a merged PR was not completed'
+[[ ! -e $target-worktrees/issue-9 ]] || fail 'a markerless merged worker worktree remained'
+! git -C "$target" show-ref --verify --quiet refs/heads/agent/issue-9 || fail 'a markerless merged worker local branch remained'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:protocol-retry' 'markerless merged worker did not record the protocol retry'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:markerless-merged' 'markerless merged worker did not record the markerless-merged observation comment'
+merged_pr_queries=$(grep -c '/pulls --method GET.*state=closed.*head=.*issue-9' "$FAKE_GH_ROOT/calls" || true)
+[[ $merged_pr_queries -eq 1 ]] || fail "markerless merged worker queried the branch's merged PR $merged_pr_queries times, expected exactly 1"
+
+# The same markerless clean exit without any independently observed merge
+# (FAKE_PR_MERGED=0) must keep following the ordinary failure path: no false
+# completion, and the worktree/branch preserved for a retried claim.
+printf '23 running open\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+rm -f "$FAKE_GH_ROOT/codex-exec-count"
+FAKE_PR_MERGED=0 FAKE_CODEX_EXEC_RESULT_1='実行結果のみ' \
+FAKE_CODEX_EXEC_RESULT_2='実行結果のみ' \
+"$target/bin/agentic-loop" _worker 23 markerless-unmerged-worker
+grep -Eq '^23 failed open$' "$state" || fail 'a markerless worker without a merged PR was not left failed'
+[[ -e $target-worktrees/issue-23 ]] || fail 'a markerless unmerged worker worktree was removed'
+git -C "$target" show-ref --verify --quiet refs/heads/agent/issue-23 || fail 'a markerless unmerged worker local branch was removed'
+if grep -Fq 'agentic-loop:markerless-merged' "$FAKE_GH_ROOT/$state_key.comments"; then fail 'a markerless worker without a merged PR recorded a markerless-merged observation'; fi
 
 # Closed-loop postmortem worker.sh terminal branch (Issue #132, ADR 0026): a
 # `postmortem link` turn, executed from inside the exec turn's own sandboxed
@@ -3880,6 +4595,24 @@ grep -Eq '^14 completed closed' "$state" || fail 'resuming an already-merged PR 
 ! git -C "$target" show-ref --verify --quiet refs/heads/agent/issue-14 || fail 'resuming an already-merged PR did not remove the local branch'
 assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:completed pr=99' 'resumed merged-PR completion was not recorded'
 assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'resumed=1' 'resumed merged-PR completion did not mark itself as a resume fast path'
+
+# A local branch at an ancestor of the merged PR head is also safe to
+# complete: it has no local-only commits, so exact SHA equality is unnecessary
+# (Issue #283).
+printf '16 running open\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+git -C "$target" worktree add --quiet -b agent/issue-16 "$target-worktrees/issue-16" origin/main
+git -C "$target-worktrees/issue-16" commit --quiet --allow-empty -m 'resume ancestor base'
+git -C "$target-worktrees/issue-16" branch agent/issue-16-merged
+ancestor_head=$(git -C "$target-worktrees/issue-16" rev-parse HEAD)
+git -C "$target-worktrees/issue-16" commit --quiet --allow-empty -m 'merged PR follow-up'
+merged_head=$(git -C "$target-worktrees/issue-16" rev-parse HEAD)
+git -C "$target-worktrees/issue-16" reset --quiet --hard "$ancestor_head"
+FAKE_RESUME_MERGED_PR=100 FAKE_RESUME_MERGED_SHA=$merged_head FAKE_RESUME_MERGED_URL="https://github.example/acme/installed-project/pull/100" \
+  "$target/bin/agentic-loop" _worker 16 resume-ancestor-worker
+grep -Eq '^16 completed closed' "$state" || fail 'a merged PR whose local branch is an ancestor did not complete the Issue'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:completed pr=100' 'ancestor resume completion was not recorded'
+git -C "$target" branch -D agent/issue-16-merged >/dev/null 2>&1 || true
 
 # A branch that has diverged from its remote (both sides carry commits the
 # other lacks) is routed to needs-input; no force-push, reset, or deletion of
@@ -4144,11 +4877,8 @@ git -C "$target" worktree add --quiet -b agent/issue-19 "$target-worktrees/issue
 FAKE_CODEX_SLEEP=2 "$target/bin/agentic-loop" _worker 19 phase-status-worker &
 worker_bg_pid=$!
 status_output=''
-for _ in 1 2 3 4 5 6 7 8 9 10; do
-  status_output=$("$target/bin/agentic-loop" status)
-  grep -Fq 'phase:' <<< "$status_output" && break
-  sleep 0.3
-done
+__phase_status_check() { status_output=$("$target/bin/agentic-loop" status); grep -Fq 'phase:' <<< "$status_output"; }
+wait_for 'status displayed the observed resume phase' __phase_status_check || true
 wait "$worker_bg_pid"
 grep -Fq '#19' <<< "$status_output" || fail 'status did not list the running Issue'
 grep -Fq 'phase: worktree-ready' <<< "$status_output" || fail 'status did not display the observed resume phase'
@@ -4268,13 +4998,21 @@ rm -f "$state_root/stop.requested"
 FAKE_CODEX_SLEEP=30 "$target/bin/agentic-loop" _supervise &
 sup_pid=$!
 graceful_claimed=0
-for _ in $(seq 1 40); do [[ -e $state_root/workers/15.pid ]] && { graceful_claimed=1; break; }; sleep 0.5; done
+wait_for 'graceful claimed' test -e "$state_root/workers/15.pid" && graceful_claimed=1
 [[ $graceful_claimed == 1 ]] || { kill "$sup_pid" 2>/dev/null; fail 'worker was not claimed before the shutdown test'; }
 kill -TERM "$sup_pid" 2>/dev/null
 wait "$sup_pid" 2>/dev/null || true
 grep -Eq '^15 queued' "$state" || fail 'graceful shutdown did not requeue the in-flight Issue'
 [[ ! -e $state_root/workers/15.pid ]] || fail 'graceful shutdown left a worker pidfile'
 assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:shutdown' 'graceful shutdown was not recorded on the Issue'
+
+# A graceful shutdown marker must not disable the next service boot.  The
+# systemd/manual entrypoint is _service, so exercise that path directly.
+write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=30 STOP_TIMEOUT=10 STALE_DAYS=30
+: > "$state"
+: > "$state_root/stop.requested"
+AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _service
+[[ ! -e $state_root/stop.requested ]] || fail 'service startup did not clear a stale stop.requested marker'
 
 # --- .pid loss must not defeat max_workers or graceful shutdown (Issue #219) ---
 # Root cause 1: worker_count() (and therefore claim_next's `< MAX_WORKERS`
@@ -4291,14 +5029,15 @@ rm -f "$state_root/stop.requested"
 FAKE_CODEX_SLEEP=30 "$target/bin/agentic-loop" _supervise &
 pidloss_sup_pid=$!
 pidloss_claimed=0
-for _ in $(seq 1 40); do [[ -r $state_root/workers/2190.pid ]] && { pidloss_claimed=1; break; }; sleep 0.25; done
+wait_for 'pidloss claimed' test -r "$state_root/workers/2190.pid" && pidloss_claimed=1
 [[ $pidloss_claimed == 1 ]] || { kill "$pidloss_sup_pid" 2>/dev/null; wait "$pidloss_sup_pid" 2>/dev/null; fail 'a worker was not claimed before the pidfile-loss max_workers test'; }
 pidloss_worker_pid=$(cat "$state_root/workers/2190.pid")
 rm -f "$state_root/workers/2190.pid"
-# Give the supervisor several polls (poll_seconds=1) to reconcile the lost
-# pidfile from its live /proc scan and to (incorrectly, if the fix regressed)
-# claim the second queued Issue.
-sleep 3
+# Give the supervisor several full poll cycles to reconcile the lost pidfile
+# from its live /proc scan and to (incorrectly, if the fix regressed) claim
+# the second queued Issue. wait_polls proves N complete poll bodies ran
+# instead of hoping a fixed sleep covered that many at poll_seconds=1.
+wait_polls 'pidfile-loss reconcile polls'
 pidloss_second_claimed=0
 grep -Eq '^2191 running' "$state" && pidloss_second_claimed=1
 pidloss_reconciled=0
@@ -4323,7 +5062,7 @@ rm -f "$state_root/stop.requested"
 FAKE_CODEX_SLEEP=30 "$target/bin/agentic-loop" _supervise &
 shutpid_sup_pid=$!
 shutpid_claimed=0
-for _ in $(seq 1 40); do [[ -r $state_root/workers/2192.pid ]] && { shutpid_claimed=1; break; }; sleep 0.25; done
+wait_for 'shutpid claimed' test -r "$state_root/workers/2192.pid" && shutpid_claimed=1
 [[ $shutpid_claimed == 1 ]] || { kill "$shutpid_sup_pid" 2>/dev/null; wait "$shutpid_sup_pid" 2>/dev/null; fail 'a worker was not claimed before the pidfile-loss shutdown test'; }
 shutpid_worker_pid=$(cat "$state_root/workers/2192.pid")
 rm -f "$state_root/workers/2192.pid"
@@ -4333,7 +5072,7 @@ rm -f "$state_root/stop.requested"
 grep -Eq '^2192 queued' "$state" || fail 'a worker whose pidfile was lost was not requeued by shutdown (Issue #219 requirement 3)'
 [[ ! -e $state_root/workers/2192.pid ]] || fail 'shutdown left a pidfile behind for the pidfile-loss scenario'
 shutpid_worker_gone=0
-for _ in $(seq 1 20); do kill -0 "$shutpid_worker_pid" 2>/dev/null || { shutpid_worker_gone=1; break; }; sleep 0.5; done
+wait_gone 'shutpid worker gone' "$shutpid_worker_pid" && shutpid_worker_gone=1
 [[ $shutpid_worker_gone == 1 ]] || fail 'a worker whose pidfile was lost was left running after shutdown (orphaned process)'
 assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:shutdown' 'graceful shutdown was not recorded on the Issue for the pidfile-loss scenario'
 
@@ -4351,11 +5090,19 @@ rm -f "$state_root/stop.requested" "$state_root/supervisor.pid"
 ( cd "$target" && exec ./bin/agentic-loop _supervise ) &
 relpath_sup_pid=$!
 relpath_seen=0
-for _ in $(seq 1 40); do [[ -r $state_root/supervisor.pid ]] && { relpath_seen=1; break; }; sleep 0.25; done
+wait_for 'relpath seen' test -r "$state_root/supervisor.pid" && relpath_seen=1
 [[ $relpath_seen == 1 ]] || { kill "$relpath_sup_pid" 2>/dev/null; wait "$relpath_sup_pid" 2>/dev/null; fail 'a supervisor started via a relative path did not publish its pid'; }
 relpath_status=$("$target/bin/agentic-loop" status)
 if grep -Fq 'supervisor-stale-pid' <<< "$relpath_status"; then fail 'a supervisor started via a relative path was misreported as having a stale pid'; fi
 grep -Fq 'running (pid' <<< "$relpath_status" || fail 'a supervisor started via a relative path was not recognized as running'
+relpath_worktree="$target-worktrees/issue-261"
+mkdir -p "$(dirname "$relpath_worktree")"
+git -C "$target" worktree add --quiet --detach "$relpath_worktree"
+worktree_status=$("$relpath_worktree/bin/agentic-loop" status)
+grep -Fq 'running (pid' <<< "$worktree_status" || fail 'status from a dedicated worktree did not recognize the main-worktree supervisor'
+"$relpath_worktree/bin/agentic-loop" start
+[[ $(cat "$state_root/supervisor.pid") == "$relpath_sup_pid" ]] || fail 'start from a dedicated worktree duplicated the supervisor'
+git -C "$target" worktree remove --force "$relpath_worktree"
 kill -TERM "$relpath_sup_pid" 2>/dev/null || true
 wait "$relpath_sup_pid" 2>/dev/null || true
 rm -f "$state_root/stop.requested"
@@ -4414,11 +5161,8 @@ rm -f "$state_root/stop.requested" "$state_root/poll-interval"
 "$target/bin/agentic-loop" _supervise &
 backoff_sup=$!
 backoff_val=0
-for _ in $(seq 1 20); do
-  backoff_val=$(cat "$state_root/poll-interval" 2>/dev/null || printf '0')
-  [[ $backoff_val =~ ^[0-9]+$ ]] && (( backoff_val > 1 )) && break
-  sleep 0.5
-done
+__backoff_check() { backoff_val=$(cat "$state_root/poll-interval" 2>/dev/null || printf '0'); [[ $backoff_val =~ ^[0-9]+$ ]] && (( backoff_val > 1 )); }
+wait_for 'idle backoff lengthened' __backoff_check || true
 kill -TERM "$backoff_sup" 2>/dev/null || true
 wait "$backoff_sup" 2>/dev/null || true
 rm -f "$state_root/stop.requested"
@@ -4438,29 +5182,21 @@ rm -f "$state_root/stop.requested"
 FAKE_CODEX_SLEEP=60 FAKE_CODEX_SLEEP_ISSUE_51=1 "$target/bin/agentic-loop" _supervise &
 hang_sup_pid=$!
 hang_worker_pid=''
-for _ in $(seq 1 40); do
-  if [[ -r $state_root/workers/50.pid ]]; then hang_worker_pid=$(cat "$state_root/workers/50.pid"); break; fi
-  sleep 0.5
-done
+__hang_worker_pid_check() { [[ -r $state_root/workers/50.pid ]] && hang_worker_pid=$(cat "$state_root/workers/50.pid"); }
+wait_for 'hung worker claimed' __hang_worker_pid_check
 [[ -n $hang_worker_pid ]] || { kill "$hang_sup_pid" 2>/dev/null; wait "$hang_sup_pid" 2>/dev/null; fail 'hung worker was not claimed before the timeout test'; }
 # Drive the elapsed-time boundary through its persisted clock input instead of
 # waiting eight wall-clock seconds. The next supervisor poll must enforce the
 # same configured timeout against this already-expired start timestamp.
 printf '%s\n' "$(($(date +%s) - 9))" > "$state_root/workers/50.started"
 hang_timed_out=0
-for _ in $(seq 1 40); do
-  grep -Eq '^50 failed' "$state" && { hang_timed_out=1; break; }
-  sleep 0.5
-done
+wait_for 'hung worker timed out' grep -Eq '^50 failed' "$state" && hang_timed_out=1
 [[ $hang_timed_out == 1 ]] || { kill "$hang_sup_pid" 2>/dev/null; wait "$hang_sup_pid" 2>/dev/null; fail 'a hung worker was not detected and failed within the configured timeout'; }
 [[ ! -e $state_root/workers/50.pid ]] || fail 'a timed-out worker pidfile was not cleared'
 # kill -0 also succeeds against a not-yet-reaped zombie, so poll briefly
 # instead of asserting on a single sample right after the state flip.
 hang_worker_gone=0
-for _ in $(seq 1 20); do
-  kill -0 "$hang_worker_pid" 2>/dev/null || { hang_worker_gone=1; break; }
-  sleep 0.5
-done
+wait_gone 'hung worker process group gone' "$hang_worker_pid" && hang_worker_gone=1
 [[ $hang_worker_gone == 1 ]] || { kill "$hang_sup_pid" 2>/dev/null; wait "$hang_sup_pid" 2>/dev/null; fail 'a timed-out worker process group left an orphan process behind'; }
 assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:worker-timeout' 'the worker-timeout disposition was not audited on the Issue'
 # lease_release's PATCH body (Issue #110): the claim/lease markers and the
@@ -4469,10 +5205,7 @@ assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:worker-timeout
 # encode_comment_body).
 assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'expires=0 -->\n<!-- agentic-loop:lease' 'lease_release did not render a real newline between its claim/lease markers'
 hang_queue_progressed=0
-for _ in $(seq 1 40); do
-  grep -Eq '^51 completed closed' "$state" && { hang_queue_progressed=1; break; }
-  sleep 0.5
-done
+wait_for 'queue progressed past the hung worker' grep -Eq '^51 completed closed' "$state" && hang_queue_progressed=1
 kill -TERM "$hang_sup_pid" 2>/dev/null || true
 wait "$hang_sup_pid" 2>/dev/null || true
 rm -f "$state_root/stop.requested"
@@ -4502,19 +5235,13 @@ pool_timeout_sup_pid=$!
 # setup and let the plan stage's OWN (already-correct, Issue #155) pool-pick
 # see it first, never actually exercising the crash/timeout path under test.
 pool_timeout_call_seen=0
-for _ in $(seq 1 60); do
-  grep -Fq -- '--sandbox read-only' "$FAKE_GH_ROOT/codex-calls" 2>/dev/null && { pool_timeout_call_seen=1; break; }
-  sleep 0.5
-done
+wait_for 'plan stage provider call started' grep -Fq -- '--sandbox read-only' "$FAKE_GH_ROOT/codex-calls" && pool_timeout_call_seen=1
 [[ $pool_timeout_call_seen == 1 ]] || { kill "$pool_timeout_sup_pid" 2>/dev/null; wait "$pool_timeout_sup_pid" 2>/dev/null; fail 'the plan stage never reached its (now sleeping) provider call before the pool-exhaustion timeout test'; }
 mkdir -p "$state_root/pools/codex"
 printf '%s\n' "$(( $(date +%s) + 1800 ))" > "$state_root/pools/codex/exhausted"
 printf '%s\n' "$(($(date +%s) - 9))" > "$state_root/workers/54.started"
 pool_timeout_requeued=0
-for _ in $(seq 1 40); do
-  grep -Eq '^54 queued open' "$state" && { pool_timeout_requeued=1; break; }
-  sleep 0.5
-done
+wait_for 'pool-exhaustion-correlated hang requeued' grep -Eq '^54 queued open' "$state" && pool_timeout_requeued=1
 kill -TERM "$pool_timeout_sup_pid" 2>/dev/null || true
 wait "$pool_timeout_sup_pid" 2>/dev/null || true
 rm -f "$state_root/stop.requested"
@@ -4558,7 +5285,7 @@ mkdir -p "$state_root/workers"
 FAKE_CODEX_SLEEP=30 setsid "$target/bin/agentic-loop" _worker 53 disabled-timeout-worker &
 disabled_worker_pid=$!
 disabled_started_seen=0
-for _ in $(seq 1 40); do [[ -r $state_root/workers/53.started ]] && { disabled_started_seen=1; break; }; sleep 0.2; done
+wait_for 'disabled started seen' test -r "$state_root/workers/53.started" && disabled_started_seen=1
 [[ $disabled_started_seen == 1 ]] || { kill -TERM "-$disabled_worker_pid" 2>/dev/null; wait "$disabled_worker_pid" 2>/dev/null; fail 'test setup did not observe the worker start marker'; }
 printf '%s\n' "$disabled_worker_pid" > "$state_root/workers/53.pid"
 printf '%s\n' "$(($(date +%s) - 100000))" > "$state_root/workers/53.started"
@@ -4566,10 +5293,7 @@ rm -f "$state_root/poll-interval"
 "$target/bin/agentic-loop" _supervise &
 disabled_sup_pid=$!
 disabled_poll_seen=0
-for _ in $(seq 1 50); do
-  [[ -r $state_root/poll-interval ]] && { disabled_poll_seen=1; break; }
-  sleep 0.1
-done
+wait_for 'disabled-timeout supervisor poll seen' test -r "$state_root/poll-interval" && disabled_poll_seen=1
 [[ $disabled_poll_seen == 1 ]] || { kill -TERM "$disabled_sup_pid" 2>/dev/null; wait "$disabled_sup_pid" 2>/dev/null; fail 'disabled-timeout supervisor did not complete a poll'; }
 disabled_still_alive=0
 kill -0 "$disabled_worker_pid" 2>/dev/null && disabled_still_alive=1
@@ -4599,6 +5323,158 @@ grep -Fq '[警告] 設定値: WORKER_TIMEOUT_SECONDS' <<< "$doctor_small_timeout
 if grep -Fq '[失敗] 設定値: WORKER_TIMEOUT_SECONDS' <<< "$doctor_small_timeout"; then fail 'an unsafely small worker_timeout_seconds was misclassified as a failure'; fi
 mv "$target/.agentic-loop.toml.valid" "$target/.agentic-loop.toml"
 
+# doctor cross-checks the new stage-stall config keys (Issue #273): a band
+# inversion against worker_timeout_seconds or against the other stall band is
+# a warning (never a failure -- both bands stay independently tunable).
+cp "$target/.agentic-loop.toml" "$target/.agentic-loop.toml.valid"
+write_queue_config "$target/.agentic-loop.toml" WORKER_TIMEOUT_SECONDS=1800 PROVIDER_STALL_SECONDS=1800
+doctor_band_timeout=$("$target/bin/agentic-loop" doctor || true)
+grep -Fq '[警告] 設定値: PROVIDER_STALL_SECONDS' <<< "$doctor_band_timeout" || fail 'doctor did not warn when provider_stall_seconds reaches worker_timeout_seconds'
+mv "$target/.agentic-loop.toml.valid" "$target/.agentic-loop.toml"
+
+cp "$target/.agentic-loop.toml" "$target/.agentic-loop.toml.valid"
+write_queue_config "$target/.agentic-loop.toml" STALL_SECONDS=1000 PROVIDER_STALL_SECONDS=500
+doctor_band_inverted=$("$target/bin/agentic-loop" doctor || true)
+grep -Fq '[警告] 設定値: PROVIDER_STALL_SECONDS' <<< "$doctor_band_inverted" || fail 'doctor did not warn when provider_stall_seconds is smaller than stall_seconds'
+mv "$target/.agentic-loop.toml.valid" "$target/.agentic-loop.toml"
+
+# --- time constant invariants (Issue #280, ADR 0032) ------------------------
+# timing_invariant_violations is the single source of truth for both the two
+# doctor warnings above and scripts/lint.sh's hard `_timing-check --committed`
+# gate; exercise the CLI boundary directly (not just doctor's warning text).
+timing_pristine="$TEST_ROOT/agentic-loop.toml.timing-pristine"
+# $target/.agentic-loop.toml has accumulated write_queue_config overrides from
+# earlier sections in this suite (several intentionally left unrestored, e.g.
+# the worker_timeout_seconds=0 disabled-timeout scenario above), so it is not
+# the genuine installed default at this point -- reconstruct it from the
+# source repository's own .agentic-loop.toml instead.
+cp "$PROJECT_ROOT/.agentic-loop.toml" "$timing_pristine"
+cp "$timing_pristine" "$target/.agentic-loop.toml"
+"$target/bin/agentic-loop" _timing-check --committed || fail '_timing-check --committed rejected the installed default configuration'
+
+assert_timing_violation() {
+  local expect_name=$1; shift
+  cp "$timing_pristine" "$target/.agentic-loop.toml"
+  write_queue_config "$target/.agentic-loop.toml" "$@"
+  local out rc
+  if out=$("$target/bin/agentic-loop" _timing-check --committed 2>&1); then rc=0; else rc=$?; fi
+  [[ $rc -eq 1 ]] || fail "_timing-check --committed did not fail for $expect_name (rc=$rc): $out"
+  grep -Fq "[違反] $expect_name" <<< "$out" || fail "_timing-check --committed output was missing $expect_name: $out"
+}
+
+assert_timing_violation stall-before-timeout STALL_SECONDS=20000 WORKER_TIMEOUT_SECONDS=100
+assert_timing_violation provider-stall-before-timeout PROVIDER_STALL_SECONDS=20000 WORKER_TIMEOUT_SECONDS=100
+assert_timing_violation stall-band-order STALL_SECONDS=1000 PROVIDER_STALL_SECONDS=500
+assert_timing_violation worker-timeout-too-low WORKER_TIMEOUT_SECONDS=60
+assert_timing_violation heartbeat-lease-margin LEASE_SECONDS=2
+assert_timing_violation pause-grace-before-timeout PAUSE_GRACE_SECONDS=20000 WORKER_TIMEOUT_SECONDS=100
+assert_timing_violation poll-backoff-order POLL_SECONDS=200 POLL_MAX_SECONDS=100
+assert_timing_violation orphan-grace-before-timeout WORKER_ORPHAN_GRACE_SECONDS=20000 WORKER_TIMEOUT_SECONDS=100
+
+# EXHAUSTION_PAUSE_SECONDS/EXHAUSTION_BACKOFF_MAX_SECONDS are bin/agentic-loop
+# constants, not .agentic-loop.toml keys, so this relation cannot be driven
+# through write_queue_config -- call timing_invariant_violations directly.
+exhaustion_violation=$(EXHAUSTION_PAUSE_SECONDS=99999 EXHAUSTION_BACKOFF_MAX_SECONDS=100 bash -c \
+  'source "$0/bin/lib/agentic-loop/common.sh"; source "$0/bin/lib/agentic-loop/config.sh"; timing_invariant_violations 300 3600 14400 300 120 30 120 120' "$PROJECT_ROOT")
+grep -Fq 'exhaustion-backoff-order' <<< "$exhaustion_violation" || fail 'timing_invariant_violations did not detect an inverted exhaustion backoff order'
+exhaustion_ok=$(EXHAUSTION_PAUSE_SECONDS=1800 EXHAUSTION_BACKOFF_MAX_SECONDS=21600 bash -c \
+  'source "$0/bin/lib/agentic-loop/common.sh"; source "$0/bin/lib/agentic-loop/config.sh"; timing_invariant_violations 300 3600 14400 300 120 30 120 120' "$PROJECT_ROOT")
+[[ -z $exhaustion_ok ]] || fail 'timing_invariant_violations reported a violation for the healthy exhaustion backoff order'
+
+# bash-fallback-vs-toml drift (acceptance criterion 3): editing only the
+# committed toml value, leaving bin/agentic-loop's own fallback constant
+# behind, must also fail the gate -- this is a distinct failure mode from any
+# single-source invariant above.
+cp "$timing_pristine" "$target/.agentic-loop.toml"
+sed -i 's/^provider_stall_seconds = 3600$/provider_stall_seconds = 100/' "$target/.agentic-loop.toml"
+if mismatch_out=$("$target/bin/agentic-loop" _timing-check --committed 2>&1); then mismatch_rc=0; else mismatch_rc=$?; fi
+[[ $mismatch_rc -eq 1 ]] || fail '_timing-check --committed did not fail when the toml diverges from the bin/agentic-loop fallback default'
+grep -Fq 'fallback-mismatch:PROVIDER_STALL_SECONDS' <<< "$mismatch_out" || fail '_timing-check --committed did not report the fallback/toml mismatch by name'
+
+cp "$timing_pristine" "$target/.agentic-loop.toml"
+"$target/bin/agentic-loop" _timing-check --committed || fail 'restoring the pristine config did not clear _timing-check violations'
+
+# --- stall閾値の実測整合 (Issue #280, ADR 0032) -----------------------------
+# doctor cross-checks the currently applied stall threshold against real
+# stage-duration samples reconstructed from events.log (host-local, zero
+# GitHub calls) -- not a fabricated progress epoch.
+write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=30 STOP_TIMEOUT=10 STALE_DAYS=30
+: > "$state_root/events.log"
+calib_t=1700000000
+for calib_i in $(seq 0 4); do
+  printf '%s\t9991\tprogress\tplan\n' "$((calib_t + calib_i * 100))" >> "$state_root/events.log"
+done
+doctor_calib_sparse=$("$target/bin/agentic-loop" doctor || true)
+grep -Fq '[成功] stall閾値の実測整合（provider stage）' <<< "$doctor_calib_sparse" || fail 'doctor treated fewer than CALIBRATION_MIN_SAMPLES provider samples as calibrated'
+grep -Fq 'sampleが20件未満' <<< "$doctor_calib_sparse" || fail 'doctor did not explain the insufficient-sample verdict'
+
+: > "$state_root/events.log"
+for calib_i in $(seq 0 21); do
+  printf '%s\t9992\tprogress\tplan\n' "$((calib_t + calib_i * 5000))" >> "$state_root/events.log"
+done
+write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=30 STOP_TIMEOUT=10 STALE_DAYS=30 STALL_SECONDS=100 PROVIDER_STALL_SECONDS=100
+doctor_calib_under=$("$target/bin/agentic-loop" doctor || true)
+grep -Fq '[警告] stall閾値の実測整合（provider stage）' <<< "$doctor_calib_under" || fail 'doctor did not warn when the real p90 exceeds provider_stall_seconds'
+grep -Eq 'p90=5000s' <<< "$doctor_calib_under" || fail 'doctor calibration warning did not include the observed p90'
+
+write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=30 STOP_TIMEOUT=10 STALE_DAYS=30 STALL_SECONDS=6000 PROVIDER_STALL_SECONDS=6000
+doctor_calib_ok=$("$target/bin/agentic-loop" doctor || true)
+grep -Fq '[成功] stall閾値の実測整合（provider stage）' <<< "$doctor_calib_ok" || fail 'doctor did not report calibration success once the threshold exceeds the observed p90'
+
+: > "$state_root/events.log"
+cp "$timing_pristine" "$target/.agentic-loop.toml"
+write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=3 STOP_TIMEOUT=10 STALE_DAYS=30
+
+# --- real (not fabricated-epoch) stall transition (Issue #280 acceptance
+# criterion 8) -- a live worker whose fake provider CLI actually sleeps past
+# provider_stall_seconds must be observed as stalled through its own real
+# progress markers; raising the threshold above the sleep keeps it healthy.
+rm -rf "$state_root/workers"
+printf '921 queued open none 2026-01-01T00:00:00Z none feature\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=30 STOP_TIMEOUT=10 STALE_DAYS=30 STALL_SECONDS=1 PROVIDER_STALL_SECONDS=1
+AGENTIC_LOOP_RUN_ONCE=1 FAKE_CODEX_SLEEP=2 "$target/bin/agentic-loop" _supervise &
+real_stall_sup_pid=$!
+real_stall_seen=0
+__real_stall_check() {
+  real_status_json=$("$target/bin/agentic-loop" status --format json 2>/dev/null) || true
+  if [[ $(yq -p json '.workers[] | select(.issue == 921) | .health' <<< "$real_status_json" 2>/dev/null) == stalled ]]; then
+    real_stall_seen=1
+    return 0
+  fi
+  kill -0 "$real_stall_sup_pid" 2>/dev/null || return 0
+  return 1
+}
+wait_for 'real fake-provider worker stalled, or supervisor exited' __real_stall_check
+wait "$real_stall_sup_pid" 2>/dev/null || true
+[[ $real_stall_seen == 1 ]] || fail 'a real fake-provider worker exceeding provider_stall_seconds was not observed as stalled without a fabricated progress epoch'
+
+rm -rf "$state_root/workers"
+printf '922 queued open none 2026-01-01T00:00:00Z none feature\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=30 STOP_TIMEOUT=10 STALE_DAYS=30 STALL_SECONDS=1 PROVIDER_STALL_SECONDS=60
+AGENTIC_LOOP_RUN_ONCE=1 FAKE_CODEX_SLEEP=2 "$target/bin/agentic-loop" _supervise &
+ctrl_stall_sup_pid=$!
+ctrl_stall_seen=0
+__ctrl_stall_check() {
+  ctrl_status_json=$("$target/bin/agentic-loop" status --format json 2>/dev/null) || true
+  if [[ $(yq -p json '.workers[] | select(.issue == 922) | .health' <<< "$ctrl_status_json" 2>/dev/null) == stalled ]]; then
+    ctrl_stall_seen=1
+    return 0
+  fi
+  kill -0 "$ctrl_stall_sup_pid" 2>/dev/null || return 0
+  return 1
+}
+wait_for 'control worker never observed as stalled, or supervisor exited' __ctrl_stall_check
+wait "$ctrl_stall_sup_pid" 2>/dev/null || true
+[[ $ctrl_stall_seen == 0 ]] || fail 'raising provider_stall_seconds above the fake providers sleep time still misclassified a real worker as stalled'
+
+rm -rf "$state_root/workers"
+: > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+cp "$timing_pristine" "$target/.agentic-loop.toml"
+write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=3 STOP_TIMEOUT=10 STALE_DAYS=30
+
 # --- worker-orphan grace-based reap (Issue #193, ADR 0029) ---
 # A worker-orphan (this host's live pidfile whose Issue GitHub no longer
 # reports as agent:running, e.g. reverted to queued while the local provider
@@ -4616,10 +5492,8 @@ rm -f "$state_root/stop.requested"
 FAKE_CODEX_SLEEP=60 "$target/bin/agentic-loop" _supervise &
 orphan_sup_pid=$!
 orphan_worker_pid=''
-for _ in $(seq 1 40); do
-  if [[ -r $state_root/workers/70.pid ]]; then orphan_worker_pid=$(cat "$state_root/workers/70.pid"); break; fi
-  sleep 0.5
-done
+__orphan_worker_pid_check() { [[ -r $state_root/workers/70.pid ]] && orphan_worker_pid=$(cat "$state_root/workers/70.pid"); }
+wait_for 'worker-orphan test worker claimed' __orphan_worker_pid_check
 [[ -n $orphan_worker_pid ]] || { kill "$orphan_sup_pid" 2>/dev/null; wait "$orphan_sup_pid" 2>/dev/null; fail 'worker-orphan test: the worker was not claimed before the Label was reverted'; }
 grep -Eq '^70 running' "$state" || { kill "$orphan_sup_pid" 2>/dev/null; wait "$orphan_sup_pid" 2>/dev/null; fail 'worker-orphan test: claim did not set agent:running before the Label was reverted'; }
 # worker() re-confirms the running Label exactly once, at its very start
@@ -4634,10 +5508,7 @@ grep -Eq '^70 running' "$state" || { kill "$orphan_sup_pid" 2>/dev/null; wait "$
 # catch, matching the real Issue #132 race where the Label diverges from an
 # already-running provider CLI process.
 orphan_claimed_seen=0
-for _ in $(seq 1 40); do
-  [[ -r $state_root/workers/70.progress ]] && { orphan_claimed_seen=1; break; }
-  sleep 0.5
-done
+wait_for 'worker-orphan test running-Label check passed' test -r "$state_root/workers/70.progress" && orphan_claimed_seen=1
 [[ $orphan_claimed_seen == 1 ]] || { kill "$orphan_sup_pid" 2>/dev/null; wait "$orphan_sup_pid" 2>/dev/null; fail 'worker-orphan test: the worker never passed its startup running-Label check before the Label was reverted'; }
 # Simulate the Issue #132 scenario: the Label diverges from the still-live
 # local worker (e.g. reverted to failed through another path -- failed rather
@@ -4647,10 +5518,7 @@ done
 # (600s here), far past this test's budget).
 sed -i 's/^70 running/70 failed/' "$state"
 orphan_since_seen=0
-for _ in $(seq 1 40); do
-  [[ -r $state_root/workers/70.orphan-since ]] && { orphan_since_seen=1; break; }
-  sleep 0.5
-done
+wait_for 'worker-orphan Label mismatch observed' test -r "$state_root/workers/70.orphan-since" && orphan_since_seen=1
 [[ $orphan_since_seen == 1 ]] || { kill "$orphan_sup_pid" 2>/dev/null; wait "$orphan_sup_pid" 2>/dev/null; fail 'worker-orphan test: the Label mismatch was never observed (orphan-since marker missing)'; }
 kill -0 "$orphan_worker_pid" 2>/dev/null || { kill "$orphan_sup_pid" 2>/dev/null; wait "$orphan_sup_pid" 2>/dev/null; fail 'worker-orphan test: the worker was killed on the very first observation instead of waiting out the grace period'; }
 # Drive the grace boundary through its persisted clock input instead of
@@ -4662,16 +5530,11 @@ printf '%s\n' "$(($(date +%s) - 6))" > "$state_root/workers/70.orphan-since"
 # original pid dying (not "the pidfile is now empty") is the right completion
 # signal.
 orphan_reaped=0
-for _ in $(seq 1 40); do
-  kill -0 "$orphan_worker_pid" 2>/dev/null || { orphan_reaped=1; break; }
-  sleep 0.5
-done
+wait_gone 'worker-orphan reaped past grace period' "$orphan_worker_pid" && orphan_reaped=1
 [[ $orphan_reaped == 1 ]] || { kill "$orphan_sup_pid" 2>/dev/null; wait "$orphan_sup_pid" 2>/dev/null; fail 'a worker-orphan persisting past worker_orphan_grace_seconds was not reaped'; }
 orphan_pidfile_cleared=0
-for _ in $(seq 1 20); do
-  [[ ! -e $state_root/workers/70.pid ]] && { orphan_pidfile_cleared=1; break; }
-  sleep 0.5
-done
+__orphan_pidfile_gone() { [[ ! -e $state_root/workers/70.pid ]]; }
+wait_for 'reaped pidfile removed' __orphan_pidfile_gone && orphan_pidfile_cleared=1
 [[ $orphan_pidfile_cleared == 1 ]] || fail 'clear_worker_local did not remove the reaped pidfile'
 [[ ! -e $state_root/workers/70.orphan-since ]] || fail 'clear_worker_local did not remove the orphan-since marker'
 [[ ! -e $state_root/workers/70.lease ]] || fail 'clear_worker_local did not remove the lease file'
@@ -4704,20 +5567,15 @@ rm -f "$state_root/stop.requested"
 FAKE_CODEX_SLEEP=60 "$target/bin/agentic-loop" _supervise &
 orphan2_sup_pid=$!
 orphan2_worker_pid=''
-for _ in $(seq 1 40); do
-  if [[ -r $state_root/workers/72.pid ]]; then orphan2_worker_pid=$(cat "$state_root/workers/72.pid"); break; fi
-  sleep 0.5
-done
+__orphan2_worker_pid_check() { [[ -r $state_root/workers/72.pid ]] && orphan2_worker_pid=$(cat "$state_root/workers/72.pid"); }
+wait_for 'worker-orphan grace-reset test worker claimed' __orphan2_worker_pid_check
 [[ -n $orphan2_worker_pid ]] || { kill "$orphan2_sup_pid" 2>/dev/null; wait "$orphan2_sup_pid" 2>/dev/null; fail 'worker-orphan grace-reset test: the worker was not claimed'; }
 # See the matching wait above: the Label must not flip until the worker's
 # one-time startup confirm-running-label check has already passed, or the
 # worker exits on its own (silently, no reap) instead of exercising the
 # grace-reset path under test.
 orphan2_claimed_seen=0
-for _ in $(seq 1 40); do
-  [[ -r $state_root/workers/72.progress ]] && { orphan2_claimed_seen=1; break; }
-  sleep 0.5
-done
+wait_for 'worker-orphan grace-reset test running-Label check passed' test -r "$state_root/workers/72.progress" && orphan2_claimed_seen=1
 [[ $orphan2_claimed_seen == 1 ]] || { kill "$orphan2_sup_pid" 2>/dev/null; wait "$orphan2_sup_pid" 2>/dev/null; fail 'worker-orphan grace-reset test: the worker never passed its startup running-Label check before the Label was reverted'; }
 # The claim is done; hand control of the reap cadence over to _reap-orphans
 # below (SIGKILL so supervisor_graceful_shutdown never runs against the
@@ -4748,6 +5606,123 @@ if grep -Fq 'agentic-loop:worker-orphan-reaped' "$FAKE_GH_ROOT/$state_key.commen
 kill -TERM "-$orphan2_worker_pid" 2>/dev/null || true
 wait "$orphan2_worker_pid" 2>/dev/null || true
 rm -f "$state_root/workers/72.pid" "$state_root/workers/72.started" "$state_root/workers/72.progress" "$state_root/workers/72.orphan-since"
+rm -f "$state_root/stop.requested"
+
+# --- a worker whose pidfile records a non-leader pid is still stopped (Issue #292) ---
+# Every worker-stop path signals a process *group* so the provider CLI child
+# goes down with the worker. The pidfile's pid used to be passed straight to
+# `kill -TERM "-$pid"`, which assumes it is its own group leader. That holds for
+# a freshly claimed worker (claim spawns it via setsid) but not after
+# reconcile_worker_pidfiles repairs a lost pidfile from the live /proc scan
+# (Issue #219): it legitimately records a *descendant* of the leader, and
+# `-$pid` then names a nonexistent group, fails with ESRCH, and is swallowed by
+# the call site's `|| true`. The worker survived every reap and held its
+# max_workers slot forever (real incident: #251 was "reaped" once per poll for
+# 8h50m while 46 queued Issues were never claimed).
+#
+# The worker under test is a dedicated session (setsid: leader + child, exactly
+# the shape claim produces) rather than a real claimed worker, and the pidfile
+# records the *child*. A real worker also spawns short-lived helpers whose pids
+# come and go, so picking one of those as "the non-leader pid" would race the
+# reap's own worker_pid_live check; this fixes the process shape the reap must
+# handle without depending on provider-CLI timing at all.
+pgid_of() {
+  local pid=$1 stat_line rest
+  local -a fields
+  [[ -r /proc/$pid/stat ]] || return 1
+  read -r stat_line < "/proc/$pid/stat" || return 1
+  rest=${stat_line##*') '}
+  read -r -a fields <<< "$rest"
+  [[ ${fields[2]:-} =~ ^[0-9]+$ ]] || return 1
+  printf '%s\n' "${fields[2]}"
+}
+write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=300 STOP_TIMEOUT=10 STALE_DAYS=30 MAX_ATTEMPTS=3 RETRY_COOLDOWN_SECONDS=600 WORKER_TIMEOUT_SECONDS=999999 WORKER_ORPHAN_GRACE_SECONDS=30
+# agent:failed, not agent:queued: worker_reassert_running would otherwise
+# self-heal an exactly-agent:queued Issue back to running on its own tick and
+# race this deterministic reap (see the grace-reset scenario above).
+printf '74 failed open none 2026-01-01T00:00:00Z\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+rm -f "$state_root/stop.requested"
+rm -rf "$state_root/workers"; mkdir -p "$state_root/workers"
+nonleader_dir="$state_root/nonleader"; rm -rf "$nonleader_dir"; mkdir -p "$nonleader_dir"
+setsid bash -c '
+  sleep 120 & printf "%s\n" "$!" > "$1/child"
+  printf "%s\n" "$$" > "$1/leader"
+  wait
+' bash "$nonleader_dir" &
+nonleader_session_pid=$!
+nonleader_ready=0
+__nonleader_ready_check() { [[ -r $nonleader_dir/child && -r $nonleader_dir/leader ]]; }
+wait_for 'non-leader pidfile test worker session started' __nonleader_ready_check && nonleader_ready=1
+[[ $nonleader_ready == 1 ]] || { kill -KILL "$nonleader_session_pid" 2>/dev/null; fail 'non-leader pidfile test: the worker session did not start'; }
+nonleader_leader=$(cat "$nonleader_dir/leader")
+nonleader_child=$(cat "$nonleader_dir/child")
+[[ $(pgid_of "$nonleader_child") == "$nonleader_leader" ]] || { kill -KILL "-$nonleader_leader" 2>/dev/null; fail 'non-leader pidfile test: the child is not in the leader'"'"'s process group'; }
+[[ $(pgid_of "$nonleader_child") != "$nonleader_child" ]] || { kill -KILL "-$nonleader_leader" 2>/dev/null; fail 'non-leader pidfile test: the recorded pid is its own group leader, so the regression would not be exercised'; }
+printf '%s\n' "$nonleader_child" > "$state_root/workers/74.pid"
+printf '%s\n' "$(($(date +%s) - 600))" > "$state_root/workers/74.started"
+"$target/bin/agentic-loop" _reap-orphans
+[[ -r $state_root/workers/74.orphan-since ]] || { kill -KILL "-$nonleader_leader" 2>/dev/null; fail 'non-leader pidfile test: the Label mismatch was not observed'; }
+kill -0 "$nonleader_child" 2>/dev/null || { kill -KILL "-$nonleader_leader" 2>/dev/null; fail 'non-leader pidfile test: the worker was killed on the very first observation instead of waiting out the grace period'; }
+printf '%s\n' "$(($(date +%s) - 31))" > "$state_root/workers/74.orphan-since"
+"$target/bin/agentic-loop" _reap-orphans
+nonleader_child_gone=0
+wait_gone 'nonleader child gone' "$nonleader_child" && nonleader_child_gone=1
+if [[ $nonleader_child_gone != 1 ]]; then kill -KILL "-$nonleader_leader" 2>/dev/null || true; fail 'a worker whose pidfile recorded a non-leader pid survived the orphan reap (its process group was never signalled)'; fi
+nonleader_leader_gone=0
+wait_gone 'nonleader leader gone' "$nonleader_leader" && nonleader_leader_gone=1
+if [[ $nonleader_leader_gone != 1 ]]; then kill -KILL "-$nonleader_leader" 2>/dev/null || true; fail 'the reap signalled only the recorded pid, leaving the rest of the worker'"'"'s process group (its provider CLI) running'; fi
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:worker-orphan-reaped' 'the non-leader-pid reap was not audited on the Issue'
+[[ ! -e $state_root/workers/74.pid ]] || fail 'clear_worker_local did not remove the reaped pidfile (non-leader pid)'
+wait "$nonleader_session_pid" 2>/dev/null || true
+rm -rf "$nonleader_dir"
+rm -rf "$state_root/workers"; mkdir -p "$state_root/workers"
+rm -f "$state_root/stop.requested"
+
+# --- the reap never signals its own process group (Issue #292) ---
+# Resolving the real group means a worker that was never setsid'd into its own
+# group (its pidfile pid shares the supervisor's group -- the observed
+# consequence of a relative-path start, Issue #219 root cause 2) would take the
+# supervisor down with it if the group were signalled blindly. signal_process_tree
+# must fall back to signalling the single pid whenever the resolved group is its
+# own. The reap therefore runs inside a dedicated session (setsid) that also
+# holds two sleepers: the one recorded in the pidfile must die, the witness --
+# same group, not the pidfile's pid -- must survive.
+write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=300 STOP_TIMEOUT=10 STALE_DAYS=30 MAX_ATTEMPTS=3 RETRY_COOLDOWN_SECONDS=600 WORKER_TIMEOUT_SECONDS=999999 WORKER_ORPHAN_GRACE_SECONDS=30
+printf '76 failed open none 2026-01-01T00:00:00Z\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+rm -f "$state_root/stop.requested"
+rm -rf "$state_root/workers"; mkdir -p "$state_root/workers"
+selfgroup_dir="$state_root/selfgroup"; rm -rf "$selfgroup_dir"; mkdir -p "$selfgroup_dir"
+setsid bash -c '
+  sleep 120 & printf "%s\n" "$!" > "$1/target"
+  sleep 120 & printf "%s\n" "$!" > "$1/witness"
+  while [[ ! -e $1/go ]]; do sleep 0.1; done
+  "$2" _reap-orphans
+  printf "done\n" > "$1/reaped"
+' bash "$selfgroup_dir" "$target/bin/agentic-loop" &
+selfgroup_sid_pid=$!
+selfgroup_ready=0
+__selfgroup_ready_check() { [[ -r $selfgroup_dir/target && -r $selfgroup_dir/witness ]]; }
+wait_for 'self-group guard test sleepers started' __selfgroup_ready_check && selfgroup_ready=1
+[[ $selfgroup_ready == 1 ]] || { kill -KILL "$selfgroup_sid_pid" 2>/dev/null; fail 'self-group guard test: the dedicated session did not start its sleepers'; }
+selfgroup_target=$(cat "$selfgroup_dir/target")
+selfgroup_witness=$(cat "$selfgroup_dir/witness")
+printf '%s\n' "$selfgroup_target" > "$state_root/workers/76.pid"
+printf '%s\n' "$(($(date +%s) - 600))" > "$state_root/workers/76.started"
+printf '%s\n' "$(($(date +%s) - 31))" > "$state_root/workers/76.orphan-since"
+: > "$selfgroup_dir/go"
+selfgroup_done=0
+wait_for 'selfgroup done' test -r "$selfgroup_dir/reaped" && selfgroup_done=1
+[[ $selfgroup_done == 1 ]] || { kill -KILL "-$selfgroup_sid_pid" 2>/dev/null; fail 'self-group guard test: the reap inside the dedicated session never completed (it signalled its own group)'; }
+selfgroup_target_gone=0
+wait_gone 'selfgroup target gone' "$selfgroup_target" && selfgroup_target_gone=1
+[[ $selfgroup_target_gone == 1 ]] || { kill -KILL "-$selfgroup_sid_pid" 2>/dev/null; fail 'a worker sharing the reaper'"'"'s process group was not stopped at all (the single-pid fallback did not fire)'; }
+kill -0 "$selfgroup_witness" 2>/dev/null || fail 'the reap signalled its own process group, killing a process it does not own'
+kill -KILL "-$selfgroup_sid_pid" 2>/dev/null || true
+wait "$selfgroup_sid_pid" 2>/dev/null || true
+rm -rf "$selfgroup_dir"
+rm -rf "$state_root/workers"; mkdir -p "$state_root/workers"
 rm -f "$state_root/stop.requested"
 
 # --- worker-orphan: other-host Issues are structurally untouched, and the
@@ -4823,21 +5798,21 @@ rm -f "$state_root/poll-interval"
 "$target/bin/agentic-loop" _supervise &
 critguard_sup_pid=$!
 critguard_poll_seen=0
-for _ in $(seq 1 50); do [[ -r $state_root/poll-interval ]] && { critguard_poll_seen=1; break; }; sleep 0.1; done
+wait_for 'critguard poll seen' test -r "$state_root/poll-interval" && critguard_poll_seen=1
 [[ $critguard_poll_seen == 1 ]] || { kill -TERM "$critguard_sup_pid" 2>/dev/null; wait "$critguard_sup_pid" 2>/dev/null; kill -TERM "-$critguard_pid" 2>/dev/null; fail 'critical-section guard test: the supervisor did not complete a poll'; }
 kill -0 "$critguard_pid" 2>/dev/null || { kill -TERM "$critguard_sup_pid" 2>/dev/null; wait "$critguard_sup_pid" 2>/dev/null; fail 'reap_orphan_workers killed a worker with an active critical section despite grace already having elapsed'; }
 [[ -e $state_root/workers/85.orphan-since ]] || { kill -TERM "$critguard_sup_pid" 2>/dev/null; wait "$critguard_sup_pid" 2>/dev/null; kill -TERM "-$critguard_pid" 2>/dev/null; fail 'the orphan-since marker was cleared while the critical-section guard was active'; }
 if grep -Fq 'agentic-loop:worker-orphan-reaped' "$FAKE_GH_ROOT/$state_key.comments"; then kill -TERM "$critguard_sup_pid" 2>/dev/null; wait "$critguard_sup_pid" 2>/dev/null; kill -TERM "-$critguard_pid" 2>/dev/null; fail 'a worker-orphan reap was audited despite an active critical section'; fi
 rm -f "$state_root/workers/85.critical"
 critguard_reaped=0
-for _ in $(seq 1 40); do kill -0 "$critguard_pid" 2>/dev/null || { critguard_reaped=1; break; }; sleep 0.5; done
+wait_gone 'critguard reaped' "$critguard_pid" && critguard_reaped=1
 # The process dying (kill -0 failing) only proves reap_orphan_workers reached
 # its kill; clear_worker_local/comment_issue still run afterward in the same
 # function body. Give the still-live supervisor a brief window to finish that
 # tail before it is terminated, or the audit-comment assertion below races
 # against its own cleanup.
 if [[ $critguard_reaped == 1 ]]; then
-  for _ in $(seq 1 20); do grep -Fq 'agentic-loop:worker-orphan-reaped' "$FAKE_GH_ROOT/$state_key.comments" 2>/dev/null && break; sleep 0.5; done
+  wait_for 'orphan-reaped comment recorded' --timeout 10 grep -Fq 'agentic-loop:worker-orphan-reaped' "$FAKE_GH_ROOT/$state_key.comments" || true
 fi
 kill -TERM "$critguard_sup_pid" 2>/dev/null || true
 wait "$critguard_sup_pid" 2>/dev/null || true
@@ -4871,16 +5846,16 @@ rm -f "$state_root/poll-interval"
 "$target/bin/agentic-loop" _supervise &
 stopguard_sup_pid=$!
 stopguard_poll_seen=0
-for _ in $(seq 1 50); do [[ -r $state_root/poll-interval ]] && { stopguard_poll_seen=1; break; }; sleep 0.1; done
+wait_for 'stopguard poll seen' test -r "$state_root/poll-interval" && stopguard_poll_seen=1
 [[ $stopguard_poll_seen == 1 ]] || { kill -TERM "$stopguard_sup_pid" 2>/dev/null; wait "$stopguard_sup_pid" 2>/dev/null; kill -TERM "-$stopguard_pid" 2>/dev/null; fail 'stop-request guard test: the supervisor did not complete a poll'; }
 kill -0 "$stopguard_pid" 2>/dev/null || { kill -TERM "$stopguard_sup_pid" 2>/dev/null; wait "$stopguard_sup_pid" 2>/dev/null; fail 'reap_orphan_workers killed a worker with a pending stop-request despite grace already having elapsed'; }
 [[ -e $state_root/workers/86.orphan-since ]] || { kill -TERM "$stopguard_sup_pid" 2>/dev/null; wait "$stopguard_sup_pid" 2>/dev/null; kill -TERM "-$stopguard_pid" 2>/dev/null; fail 'the orphan-since marker was cleared while the stop-request guard was active'; }
 if grep -Fq 'agentic-loop:worker-orphan-reaped' "$FAKE_GH_ROOT/$state_key.comments"; then kill -TERM "$stopguard_sup_pid" 2>/dev/null; wait "$stopguard_sup_pid" 2>/dev/null; kill -TERM "-$stopguard_pid" 2>/dev/null; fail 'a worker-orphan reap was audited despite a pending stop-request'; fi
 rm -f "$state_root/workers/86.stop-requested"
 stopguard_reaped=0
-for _ in $(seq 1 40); do kill -0 "$stopguard_pid" 2>/dev/null || { stopguard_reaped=1; break; }; sleep 0.5; done
+wait_gone 'stopguard reaped' "$stopguard_pid" && stopguard_reaped=1
 if [[ $stopguard_reaped == 1 ]]; then
-  for _ in $(seq 1 20); do grep -Fq 'agentic-loop:worker-orphan-reaped' "$FAKE_GH_ROOT/$state_key.comments" 2>/dev/null && break; sleep 0.5; done
+  wait_for 'orphan-reaped comment recorded' --timeout 10 grep -Fq 'agentic-loop:worker-orphan-reaped' "$FAKE_GH_ROOT/$state_key.comments" || true
 fi
 kill -TERM "$stopguard_sup_pid" 2>/dev/null || true
 wait "$stopguard_sup_pid" 2>/dev/null || true
@@ -4917,7 +5892,7 @@ rm -f "$state_root/poll-interval"
 "$target/bin/agentic-loop" _supervise &
 stale_sup_pid=$!
 stale_poll_seen=0
-for _ in $(seq 1 50); do [[ -r $state_root/poll-interval ]] && { stale_poll_seen=1; break; }; sleep 0.1; done
+wait_for 'stale poll seen' test -r "$state_root/poll-interval" && stale_poll_seen=1
 [[ $stale_poll_seen == 1 ]] || { kill -TERM "$stale_sup_pid" 2>/dev/null; wait "$stale_sup_pid" 2>/dev/null; kill -TERM "-$stale_pid" 2>/dev/null; fail 'stale-marker test: the supervisor did not complete a poll'; }
 kill -0 "$stale_pid" 2>/dev/null || { kill -TERM "$stale_sup_pid" 2>/dev/null; wait "$stale_sup_pid" 2>/dev/null; fail 'a stale orphan-since marker predating the current worker triggered an immediate kill'; }
 stale_since_after=''
@@ -4930,9 +5905,9 @@ if grep -Fq 'agentic-loop:worker-orphan-reaped' "$FAKE_GH_ROOT/$state_key.commen
 # (rather than permanently disables) the grace countdown.
 printf '%s\n' "$(($(date +%s) - 6))" > "$state_root/workers/87.orphan-since"
 stale_reaped=0
-for _ in $(seq 1 40); do kill -0 "$stale_pid" 2>/dev/null || { stale_reaped=1; break; }; sleep 0.5; done
+wait_gone 'stale reaped' "$stale_pid" && stale_reaped=1
 if [[ $stale_reaped == 1 ]]; then
-  for _ in $(seq 1 20); do grep -Fq 'agentic-loop:worker-orphan-reaped' "$FAKE_GH_ROOT/$state_key.comments" 2>/dev/null && break; sleep 0.5; done
+  wait_for 'orphan-reaped comment recorded' --timeout 10 grep -Fq 'agentic-loop:worker-orphan-reaped' "$FAKE_GH_ROOT/$state_key.comments" || true
 fi
 kill -TERM "$stale_sup_pid" 2>/dev/null || true
 wait "$stale_sup_pid" 2>/dev/null || true
@@ -5887,7 +6862,8 @@ grep -Fq 'Running Issues: none' <<< "$status_output" || fail 'idle status did no
 grep -Fq '競合待ちIssue: none' <<< "$status_output" || fail 'idle status did not report no conflict waits'
 grep -Fq 'キュー: 0件' <<< "$status_output" || fail 'idle status did not report an empty queue'
 grep -Fq '状態サマリ:' <<< "$status_output" || fail 'idle status did not show the state summary section'
-grep -Fq '警告: none' <<< "$status_output" || fail 'idle status unexpectedly reported an anomaly'
+grep -Fq '自動回復中: none' <<< "$status_output" || fail 'idle status unexpectedly reported automatic recovery'
+grep -Fq '要対応: none' <<< "$status_output" || fail 'idle status unexpectedly reported an action item'
 [[ $(git -C "$target" status --porcelain) == "$before_status" ]] || fail 'idle status modified the repository working tree'
 status_delta=$(tail -n +"$((calls_before + 1))" "$FAKE_GH_ROOT/calls")
 idle_core_reads=$(grep -c $'\tapi repos/' <<< "$status_delta" || true)
@@ -5983,10 +6959,16 @@ status_output=$("$target/bin/agentic-loop" status); status_rc=$?
 grep -Fq '#60' <<< "$status_output" || fail 'lease-expired status did not list the running Issue'
 grep -Fq '期限切れ' <<< "$status_output" || fail 'lease-expired status did not mark the running Issue lease as expired'
 grep -Fq 'lease-expired' <<< "$status_output" || fail 'lease-expired status did not report a lease-expired anomaly'
+grep -Fq '自動回復中:' <<< "$status_output" || fail 'lease-expired status did not separate automatic recovery'
+grep -Eq '経過[0-9]+(秒|分[0-9]+秒|時間[0-9]+分|日[0-9]+時間)' <<< "$status_output" || fail 'lease-expired status did not show a human-readable elapsed time'
+grep -Fq '次pollで安全にqueueへ戻します。' <<< "$status_output" || fail 'lease-expired status did not show the next automatic action'
 [[ $(git -C "$target" status --porcelain) == "$before_status" ]] || fail 'lease-expired status modified the repository working tree'
 lease_json=$("$target/bin/agentic-loop" status --format json)
 [[ $(printf '%s' "$lease_json" | yq -p json '.workers[0].lease_expired') == true ]] || fail 'status --format json did not mark the worker lease as expired'
 [[ $(printf '%s' "$lease_json" | yq -p json '.anomalies[] | select(.code == "lease-expired") | .subject') == '#60' ]] || fail 'status --format json did not report the lease-expired anomaly'
+[[ $(printf '%s' "$lease_json" | yq -p json '.anomalies[] | select(.code == "lease-expired") | .classification') == recovering ]] || fail 'status JSON did not classify lease-expired as recovering'
+[[ $(printf '%s' "$lease_json" | yq -p json '.anomalies[] | select(.code == "lease-expired") | .elapsed') -ge 1 ]] || fail 'status JSON did not include elapsed for lease-expired'
+[[ -n $(printf '%s' "$lease_json" | yq -p json '.anomalies[] | select(.code == "lease-expired") | .action') ]] || fail 'status JSON did not include action for lease-expired'
 rm -rf "$state_root/workers"
 
 # Scenario: corrupted local-state files (a non-numeric .started, a malformed
@@ -6004,19 +6986,95 @@ status_output=$("$target/bin/agentic-loop" status); status_rc=$?
 (( status_rc == 0 )) || fail 'status crashed on corrupted local state'
 grep -Fq 'local-state-corrupt' <<< "$status_output" || fail 'status did not report the corrupted local-state files'
 grep -Fq 'supervisor-stale-pid' <<< "$status_output" || fail 'status did not report the stale supervisor.pid'
+grep -Fq '要対応:' <<< "$status_output" || fail 'status did not separate human action items'
+grep -Fq '対応: bin/agentic-loop start' <<< "$status_output" || fail 'status did not show the stale supervisor recovery action'
 [[ $(git -C "$target" status --porcelain) == "$before_status" ]] || fail 'status modified the repository working tree on corrupted local state'
+printf '1\t1700000030\tabrupt\tunknown\t%s\t1700000000\t1700000020\tpoll\t00000000-0000-0000-0000-000000000000\t12345\n' "$dead_pid" > "$state_root/supervisor.last-exit"
+status_output=$("$target/bin/agentic-loop" status)
+status_json=$("$target/bin/agentic-loop" status --format json)
+grep -Fq '前回のSupervisor終了: kind=abrupt detail=unknown' <<< "$status_output" || fail 'status did not render the previous abrupt supervisor termination'
+[[ $(printf '%s' "$status_json" | yq -p json '.supervisor.last_exit.kind') == abrupt ]] || fail 'status JSON did not expose the previous supervisor termination kind'
+[[ $(printf '%s' "$status_json" | yq -p json '.supervisor.last_exit.stage') == poll ]] || fail 'status JSON did not expose the last supervisor stage'
 rm -f "$state_root/supervisor.pid" "$state_root/workers/70.started" "$state_root/workers/70.lease"
 
+# Scenario: project-sync-pending's elapsed tracks the oldest unresolved
+# retry via project-pending.since, not project-pending's own mtime
+# (regression: an ack rewrites the file via awk+mv and a later enqueue
+# appends to it, both of which reset a plain mtime-based elapsed to near
+# zero even though the retry queue never actually drained).
+: > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+printf '95\n' > "$state_root/project-pending"
+printf '%s\n' "$(($(date +%s) - 120))" > "$state_root/project-pending.since"
+sleep 1
+printf '96\n' >> "$state_root/project-pending"
+pending_json=$("$target/bin/agentic-loop" status --format json)
+pending_elapsed=$(printf '%s' "$pending_json" | yq -p json '.anomalies[] | select(.code == "project-sync-pending") | .elapsed')
+(( pending_elapsed >= 120 )) || fail "project-sync-pending elapsed did not reflect the oldest pending entry despite a later append touching the file's mtime (got $pending_elapsed)"
+rm -f "$state_root/project-pending" "$state_root/project-pending.since"
+
+# Scenario: claim-paused elapsed reflects whichever pause marker is actually
+# in effect (regression: it used to be hardcoded to budget-paused's mtime and
+# read as 0 -- via a stat that always failed -- whenever some other reason,
+# e.g. a stop-request drain, was the actual cause).
+: > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+rm -f "$state_root/budget-paused" "$state_root/core-budget-paused" "$state_root/agent-exhausted" "$state_root/all-pools-paused"
+: > "$state_root/stop.requested"
+sleep 1
+claimpause_output=$("$target/bin/agentic-loop" status)
+grep -Fq 'claim-paused' <<< "$claimpause_output" || fail 'status did not report a claim-paused anomaly for a stop-request drain'
+claimpause_json=$("$target/bin/agentic-loop" status --format json)
+claimpause_elapsed=$(printf '%s' "$claimpause_json" | yq -p json '.anomalies[] | select(.code == "claim-paused") | .elapsed')
+(( claimpause_elapsed >= 1 )) || fail "claim-paused elapsed was not derived from the stop.requested marker when budget-paused was absent (got $claimpause_elapsed)"
+rm -f "$state_root/stop.requested"
+
+# Scenario: worker-orphan is needs-attention (not recovering) and says the
+# automatic stop is disabled when queue.worker_orphan_grace_seconds=0, but
+# recovering when grace is positive (regression: status used to always claim
+# the supervisor would eventually auto-stop the worker, which is false at
+# grace=0 -- worker_orphan_reap itself no-ops when grace is 0).
+printf '93 needs-input open none 2026-01-01T00:00:00Z\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+mkdir -p "$state_root/workers"
+printf '%s\n' "$$" > "$state_root/workers/93.pid"
+write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=30 STOP_TIMEOUT=10 STALE_DAYS=30 WORKER_ORPHAN_GRACE_SECONDS=0
+orphan0_output=$("$target/bin/agentic-loop" status)
+grep -Fq '自動停止は無効です' <<< "$orphan0_output" || fail 'worker-orphan with grace=0 did not say the automatic stop is disabled'
+orphan0_json=$("$target/bin/agentic-loop" status --format json)
+[[ $(printf '%s' "$orphan0_json" | yq -p json '.anomalies[] | select(.code == "worker-orphan") | .classification') == needs-attention ]] || fail 'worker-orphan with grace=0 was not classified as needs-attention'
+write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=30 STOP_TIMEOUT=10 STALE_DAYS=30
+orphan1_json=$("$target/bin/agentic-loop" status --format json)
+[[ $(printf '%s' "$orphan1_json" | yq -p json '.anomalies[] | select(.code == "worker-orphan") | .classification') == recovering ]] || fail 'worker-orphan with grace>0 was not classified as recovering'
+rm -rf "$state_root/workers"
+: > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+
+# Structural check: every anomaly a running scenario produces carries both a
+# non-empty action and classification (Issue #212's requirement that every
+# displayed line has a next step), checked mechanically instead of per-code.
+printf '94 running open\n' > "$state"
+mkdir -p "$state_root/workers"
+now=$(date +%s)
+printf '%s\n' "$((now - 100))" > "$state_root/workers/94.started"
+printf '222\t%s\t%s\n' "$((now - 100))" "$((now - 400))" > "$state_root/workers/94.lease"
+structural_json=$("$target/bin/agentic-loop" status --format json)
+[[ $(printf '%s' "$structural_json" | yq -p json '.anomalies | length') -ge 1 ]] || fail 'structural anomaly check scenario produced no anomalies to verify'
+[[ $(printf '%s' "$structural_json" | yq -p json '[.anomalies[] | select(.action == "" or .classification == "")] | length') -eq 0 ]] || fail 'some anomaly is missing an action or a classification'
+rm -rf "$state_root/workers"
+: > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+
 # Scenario: a worktree/branch left over from an Issue no longer agent:running
-# is flagged, and clears once removed.
+# is left to Issue #211's supervisor prune and never adds status noise.
 git -C "$target" worktree add --quiet -b agent/issue-9999 "$target-worktrees/issue-9999" origin/main
 status_output=$("$target/bin/agentic-loop" status)
-grep -Fq 'residual-worktree' <<< "$status_output" || fail 'status did not flag a residual worktree'
-grep -Fq 'residual-branch' <<< "$status_output" || fail 'status did not flag a residual branch'
+grep -Fq 'residual-worktree' <<< "$status_output" && fail 'status reported a residual worktree despite automatic prune ownership'
+grep -Fq 'residual-branch' <<< "$status_output" && fail 'status reported a residual branch despite automatic prune ownership'
 git -C "$target" worktree remove --force "$target-worktrees/issue-9999"
 git -C "$target" branch -D agent/issue-9999 >/dev/null
 status_output=$("$target/bin/agentic-loop" status)
-grep -Fq 'residual-worktree' <<< "$status_output" && fail 'status kept flagging a removed worktree'
+grep -Fq 'residual-worktree' <<< "$status_output" && fail 'status reported a removed worktree'
 : > "$state"
 : > "$FAKE_GH_ROOT/$state_key.comments"
 rm -rf "$state_root/workers"
@@ -6030,7 +7088,10 @@ now=$(date +%s)
 printf '%s\n' "$((now - 60))" > "$state_root/workers/80.started"
 printf '%s\tplan\t5\n' "$((now - 10))" > "$state_root/workers/80.progress"
 printf '%s\n' "$((now - 100))" > "$state_root/workers/81.started"
-printf '%s\texec\t9\n' "$((now - 400))" > "$state_root/workers/81.progress"
+# stage=checks is a non-provider stage, so it uses the narrower STALL_SECONDS
+# band (default 300s) rather than PROVIDER_STALL_SECONDS -- see the dedicated
+# stage-band tests below for exec/plan/replan using the wider band.
+printf '%s\tchecks\t9\n' "$((now - 400))" > "$state_root/workers/81.progress"
 printf '%s\n' "$((now - 20000))" > "$state_root/workers/82.started"
 # Issue 83 intentionally has no local state at all (other-host scenario).
 progress_status_before=$(git -C "$target" status --porcelain)
@@ -6065,6 +7126,63 @@ printf '%s' "$progress_json" | yq -p json -o json >/dev/null || fail 'progress s
 [[ $(printf '%s' "$progress_json" | yq -p json '.anomalies[] | select(.code == "worker-stalled") | .subject') == '#81' ]] || fail 'progress status JSON did not report the worker-stalled anomaly'
 [[ $(printf '%s' "$progress_json" | yq -p json '.workers[] | select(.issue == 80) | .phase') == '' ]] || fail 'progress status JSON changed the existing phase field contract'
 
+# --- stage-based, configurable stall thresholds (Issue #273) ---
+# Provider stages (plan/exec/replan) block on one long CLI call and must not
+# flag as stalled within ordinary reasoning/exec time; other stages keep the
+# narrower default. Both bands are separately configurable, and status
+# reports which threshold it actually applied.
+write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=3 STOP_TIMEOUT=10 STALE_DAYS=30 STALL_SECONDS=300 PROVIDER_STALL_SECONDS=3600
+printf '84 running open\n85 running open\n86 running open\n' > "$state"
+mkdir -p "$state_root/workers" "$state_root/logs"
+now=$(date +%s)
+printf '%s\n' "$((now - 5000))" > "$state_root/workers/84.started"
+printf '%s\texec\t1\n' "$((now - 1000))" > "$state_root/workers/84.progress"
+printf '%s\n' "$((now - 5000))" > "$state_root/workers/85.started"
+printf '%s\texec\t1\n' "$((now - 4000))" > "$state_root/workers/85.progress"
+printf '%s\n' "$((now - 5000))" > "$state_root/workers/86.started"
+printf '%s\tplan\t1\n' "$((now - 500))" > "$state_root/workers/86.progress"
+band_json=$("$target/bin/agentic-loop" status --format json)
+[[ $(printf '%s' "$band_json" | yq -p json '.workers[] | select(.issue == 84) | .health') == healthy ]] || fail 'exec stage within provider_stall_seconds was misclassified as stalled'
+[[ $(printf '%s' "$band_json" | yq -p json '.workers[] | select(.issue == 84) | .stall_threshold_seconds') == 3600 ]] || fail 'status JSON did not report the applied provider stall threshold'
+[[ $(printf '%s' "$band_json" | yq -p json '.workers[] | select(.issue == 85) | .health') == stalled ]] || fail 'exec stage beyond provider_stall_seconds was not detected as a genuine stall'
+[[ $(printf '%s' "$band_json" | yq -p json '.workers[] | select(.issue == 86) | .health') == healthy ]] || fail 'plan stage within provider_stall_seconds was misclassified as stalled'
+[[ $(printf '%s' "$band_json" | yq -p json '.workers[] | select(.issue == 86) | .stall_threshold_seconds') == 3600 ]] || fail 'plan stage did not report the provider stall threshold'
+band_text=$("$target/bin/agentic-loop" status)
+grep -Fq 'stage=exec' <<< "$band_text" || fail 'worker-stalled anomaly text did not include the stage'
+grep -Eq '適用閾値 3600秒' <<< "$band_text" || fail 'worker-stalled anomaly text did not include the applied threshold'
+
+# Configurability: lowering provider_stall_seconds makes the same 1000s-old
+# exec worker stall, and setting it to 0 disables the band entirely.
+write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=3 STOP_TIMEOUT=10 STALE_DAYS=30 STALL_SECONDS=300 PROVIDER_STALL_SECONDS=500
+tuned_json=$("$target/bin/agentic-loop" status --format json)
+[[ $(printf '%s' "$tuned_json" | yq -p json '.workers[] | select(.issue == 84) | .health') == stalled ]] || fail 'lowering queue.provider_stall_seconds via config did not take effect'
+write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=3 STOP_TIMEOUT=10 STALE_DAYS=30 STALL_SECONDS=300 PROVIDER_STALL_SECONDS=0
+disabled_json=$("$target/bin/agentic-loop" status --format json)
+[[ $(printf '%s' "$disabled_json" | yq -p json '.workers[] | select(.issue == 85) | .health') == healthy ]] || fail 'queue.provider_stall_seconds=0 did not disable stall detection for provider stages'
+rm -rf "$state_root/workers"
+: > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=1 LEASE_SECONDS=3 STOP_TIMEOUT=10 STALE_DAYS=30
+
+# A stage output file's mtime (agent_run_stage's plan/result file, including
+# its transient `.raw.*`/`.final.*` siblings while streaming) is a secondary
+# progress signal independent of the progress marker (Issue #273): a worker
+# whose marker looks old but is still visibly writing output must stay
+# healthy.
+printf '87 running open\n' > "$state"
+mkdir -p "$state_root/workers" "$state_root/logs"
+now=$(date +%s)
+printf '%s\n' "$((now - 5000))" > "$state_root/workers/87.started"
+printf '%s\texec\t1\n' "$((now - 4000))" > "$state_root/workers/87.progress"
+: > "$state_root/issue-87-result.txt"
+touch -d "@$((now - 10))" "$state_root/issue-87-result.txt"
+output_json=$("$target/bin/agentic-loop" status --format json)
+[[ $(printf '%s' "$output_json" | yq -p json '.workers[] | select(.issue == 87) | .health') == healthy ]] || fail 'a fresh stage output file mtime did not keep an old-progress-marker worker healthy'
+rm -f "$state_root/issue-87-result.txt"
+rm -rf "$state_root/workers"
+: > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+
 # `status --watch` on a non-TTY (pipe/redirect) prints the recent events once
 # and exits without a follow loop: later appends are not streamed, and the run
 # makes zero GitHub calls and leaves the repository untouched.
@@ -6079,11 +7197,9 @@ grep -Fq 'plan' "$TEST_ROOT/watch-once.out" || fail 'status --watch did not prin
 grep -Fq 'supervisor' "$TEST_ROOT/watch-once.out" || fail 'status --watch did not print all existing events once'
 "$target/bin/agentic-loop" status --watch > "$TEST_ROOT/watch-once.out" 2>&1 &
 watch_once_pid=$!
-sleep 0.5
+wait_gone 'status --watch (non-TTY) exited without following' "$watch_once_pid" \
+  || { kill -TERM "$watch_once_pid" 2>/dev/null || true; wait "$watch_once_pid" 2>/dev/null || true; fail 'status --watch kept following on a non-TTY'; }
 printf '%s\t84\tprogress\tmerge\n' "$((now))" >> "$state_root/events.log"
-sleep 1
-if kill -0 "$watch_once_pid" 2>/dev/null; then kill -TERM "$watch_once_pid" 2>/dev/null || true; wait "$watch_once_pid" 2>/dev/null || true; fail 'status --watch kept following on a non-TTY'; fi
-wait "$watch_once_pid" 2>/dev/null || true
 ! grep -Fq 'merge' "$TEST_ROOT/watch-once.out" || fail 'status --watch streamed an event appended after its non-TTY exit'
 watch_once_delta=$(tail -n +"$((watch_once_calls_before + 1))" "$FAKE_GH_ROOT/calls")
 [[ -z $watch_once_delta ]] || fail 'status --watch made a GitHub call'
@@ -6097,9 +7213,9 @@ watch_tty_status_before=$(git -C "$target" status --porcelain)
 watch_tty_calls_before=$(wc -l < "$FAKE_GH_ROOT/calls")
 script -q -c "$target/bin/agentic-loop status --watch" /dev/null > "$TEST_ROOT/watch-tty.out" 2>&1 &
 watch_tty_pid=$!
-sleep 1
+wait_for 'status --watch (TTY) printed existing events' grep -Fq 'plan' "$TEST_ROOT/watch-tty.out" || true
 printf '%s\t85\tprogress\tcleanup\n' "$((now))" >> "$state_root/events.log"
-sleep 1
+wait_for 'status --watch (TTY) streamed the appended event' grep -Fq 'cleanup' "$TEST_ROOT/watch-tty.out" || true
 kill -TERM "$watch_tty_pid" 2>/dev/null || true
 wait "$watch_tty_pid" 2>/dev/null || true; watch_tty_rc=$?
 (( watch_tty_rc == 0 )) || fail 'status --watch (TTY) did not exit 0 on SIGTERM'
@@ -6148,9 +7264,9 @@ if "$target/bin/agentic-loop" tail --bogus >/dev/null 2>&1; then fail 'tail acce
 tail_follow_calls_before=$(wc -l < "$FAKE_GH_ROOT/calls")
 "$target/bin/agentic-loop" tail --follow > "$TEST_ROOT/tail-follow.out" 2>&1 &
 tail_follow_pid=$!
-sleep 1
+wait_for 'tail --follow printed existing events' grep -Fq 'progress' "$TEST_ROOT/tail-follow.out" || true
 printf '%s\t84\tprogress\tmerge\n' "$((now))" >> "$state_root/events.log"
-sleep 1
+wait_for 'tail --follow streamed the appended event' grep -Fq 'merge' "$TEST_ROOT/tail-follow.out" || true
 kill -TERM "$tail_follow_pid" 2>/dev/null || true
 wait "$tail_follow_pid" 2>/dev/null || true
 grep -Fq 'progress' "$TEST_ROOT/tail-follow.out" || fail 'tail --follow did not print existing events'
@@ -6219,7 +7335,7 @@ rm -f "$state_root/stop.requested"
 FAKE_CODEX_SLEEP=30 "$target/bin/agentic-loop" _supervise &
 pause_sup_pid=$!
 pause_claimed=0
-for _ in $(seq 1 40); do [[ -e $state_root/workers/192.pid ]] && { pause_claimed=1; break; }; sleep 0.5; done
+wait_for 'pause claimed' test -e "$state_root/workers/192.pid" && pause_claimed=1
 [[ $pause_claimed == 1 ]] || { kill "$pause_sup_pid" 2>/dev/null; wait "$pause_sup_pid" 2>/dev/null; fail 'worker was not claimed before the running-pause test'; }
 "$target/bin/agentic-loop" pause 192 --reason 'incident freeze'
 kill "$pause_sup_pid" 2>/dev/null; wait "$pause_sup_pid" 2>/dev/null || true
@@ -6826,6 +7942,32 @@ printf 'check:\n\t/bin/true\n' > "$affected_cap_without/Makefile"
 grep -Fxq 'validation.affected_check' <(yq -p toml -r '.undetermined[]' "$affected_cap_without/.agentic-loop/capabilities.toml") || fail 'capability_generate fabricated validation.affected_check without a Makefile affected: target'
 grep -Fxq 'validation.impact_map' <(yq -p toml -r '.undetermined[]' "$affected_cap_without/.agentic-loop/capabilities.toml") || fail 'capability_generate fabricated validation.impact_map without an impact map file'
 
+# Worker prompt capability rendering is declaration-driven: affected details
+# appear only when both values are present in a valid manifest (Issue #266).
+summary_with=$(source "$PROJECT_ROOT/bin/lib/agentic-loop/common.sh"; source "$PROJECT_ROOT/bin/lib/agentic-loop/capability.sh"; capability_summary_block "$affected_cap_with")
+grep -Fq '影響範囲検証（反復の短縮専用、push/merge gateではない）' <<< "$summary_with" || fail 'capability summary omitted a declared affected check'
+grep -Fq '影響範囲map: tests/impact-map.toml' <<< "$summary_with" || fail 'capability summary omitted a declared impact map'
+summary_without=$(source "$PROJECT_ROOT/bin/lib/agentic-loop/common.sh"; source "$PROJECT_ROOT/bin/lib/agentic-loop/capability.sh"; capability_summary_block "$affected_cap_without")
+if grep -Fq '影響範囲検証（反復の短縮専用、push/merge gateではない）' <<< "$summary_without" || grep -Fq '影響範囲map:' <<< "$summary_without"; then
+  fail 'capability summary fabricated undeclared affected details'
+fi
+
+# worker_time_budget_block (Issue #266): observed, not provider-claimed, and
+# opt-in via queue.worker_timeout_seconds. Absent/zero timeout or a missing/
+# unreadable started marker must render nothing (never a fabricated budget).
+time_budget_root="$TEST_ROOT/worker-time-budget"
+mkdir -p "$time_budget_root/workers"
+date +%s > "$time_budget_root/workers/9001.started"
+time_budget_disabled=$(STATE_ROOT="$time_budget_root" WORKER_TIMEOUT_SECONDS=0 bash -c \
+  'source "$0/bin/lib/agentic-loop/common.sh"; source "$0/bin/lib/agentic-loop/worker_state.sh"; source "$0/bin/lib/agentic-loop/worker.sh"; worker_time_budget_block 9001' "$PROJECT_ROOT")
+[[ -z $time_budget_disabled ]] || fail 'worker_time_budget_block rendered a budget with worker_timeout_seconds=0'
+time_budget_no_started=$(STATE_ROOT="$time_budget_root" WORKER_TIMEOUT_SECONDS=300 bash -c \
+  'source "$0/bin/lib/agentic-loop/common.sh"; source "$0/bin/lib/agentic-loop/worker_state.sh"; source "$0/bin/lib/agentic-loop/worker.sh"; worker_time_budget_block 9002' "$PROJECT_ROOT")
+[[ -z $time_budget_no_started ]] || fail 'worker_time_budget_block rendered a budget without a started marker'
+time_budget_enabled=$(STATE_ROOT="$time_budget_root" WORKER_TIMEOUT_SECONDS=300 bash -c \
+  'source "$0/bin/lib/agentic-loop/common.sh"; source "$0/bin/lib/agentic-loop/worker_state.sh"; source "$0/bin/lib/agentic-loop/worker.sh"; worker_time_budget_block 9001' "$PROJECT_ROOT")
+grep -Fq 'このworkerの実行時間予算: 上限=300秒' <<< "$time_budget_enabled" || fail 'worker_time_budget_block did not render an observed budget when enabled'
+
 # drift検出: affected_check_secondsがfull_check_seconds以上になると警告する
 # (bin/lib/agentic-loop/doctor.shはdrift:*をwildcardで既に処理する)。
 drift_target="$TEST_ROOT/capability-affected-drift"
@@ -6846,6 +7988,40 @@ drift_findings=$(
   for cap_i in "${!CAPABILITY_CODES[@]}"; do printf '%s\n' "${CAPABILITY_CODES[$cap_i]}"; done
 )
 grep -Fxq 'drift:affected_check_seconds' <<< "$drift_findings" || fail 'capability_validate did not warn when affected_check_seconds >= full_check_seconds'
+
+# --- stall calibration primitives (Issue #280, ADR 0032) -------------------
+# metrics_calibration_verdict is a pure function; test it directly rather than
+# only indirectly through a fleet-wide fixture below.
+calib_verdict_ok=$(CALIBRATION_MIN_SAMPLES=20 bash -c \
+  'source "$0/bin/lib/agentic-loop/common.sh"; source "$0/bin/lib/agentic-loop/metrics.sh"; metrics_calibration_verdict "$1" "$2"' \
+  "$PROJECT_ROOT" $'25\t100\t100\t100\t200' 300)
+[[ $calib_verdict_ok == ok ]] || fail 'metrics_calibration_verdict misclassified a healthy distribution as not ok'
+calib_verdict_under=$(CALIBRATION_MIN_SAMPLES=20 bash -c \
+  'source "$0/bin/lib/agentic-loop/common.sh"; source "$0/bin/lib/agentic-loop/metrics.sh"; metrics_calibration_verdict "$1" "$2"' \
+  "$PROJECT_ROOT" $'25\t3600\t3600\t4000\t5000' 3600)
+[[ $calib_verdict_under == undersized ]] || fail 'metrics_calibration_verdict did not flag a threshold at or below the observed p90 as undersized'
+calib_verdict_sparse=$(CALIBRATION_MIN_SAMPLES=20 bash -c \
+  'source "$0/bin/lib/agentic-loop/common.sh"; source "$0/bin/lib/agentic-loop/metrics.sh"; metrics_calibration_verdict "$1" "$2"' \
+  "$PROJECT_ROOT" $'5\t100\t100\t100\t100' 300)
+[[ $calib_verdict_sparse == insufficient-samples ]] || fail 'metrics_calibration_verdict did not flag too few samples as insufficient-samples'
+calib_verdict_disabled=$(CALIBRATION_MIN_SAMPLES=20 bash -c \
+  'source "$0/bin/lib/agentic-loop/common.sh"; source "$0/bin/lib/agentic-loop/metrics.sh"; metrics_calibration_verdict "$1" "$2"' \
+  "$PROJECT_ROOT" $'25\t9999\t9999\t9999\t9999' 0)
+[[ $calib_verdict_disabled == ok ]] || fail 'metrics_calibration_verdict did not treat threshold=0 (disabled band) as ok'
+
+# events_stage_duration_samples reconstructs stage durations from real
+# progress transitions (no fabricated epoch): the departing stage of each
+# consecutive same-subject progress pair is sampled, the final stage of a
+# subject is never sampled, and a gap beyond worker_timeout_seconds is
+# dropped as host/timeout-attributable rather than a natural stage duration.
+events_calib_log="$TEST_ROOT/events-calibration.log"
+printf '1000\t42\tprogress\tplan\n2000\t42\tprogress\texec\n2100\t42\tprogress\tchecks\n20000\t42\tprogress\tdone\n' > "$events_calib_log"
+events_calib_out=$(EVENTS_LOG="$events_calib_log" EVENTS_CALIBRATION_MAX_LINES=2000 WORKER_TIMEOUT_SECONDS=5000 bash -c \
+  'source "$0/bin/lib/agentic-loop/common.sh"; source "$0/bin/lib/agentic-loop/worker_state.sh"; events_stage_duration_samples' "$PROJECT_ROOT")
+[[ $(grep -c '^provider	' <<< "$events_calib_out") -eq 2 ]] || fail 'events_stage_duration_samples did not attribute the plan/exec departures to the provider band'
+grep -Fxq $'provider\t1000' <<< "$events_calib_out" || fail 'events_stage_duration_samples miscalculated the plan-stage duration'
+grep -Fxq $'provider\t100' <<< "$events_calib_out" || fail 'events_stage_duration_samples miscalculated the exec-stage duration'
+[[ $(grep -c '^non-provider	' <<< "$events_calib_out") -eq 0 ]] || fail 'events_stage_duration_samples produced a sample for a gap beyond worker_timeout_seconds'
 
 # --- bin/agentic-loop metrics (see docs/decisions/0007, docs/operations/loop-metrics.md) ---
 write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=2 LEASE_SECONDS=30 STOP_TIMEOUT=10 STALE_DAYS=30
@@ -6973,6 +8149,13 @@ mj() { printf '%s' "$metrics_json" | yq -p json "$1"; }
 [[ $(mj '.durations.needs_input_wait.n') -eq 1 && $(mj '.durations.needs_input_wait.max') -eq 7200 ]] || fail 'metrics computed the wrong closed needs_input_wait sample (511: 7200s)'
 [[ $(mj '.durations.plan_seconds.n') -eq 1 && $(mj '.durations.plan_seconds.max') -eq 50 ]] || fail 'metrics did not read plan_seconds from the enriched usage marker'
 [[ $(mj '.durations.exec_seconds.n') -eq 1 && $(mj '.durations.exec_seconds.max') -eq 120 ]] || fail 'metrics did not read exec_seconds from the enriched usage marker'
+
+# stall_calibration (Issue #280, ADR 0032): this fixture's plan/exec sample
+# counts (1 each) are far below CALIBRATION_MIN_SAMPLES, so the verdict must
+# stay insufficient-samples rather than fabricate a judgement from one point.
+[[ $(mj '.stall_calibration.verdict') == insufficient-samples ]] || fail 'metrics did not report insufficient-samples when plan/exec sample counts are below CALIBRATION_MIN_SAMPLES'
+[[ $(mj '.stall_calibration.plan_p90') -eq 50 && $(mj '.stall_calibration.exec_p90') -eq 120 ]] || fail 'metrics stall_calibration did not surface the observed p90s'
+[[ $(mj '.stall_calibration.provider_stall_seconds') -eq 3600 ]] || fail 'metrics stall_calibration did not echo the applied provider_stall_seconds'
 [[ $(mj '.durations.pr_review_wait.n') -eq 2 && $(mj '.durations.pr_review_wait.max') -eq 7280 ]] || fail 'metrics computed the wrong pr_review_wait distribution (PR 9: 400-120=280, PR 11: 7300-20=7280; PR 10 is unmerged and excluded)'
 [[ $(mj '.durations.lead_time.n') -eq 3 && $(mj '.durations.lead_time.max') -eq 7300 ]] || fail 'metrics computed the wrong lead_time distribution (505 is excluded: no completed marker despite the label)'
 
@@ -7041,6 +8224,23 @@ degraded_json=$(FAKE_METRICS_EVENTS_FAIL=1 "$target/bin/agentic-loop" metrics --
 metrics_text=$("$target/bin/agentic-loop" metrics --days "$days" --as-of "$as_of")
 [[ $metrics_text == *'転帰:'* ]] || fail 'metrics text format did not render a summary'
 [[ $metrics_text != *'Fake issue'* && $metrics_text != *'worker=w'* ]] || fail 'metrics text format leaked private data'
+
+# stall_calibration undersized: append 25 exec_seconds samples at 4000s (>=
+# the fixture's provider_stall_seconds=3600) so the real-execution p90 is at
+# or above the applied threshold and metrics must report verdict=undersized
+# with a matching warning. Appended after every assertion above that depends
+# on this fixture's exact counts/reproducibility, since this mutates the
+# shared metrics_issues/metrics_events files those assertions already read.
+calib_undersized_issues="" calib_undersized_events=""
+for calib_n in $(seq 601 625); do
+  calib_undersized_issues+="$calib_n	$((window_start + 5000))	0	open	category:improvement	25	agent:running"$'\n'
+  calib_undersized_events+="$calib_n	$((window_start + 5010))	usage worker=w stage=exec provider=codex seconds=4000 exit=0"$'\n'
+done
+printf '%s' "$calib_undersized_issues" >> "$metrics_issues"
+printf '%s' "$calib_undersized_events" >> "$metrics_events"
+metrics_json_undersized=$("$target/bin/agentic-loop" metrics --format json --days "$days" --as-of "$as_of")
+[[ $(printf '%s' "$metrics_json_undersized" | yq -p json '.stall_calibration.verdict') == undersized ]] || fail 'metrics did not report undersized once exec_seconds p90 reached provider_stall_seconds'
+[[ $(printf '%s' "$metrics_json_undersized" | yq -p json '.warnings[]') == *stall_calibration* ]] || fail 'metrics did not emit a stall_calibration warning when undersized'
 
 # --- flaky test detection and quarantine (Issue #60, ADR 0022, docs/operations/flaky-tests.md) ---
 flaky_sh="$PROJECT_ROOT/scripts/flaky.sh"
@@ -7240,6 +8440,18 @@ FAKE_RUNNER_STATE="$run_state1" "$run_e2e_sh" --groups queue --runner "$flaky_fa
   || fail 'run-e2e.sh failed for an always-passing group'
 [[ $(yq -p json -r '.verdicts[0].verdict' "$run_record1") == passed ]] || fail 'run-e2e.sh record did not mark an always-passing group as passed'
 [[ $(yq -p json -r '.verdicts[0].attempts | length' "$run_record1") -eq 1 ]] || fail 'run-e2e.sh retried an always-passing group'
+
+# CI matrixは共通入口を変えず、環境変数でrun-e2e.shの既定群を1群へ絞る。
+# 明示的な--groupsを渡さない経路を固定し、各matrix jobが全4群を重複実行する
+# regressionを防ぐ。
+run_state_env="$TEST_ROOT/run-e2e-state-env"
+mkdir -p "$run_state_env"
+echo pass > "$run_state_env/lifecycle.behavior"
+run_report_env="$TEST_ROOT/run-e2e-report-env.tsv"
+AGENTIC_LOOP_TEST_GROUP=lifecycle FAKE_RUNNER_STATE="$run_state_env" "$run_e2e_sh" --runner "$flaky_fake_runner" --registry "$flaky_empty_registry" --report "$run_report_env" --no-record >/dev/null 2>&1 \
+  || fail 'run-e2e.sh failed for the CI matrix environment-selected group'
+[[ $(wc -l < "$run_report_env") -eq 1 ]] || fail 'run-e2e.sh ran more than one group for the CI matrix environment selection'
+grep -Eq '^lifecycle[[:space:]]+passed[[:space:]]+' "$run_report_env" || fail 'run-e2e.sh did not run the CI matrix environment-selected group'
 
 # 常時失敗: 隔離entryがあっても決定的失敗は非ゼロで終了する。
 run_state2="$TEST_ROOT/run-e2e-state-2"
@@ -7443,6 +8655,7 @@ exit 1
 GHFAKE
 chmod +x "$retry_ceiling_dir/bin/gh"
 (
+  # shellcheck disable=SC2030,SC2031 # intentionally subshell-local retry fixture environment
   export PATH="$retry_ceiling_dir/bin:$TEST_HOST_PATH"
   # shellcheck disable=SC2030 # intentionally subshell-local: read by the api.sh sourced just below, within this same subshell
   export STATE_ROOT="$retry_ceiling_dir/state"
@@ -7458,6 +8671,38 @@ chmod +x "$retry_ceiling_dir/bin/gh"
 ) || true
 retry_ceiling_calls=$(wc -l < "$retry_ceiling_calls_log")
 [[ $retry_ceiling_calls -eq 3 ]] || fail "repo_api made $retry_ceiling_calls underlying calls for API_RETRY_ATTEMPTS=3 against a persistently failing endpoint (expected exactly 3, no unbounded retry amplification)"
+
+# A timeout is ambiguous for writes: the server may have committed the
+# request before the client lost its response. Do not blindly resend POST,
+# while preserving timeout retry for idempotent GET reads.
+timeout_method_dir="$TEST_ROOT/timeout-method"
+timeout_method_calls_log="$TEST_ROOT/timeout-method-calls.log"
+mkdir -p "$timeout_method_dir/bin" "$timeout_method_dir/state"
+: > "$timeout_method_calls_log"
+printf 'acme/example\n' > "$timeout_method_dir/state/repository"
+cat > "$timeout_method_dir/bin/gh" <<GHFAKE
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$timeout_method_calls_log"
+printf 'curl: (28) Operation timed out\n' >&2
+exit 1
+GHFAKE
+chmod +x "$timeout_method_dir/bin/gh"
+(
+  # shellcheck disable=SC2030,SC2031 # intentionally subshell-local timeout fixture environment
+  export PATH="$timeout_method_dir/bin:$TEST_HOST_PATH"
+  export STATE_ROOT="$timeout_method_dir/state" PROGRAM_NAME=timeout-method-test
+  export API_RETRY_ATTEMPTS=3 API_RETRY_BASE_SECONDS=0
+  # shellcheck source=bin/lib/agentic-loop/common.sh
+  source "$PROJECT_ROOT/bin/lib/agentic-loop/common.sh"
+  # shellcheck source=bin/lib/agentic-loop/api.sh
+  source "$PROJECT_ROOT/bin/lib/agentic-loop/api.sh"
+  repo_api issues --method POST >/dev/null 2>&1 || true
+  repo_api issues --method GET >/dev/null 2>&1 || true
+)
+timeout_post_calls=$(grep -c -- '--method POST' "$timeout_method_calls_log" || true)
+timeout_get_calls=$(grep -c -- '--method GET' "$timeout_method_calls_log" || true)
+[[ $timeout_post_calls -eq 1 ]] || fail "timeout POST was retried $timeout_post_calls times (expected exactly once)"
+[[ $timeout_get_calls -eq 3 ]] || fail "timeout GET was retried $timeout_get_calls times (expected API_RETRY_ATTEMPTS=3)"
 
 # --- bin/agentic-loop workload static scan (Issue #130, ADR 0025 T7) -------
 # The scanner itself is local-only (zero GitHub calls) and detects each of
@@ -7563,6 +8808,95 @@ reassert_run 'agent:running'
 if grep -Fq 'set 77 running' "$reassert_state/calls"; then fail 'worker_reassert_running wrote redundantly while already agent:running'; fi
 rm -rf "$reassert_state"
 
+# --- bin/agentic-loop smoke (Issue #279) ---
+# This only proves the CLI's wiring to the real-boundary entry points (right
+# functions, right order, bounded call counts) using the fake gh/claude test
+# doubles; it is not a substitute for the real GraphQL/provider boundary,
+# which only `make smoke` against genuine `gh`/provider CLIs exercises (see
+# docs/policies/validation-harness.md).
+printf '279 needs-input open none 2026-01-01T00:00:00Z none improvement\n' >> "$FAKE_GH_ROOT/$state_key.state"
+printf 'https://github.com/acme/installed-project/issues/279\n' >> "$FAKE_GH_ROOT/$state_key.project-items"
+printf '279\tNeeds input\tImprovement\t\n' >> "$FAKE_GH_ROOT/$state_key.project-values"
+rm -f "$FAKE_GH_ROOT/claude-probe-calls"
+calls_before=$(wc -l < "$FAKE_GH_ROOT/calls")
+smoke_out="$TEST_ROOT/smoke-success.out"
+AGENT_PROVIDER=claude FAKE_CLAUDE_PROBE_MODE=ok "$target/bin/agentic-loop" smoke --issue 279 > "$smoke_out" 2>&1 \
+  || fail "smoke did not exit 0 on a healthy boundary: $(cat "$smoke_out")"
+assert_contains "$smoke_out" 'github-graphql: ok' 'smoke did not report the GraphQL boundary as ok'
+assert_contains "$smoke_out" 'github-rest: ok' 'smoke did not report the REST boundary as ok'
+assert_contains "$smoke_out" 'provider(claude): ok' 'smoke did not report the provider boundary as ok'
+# Issue #273: smoke also runs a claude-only real-CLI stream-json boundary
+# check (docs/decisions/0031), a second billable probe call distinct from the
+# usage-percent probe above -- so claude-probe-calls now holds exactly two
+# lines (one --output-format json, one --output-format stream-json) instead
+# of one.
+assert_contains "$smoke_out" 'stream-json boundary: ok' 'smoke did not report the claude stream-json boundary as ok'
+tail -n "+$((calls_before + 1))" "$FAKE_GH_ROOT/calls" > "$TEST_ROOT/smoke-calls.log"
+[[ $(grep -c 'projectItems(first:20' "$TEST_ROOT/smoke-calls.log" || true) -le 1 ]] || fail 'smoke issued more than one projectItems query for one Issue'
+[[ $(grep -Ec $'\tissues/[0-9]+ ' "$TEST_ROOT/smoke-calls.log" || true) -le 2 ]] || fail 'smoke issued more than two read-only REST reads'
+[[ $(wc -l < "$FAKE_GH_ROOT/claude-probe-calls" 2>/dev/null || printf 0) -eq 2 ]] || fail 'smoke did not launch exactly the usage probe and the stream-json boundary probe'
+assert_contains "$FAKE_GH_ROOT/claude-probe-calls" '--output-format json' 'smoke did not run the usage-percent probe with --output-format json'
+assert_contains "$FAKE_GH_ROOT/claude-probe-calls" '--output-format stream-json' 'smoke did not run the stream-json boundary probe with --output-format stream-json'
+assert_contains "$FAKE_GH_ROOT/claude-probe-calls" '--verbose' 'smoke did not pass --verbose to the stream-json boundary probe'
+
+# A GraphQL boundary failure is reported before the (billable) provider probe
+# ever launches.
+rm -f "$FAKE_GH_ROOT/claude-probe-calls"
+smoke_fail_out="$TEST_ROOT/smoke-failure.out"
+if FAKE_PROJECT_CONTENT_FAIL_ISSUE=279 AGENT_PROVIDER=claude FAKE_CLAUDE_PROBE_MODE=ok \
+  "$target/bin/agentic-loop" smoke --issue 279 > "$smoke_fail_out" 2>&1; then
+  fail 'smoke exited 0 despite a forced GraphQL boundary failure'
+fi
+assert_contains "$smoke_fail_out" 'github-graphql: failed' 'smoke did not report the GraphQL boundary failure'
+[[ -s $FAKE_GH_ROOT/claude-probe-calls ]] && fail 'smoke launched the provider probe after a GitHub boundary failure'
+true
+
+# --- gh --body "@path" silent-loss observability: status/doctor (Issue #272, ADR 0030) ---
+
+unexpanded_body_b64=$(printf '@/tmp/issue_body.md' | base64 -w0)
+multiline_body_b64=$(printf '@/tmp/issue_body.md にも触れています。\n続きの行です。' | base64 -w0)
+mention_no_path_b64=$(printf '@wakuwaku3' | base64 -w0)
+mention_with_space_b64=$(printf '@wakuwaku3 ご確認ください' | base64 -w0)
+fenced_path_b64=$(printf '説明:\n```\n@/tmp/issue_body.md\n```\n' | base64 -w0)
+printf '920 queued open none 2026-01-01T00:00:00Z none none %s\n921 queued open none 2026-01-02T00:00:00Z none none %s\n922 queued open none 2026-01-03T00:00:00Z none none %s\n923 queued open none 2026-01-04T00:00:00Z none none %s\n924 queued open none 2026-01-05T00:00:00Z none none %s\n' \
+  "$unexpanded_body_b64" "$multiline_body_b64" "$mention_no_path_b64" "$mention_with_space_b64" "$fenced_path_b64" > "$FAKE_GH_ROOT/$state_key.state"
+calls_before_status=$(wc -l < "$FAKE_GH_ROOT/calls")
+status_body_output=$("$target/bin/agentic-loop" status)
+calls_after_status=$(wc -l < "$FAKE_GH_ROOT/calls")
+[[ $calls_after_status -gt $calls_before_status ]] || fail 'status made no GitHub call while checking body-unexpanded'
+grep -Fq '要対応:' <<< "$status_body_output" || fail 'status did not show a needs-attention section for the lost-requirement Issue'
+grep -Fq 'issue-body-unexpanded #920:' <<< "$status_body_output" || fail 'status did not report the issue-body-unexpanded anomaly for the lost-requirement Issue'
+if grep -Fq '/tmp/issue_body.md' <<< "$status_body_output"; then fail 'status printed the Issue body content instead of a fixed anomaly message'; fi
+for negative_issue in 921 922 923 924; do
+  grep -Fq "issue-body-unexpanded #$negative_issue:" <<< "$status_body_output" && fail "status false-positived a legitimate body as issue-body-unexpanded (#$negative_issue)"
+done
+status_body_json=$("$target/bin/agentic-loop" status --format json)
+grep -Fq '"code":"issue-body-unexpanded"' <<< "$status_body_json" || fail 'status --format json did not report the issue-body-unexpanded anomaly'
+grep -Fq '"subject":"#920"' <<< "$status_body_json" || fail 'status --format json did not name the lost-requirement Issue'
+
+# doctor reuses the same open-Issue snapshot (no extra open-Issue list call)
+# and additionally does a single, unpaginated repo-wide recent-comments scan.
+calls_before_doctor=$(wc -l < "$FAKE_GH_ROOT/calls")
+: > "$FAKE_GH_ROOT/doctor-comments"
+export FAKE_DOCTOR_COMMENTS="$FAKE_GH_ROOT/doctor-comments"
+doctor_body_out=$("$target/bin/agentic-loop" doctor || true)
+open_issue_list_call_count=$(tail -n "+$((calls_before_doctor + 1))" "$FAKE_GH_ROOT/calls" | grep -Fc 'issues --method GET -f state=open' || true)
+[[ $open_issue_list_call_count -eq 1 ]] || fail "doctor issued $open_issue_list_call_count open-Issue list calls, expected exactly 1"
+grep -Fq '要求本文の欠落' <<< "$doctor_body_out" || fail 'doctor did not warn about the lost-requirement Issue body'
+if grep -Fq '/tmp/issue_body.md' <<< "$doctor_body_out"; then fail 'doctor printed the Issue body content instead of a fixed warning message'; fi
+
+# A broken comment (repo-wide, best-effort, single page) is reported distinctly.
+printf '%s\n' "$unexpanded_body_b64" > "$FAKE_GH_ROOT/doctor-comments"
+doctor_comment_out=$("$target/bin/agentic-loop" doctor || true)
+grep -Fq '要求コメントの欠落' <<< "$doctor_comment_out" || fail 'doctor did not warn about the lost-requirement comment'
+: > "$FAKE_GH_ROOT/doctor-comments"
+doctor_clean_out=$("$target/bin/agentic-loop" doctor || true)
+if grep -Fq '要求コメントの欠落' <<< "$doctor_clean_out"; then
+  grep -Fq '対応は不要です。' <<< "$doctor_clean_out" || fail 'doctor did not report success once the lost-requirement comment was fixed'
+fi
+unset FAKE_DOCTOR_COMMENTS
+printf '279 needs-input open none 2026-01-01T00:00:00Z none improvement\n' > "$FAKE_GH_ROOT/$state_key.state"
+
 fi
 
 if [[ $TEST_GROUP == all || $TEST_GROUP == upgrade ]]; then
@@ -7647,6 +8981,61 @@ hook_result=$(run_edit_hook Edit "$hook_outside/main-link/tracked file.txt" "$ho
 hook_result=$(printf '{"tool_name":"Edit","tool_input":{},"cwd":"%s"}' "$hook_main" | env -u AGENTIC_LOOP_AGENT "$PROJECT_ROOT/.claude/hooks/confirm-main-worktree-edit.sh")
 [[ $hook_result == *'"permissionDecision":"deny"'* ]] || fail 'malformed edit input did not fail safely'
 
+# --- gh --body "@path" Bash PreToolUse hook (Issue #272, ADR 0030) ---------
+# Fail-open by design: only a Bash tool_input.command containing an unexpanded
+# `gh --body "@path"`-shaped value is denied; everything else (including a
+# broken payload) passes through unchanged, since Bash is this loop's most
+# common tool and a fail-closed gate here would stall it entirely.
+run_body_hook() { # COMMAND
+  local cmd=$1 escaped
+  escaped=${cmd//\\/\\\\}
+  escaped=${escaped//\"/\\\"}
+  printf '{"tool_name":"Bash","tool_input":{"command":"%s"},"cwd":"%s"}' "$escaped" "$PROJECT_ROOT" \
+    | "$PROJECT_ROOT/.claude/hooks/require-gh-body-file.sh"
+}
+positive_body_commands=(
+  'gh issue create --title x --body "@/tmp/issue_body.md"'
+  'gh issue create --title x --body=@/tmp/issue_body.md'
+  'gh pr comment 12 -b "@/tmp/a/b.md"'
+  'gh pr create --title x --body "@notes.md"'
+)
+for cmd in "${positive_body_commands[@]}"; do
+  hook_result=$(run_body_hook "$cmd")
+  [[ $hook_result == *'"permissionDecision":"deny"'* ]] || fail "gh --body hook did not deny: $cmd"
+  [[ $hook_result == *'--body-file'* ]] || fail "gh --body hook deny did not point at --body-file: $cmd"
+done
+negative_body_commands=(
+  'gh issue create --title x --body-file /tmp/issue_body.md'
+  'gh issue create --title x --body "通常の本文です"'
+  'gh issue comment 1 --body "@wakuwaku3 ご確認ください"'
+  'gh api repos/o/r/issues -f body=@x.md'
+  'ls -la /tmp'
+)
+for cmd in "${negative_body_commands[@]}"; do
+  [[ -z $(run_body_hook "$cmd") ]] || fail "gh --body hook wrongly denied: $cmd"
+done
+# Non-Bash tool calls are never inspected, even if the command text matches.
+non_bash_result=$(printf '{"tool_name":"Edit","tool_input":{"command":"gh issue create --body \\"@x.md\\""},"cwd":"%s"}' "$PROJECT_ROOT" | "$PROJECT_ROOT/.claude/hooks/require-gh-body-file.sh")
+[[ -z $non_bash_result ]] || fail 'gh --body hook inspected a non-Bash tool call'
+# yq missing from PATH: fall back to the raw-payload string scan rather than
+# fail-closed (a Bash tool call must not be blanket-denied just because the
+# JSON parser is unavailable).
+[[ -z $(printf '{"tool_name":"Bash","tool_input":{"command":"ls -la"},"cwd":"%s"}' "$PROJECT_ROOT" | PATH=/usr/bin:/bin "$PROJECT_ROOT/.claude/hooks/require-gh-body-file.sh") ]] \
+  || fail 'gh --body hook denied an unrelated Bash command with yq unavailable'
+hook_result=$(printf '{"tool_name":"Bash","tool_input":{"command":"gh issue create --title x --body \\"@/tmp/issue_body.md\\""},"cwd":"%s"}' "$PROJECT_ROOT" | PATH=/usr/bin:/bin "$PROJECT_ROOT/.claude/hooks/require-gh-body-file.sh")
+[[ $hook_result == *'"permissionDecision":"deny"'* ]] || fail 'gh --body hook did not deny with yq unavailable (raw fallback)'
+# body_unexpanded_file_reference in the hook must agree with the shell
+# common.sh implementation for the same fixture table, so the two cannot
+# drift. common.sh is sourced in an isolated subshell (it defines its own
+# fail/say, which must not clobber this test script's own).
+common_predicate() { ( source "$PROJECT_ROOT/bin/lib/agentic-loop/common.sh" >/dev/null 2>&1; body_unexpanded_file_reference "$1" ); }
+for cmd_body in '@/tmp/issue_body.md' '通常の本文です' '@wakuwaku3 ご確認ください' '@x.md'; do
+  common_verdict=1; common_predicate "$cmd_body" && common_verdict=0
+  hook_verdict=1
+  [[ $(run_body_hook "gh issue create --body \"$cmd_body\"") == *'"deny"'* ]] && hook_verdict=0
+  [[ $common_verdict == "$hook_verdict" ]] || fail "common.sh and the Bash hook disagree on: $cmd_body"
+done
+
 # Regression (Issue #160 + linked-worktree PATH restore): the hook must resolve
 # its JSON parser (yq) from the recorded runtime.path even when invoked with a
 # PATH that omits the Nix-pinned bins -- Claude Code PreToolUse and login shells
@@ -7707,6 +9096,9 @@ AGENTIC_LOOP_SOURCE="$PROJECT_ROOT" AGENTIC_LOOP_TARGET="$upgrade_target" AGENTI
 [[ -x $upgrade_target/.claude/hooks/confirm-main-worktree-edit.sh ]] || fail 'install did not distribute an executable Claude edit hook'
 [[ $(yq -p json -r '.hooks.PreToolUse[0].matcher' "$upgrade_target/.claude/settings.json") == 'Edit|Write|NotebookEdit' ]] || fail 'install did not distribute Claude hook settings'
 [[ $(yq -p json -r '.files[] | select(.path == ".claude/hooks/confirm-main-worktree-edit.sh") | .class' "$upgrade_target/.agentic-loop/manifest.json") == shared ]] || fail 'manifest did not classify the Claude edit hook as shared'
+[[ -x $upgrade_target/.claude/hooks/require-gh-body-file.sh ]] || fail 'install did not distribute an executable gh --body Bash hook'
+[[ $(yq -p json -r '.hooks.PreToolUse[1].matcher' "$upgrade_target/.claude/settings.json") == Bash ]] || fail 'install did not distribute the gh --body Bash hook settings'
+[[ $(yq -p json -r '.files[] | select(.path == ".claude/hooks/require-gh-body-file.sh") | .class' "$upgrade_target/.agentic-loop/manifest.json") == shared ]] || fail 'manifest did not classify the gh --body Bash hook as shared'
 [[ -f $upgrade_target/.agentic-loop/manifest.json ]] || fail 'install did not write a Foundation manifest'
 [[ $(yq -p json -o yaml '.mode' "$upgrade_target/.agentic-loop/manifest.json") == install ]] || fail 'manifest recorded the wrong install mode'
 [[ $(yq -p json -o yaml '.source.repository' "$upgrade_target/.agentic-loop/manifest.json") == 'wakuwaku3/agentic-loop-foundation' ]] || fail 'manifest recorded the wrong source repository'
