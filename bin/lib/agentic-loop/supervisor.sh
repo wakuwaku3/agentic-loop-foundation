@@ -79,7 +79,7 @@ drain_paused_workers() {
   local issue
   while IFS= read -r issue; do
     [[ -n $issue ]] || continue
-    worker_pid_live "$issue" || continue
+    worker_pid_owned "$issue" || continue
     control_drain_local_worker "$issue"
   done < <(snapshot_state_rows paused | cut -f1 || true)
 }

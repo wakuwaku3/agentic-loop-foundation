@@ -365,7 +365,7 @@ worker_alive() {
   [[ $pid =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null || return 1
   [[ -r /proc/$pid/cmdline ]] || return 1
   command_line=$(tr '\0' ' ' < "/proc/$pid/cmdline") || return 1
-  [[ $command_line == *"$SCRIPT_ROOT/bin/agentic-loop"* && $command_line == *" _worker $issue "* ]]
+  [[ $command_line == "$PROGRAM_PATH _worker $issue "* ]]
 }
 
 
