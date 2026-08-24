@@ -1,8 +1,10 @@
-.PHONY: check environment format lint test contracts docs secrets smoke clean infra-policy infra-lint infra-validate component-plan affected candidate candidate-affected component ownership component-ci component-contracts component-control-plane component-runner component-provider component-domain component-application component-store-memory component-store-firestore component-api component-web component-docs component-test component-infra component-tooling component-reconciler component-release component-scheduler component-legacy-import component-update
+.PHONY: check environment format lint test contracts docs secrets smoke clean infra-policy infra-lint infra-validate component-plan affected candidate candidate-affected component ownership component-ci component-contracts component-control-plane component-runner component-provider component-domain component-application component-store-memory component-store-firestore component-api component-web component-docs component-test component-infra component-tooling component-reconciler component-release component-scheduler component-legacy-import component-update evidence-all evidence-keys
 
 GO ?= go
 EVIDENCE_DIR ?= build/evidence
 BASE ?= HEAD^
+EVIDENCE_TASK_ID ?=
+EVIDENCE_CORRELATION_ID ?=
 
 check: environment format lint test contracts docs secrets ownership component-store-firestore
 
@@ -17,13 +19,19 @@ ownership:
 
 component:
 	@test -n "$(COMPONENT)"
-	@go run ./cmd/ci-plan --execute --component "$(COMPONENT)" --evidence-out "$(EVIDENCE_DIR)"
+	@go run ./cmd/ci-plan --execute --component "$(COMPONENT)" --evidence-out "$(EVIDENCE_DIR)" --task-id "$(EVIDENCE_TASK_ID)" --correlation-id "$(EVIDENCE_CORRELATION_ID)"
 
 candidate:
 	@go run ./cmd/ci-plan --candidate --evidence-dir "$(EVIDENCE_DIR)"
 
 candidate-affected:
 	@go run ./cmd/ci-plan --candidate --candidate-changed "$$(scripts/affected.sh --list "$(BASE)")" --evidence-dir "$(EVIDENCE_DIR)"
+
+evidence-all:
+	@go run ./cmd/ci-plan --execute --all --evidence-out "$(EVIDENCE_DIR)" --task-id "$(EVIDENCE_TASK_ID)" --correlation-id "$(EVIDENCE_CORRELATION_ID)"
+
+evidence-keys:
+	@go run ./cmd/ci-plan --all --keys
 
 component-ci:
 	@go test ./internal/ci ./cmd/ci-plan

@@ -243,6 +243,26 @@ Requirement Done:
 
 component ごとに、component source、公開 contract、依存 surface、test source／runner、lockfile／toolchain／Devbox 等の環境定義を hash 化した evidence key を作る。同じ key の成功 evidence は再利用できる。候補 commit の gate は、全 component について現在の key に対応する新鮮な evidence が存在することを aggregate attestation で確認する。
 
+### aggregate attestation と identity 注入
+
+`cmd/ci-plan` は `--task-id` / `--correlation-id` を受け取り、evidence record にそのまま記録する。値が空または空白のみのときは既定値（`task_id=V2-000`, `correlation_id=local-component-evidence`）へ fallback し、`task_id` は `^V2-[0-9]{3}$` を満たさない限り record を1件も書かずに失敗する。identity は環境変数ではなく argv で注入する。`devbox run --pure` は継承した環境変数を落とすため、共通入口 `devbox run --pure -- make <target>` を経由しても確実に届く経路は make 変数（argv 展開）だけである。
+
+全 component の evidence を一括生成／確認するために次の target を使う。
+
+- `make evidence-all EVIDENCE_TASK_ID=<id> EVIDENCE_CORRELATION_ID=<corr>` — manifest の全 component を選択し（`--all`）、各 component の検証入口を実行して `build/evidence` に record を書く。
+- `make candidate` — `build/evidence` にある record が現在の evidence key と一致し `passed` であることを全 component について確認する。
+- `make evidence-keys` — 各 component の現在の evidence key を `--all --keys` で算出して JSON で出力する。検証の実行は行わない。
+
+`build/evidence` は `.gitignore` 済みの ephemeral な developer feedback であり、commit しない。evidence key は tracked file の内容と working tree の状態から決まるため、生成前に `rm -rf build/evidence` して clean な staged tree で実行する。
+
+候補 commit の閉包を記録として残す場合は aggregate attestation を作るが、単一 commit では自己整合しない（attestation は自分自身を含む tree の evidence key を記録するため、記録対象に記録物自身が含まれる不動点になり、原理的に一致させられない）。そのため 2-commit protocol を用いる。
+
+1. commit A: コード・test・Makefile・docs の変更のみを含む commit を作る。
+2. commit A の sha を `base_commit` として、`make evidence-all` と `make evidence-keys` の結果から aggregate attestation を作成する。
+3. commit B: attestation とその index への登録のみを含む commit を作る（コード変更は含めない）。
+4. commit B の分だけ `.agents/**` の内容が変わるため、`task-ledger` component の evidence だけが古くなる。`task-ledger` の evidence 1件だけを再発行する。
+5. `make candidate` を再実行して green（`{"candidate":true}`）を確認する。
+
 ### Full-system gate との責務分離
 
 選択的 CI は開発 feedback を短縮する gate である。Preview での全 user capability exercise、対象 Provider の実接続確認、Stable 昇格判定は差分にかかわらず実行する。したがって、境界定義の誤りがそのまま Stable に到達しない。
