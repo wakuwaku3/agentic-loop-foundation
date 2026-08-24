@@ -13,6 +13,7 @@ import (
 
 	"github.com/takushi/agentic-loop-foundation/v2/internal/api"
 	"github.com/takushi/agentic-loop-foundation/v2/internal/application"
+	"github.com/takushi/agentic-loop-foundation/v2/internal/quota"
 	"github.com/takushi/agentic-loop-foundation/v2/internal/runner"
 	"github.com/takushi/agentic-loop-foundation/v2/internal/store/memory"
 )
@@ -228,5 +229,51 @@ func TestRunnerEnrollmentHTTPChallengeFlow(t *testing.T) {
 	complete := call(h, http.MethodPost, "/v1/runner/enrollment/complete", `{"challenge_id":"`+c.ID+`","signature":"`+base64.RawURLEncoding.EncodeToString(sig)+`"}`, "")
 	if complete.Code != http.StatusOK || !strings.Contains(complete.Body.String(), "session_token") {
 		t.Fatalf("complete=%d %s", complete.Code, complete.Body.String())
+	}
+}
+
+// A3: budget exhaustion is an explicit 429 quota_exhausted with a
+// Retry-After naming the next UTC midnight, never the default 400
+// invalid_request that a generic domain error maps to.
+func TestQuotaExhaustionMapsTo429NotBadRequest(t *testing.T) {
+	st := memory.New()
+	c := clock{}
+	svc, err := application.NewServiceWithConfig(st, c, &ids{}, application.ServiceConfig{InstallationID: "install", LeaseTTL: time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Fill the day's write budget directly to exactly the ceiling, so the
+	// next mutation's worst-case reservation is refused by one write before
+	// any document is staged.
+	if err := st.Transact(context.Background(), func(u application.UnitOfWork) error {
+		return u.ReserveQuota(context.Background(), "fill", c.Now(), quota.Usage{Writes: quota.DefaultBudget.Writes})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	auth := api.BearerAuthenticator{"owner": {Role: application.RoleOwner, Subject: "owner"}}
+	enrollment, err := runner.NewService(runner.NewMemoryStore())
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := api.New(api.Config{Authenticator: auth, Service: svc, RunnerEnrollment: enrollment, AllowedOrigins: []string{"https://console.example"}})
+
+	w := call(h, http.MethodPost, "/v1/requirements", `{"request_id":"quota-exhausted","text":"x"}`, "owner")
+	if w.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected 429, got %d body=%s", w.Code, w.Body.String())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body["error"] != "quota_exhausted" {
+		t.Fatalf("expected error code quota_exhausted, got %v", body)
+	}
+	if w.Header().Get("Retry-After") == "" {
+		t.Fatal("expected a Retry-After header naming the next UTC midnight")
+	}
+	for key := range body {
+		if key != "error" && key != "message" && key != "schema_version" && key != "correlation_id" {
+			t.Fatalf("unexpected quota_exhausted response field %q leaks beyond the documented envelope: %v", key, body)
+		}
 	}
 }

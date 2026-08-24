@@ -1,4 +1,4 @@
-.PHONY: check environment format lint test contracts docs secrets smoke clean infra-policy infra-lint infra-validate component-plan affected candidate candidate-affected component ownership component-ci component-contracts component-control-plane component-runner component-provider component-domain component-application component-store-memory component-store-firestore component-api component-web component-docs component-test component-infra component-tooling component-reconciler component-release component-scheduler component-legacy-import component-update evidence-all evidence-keys
+.PHONY: check environment format lint test contracts docs secrets smoke clean infra-policy infra-lint infra-validate workflow-pins component-plan affected candidate candidate-affected component ownership component-ci component-contracts component-control-plane component-runner component-provider component-domain component-application component-store-memory component-store-firestore component-api component-web component-docs component-test component-infra component-tooling component-reconciler component-release component-scheduler component-legacy-import component-update evidence-all evidence-keys
 
 GO ?= go
 EVIDENCE_DIR ?= build/evidence
@@ -6,7 +6,7 @@ BASE ?= HEAD^
 EVIDENCE_TASK_ID ?=
 EVIDENCE_CORRELATION_ID ?=
 
-check: environment format lint test contracts docs secrets ownership component-store-firestore
+check: environment format lint test contracts docs secrets ownership component-store-firestore workflow-pins
 
 component-plan:
 	@go run ./cmd/ci-plan --changed "$$(scripts/affected.sh --list "$(BASE)")"
@@ -99,6 +99,9 @@ docs:
 
 secrets:
 	@gitleaks git --no-banner --redact
+
+workflow-pins:
+	@scripts/workflow-pins.sh
 
 smoke:
 	@$(GO) run ./cmd/runner --version | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+-dev$$'

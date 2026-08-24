@@ -10,15 +10,30 @@ Artifact Registry repository は作成しません。
 ## 料金・制限の前提
 
 確認日 2026-08-22。`us-central1` の Cloud Run request-based billing は monthly free tier
-（180,000 vCPU-seconds、360,000 GiB-seconds、2,000,000 requests）を基準とする。
+（180,000 vCPU-seconds、360,000 GiB-seconds、2,000,000 requests）を基準とする。pinned
+cpu=0.08/memory=512Mi では 50% 上限は 360,000 instance-seconds/month（CPU 側の理論上限は
+1,125,000）、requests は 1,000,000/month。Cloud Scheduler は M2 では 0 job
+（`enable_reconcile_scheduler=false`）に固定する。
 Firestore の既定 database は 1 GiB、50,000 reads/day、20,000 writes/day、20,000 deletes/day
-が無料で、named database は無料枠の対象外である。アプリは事故余白 20% を残し、毎日
-40,000 reads、16,000 writes、16,000 deletes を hard reservation として日次 aggregate と
-32 個の監査用 accounting bucket に記録する（bucket は同一 document 内の内訳であり、
-Firestore contention shard ではない）。read transaction は最大 bounded query 1001 reads
-＋quota document read/write を、mutation は最大 32 reads / 16 writes を mutation 前に
-予約し、超過は fail closed する。read の 6,000 は bounded query の fan-out を含む保守的な
-境界値である。
+が無料で、named database は無料枠の対象外である。roadmap M2 の完了条件は無料枠の 50% を
+超えないことなので、アプリは毎日 25,000 reads、10,000 writes、10,000 deletes（無料枠の
+50%）を hard reservation として日次 aggregate と 32 個の監査用 accounting bucket に記録する
+（bucket は同一 document 内の内訳であり、Firestore contention shard ではない）。stored
+bytes は日次 flow ではなく level なので UTC 日次リセットの対象外で、`internal/quota.
+StorageLevel` が 268,435,456 bytes（document payload、index storage 2x overhead を仮定して
+1 GiB の 50% の半分）を 536,870,912 bytes（1 GiB の 50%）に対して enforce する。
+
+read transaction は最大 bounded query 1001 reads＋quota document read/write（合計
+6,001 reads）を、mutation は最大 32 reads / 16 writes を mutation 前に予約し、超過は
+fail closed する。6,001/25,000 だと 1 日 4 read transaction しか通らず実用に耐えないため、
+その保守的な worst-case 予約はそのまま維持しつつ、実際にトランザクションが読んだ document
+数（unit-of-work cache のサイズ）とステージした write/delete 数を使って、flush 直前
+（`internal/store/firestore.unit.flush`）に実測値へ true-up する。true-up は予約を絶対に
+超えて増やさず、0 未満にもしない。measured: single bounded page（1,002 reads）まで
+true-up すると 1 日 24 read transaction まで通る（`internal/quota` のテストで実測、
+`go test -count=1 ./internal/quota -run TestMeasuredDailyCapacityAtFiftyPercentCeiling -v`）。
+予約超過は `quota.ErrOverBudget` となり、`internal/api` で HTTP 429 `quota_exhausted`
+（`Retry-After` は次の UTC 深夜）にマップされる。400 invalid_request にはならない。
 
 一次資料:
 
@@ -34,19 +49,28 @@ Firestore contention shard ではない）。read transaction は最大 bounded 
 7.45.0 に固定する。secret、サービスアカウント鍵、tfstate は
 リポジトリへ保存しない。
 
+state は OpenTofu state 用の private/versioned Cloud Storage bucket（`infra/versions.tf`
+の partial `backend "gcs" {}`）を先に用意し、bucket 名を `TF_STATE_BUCKET` として渡す。
+`infra-plan.sh`/`infra-drift.sh` は `TF_STATE_BUCKET` が空だと fail closed する。
+`infra-validate.sh` は `tofu init -backend=false` のままなのでローカル閉域では bucket
+不要。
+
 ```sh
 cp infra/terraform.tfvars.example /tmp/agentic-loop.tfvars
 # project_id、既存 repository、64桁 image_digest、IAP owner を /tmp で編集
-TFVARS_FILE=/tmp/agentic-loop.tfvars devbox run --pure -- ./scripts/infra-plan.sh
+TFVARS_FILE=/tmp/agentic-loop.tfvars TF_STATE_BUCKET=<bucket> devbox run --pure -- ./scripts/infra-plan.sh
 ```
 
-plan の内容を人間が確認してから、明示的な承認を得た環境でのみ apply する。
-
-```sh
-cd infra
-tofu init -input=false
-tofu apply -input=false -var-file=/tmp/agentic-loop.tfvars
-```
+plan は `infra/build/infra.tfplan` に保存され、`infra/build/infra.plan.json`
+（`tofu show -json` の出力）とその sha256 が同時に出力される。この sha256 が preflight
+record（`contracts/schemas/deployment-preflight.json`、`.agents/v2/preflight/`）の
+`target.plan_digest` になり、人間の承認はこの digest に対して行う。apply は
+**承認された保存済み plan をそのまま apply する**のであって再 plan しない
+（`tofu apply -input=false build/infra.tfplan`）。deploy workflow の apply step は
+実行前に「plan step が今回生成した plan の sha256」と「承認済み preflight record の
+`target.plan_digest`」が一致することを確認し、不一致または record 欠落なら fail
+closed する。これは、承認された対象と実行される対象が別物になり得る
+`tofu apply -auto-approve -var-file=...`（再 plan してしまう）を避けるためである。
 
 この環境では `gcloud auth list` と project を確認できない場合があるため、ローカルでの
 cloud apply は行わない。`tofu plan -refresh-only` は drift 検知であり変更を適用しない。
@@ -54,13 +78,25 @@ cloud apply は行わない。`tofu plan -refresh-only` は drift 検知であ�
 ## drift、rollback、destroy
 
 ```sh
-TFVARS_FILE=/tmp/agentic-loop.tfvars devbox run --pure -- ./scripts/infra-drift.sh
+TFVARS_FILE=/tmp/agentic-loop.tfvars TF_STATE_BUCKET=<bucket> devbox run --pure -- ./scripts/infra-drift.sh
 ```
 
-image digest の rollback は、既知の正常 digest を `image_digest` に戻して plan/apply する。
-Cloud Run と Firestore は `prevent_destroy`/`deletion_protection` で保護され、destroy は
-通常の経路では拒否される。緊急削除は別途明示承認、state backup、影響範囲の記録を先に
-完了し、`tofu state rm` で保護を迂回しない。
+`infra-drift.sh` は `tofu plan -refresh-only -detailed-exitcode` を使う: exit 0 は
+drift なし、exit 2 は drift ありでスクリプト自体が非 0 で終了する（以前は plan を印字する
+だけで drift を無視していた）。
+
+image digest の rollback は revision rollback であり resource 削除ではない: 既知の正常
+digest へ `image_digest` を戻し、新しい plan を作り直し、その新しい plan_digest に対して
+改めて人間の承認を得てから、その承認済み plan を apply する。rollback 完了条件は
+(1) 直前の digest で build された revision が traffic 100% を受けている、(2)
+`tofu plan -refresh-only -detailed-exitcode` が exit 0、(3) IAP 経由の `/healthz` が
+200、(4) rollback 前後で canonical Firestore document の content digest が一致、の
+4 つ全て。Cloud Run と Firestore は `prevent_destroy`/`deletion_protection` で保護され、
+destroy は通常の経路では拒否される。`google_firestore_database` は
+`deletion_policy = ABANDON` でもあるため、OpenTofu が project を再び空の状態へ戻すことは
+不可能であり、state を失った場合の再 apply は `tofu import` が必要で、`tofu state rm` で
+保護を迂回してはならない。緊急削除は別途明示承認、state backup、影響範囲の記録を先に
+完了する。
 # Optional reconcile Scheduler
 
 Cloud Scheduler is disabled by default (`enable_reconcile_scheduler=false`).

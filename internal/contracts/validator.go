@@ -33,6 +33,8 @@ func Validate(schema, value []byte, resolver func(string) ([]byte, error)) error
 		return validateTaskState(obj)
 	case "evidence-index", "historical-evidence-index":
 		return validateEvidenceIndex(obj)
+	case "deployment-preflight":
+		return validateDeploymentPreflight(obj)
 	}
 	return nil
 }

@@ -190,6 +190,13 @@ type unit struct {
 	ctx    context.Context
 	cache  map[string]*cloudfirestore.DocumentSnapshot
 	values map[string]pending
+	// quotaRef/quotaKey/quotaReserved record the single worst-case
+	// ReserveQuota call made at the start of this transaction (before any
+	// other mutation was staged), so flush() can true it up to the actual
+	// cost right before committing.
+	quotaRef      *cloudfirestore.DocumentRef
+	quotaKey      string
+	quotaReserved quota.Usage
 }
 
 // Store is a tenant-scoped Firestore adapter. It has no canonical in-memory
@@ -283,7 +290,43 @@ func (u *unit) ReserveQuota(ctx context.Context, key string, at time.Time, usage
 		return err
 	}
 	record = quotaRecord{Day: counter.Day, Total: counter.Total, Shards: counter.Shards}
-	return u.stage(ref, "quota", record, false)
+	if err := u.stage(ref, "quota", record, false); err != nil {
+		return err
+	}
+	// Remember the worst-case reservation so flush() can true it up to the
+	// actual read/write/delete cost right before the transaction commits.
+	// ReserveQuota is called exactly once per transaction, before any other
+	// mutation is staged (internal/application.Service.transact/mutate).
+	u.quotaRef = ref
+	u.quotaKey = key
+	u.quotaReserved = usage
+	return nil
+}
+
+// trueUpQuota corrects the worst-case reservation staged by ReserveQuota
+// down to the transaction's actual cost: reads actually observed in the
+// unit-of-work cache (every document this transaction fetched, by query or
+// by key, is cached exactly once by path) and writes actually staged (this
+// adapter has no delete operation today, so actual deletes is always zero).
+// It must run after the caller's callback returns and before flush() issues
+// any Firestore write, so the corrected total is what is actually committed.
+func (u *unit) trueUpQuota() error {
+	if u.quotaRef == nil {
+		return nil
+	}
+	p, ok := u.values[u.quotaRef.Path]
+	if !ok {
+		return nil
+	}
+	var record quotaRecord
+	if err := json.Unmarshal([]byte(p.doc.Payload), &record); err != nil {
+		return ErrInvalidSchema
+	}
+	actual := quota.Usage{Reads: int64(len(u.cache)), Writes: int64(len(u.values))}
+	counter := quota.Counter{Day: record.Day, Total: record.Total, Shards: record.Shards}
+	counter.TrueUp(u.quotaKey, u.quotaReserved, actual)
+	record = quotaRecord{Day: counter.Day, Total: counter.Total, Shards: counter.Shards}
+	return u.stage(u.quotaRef, "quota", record, false)
 }
 func (u *unit) read(ref *cloudfirestore.DocumentRef) (*cloudfirestore.DocumentSnapshot, error) {
 	if v, ok := u.cache[ref.Path]; ok {
@@ -299,6 +342,19 @@ func (u *unit) read(ref *cloudfirestore.DocumentRef) (*cloudfirestore.DocumentSn
 	}
 	u.cache[ref.Path] = v
 	return v, nil
+}
+
+// countReads caches every snapshot a query or batch get fetched, exactly
+// like read() does for a single document lookup. The end-of-transaction
+// true-up measures actual reads by cache size, so every read path must feed
+// this same cache or the true-up would under-count a query's real cost.
+func (u *unit) countReads(snaps []*cloudfirestore.DocumentSnapshot) {
+	for _, snap := range snaps {
+		if snap == nil {
+			continue
+		}
+		u.cache[snap.Ref.Path] = snap
+	}
 }
 func (u *unit) value(ref *cloudfirestore.DocumentRef, kind string, out any) (bool, error) {
 	if p, ok := u.values[ref.Path]; ok {
@@ -340,6 +396,9 @@ func (u *unit) saveVersion(ref *cloudfirestore.DocumentRef, kind string, value a
 	return u.stage(ref, kind, value, expected == 0 && current == 0)
 }
 func (u *unit) flush() error {
+	if err := u.trueUpQuota(); err != nil {
+		return err
+	}
 	if len(u.values) > MaxWrites {
 		return ErrWriteCap
 	}
@@ -409,13 +468,13 @@ func (u *unit) RequirementsPage(ctx context.Context, afterID string, limit int) 
 	if err != nil {
 		return nil, false, err
 	}
+	u.countReads(snaps)
 	more := len(snaps) > limit
 	if more {
 		snaps = snaps[:limit]
 	}
 	out := make([]domain.Requirement, 0, len(snaps))
 	for _, snap := range snaps {
-		u.cache[snap.Ref.Path] = snap
 		var v requirementRecord
 		if err := decodeDocument(snap, "requirement", &v); err != nil {
 			return nil, false, err
@@ -470,6 +529,7 @@ func (u *unit) IncrementsForRequirements(ctx context.Context, ids []string) ([]d
 	if err != nil {
 		return nil, err
 	}
+	u.countReads(snaps)
 	out := make([]domain.Increment, 0, len(snaps))
 	for _, snap := range snaps {
 		if snap == nil || !snap.Exists() {
@@ -506,6 +566,7 @@ func (u *unit) ExecutionsForIncrements(ctx context.Context, ids []string) ([]dom
 		if e != nil {
 			return nil, e
 		}
+		u.countReads(snaps)
 		if len(snaps) > MaxQueryRows {
 			return nil, ErrQueryLimit
 		}
@@ -537,6 +598,7 @@ func (u *unit) EventsPage(ctx context.Context, afterID string, limit int) ([]app
 	if e != nil {
 		return nil, false, e
 	}
+	u.countReads(snaps)
 	more := len(snaps) > limit
 	if more {
 		snaps = snaps[:limit]
@@ -730,6 +792,7 @@ func (u *unit) ExpiredActiveLeases(ctx context.Context, at time.Time, cursor str
 	if err != nil {
 		return nil, "", err
 	}
+	u.countReads(snaps)
 	more := len(snaps) > limit
 	if more {
 		snaps = snaps[:limit]
@@ -765,6 +828,7 @@ func (u *unit) ActiveLeases(ctx context.Context, limit int) ([]domain.Lease, err
 	if err != nil {
 		return nil, err
 	}
+	u.countReads(snaps)
 	if len(snaps) > limit {
 		return nil, errors.New("active lease safety limit exceeded")
 	}
@@ -787,6 +851,7 @@ func (u *unit) ExecutionByLease(ctx context.Context, leaseID string) (domain.Exe
 	if err != nil {
 		return domain.Execution{}, false, err
 	}
+	u.countReads(snaps)
 	if len(snaps) == 0 {
 		return domain.Execution{}, false, nil
 	}
@@ -811,6 +876,7 @@ func (u *unit) PendingControlProgresses(ctx context.Context, limit int) ([]domai
 	if err != nil {
 		return nil, err
 	}
+	u.countReads(snaps)
 	out := make([]domain.ControlProgress, 0, len(snaps))
 	for _, snap := range snaps {
 		var v domain.ControlProgress
@@ -831,6 +897,7 @@ func (u *unit) OutboxResolution(ctx context.Context, leaseID string) (applicatio
 	if err != nil {
 		return application.OutboxResolution{}, err
 	}
+	u.countReads(snaps)
 	if len(snaps) > limit {
 		return application.OutboxResolution{}, errors.New("outbox resolution safety limit exceeded")
 	}
@@ -1064,6 +1131,7 @@ func (u *unit) Outboxes(ctx context.Context, now time.Time, limit int) ([]applic
 	if err != nil {
 		return nil, err
 	}
+	u.countReads(snaps)
 	if len(snaps) > MaxQueryRows {
 		return nil, ErrQueryLimit
 	}
@@ -1181,6 +1249,7 @@ func (u *unit) query(ctx context.Context, collection, kind string) ([][]byte, er
 	if err != nil {
 		return nil, err
 	}
+	u.countReads(snaps)
 	if len(snaps) > MaxQueryRows {
 		return nil, ErrQueryLimit
 	}
@@ -1244,6 +1313,7 @@ func (u *unit) QueueSummary(ctx context.Context) (application.QueueSummary, erro
 	if e != nil {
 		return application.QueueSummary{}, e
 	}
+	u.countReads(snaps)
 	out := application.QueueSummary{ByRequirementStatus: map[string]int{}, ByIncrementStatus: map[string]int{}}
 	for _, snap := range snaps {
 		if snap == nil || !snap.Exists() {

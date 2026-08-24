@@ -24,8 +24,18 @@ rg -n 'gcp-sa-iap\.iam\.gserviceaccount\.com' "$infra" >/dev/null || fail 'Cloud
 rg -n 'resource "google_cloud_run_v2_service_iam_member" "iap_invoker"' "$infra" >/dev/null && fail 'IAP owners must not receive run.invoker directly'
 rg -n 'image_digest|sha256:' "$infra" >/dev/null || fail 'Cloud Run image must be digest-pinned'
 rg -n 'prevent_destroy\s*=\s*true|deletion_protection\s*=\s*true' "$infra" >/dev/null || fail 'destroy protection is missing'
-rg -n 'Shards\s*=\s*32|Reads:\s*40_000|Writes:\s*16_000|Deletes:\s*16_000' "$root/internal/quota/quota.go" >/dev/null || fail 'bounded 80% Firestore reservation is missing'
+# Each budget figure is asserted separately and fails closed on its own: an
+# rg alternation (a|b|c) passes as soon as any single branch matches, so a
+# single combined check would stay green even if only one of four figures
+# were still correct. See docs/architecture/validation.md section 6.
+rg -n 'Shards\s*=\s*32' "$root/internal/quota/quota.go" >/dev/null || fail 'quota Shards must be 32'
+rg -n 'Reads:\s*25_000' "$root/internal/quota/quota.go" >/dev/null || fail 'Firestore daily read budget must be 25_000 (50% of the free tier)'
+rg -n 'Writes:\s*10_000' "$root/internal/quota/quota.go" >/dev/null || fail 'Firestore daily write budget must be 10_000 (50% of the free tier)'
+rg -n 'Deletes:\s*10_000' "$root/internal/quota/quota.go" >/dev/null || fail 'Firestore daily delete budget must be 10_000 (50% of the free tier)'
+rg -n 'PayloadBytes:\s*268_435_456' "$root/internal/quota/quota.go" >/dev/null || fail 'Firestore stored payload-byte ceiling must be 268_435_456'
+rg -n 'TotalBytes:\s*536_870_912' "$root/internal/quota/quota.go" >/dev/null || fail 'Firestore stored-bytes total allowance must be 536_870_912'
 rg -n 'ReadTransactionUsage|MutationUsage|MaxBoundedQueryReads|MaxReadBoundaryReads' "$root/internal/quota/quota.go" >/dev/null || fail 'conservative boundary I/O reservations are missing'
+rg -n 'default\s*=\s*"\*/15 \* \* \* \*"' "$infra" >/dev/null || fail 'reconcile_schedule default must be */15 * * * * (25% of the monthly compute ceiling; */5 would be 74%)'
 rg -n 'enable_reconcile_scheduler|reconcile_cost_preflight_approved|google_cloud_scheduler_job' "$infra" >/dev/null || fail 'reconcile scheduler cost gate is missing'
 rg -n 'google_service_account" "reconciler"|RECONCILE_IDENTITY|reconciler_iap_accessor' "$infra" >/dev/null || fail 'dedicated reconciler identity wiring is missing'
 

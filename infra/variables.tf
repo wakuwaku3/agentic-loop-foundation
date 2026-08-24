@@ -95,8 +95,9 @@ variable "reconcile_scheduler_name" {
 }
 
 variable "reconcile_schedule" {
-  type    = string
-  default = "*/5 * * * *"
+  description = "Cron schedule for the optional reconcile trigger. Defaults to every 15 minutes (2,976 ticks/month at <=30s/tick = 89,280 instance-seconds, 25% of the 360,000-second monthly ceiling); */5 would cost 267,840 instance-seconds, 74% of the ceiling, leaving too little for owner traffic."
+  type        = string
+  default     = "*/15 * * * *"
 }
 
 variable "reconcile_time_zone" {

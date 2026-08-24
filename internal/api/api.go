@@ -18,6 +18,7 @@ import (
 
 	"github.com/takushi/agentic-loop-foundation/v2/internal/application"
 	"github.com/takushi/agentic-loop-foundation/v2/internal/domain"
+	"github.com/takushi/agentic-loop-foundation/v2/internal/quota"
 	"github.com/takushi/agentic-loop-foundation/v2/internal/runner"
 	"github.com/takushi/agentic-loop-foundation/v2/internal/web"
 )
@@ -719,6 +720,16 @@ func (h *Handler) decode(w http.ResponseWriter, r *http.Request, v any) bool {
 	return true
 }
 func (h *Handler) domainError(w http.ResponseWriter, r *http.Request, err error) {
+	if errors.Is(err, quota.ErrOverBudget) {
+		// Capacity exhaustion is an explicit waiting state, never a caller
+		// mistake: 429 with a Retry-After naming the next UTC midnight, when
+		// the daily counter resets. The message repeats only the ceilings
+		// already documented in docs/operations/gcp-runbook.md; it never
+		// echoes the wrapped error's actual usage figures.
+		w.Header().Set("Retry-After", nextUTCMidnight(time.Now()).Format(http.TimeFormat))
+		h.error(w, r, http.StatusTooManyRequests, "quota_exhausted", "the daily Firestore quota budget is exhausted for this installation; retry after the next UTC midnight")
+		return
+	}
 	status := http.StatusBadRequest
 	code := "invalid_request"
 	if errors.Is(err, application.ErrNotFound) {
@@ -746,6 +757,13 @@ func (h *Handler) domainError(w http.ResponseWriter, r *http.Request, err error)
 		code = "conflict"
 	}
 	h.error(w, r, status, code, err.Error())
+}
+
+// nextUTCMidnight returns the first instant of the UTC day after at, which
+// is when quota.Counter's daily reservation resets.
+func nextUTCMidnight(at time.Time) time.Time {
+	u := at.UTC()
+	return time.Date(u.Year(), u.Month(), u.Day(), 0, 0, 0, 0, time.UTC).AddDate(0, 0, 1)
 }
 func (h *Handler) error(w http.ResponseWriter, r *http.Request, status int, code, msg string) {
 	writeJSON(w, status, map[string]any{"error": code, "message": msg, "schema_version": "v1", "correlation_id": CorrelationID(r.Context())})

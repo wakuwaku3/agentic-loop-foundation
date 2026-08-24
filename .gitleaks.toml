@@ -11,10 +11,21 @@ useDefault = true
 # positives:
 #
 #   1. 64-hex-digit reference digests: evidence_key and digest values in
-#      .agents/v2/evidence/**, and input_hash/output_hash in
+#      .agents/v2/evidence/**, input_hash/output_hash in
 #      .agents/v2/task-state/** (contracts/schemas/task-state.json requires
-#      ^[a-f0-9]{64}$ for both). These are content hashes, not secrets, but
-#      they are indistinguishable from a generic API key by entropy alone.
+#      ^[a-f0-9]{64}$ for both), and image_digest/plan_digest in
+#      .agents/v2/preflight/** (contracts/schemas/deployment-preflight.json
+#      requires the same shape for both). These are content hashes, not
+#      secrets, but they are indistinguishable from a generic API key by
+#      entropy alone. Measured with `gitleaks git`: a deployment-preflight
+#      record's field names (target.image_digest, target.plan_digest, and
+#      every other required field) contain none of generic-api-key's trigger
+#      keywords (access/api/auth/key/credential/creds/passwd/password/secret/
+#      token), so a preflight record on its own line is not flagged even
+#      without this allowlist; .agents/v2/preflight/ is listed explicitly
+#      below anyway so the path is documented and covered even if a future
+#      field name or a minified adjacent record ever introduces one of those
+#      keywords on the same line.
 #
 #   2. Ledger reference identifiers such as evidence, work-order, design-
 #      packet, problem-brief and task-state ids (ev-/wo-/dp-/pb-/ts- prefixed,
@@ -39,7 +50,7 @@ id = "generic-api-key"
 # and every generic-api-key finding under .agents/v2/. A real API token is
 # very often exactly 64 hex digits, so OR would be a silent hole.
 condition = "AND"
-paths = ['''\.agents/v2/.*''']
+paths = ['''\.agents/v2/.*''', '''\.agents/v2/preflight/.*''']
 regexes = ['''^[a-f0-9]{64}$''']
 
 [[rules.allowlists]]

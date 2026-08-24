@@ -21,7 +21,7 @@ jobs:
       GCP_SERVICE_ACCOUNT: ${{ secrets.GCP_SERVICE_ACCOUNT }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: jetify-com/devbox-install-action@22c0f5500b14df4ea357ce673fbd4ced940ed6a1 # v0.13.0
+      - uses: jetify-com/devbox-install-action@22b0f5500b14df4ea357ce673fbd4ced940ed6a1 # v0.13.0
       - name: Cost and policy preflight
         run: |
           test -n "$GCP_WORKLOAD_IDENTITY_PROVIDER" || { echo 'WIF credential is not configured'; exit 1; }
@@ -35,9 +35,30 @@ jobs:
       - name: Plan
         env:
           TFVARS_FILE: ${{ vars.GCP_TFVARS_FILE }}
+          TF_STATE_BUCKET: ${{ vars.GCP_TF_STATE_BUCKET }}
         run: devbox run --pure -- scripts/infra-plan.sh
-      - name: Apply only when explicitly enabled
+      - name: Apply only the human-approved saved plan
         if: vars.GCP_APPLY_ENABLED == 'true'
         env:
-          TFVARS_FILE: ${{ vars.GCP_TFVARS_FILE }}
-        run: cd infra && tofu apply -input=false -auto-approve -var-file="$TFVARS_FILE"
+          PREFLIGHT_RECORD: ${{ vars.GCP_PREFLIGHT_RECORD }}
+        # The plan step above is the only place infra/build/infra.tfplan and
+        # its infra/build/infra.plan.json digest are produced. Applying that
+        # saved plan (rather than re-planning with tofu apply -var-file=...)
+        # is what makes the object a human approved and the object that
+        # executes provably the same artifact. This step fails closed if the
+        # preflight record is missing, carries no approval, or its
+        # target.plan_digest does not match the plan actually produced in
+        # this run.
+        run: |
+          test -n "$PREFLIGHT_RECORD" || { echo "GCP_PREFLIGHT_RECORD is not configured"; exit 1; }
+          test -f "$PREFLIGHT_RECORD" || { echo "preflight record $PREFLIGHT_RECORD is missing"; exit 1; }
+          approval="$(devbox run --pure -- jq -r '.approval // empty' "$PREFLIGHT_RECORD")"
+          test -n "$approval" || { echo "preflight record $PREFLIGHT_RECORD has no approval"; exit 1; }
+          approved_digest="$(devbox run --pure -- jq -r '.target.plan_digest // empty' "$PREFLIGHT_RECORD")"
+          test -n "$approved_digest" || { echo "preflight record $PREFLIGHT_RECORD has no target.plan_digest"; exit 1; }
+          actual_digest="$(devbox run --pure -- sha256sum infra/build/infra.plan.json | cut -d' ' -f1)"
+          if [ "$approved_digest" != "$actual_digest" ]; then
+            echo "plan digest mismatch: approved=$approved_digest actual=$actual_digest"
+            exit 1
+          fi
+          cd infra && devbox run --pure -- tofu apply -input=false build/infra.tfplan
