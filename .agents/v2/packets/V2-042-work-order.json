@@ -6,7 +6,7 @@
  "correlation_id": "v2-042-ledger-digest-allowlist",
  "problem_brief_ref": "pb-v2-042",
  "design_packet_ref": "dp-v2-042",
- "observable_outcome": "make check is green at the committed HEAD with the secret-scan allowlist covering exactly the 64-hex reference digests under .agents/v2/, proven by three positive controls, and the change is recorded as evidence in the index.",
+ "observable_outcome": "make check is green at the committed HEAD with the secret-scan allowlist covering exactly two shapes inside .agents/v2/ -- 64-hex reference digests and anchored ledger reference identifiers -- proven by four positive controls, and the change is recorded as evidence in the index.",
  "allowed_paths": [
   ".gitleaks.toml",
   "docs/architecture/validation.md",
@@ -32,14 +32,15 @@
  ],
  "contracts_changed": [],
  "acceptance_criteria": [
-  "A1. .gitleaks.toml keeps extend.useDefault, keeps condition = \"AND\", and changes only the path regex so that it covers .agents/v2/ instead of .agents/v2/evidence/. The value regex stays anchored as ^[a-f0-9]{64}$. No second allowlist and no rule removal.",
+  "A1. .gitleaks.toml keeps extend.useDefault and keeps every allowlist AND-scoped. Allowlist one covers path .agents/v2/ with the anchored value pattern ^[a-f0-9]{64}$. Allowlist two covers path .agents/v2/ with the anchored value pattern ^(ev|wo|dp|pb|ts)-v2-[0-9]{3}(-[a-z0-9-]+)?$. No rule is removed or globally disabled, no third allowlist is added, and neither value pattern is unanchored.",
   "A2. Positive control one: a commit adding a 64-hex secret assignment outside .agents/v2/ is still reported by generic-api-key. Record the finding count.",
-  "A3. Positive control two: a commit adding a non-hex high-entropy secret inside .agents/v2/ is still reported. Record the finding count.",
-  "A4. Positive control three: with both probe commits removed, devbox run --pure -- gitleaks git --no-banner --redact reports no leaks found at the committed HEAD.",
-  "A5. devbox run --pure -- make check passes every target including secrets, run after committing so the scan reads committed history.",
-  "A6. docs/architecture/validation.md records that the allowlist covers the ledger reference digests mandated by the canonical schemas, not only evidence records.",
-  "A7. A new evidence artifact .agents/v2/evidence/V2-042-ledger-digest-allowlist.json (id ev-v2-042-ledger-digest-allowlist, task_id V2-042, component environment) records the three positive controls and is registered in .agents/v2/evidence/index.json with a sha256-matching evidence_hash; devbox run --pure -- go test ./internal/contracts is green.",
-  "A8. No file outside allowed_paths changes."
+  "A3. Positive control two: a commit adding a high-entropy secret that matches neither allowlisted shape inside .agents/v2/ is still reported. Record the finding count.",
+  "A4. Positive control three: a commit adding a value shaped like a ledger reference identifier outside .agents/v2/ is still reported. Record the finding count.",
+  "A5. Positive control four: with every probe commit removed, devbox run --pure -- gitleaks git --no-banner --redact reports no leaks found at the committed HEAD.",
+  "A6. devbox run --pure -- make check passes every target including secrets, run after committing so the scan reads committed history.",
+  "A7. docs/architecture/validation.md records that the allowlist covers two ledger shapes -- the reference digests and the reference identifiers mandated by the canonical schemas -- and states the measured reason the identifier shape needs allowing: generic-api-key captures the value following a keyword, and the evidence id ev-v2-041-secrets-gate contains the keyword substring secret, so an adjacent reference id in a refs array is captured as if it were the secret.",
+  "A8. A new evidence artifact .agents/v2/evidence/V2-042-ledger-digest-allowlist.json (id ev-v2-042-ledger-digest-allowlist, task_id V2-042, component environment) records all four positive controls with their measured counts and the corrected diagnosis, and is registered in .agents/v2/evidence/index.json with a sha256-matching evidence_hash; devbox run --pure -- go test ./internal/contracts is green.",
+  "A9. No file outside allowed_paths changes. In particular no file under .agents/v2/task-state/ is edited to work around the finding."
  ],
  "validation": {
   "argv": [

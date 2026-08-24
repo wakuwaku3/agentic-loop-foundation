@@ -20,6 +20,16 @@
    "id": "d3",
    "decision": "Prove the change with three positive controls before accepting it: a 64-hex secret outside .agents/v2/ must still be reported, a non-hex secret inside .agents/v2/ must still be reported, and the clean tree must report no leaks.",
    "rationale": "The first version of this allowlist listed its conditions without condition = AND, which silently suppressed every 64-hex finding in the repository. Only a positive control distinguishes a narrow allowlist from a hole."
+  },
+  {
+   "id": "d4",
+   "decision": "Correct the diagnosis. The three findings are not the 64-hex reference digests. gitleaks captured the quoted string ev-v2-025-contracts because the neighbouring reference id ev-v2-041-secrets-gate contains the keyword substring secret, and generic-api-key captures the value that follows a keyword. Add a second AND-scoped allowlist for ledger reference identifiers under .agents/v2/ with the anchored pattern ^(ev|wo|dp|pb|ts)-v2-[0-9]{3}(-[a-z0-9-]+)?$, and keep the digest allowlist as it is.",
+   "rationale": "Measured with gitleaks -v: all three findings report Secret ev-v2-025-contracts with entropy 3.58 in .agents/v2/task-state/V2-006.json, and grep counts exactly three occurrences of the adjacent id pair, which matches leaks found 3. Renaming the evidence id is not available because the id is already referenced from committed append-only transitions. Ledger reference identifiers are schema-constrained, machine-generated names, never credentials, so allowing exactly that shape inside the ledger directory is narrower than relaxing the digest pattern and leaves every other value in the directory scanned."
+  },
+  {
+   "id": "d5",
+   "decision": "Add a fourth positive control: a value shaped like a ledger reference identifier placed outside .agents/v2/ must still be reported.",
+   "rationale": "The second allowlist is scoped by path as well as by shape. Without a control for the shape outside the ledger, an over-broad second condition would be indistinguishable from a correct one, which is exactly the failure mode of the first version of this allowlist."
   }
  ],
  "components": [
@@ -28,9 +38,11 @@
  "verification": [
   "devbox run --pure -- make secrets",
   "devbox run --pure -- make check",
-  "devbox run --pure -- gitleaks git --no-banner --redact"
+  "devbox run --pure -- gitleaks git --no-banner --redact",
+  "devbox run --pure -- gitleaks git --no-banner -c .gitleaks.toml -v"
  ],
  "risks": [
-  "A real 64-hex secret committed under .agents/v2/ would not be reported by generic-api-key; the ledger is machine-generated and policy already forbids secrets there, and every other pattern in that directory is still scanned."
+  "A real 64-hex secret committed under .agents/v2/ would not be reported by generic-api-key; the ledger is machine-generated and policy already forbids secrets there, and every other pattern in that directory is still scanned.",
+  "A real credential that happens to match the ledger identifier shape and sits inside .agents/v2/ would not be reported; the shape is anchored, lowercase, hyphenated and prefixed, so a credential of that exact form is implausible, and every other shape in the directory is still scanned."
  ]
 }
