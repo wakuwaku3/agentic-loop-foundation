@@ -44,7 +44,7 @@ task-state側を信じ、本文書を更新する。
 | V2-017 | M3 | luna | V2-016, V2-047, V2-048 | live | cost, credential-scope |
 | V2-018 | M3 gate | sol | V2-017, V2-045, V2-047, V2-048 | local | none |
 | V2-019 | M4 | luna | V2-016 | local | none |
-| V2-020 | M4 gate | sol | V2-019 | local | none |
+| V2-020 | M4 gate | sol | V2-019, V2-046 | local | none |
 | V2-021 | M5 | luna | V2-009, V2-011 | local | none |
 | V2-022 | M5 | luna | V2-021, V2-017, V2-020, V2-015, V2-049 | live | cost |
 | V2-026 | M5 gate | sol | V2-022 | local | none |
