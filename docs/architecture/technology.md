@@ -17,7 +17,7 @@
 | Control Plane／Runner言語 | Go、同一module内の複数command |
 | UI | Go server-rendered HTML＋embedded CSS／vanilla ES modules |
 | Runner配布 | Cloud Run release imageに同梱した署名済みLinux binary |
-| Runner local state | SQLite（cache／process journalのみ。canonicalではない） |
+| Runner local state | fsync付きJSONL journal（durable append、fsync後ack、idempotent replay、partial-tail耐性、corruption拒否、bounded size。canonicalではない） |
 | Runner sandbox | Linux namespace sandbox＋Increment専用clone／workspace |
 | Infrastructure as Code | OpenTofu＋Google provider、version／provider lock固定 |
 | Repository environment | Repository Contractが宣言する既存の固定環境。Foundation自身はDevboxを継続 |
@@ -279,8 +279,11 @@ Firestore realtime listenerをbrowserから使わず、read budgetと認可をCo
 ## 10. Runner local implementation
 
 - Linux `x86_64`／`aarch64`を初期対応platformとする
-- Runner local journal／cacheにSQLiteを使う
-- canonical decisionはSQLiteだけから行わない
+- Runner local durable storeは次の保証を満たす: durable append、acknowledgement前のfsync、idempotent
+  replay、partial-tail耐性、corruption拒否、bounded size
+- 現行実装はfsync付きJSONL journal（`internal/runner/journal.go`）。この節が固定するのは保証であって
+  engineではなく、engineは同じ保証を満たす限り交換可能
+- canonical decisionはlocal journalだけから行わない
 - Incrementごとに独立cloneを作り、shared git metadataへのwrite依存を避ける
 - local bare mirrorをnetwork削減cacheに使えるが、workspaceは自己完結させる
 - namespace sandboxでworkspace、toolchain、選択credential以外をread-onlyまたは不可視にする

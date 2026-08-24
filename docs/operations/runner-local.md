@@ -93,20 +93,22 @@ an OS-enforced sandbox: no namespace or container confines the child process
 itself. OS-level confinement is deferred to a privileged container or VM
 integration test (V2-046, M4); it is not required at the M3 gate.
 
-## Durable store: fsync'd JSONL journal, not SQLite
+## Durable store: fsync'd JSONL journal, not SQLite — resolved (V2-044)
 
 The Runner local durable store is the existing fsync-backed JSONL journal
 (`runner.Journal`): durable append, fsync, idempotent replay, partial-tail
 tolerance, corruption rejection, and a bounded size, all already implemented
 and tested. `docs/architecture/technology.md` section 10 and
-`docs/architecture/validation.md` section 2 name SQLite for this role; V2-016
-does not introduce it, because doing so would add a third-party dependency
-and change `go.mod`/`go.sum`, which are hashed into every component's
-evidence key (`internal/ci/planner.go` `evidenceKey()`) and would invalidate
-the whole evidence ledger for a storage-engine swap that changes no M3
-completion condition. This is recorded here as a documentation-versus-
-implementation divergence resolved by V2-044, not as a decision V2-016 made
-on its own.
+`docs/architecture/validation.md` section 2 previously named SQLite for this
+role; V2-016 did not introduce it, because doing so would add a third-party
+dependency and change `go.mod`/`go.sum`, which are hashed into every
+component's evidence key (`internal/ci/planner.go` `evidenceKey()`) and would
+invalidate the whole evidence ledger for a storage-engine swap that changes
+no M3 completion condition. This was recorded here as a documentation-
+versus-implementation divergence to be resolved by V2-044. V2-044 has now
+resolved it by rewriting both documents to state the required guarantees and
+name the implemented journal instead of SQLite, so this note records a
+closed divergence, not an open one.
 
 ## Retry and idempotency
 

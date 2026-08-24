@@ -71,7 +71,10 @@ OpenAPIを契約の正本にし、server、Runner client、test fixture、refere
 
 - workspace path／symlink／permission validation
 - process group TERM／KILL
-- daemon restartとlocal SQLite reconciliation
+- daemon restartとlocal journal reconciliation（journalのrecoveryとidempotent appendを検証する
+  `TestJournalRecoveryAndIdempotentAppend`、corrupt lineの拒否を検証する
+  `TestJournalRejectsCorruptCompleteLine`、process groupへの実SIGKILL後の耐久性を検証する
+  `TestJournalSurvivesRealSIGKILLOfProcessGroup`）
 - bounded log／redaction
 - Secret Brokerが許可process以外へcredentialを渡さない
 - sandboxからworkspace外へwriteできない
