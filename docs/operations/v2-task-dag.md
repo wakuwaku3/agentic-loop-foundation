@@ -31,6 +31,7 @@ task-state側を信じ、本文書を更新する。
 | V2-044 | M3 remediation | terra | V2-016 | local | none |
 | V2-045 | M3 remediation | terra | V2-016, V2-017 | local | none |
 | V2-046 | M4 | luna | V2-017 | live (privileged container/VM) | none |
+| V2-047 | M3 remediation | luna | V2-016 | local | none |
 | V2-010 | M1 | luna | V2-006 | local | none |
 | V2-011 | M1 gate | sol | V2-010 | local | none |
 | V2-012 | M2設計 | terra | V2-006 | local | none |
@@ -38,8 +39,8 @@ task-state側を信じ、本文書を更新する。
 | V2-014 | M2 | luna | V2-013 | live | cost |
 | V2-015 | M2 gate | sol | V2-014 | local | none |
 | V2-016 | M3 | luna | V2-011 | local | none |
-| V2-017 | M3 | luna | V2-016, V2-015 | live | credential-scope |
-| V2-018 | M3 gate | sol | V2-017, V2-045 | local | none |
+| V2-017 | M3 | luna | V2-016, V2-047 | live | cost, credential-scope |
+| V2-018 | M3 gate | sol | V2-017, V2-045, V2-047 | local | none |
 | V2-019 | M4 | luna | V2-016 | local | none |
 | V2-020 | M4 gate | sol | V2-019 | local | none |
 | V2-021 | M5 | luna | V2-009, V2-011 | local | none |
@@ -68,16 +69,24 @@ V2-010は枯渇したV2-007の後継である。retryではなくscope再計画�
 critical path（このtask列が全て順にcompleteしない限りM9 gateへ到達しない）:
 
 ```
-V2-008/V2-009 → V2-006 → V2-010 → V2-011 → V2-013 → V2-014 → V2-015 →
-V2-016 → V2-017 → V2-018 → V2-019 → V2-020 → V2-021 → V2-022 → V2-026 →
-V2-027 → V2-028 → V2-029 → V2-030 → V2-031 → V2-032 → V2-033 → V2-034 →
-V2-035 → V2-036 → V2-037 → V2-038 → V2-039
+V2-008/V2-009 → V2-006 → V2-010 → V2-011 → V2-016 → V2-047 → V2-017 →
+V2-018 → V2-019 → V2-020 → V2-027 → V2-028 → V2-029 → V2-030 → V2-031 →
+V2-032 → V2-033 → V2-034 → V2-035 → V2-036 → V2-037 → V2-038 → V2-039
 ```
+
+M2のlive枝（V2-013 → V2-014 → V2-015）はcritical pathから外し、M5 liveの
+V2-022へ合流する並行枝として扱う。roadmap M3の完了条件はGCP resourceを1つも
+名指ししておらず、GCPはM2の完了条件である。実Providerの縦切りをGCPの外部調達に
+人質として取ると、roadmap §7のrisk reduction order（「1 Provider／1 Repositoryの
+縦切りを通す」が「Preview／Stableと文書を完成させる」より前）を事実上逆転させる。
+したがってV2-014とV2-015がexternal-unavailableの間もM3とM4は進行する。Preview
+実環境が本当に必要になるV2-022（M5 live dogfood）でV2-015依存が正しく効き続ける。
 
 並列に着手できる組（依存が揃った時点でscheduler上の順序を問わない）:
 
 - V2-012はV2-010と並列（両方ともV2-006だけに依存）
 - V2-016、V2-019、V2-021はV2-011後（V2-021はV2-009にも依存）に並列
+- V2-047はV2-016後にV2-019／V2-021と並列（M3 liveの前提整備）
 - V2-027はV2-018 gate後、V2-030はV2-020 gate後にそれぞれ並列
 
 ## 4. gate共通判定規則 G1〜G5
@@ -116,12 +125,12 @@ gate taskのcomplete transitionの`reason`に「`gate M<N> passed`」という�
 | M2 | V2-013 | infra-plan（emulator+tofu validate） | 不要 |
 | M2live | V2-014 | gcp-live-apply（apply/verify/rollback/scale-to-zero/budget guard） | 必須 |
 | M3 | V2-016 | runner（fake Providerでの縦断） | 不要 |
-| M3live | V2-017 | provider-live-codex（Codexでの縦断・credential隔離） | 必須 |
+| M3live | V2-017 | provider-live-claude（代表Provider claudeでの縦断・credential隔離・費用bound 16 invocation／累計$10.00） | 必須 |
 | M4 | V2-019 | reconciler（制御・障害注入の収束） | 不要 |
 | M5 | V2-021 | release（candidate/promotion/rollback/docs drift） | 不要 |
 | M5live | V2-022 | release-live-dogfood（本Repositoryでの実運用） | 必須 |
 | M6 | V2-027 | provider（Claude/opencode adapter、fixture契約） | 不要 |
-| M6live | V2-028 | provider-live-multi（Codex/Claude/opencodeの実CLI検証） | 必須 |
+| M6live | V2-028 | provider-live-multi（codex／claude／opencodeの実CLI検証） | 必須 |
 | M7 | V2-030 | scheduler（単一machineでの多Runner/多Repository） | 不要 |
 | M7live | V2-031 | scheduler-live-multi-machine（2台以上・2 Repository以上） | 必須 |
 | M8設計 | V2-033 | update（設計docのみ） | 不要 |
@@ -241,12 +250,33 @@ test改修が不要**であり、これがV2-010〜V2-039の27件追加をtest�
 このsession（v2-task/dag-registration worktree）で実際に確認した事実。実行時には
 再観測し、変化していればこの記述を盲信しない。
 
-- 開発機に`gcloud`が無く、`devbox.json`にも含まれない。GCPプロジェクトも未設定。
-  → V2-014（M2 live）は現状の環境では`external-unavailable`見込み。
-- `codex` CLIと`opencode` CLIが不在。
-  → V2-017（M3 live, Codex）とV2-028（M6 live, 3 Provider）のうちopencode/Codex分は
+- **`claude` CLIは存在し使える**。`~/.local/bin/claude`、version 2.1.241、認証済み。
+  `internal/provider`の`ClaudeAdapter.Build`が組むargv（`claude --print
+  --output-format json --no-session-persistence` ＋ Work Packetをstdin）は実CLIと
+  wire互換であることを実測した。CLIはJSONに`total_cost_usd`・`usage`・
+  `duration_api_ms`・`session_id`を返すため、release-contract.md §7が要求する
+  「Provider、version、capability、時刻、結果、消費量」をそのまま記録できる。
+  **費用は実在し、1 invocationあたり約$0.08〜0.11が下限**である（CLI自身の
+  system promptのcache作成が毎回乗るため、入力2 tokenの最小probeでも$0.077〜0.105）。
+  → V2-017はexternal-unavailableではない。着手前にV2-047が用意するprovider
+  preflight（16 invocation／累計$10.00、fail-closed）へownerの承認を記録する。
+- `codex` CLIと`opencode` CLIが不在。`npm`／`npx`／`node`は使えるのでopencodeは
+  npm導入の可能性があるが、codexはOpenAIアカウントという人間の費用・identity判断を
+  要する。**capability宣言のprovidersからcodex／opencodeを削って昇格を通してはならない**
+  （契約の実質的弱体化になる）。→ V2-028は着手時に
+  `external-unavailable: codex CLI and OpenAI account; needs: ...`へ遷移させる。
+  opencodeの導入はV2-028のscopeとし、`devbox.json`には入れない（Provider CLIは
+  `devbox run --pure check`の実行pathに乗らず、lock変更は23 componentのevidence keyを
+  全滅させるだけである）。再現性はenrollment時のCLI path／version観測、
+  `docs/operations/`のprovider runbook、evidenceへのversion記録で担保する。
+- 開発機に`gcloud`が無く、`devbox.json`にも含まれない。`~/.config/gcloud`には
+  旧credential（`credentials.db`／`access_tokens.db`／`legacy_credentials`）と
+  account・projectを持つ`config_default`が残っているが、**ADCもbinaryも無いため
+  観測経路にならない**。既存の既定projectは空である保証がなく、
+  「clean projectへapply」というM2完了条件を崩すため**M2 liveの既定候補にしない**。
+  → V2-014は`external-unavailable`のまま。観測とapplyはGitHub Actions＋WIF経由とする。
+- **2台目の実機が無い**（`java`も不在）。→ V2-031（M7 live）は着手時に
   `external-unavailable`見込み。
-- `claude` CLIは存在する。
 
 これらはブロック要因の事前記録であり、担当taskが着手時に自ら再確認して
 `blocked`＋`block_reason: external-unavailable:...`へ遷移させる。本文書は
