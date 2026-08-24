@@ -1,0 +1,73 @@
+{
+ "schema_version": "v1",
+ "id": "wo-v2-044",
+ "kind": "work-order",
+ "created_at": "2026-08-24T13:48:05Z",
+ "correlation_id": "v2-044-runner-store-docs",
+ "problem_brief_ref": "pb-v2-044",
+ "design_packet_ref": "dp-v2-044",
+ "observable_outcome": "The architecture documents describe the Runner local durable store by its guarantees and name the implemented fsync-backed JSONL journal, no document requires SQLite for that store any more, the divergence note in the Runner runbook is marked resolved, and make check is green with the change recorded as evidence in the index.",
+ "allowed_paths": [
+  "docs/architecture/technology.md",
+  "docs/architecture/validation.md",
+  "docs/operations/runner-local.md",
+  ".agents/v2/evidence/V2-044-runner-store-docs.json",
+  ".agents/v2/evidence/index.json"
+ ],
+ "prohibited_paths": [
+  "internal/**",
+  "cmd/**",
+  "contracts/**",
+  "ci/**",
+  "Makefile",
+  "go.mod",
+  "go.sum",
+  "devbox.json",
+  "devbox.lock",
+  ".github/**",
+  "infra/**",
+  "scripts/**",
+  ".gitleaks.toml",
+  ".agents/v2/task-state/**",
+  ".agents/v2/packets/**",
+  "docs/principles.md",
+  "docs/product/**",
+  "docs/policies/**",
+  "docs/architecture/domain-model.md",
+  "docs/operations/v2-task-dag.md"
+ ],
+ "contracts_changed": [],
+ "acceptance_criteria": [
+  "A1. docs/architecture/technology.md no longer requires SQLite for the Runner local store. It states the required guarantees -- durable append, fsync before acknowledgement, idempotent replay, partial-tail tolerance, corruption rejection, bounded size -- names the current implementation as an fsync-backed JSONL journal, and keeps the existing rule that a canonical decision is never taken from the local store alone.",
+  "A2. docs/architecture/validation.md no longer says local SQLite reconciliation in the Runner component test list; it says local journal reconciliation and names the tests that carry the guarantees (journal recovery and idempotent append, corrupt line rejection, and the real-SIGKILL durability test added by V2-016).",
+  "A3. The divergence note in docs/operations/runner-local.md is updated from a recorded divergence to resolved, naming V2-044.",
+  "A4. No document anywhere under docs/ still requires SQLite for the Runner local store. Prove it with a repository-wide search for SQLite under docs/ and report every remaining occurrence with the reason it is legitimate.",
+  "A5. A new evidence artifact .agents/v2/evidence/V2-044-runner-store-docs.json (id ev-v2-044-runner-store-docs, task_id V2-044, component docs, result passed) records the argv actually executed, and is registered in .agents/v2/evidence/index.json with an evidence_hash equal to the sha256 of the artifact bytes. Its evidence_key is the docs component key read with make evidence-keys on the final tree at which make check is green.",
+  "A6. devbox run --pure -- go test -count=1 ./internal/contracts is green, devbox run --pure -- make check is green when run after committing, and devbox run --pure -- make candidate returns candidate true after regenerating build/evidence.",
+  "A7. No file outside allowed_paths changes."
+ ],
+ "validation": {
+  "argv": [
+   "devbox",
+   "run",
+   "--pure",
+   "--",
+   "make",
+   "check"
+  ],
+  "working_directory": ".",
+  "timeout_seconds": 2400
+ },
+ "constraints": [
+  "Work only inside the assigned isolated task worktree; never push.",
+  "Never use git reset, git checkout --, git stash or git commit --amend.",
+  "Do not introduce SQLite and do not change any Go file.",
+  "Read the evidence key only after make check is green on the final committed tree, and remember that a file which is not yet added to the index is invisible to the key.",
+  "Japanese prose for the tracked documents, matching the surrounding sections."
+ ],
+ "failure_stop": true,
+ "tasks": [
+  "V2-044"
+ ],
+ "priority": 50
+}
