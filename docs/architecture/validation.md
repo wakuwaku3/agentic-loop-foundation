@@ -178,6 +178,8 @@ Firestore read／write数、Cloud Run CPU時間、Provider usageをtest result�
 
 実credentialの値をtest reportへ表示しない。live testには専用の最小権限accountを使う。
 
+secret scanのallowlistを追加・変更するときは、同じ形（同じpattern）のsecretをallowlist対象外のpathに置いても検出されることをpositive controlとして実測し、そのbefore/afterをevidenceに残す。allowlistの条件を並べただけでは既定がORになり、意図より広く抑制される。
+
 ## 7. Feedback time targets
 
 | Gate | 目的 | 目標 |
@@ -261,7 +263,7 @@ component ごとに、component source、公開 contract、依存 surface、test
 2. commit A の sha を `base_commit` として、`make evidence-all` と `make evidence-keys` の結果から aggregate attestation を作成する。
 3. commit B: attestation とその index への登録のみを含む commit を作る（コード変更は含めない）。
 4. commit B の分だけ `.agents/**` の内容が変わるため、`task-ledger` component の evidence だけが古くなる。`task-ledger` の evidence 1件だけを再発行する。
-5. `make candidate` を再実行して green（`{"candidate":true}`）を確認する。
+5. commit B を検証する際は `make candidate` だけでなく `make check` を実行して green（`make candidate` は `{"candidate":true}`）を確認する。`gitleaks git` は commit 済み履歴を走査する仕組みであり、未 commit の working tree の内容は走査対象に入らない。したがって attestation ファイルを commit する前に `make check`（`secrets` を含む）を実行しても、その attestation 自身に含まれる 64-hex の evidence key が secret scan を通過したことにはならない。commit B を作った後にあらためて `make check` を実行して初めて、その内容が commit 済み履歴として scan されたと言える。
 
 ### Full-system gate との責務分離
 

@@ -103,7 +103,7 @@ gate taskのcomplete transitionの`reason`に「`gate M<N> passed`」という�
 
 | milestone | 対応task | 想定component | live必須か |
 | --- | --- | --- | --- |
-| M0 | V2-008, V2-009, V2-006 | contracts, ci-plan | 不要（local閉域） |
+| M0 | V2-008, V2-009, V2-006 | 必須evidence: `ev-v2-025-contracts`, `ev-v2-008-candidate-aggregate`, `ev-v2-009-release-contract` | 不要（local閉域） |
 | M1 | V2-010, V2-011 | domain（Safety Invariant） | 不要 |
 | M2設計 | V2-012 | infra（設計docのみ） | 不要 |
 | M2 | V2-013 | infra-plan（emulator+tofu validate） | 不要 |
@@ -123,6 +123,16 @@ gate taskのcomplete transitionの`reason`に「`gate M<N> passed`」という�
 | M9 | V2-037 | legacy-import-dry-run（read-only export・秘密scan） | 実データread-onlyでlive必須 |
 | M9 | V2-038 | legacy-import-live-cutover（停止・drain・import・rollback rehearsal） | 必須 |
 | M9 gate | V2-039 | cutover-record | 必須（cutover決定そのものがlive事実） |
+
+M0行は他の行と異なり、component名ではなく`.agents/v2/evidence/index.json`上のevidence
+idを直接列挙する。`contracts`はcomponent一覧に実在するが、V2-008が生成する
+aggregate attestationのcomponent値は`candidate-aggregate`であり、これは
+`ci/components.json`のcomponent一覧に存在しない（23個の実componentの評価結果を
+束ねる合成attestationのためのcomponent値であり、単体のcomponentではない）。
+component名で書くとindexの実際のcomponent値と食い違うため、M0 gate（V2-006）が
+根拠として直接読むevidence idをそのまま書く。V2-009が生成すべき
+`ev-v2-009-release-contract`は2026-08-24時点でindexに未登録であり、これがV2-006が
+M0 gateをnot passedと判定した理由の一つである。
 
 ## 6. 失敗タスクの処置とsuperseded規則
 
@@ -216,7 +226,42 @@ test改修が不要**であり、これがV2-010〜V2-039の27件追加をtest�
 `blocked`＋`block_reason: external-unavailable:...`へ遷移させる。本文書は
 先回りしてtask-stateを書き換えない。
 
-## 10. 次の安全な1アクション
+## 10. checkpoint pushの手順と既知のdeploy workflow defect
+
+### checkpointは1本ずつpushする
+
+`scripts/verify-parent-ci.sh`は、diffが`.github/*`・`ci/*`・`scripts/*`・
+`Makefile`・`devbox.json`・`devbox.lock`・`go.mod`・`go.sum`のいずれにも触れて
+いない限り、親commit（`GITHUB_EVENT_BEFORE`、無ければ`HEAD^`）に対する
+`v2 selective CI`のsuccessful runがGitHub上に存在することを要求し、無ければ失敗する。
+そのため複数commitを連続でpushすると、後続commitの親（先にpushしたcommit）の
+CIがまだ完了していない時点でCIが起動し、`parent <sha> has no successful v2
+selective CI attestation`で失敗する。これはcode上の欠陥ではなく、pushの順序に
+起因する見せかけの失敗（spurious failure）である。checkpointは1本ずつpushし、
+親commitのCIが緑になったことを確認してから次のcheckpointをpushする。
+
+### task worktreeはcommit後に再検証する
+
+`gitleaks git`はcommit済みのgit履歴を走査し、working treeの未commit内容は
+走査しない（本文書の運用上の帰結。詳細は
+`docs/architecture/validation.md`の11章を参照）。したがって、commit前に
+`make check`が緑であっても、それはcommitしようとしている内容がsecret scanを
+通過したことの証明にはならない。task worktreeでの実装が終わったら、commitした
+「後」にあらためて`devbox run --pure -- make check`（`secrets`を含む）を実行し、
+commit済みの状態で緑であることを確認する。
+
+### `.github/workflows/deploy.yml`の既知の欠陥
+
+`.github/workflows/deploy.yml`は`jetify-com/devbox-install-action`を
+`22c0f5500b14df4ea357ce673fbd4ced940ed6a1`というrevisionでpinしているが、この
+revisionはupstream repositoryに存在しない。`.github/workflows/ci.yml`が使って
+いる正しいpinは`22b0f5500b14df4ea357ce673fbd4ced940ed6a1`（2文字目が`b`）であり、
+`deploy.yml`のみが`c`になっている。この結果、`deploy.yml`のjobは
+`devbox-install-action`のresolveに失敗し、起動できない。この欠陥はこの文書が
+記録するのみで、この文書の担当taskでは修正しない。修正はM2の設計・実装を担う
+V2-012（設計）とV2-013（実装）の責務である。
+
+## 11. 次の安全な1アクション
 
 Terraが V2-008 に着手する（`blocked → queued → running`という遷移列のうち、
 V2-008は既に`queued`（Sol承認済み）まで進んでいるため、残るのは`queued → running`

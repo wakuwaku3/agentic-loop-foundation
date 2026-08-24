@@ -1,0 +1,24 @@
+title = "agentic-loop-foundation gitleaks config"
+
+# Extend the upstream default ruleset. No rule is removed or globally
+# disabled here; only one narrowly scoped allowlist is added below.
+[extend]
+useDefault = true
+
+# Committed component evidence records (.agents/v2/evidence/**) legitimately
+# contain 64-hex-digit evidence_key and digest values. These are content
+# hashes, not secrets, but they are indistinguishable from a generic API key
+# by entropy alone, so the generic-api-key rule flags them as false
+# positives. Narrow the allowlist to that exact path and that exact pattern
+# so every other path and every other rule keeps enforcing normally.
+[[rules]]
+id = "generic-api-key"
+
+[[rules.allowlists]]
+# Both conditions must hold. gitleaks defaults an allowlist with several
+# conditions to OR, which would suppress every 64-hex finding repository-wide
+# and every generic-api-key finding under the evidence path. A real API token
+# is very often exactly 64 hex digits, so OR would be a silent hole.
+condition = "AND"
+paths = ['''\.agents/v2/evidence/.*''']
+regexes = ['''^[a-f0-9]{64}$''']

@@ -19,5 +19,6 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GITHUB_EVENT_BEFORE: ${{ github.event.before }}
         run: scripts/verify-parent-ci.sh
+      - run: devbox run --pure -- make secrets
       - run: devbox run --pure -- make affected
       - run: devbox run --pure -- make candidate-affected
