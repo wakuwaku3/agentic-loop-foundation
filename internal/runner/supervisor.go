@@ -14,14 +14,32 @@ import (
 // Env, if non-nil, is the exact environment the child receives (this is the
 // only place a Secret Broker grant may be merged into a child's environment;
 // nil means "inherit exec.Command's default", matching earlier behaviour).
+//
+// Confine, if non-nil, runs the child inside a rootless user+mount
+// namespace confined to Confine.Workspace (see NamespaceConfinement's doc
+// comment for the mechanism). Run fails closed -- it returns
+// ErrNamespaceUnsupported and never starts the child -- when the kernel or
+// environment cannot actually provide that confinement, rather than
+// silently falling back to running the child unconfined.
 type ProcessSupervisor struct {
 	TermGrace time.Duration
 	Env       []string
+	Confine   *NamespaceConfinement
 }
 
 func (s ProcessSupervisor) Run(ctx context.Context, argv []string) error {
 	if len(argv) == 0 || argv[0] == "" {
 		return errors.New("process argv is required")
+	}
+	if s.Confine != nil {
+		if err := s.Confine.Probe(ctx); err != nil {
+			return err
+		}
+		wrapped, err := s.Confine.wrap(argv)
+		if err != nil {
+			return err
+		}
+		argv = wrapped
 	}
 	cmd := exec.Command(argv[0], argv[1:]...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}

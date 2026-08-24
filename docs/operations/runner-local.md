@@ -81,17 +81,82 @@ past the cap plus the marker's own length. Every write passes through
 `RedactLog` first: a secret-shaped value is replaced with `[REDACTED]`, while
 a non-secret value of the same length survives byte for byte.
 
-## Workspace confinement is convention-level, not OS-enforced
+## Workspace confinement: convention-level path checks, plus OS-enforced writes (V2-046)
 
 The runner asserts, and a test verifies, that it never hands a child a path
 outside its workspace: `Invocation.WorkingDirectory` is the symlink-resolved
 workspace path, no argv element resolves outside the workspace root, the
 per-execution workspace is not a symlink and is not group- or world-
 accessible, and a write path escaping the workspace root is detected before
-use. This is a convention the runner enforces on the paths it constructs, not
-an OS-enforced sandbox: no namespace or container confines the child process
-itself. OS-level confinement is deferred to a privileged container or VM
-integration test (V2-046, M4); it is not required at the M3 gate.
+use. This remains a convention the runner enforces on the paths it
+constructs, not a guarantee about what the child process itself can do.
+
+`runner.NamespaceConfinement` (`internal/runner/confinement.go`) closes that
+gap for filesystem writes without any privileged container or VM: it runs
+the child inside a rootless (unprivileged) Linux user namespace plus mount
+namespace. `unshare --user --map-root-user --mount` maps the caller's own
+uid to root *inside a brand-new user namespace only* -- no `sudo`, no
+`CAP_SYS_ADMIN` requested from the host, no setuid helper -- which is
+sufficient, since Linux 3.8 (see `user_namespaces(7)`), to also create a
+mount namespace and perform bind mounts and remounts confined to that
+namespace's own view. `ProcessSupervisor.Confine`, when set, wires this in:
+`ProcessSupervisor.Run` calls `NamespaceConfinement.Probe` before ever
+starting the child, and returns `runner.ErrNamespaceUnsupported` -- refusing
+to start the child at all -- if this kernel/environment cannot actually
+provide the confinement, rather than silently falling back to running it
+unconfined. The TERM-then-KILL process-group semantics are unchanged: since
+`unshare(1)` unshares the calling process's own namespaces in place (no
+`--fork`, no PID namespace requested), the wrapped child keeps the exact PID
+`ProcessSupervisor` already put in its own process group, so
+`syscall.Kill(-pid, ...)` still reaches it and everything it spawns.
+
+The mechanism, once the namespace exists: the top-level directory under `/`
+that contains the workspace (e.g. `/tmp` for a workspace at
+`/tmp/x/y/workspace`) is bind-mounted onto itself and then remounted
+read-only (two steps, because the kernel's bind-mount syscall ignores every
+flag but `MS_BIND` on its first call); the workspace itself is then
+bind-mounted onto itself and explicitly remounted read-write, strictly
+*after* the ancestor is sealed, because a mount created before its ancestor
+becomes its own mount object is invisible once that happens, and a bind
+mount created while its source already sits under a read-only mount
+inherits that read-only flag. Since read-only is a whole-mount property,
+sealing the ancestor makes every path under it read-only in one operation,
+except the workspace's own separately pinned mount.
+
+This was measured, not assumed: with the ancestor sealed and the workspace
+re-punched writable inside a fresh namespace, a write into the workspace
+succeeds, and a write to a sibling path under the same sealed ancestor fails
+at the syscall boundary with `EROFS` ("Read-only file system") -- observed
+verbatim in a child shell's own error output, not inferred from an exit
+code. A positive control (the identical write, same paths, run without
+`unshare`) succeeds, ruling out "it just can't write there anyway" as the
+explanation. After the confined process exits and its ephemeral mount
+namespace is torn down by the kernel, the outside path is exactly as it was
+before: the failed write never touched the host filesystem at all, and the
+successful workspace write is an ordinary, real, persisted write (mount
+namespaces do not create copies; the workspace directory is the same inode
+throughout). `internal/runner/confinement_test.go` is this proof: it never
+counts a `t.Skip` as a pass -- when `Probe` reports the kernel/environment
+cannot provide unprivileged namespaces, the test skips and emits no
+evidence, rather than reporting success for confinement it never exercised.
+
+What this does **not** provide: the mount namespace's own root (`/`) cannot
+itself be bind-mounted by an unprivileged caller -- the kernel's
+`do_loopback` rejects binding a mount namespace's root dentry onto any
+target with `EINVAL`, confirmed empirically here, not merely inferred from
+documentation -- so directories *outside* the sealed top-level ancestor are
+left exactly as the host's ordinary DAC permissions already left them. On
+any standard deployment where the runner's own uid is not the real root,
+everything above that top-level ancestor was already unwritable to it, so
+this is not an exploitable gap in practice; it would be one if the runner
+were ever run as real root, which it is not designed to be. This mechanism
+is a filesystem-write boundary only: it says nothing about network access,
+process visibility/interference with other processes owned by the same
+uid, or resource limits -- those remain out of scope for V2-046 and are not
+claimed here. It is also a convention-independent proof only for the
+specific mount operations exercised (bind, remount-bind-ro/rw, tmpfs); it
+does not itself replace the path-construction checks described above, which
+still run first and independently.
 
 ## Durable store: fsync'd JSONL journal, not SQLite — resolved (V2-044)
 
