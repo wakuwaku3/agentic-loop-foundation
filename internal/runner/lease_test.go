@@ -3,6 +3,7 @@ package runner
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -143,5 +144,62 @@ func TestLeaseKeeperStopsRenewingOnceLeaseIsExpiredWithoutResurrectingIt(t *test
 	}
 	if !out2.HeartbeatResult.Accepted {
 		t.Fatal("expired-lease tick should still heartbeat")
+	}
+}
+
+// TestReconnectRefusesNewClaimUntilPriorExecutionIsReportedThenAllows is
+// acceptance A11: after a restart, replaying the journal must surface an
+// unreconciled prior Execution, and while one is present the Runner must
+// refuse to obtain a new claim with an explicit error rather than a silent
+// skip; once it has been reported, a new claim is allowed again. Both
+// directions are asserted against the same on-disk Journal, replayed twice
+// (as a fresh OpenJournal would after a real restart), never against an
+// in-memory flag.
+func TestReconnectRefusesNewClaimUntilPriorExecutionIsReportedThenAllows(t *testing.T) {
+	dir := t.TempDir()
+	journal, err := OpenJournal(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// No prior Execution at all yet: the gate must allow a claim.
+	if err := RefuseClaimIfUnreconciled(journal); err != nil {
+		t.Fatalf("fresh journal refused a claim: %v", err)
+	}
+
+	// A provider result is journaled pending canonical acceptance for a
+	// prior attempt, exactly as a crashed/partitioned Runner's last attempt
+	// would leave it (dp-v2-016 d5's own JournalProviderPending).
+	if err := JournalProviderPending(journal, PendingProviderRecord{IncrementID: "increment-x", ExecutionID: "execution-x", WorkPacketDigest: "digest-x", Succeeded: true, Checkpoint: "cp-x"}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate a restart: reopen the journal fresh from disk rather than
+	// reusing the in-memory handle, so this is genuinely a replay-surfaced
+	// fact, not an in-process flag.
+	reopened, err := OpenJournal(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = RefuseClaimIfUnreconciled(reopened)
+	if !errors.Is(err, ErrUnreconciledExecution) {
+		t.Fatalf("err=%v, want ErrUnreconciledExecution while execution-x is unreconciled", err)
+	}
+	if !strings.Contains(err.Error(), "execution-x") {
+		t.Fatalf("err=%v, want it to name the dangling execution id", err)
+	}
+
+	// The prior Execution's result is now canonically accepted.
+	if err := JournalResultAccepted(reopened, "execution-x", domain.ExecutionSucceeded); err != nil {
+		t.Fatal(err)
+	}
+
+	// Restart again: replaying the journal must now show nothing dangling.
+	reopenedAgain, err := OpenJournal(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := RefuseClaimIfUnreconciled(reopenedAgain); err != nil {
+		t.Fatalf("err=%v, want nil once execution-x has been reported", err)
 	}
 }

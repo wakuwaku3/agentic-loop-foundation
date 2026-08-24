@@ -1292,7 +1292,29 @@ func (s *Service) effectOutbox(ctx context.Context, u UnitOfWork, outboxID, oper
 	if err != nil {
 		return nil, err
 	}
-	return &OutboxItem{ID: outboxID, OperationID: effect.OperationID.String(), Kind: outboxKind, Target: effect.Target, ExpectedVersion: effect.ExpectedVersion, FencingToken: effect.FencingToken, ControlRevision: effect.ControlRevision, IncrementID: target.IncrementID.String(), LeaseID: latest.ID.String(), RunnerID: target.RunnerID.String(), ControlTarget: target, PermitKind: kind}, nil
+	// The OutboxDispatcher later re-validates this item by re-fetching
+	// CanonicalTarget fresh from the durable store and comparing it against
+	// the item's own stored ControlTarget (internal/application/outbox.go
+	// beforeEffect). CanonicalTarget is saved once at Plan time and never
+	// carries a RunnerID (SaveCanonicalTarget takes no runner parameter),
+	// but target here has already been canonicalized with the calling
+	// Runner's id filled in (Claim/Renew/AcceptResult all do this for their
+	// own Permit evaluation above, which does need the RunnerID to match a
+	// ScopeRunner control). Persisting that ephemeral, runner-filled target
+	// as ControlTarget would make it permanently mismatch the durable
+	// canonical target beforeEffect re-fetches, so every such effect would
+	// fail ErrOutboxNotReady and go Dead on its very first delivery
+	// attempt. Persist the same durable value beforeEffect will compare
+	// against instead.
+	persistedTarget := target
+	if target.IncrementID != "" {
+		if canonical, found, cerr := u.CanonicalTarget(ctx, target.IncrementID.String(), target.RunnerID.String()); cerr != nil {
+			return nil, cerr
+		} else if found {
+			persistedTarget = canonical
+		}
+	}
+	return &OutboxItem{ID: outboxID, OperationID: effect.OperationID.String(), Kind: outboxKind, Target: effect.Target, ExpectedVersion: effect.ExpectedVersion, FencingToken: effect.FencingToken, ControlRevision: effect.ControlRevision, IncrementID: target.IncrementID.String(), LeaseID: latest.ID.String(), RunnerID: target.RunnerID.String(), ControlTarget: persistedTarget, PermitKind: kind}, nil
 }
 
 func (s *Service) record(ctx context.Context, u UnitOfWork, eventID, operationID, fingerprint, requestID, operation, aggregateType, aggregateID string, version domain.Version, typ, actor string, outbox *OutboxItem, value any) error {

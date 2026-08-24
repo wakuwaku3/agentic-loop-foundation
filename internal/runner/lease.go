@@ -2,6 +2,7 @@ package runner
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 
@@ -117,4 +118,73 @@ func (k *LeaseKeeper) Tick(ctx context.Context, expectedLeaseVersion domain.Vers
 		}
 	}
 	return out, nil
+}
+
+// ErrUnreconciledExecution is returned when a Runner attempts to obtain a
+// new claim while journal replay still shows a prior Execution's provider
+// result pending without a matching canonically-accepted record
+// (dp-v2-019, acceptance A11; failure-model.md section 5's reconnect step:
+// "再接続時に古いprocess、workspace、Operationをreconcileしてから新規claim
+// を許可する"). It is returned explicitly, wrapping the dangling Execution
+// id, rather than the caller silently skipping the check.
+var ErrUnreconciledExecution = errors.New("a prior execution is unreconciled; report it before claiming new work")
+
+// UnreconciledExecution replays j and returns the id of a prior Execution
+// whose result_pending journal record has no matching result_accepted
+// record, if one exists. It composes only the same journal bookkeeping
+// FindPendingProviderResult already uses (result_pending / result_accepted,
+// dp-v2-016 d5), generalised to scan every IncrementID rather than one,
+// because after a restart the Runner does not yet know which Increment it
+// is about to claim next.
+func UnreconciledExecution(j *Journal) (executionID string, found bool, err error) {
+	if j == nil {
+		return "", false, errors.New("journal is required")
+	}
+	events, err := j.Replay()
+	if err != nil {
+		return "", false, err
+	}
+	accepted := map[string]bool{}
+	for _, e := range events {
+		if e.Kind != "result_accepted" {
+			continue
+		}
+		var a struct {
+			ExecutionID string `json:"execution_id"`
+		}
+		if jsonErr := json.Unmarshal(e.Payload, &a); jsonErr != nil {
+			return "", false, ErrJournalCorrupt
+		}
+		accepted[a.ExecutionID] = true
+	}
+	for _, e := range events {
+		if e.Kind != "result_pending" {
+			continue
+		}
+		var rec PendingProviderRecord
+		if jsonErr := json.Unmarshal(e.Payload, &rec); jsonErr != nil {
+			return "", false, ErrJournalCorrupt
+		}
+		if accepted[rec.ExecutionID] {
+			continue
+		}
+		executionID = rec.ExecutionID
+		found = true
+	}
+	return executionID, found, nil
+}
+
+// RefuseClaimIfUnreconciled is the explicit reconnect gate a Runner must
+// consult before obtaining a new claim: it returns ErrUnreconciledExecution
+// (wrapping the dangling Execution id) if UnreconciledExecution finds one,
+// and nil once every prior Execution's result has been reported.
+func RefuseClaimIfUnreconciled(j *Journal) error {
+	id, found, err := UnreconciledExecution(j)
+	if err != nil {
+		return err
+	}
+	if found {
+		return fmt.Errorf("%w: execution %s", ErrUnreconciledExecution, id)
+	}
+	return nil
 }
