@@ -5,6 +5,7 @@
   "created_at": "2026-08-24T00:00:00Z",
   "correlation_id": "v2-009-release-contract",
   "release": "0.1.0-baseline",
+  "representative_provider": "claude",
   "contract_ref": "rc-foundation-0.1.0-baseline",
   "capabilities": [
     {

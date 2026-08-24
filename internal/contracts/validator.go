@@ -35,6 +35,8 @@ func Validate(schema, value []byte, resolver func(string) ([]byte, error)) error
 		return validateEvidenceIndex(obj)
 	case "deployment-preflight":
 		return validateDeploymentPreflight(obj)
+	case "provider-preflight":
+		return validateProviderPreflight(obj)
 	}
 	return nil
 }

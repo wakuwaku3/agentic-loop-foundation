@@ -100,13 +100,13 @@ v1 sourceのarchiveはGit historyとcutover tagを正本とし、v2 treeへ残�
 - Firestore無料quotaの50% hard budgetを越えない
 - GitHub Issueなしで課題を永続化できる
 
-### M3: One Runner・Codex vertical slice
+### M3: One Runner・代表Provider vertical slice
 
 成果:
 
 - Runner enrollment、heartbeat、claim、Lease
 - workspace、process supervisor、Secret Broker
-- Codex Adapter
+- 代表Provider Adapter（Release Contractのrepresentative_providerで宣言、現在はclaude）
 - 1 Repository／1 Incrementの変更、検証、integration
 - provider-neutral Work Packet
 
@@ -114,7 +114,7 @@ v1 sourceのarchiveはGit historyとcutover tagを正本とし、v2 treeへ残�
 
 - 課題登録からIncrement Artifactまで通る
 - Runner crash後、別Executionで再開できる
-- Codex実物のPreview capabilityが成功する
+- 代表Provider実物のPreview capabilityが成功する
 - credentialがControl Plane／Work Packet／logへ入らない
 
 ### M4: Control and recovery first
@@ -158,7 +158,7 @@ v1 sourceのarchiveはGit historyとcutover tagを正本とし、v2 treeへ残�
 
 成果:
 
-- Claude Adapter、opencode Adapter
+- 代表Provider以外のAdapter（Codex、opencode）
 - Provider Account／pool／quota／circuit breaker
 - provider-neutral handoff
 - 3 Provider live Release Contract

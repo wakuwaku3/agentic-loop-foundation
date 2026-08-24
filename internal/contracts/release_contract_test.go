@@ -1,8 +1,10 @@
 package contracts
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strings"
 	"testing"
@@ -82,6 +84,74 @@ func TestFoundationReleaseContractBaseline(t *testing.T) {
 	}
 	if got, want := stringValue(decl["release"]), stringValue(contract["release"]); got != want {
 		t.Fatalf("release mismatch: foundation-capabilities.json has %q, foundation.json has %q", got, want)
+	}
+
+	// (k1) the declaration set names a representative Provider and it is
+	// "claude" (V2-047: Sol's re-plan of M3 around the representative
+	// Provider role rather than a hardcoded CLI).
+	repProviderRaw, present := decl["representative_provider"]
+	if !present {
+		t.Fatal("k1: foundation-capabilities.json missing representative_provider")
+	}
+	representativeProvider := stringValue(repProviderRaw)
+	if representativeProvider != "claude" {
+		t.Fatalf("k1: representative_provider = %q, want %q", representativeProvider, "claude")
+	}
+
+	// (k2) the declared representative Provider must actually be a
+	// dependency of every capability that declares a non-empty providers
+	// array: naming a representative Provider the contract does not depend
+	// on anywhere would be an unenforceable claim.
+	for _, raw := range declCaps {
+		capability := raw.(map[string]any)
+		id := stringValue(capability["id"])
+		deps, _ := capability["external_dependencies"].(map[string]any)
+		providers, _ := deps["providers"].([]any)
+		if len(providers) == 0 {
+			continue
+		}
+		found := false
+		for _, p := range providers {
+			if stringValue(p) == representativeProvider {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("k2: %s: external_dependencies.providers %v does not include representative_provider %q", id, providers, representativeProvider)
+		}
+	}
+
+	// (k3) anti-weakening pin: the three Provider-dependent capabilities
+	// must each still declare all three Providers, in the same order.
+	// Promoting a capability by deleting codex or opencode from its
+	// providers array would be a substantive contract weakening that Sol
+	// explicitly prohibited; three-Provider live remains V2-028's M6 work.
+	wantProviders := []string{"codex", "claude", "opencode"}
+	for _, id := range []string{"cap-autonomous-resolution", "cap-shared-resource-allocation", "cap-provider-operation"} {
+		capability := declByID[id]
+		if capability == nil {
+			t.Fatalf("k3: %s: not found in foundation-capabilities.json", id)
+		}
+		deps, _ := capability["external_dependencies"].(map[string]any)
+		providers, _ := deps["providers"].([]any)
+		got := make([]string, len(providers))
+		for i, p := range providers {
+			got[i] = stringValue(p)
+		}
+		if !reflect.DeepEqual(got, wantProviders) {
+			t.Errorf("k3: %s: external_dependencies.providers = %v, want %v", id, got, wantProviders)
+		}
+	}
+
+	// (k4) forward compatibility: if foundation.json ever gains its own
+	// representative_provider field (a later, sequenced migration once
+	// internal/release/release.go's DisallowUnknownFields decoder gains the
+	// field), it must not disagree with the declaration set's value.
+	if raw, present := contract["representative_provider"]; present {
+		if got := stringValue(raw); got != representativeProvider {
+			t.Errorf("k4: foundation.json representative_provider = %q, want %q (must match declaration set)", got, representativeProvider)
+		}
 	}
 
 	release := stringValue(contract["release"])
@@ -190,6 +260,29 @@ func TestFoundationReleaseContractBaseline(t *testing.T) {
 		if !makeTargets[fields[1]] {
 			t.Errorf("verification entry %q names an unknown make target %q", entry, fields[1])
 		}
+	}
+}
+
+// TestCapabilityDeclarationSetRepresentativeProviderEnumIsEnforced proves
+// dp-v2-047 d3(ii): representative_provider's enum keyword does the
+// rejecting, not some other field of an already-broken fixture. It mutates
+// a decoded copy of the VALID capability-declaration-set fixture (the only
+// way to isolate the enum's effect) to an out-of-enum value and requires
+// Validate to reject it.
+func TestCapabilityDeclarationSetRepresentativeProviderEnumIsEnforced(t *testing.T) {
+	root := filepath.Join("..", "..")
+	schemaPath := filepath.Join(root, "contracts", "schemas", "capability-declaration-set.json")
+	validPath := filepath.Join(root, "contracts", "fixtures", "valid", "capability-declaration-set.json")
+
+	schema := mustRead(t, schemaPath)
+	decoded := readJSON(t, validPath)
+	decoded["representative_provider"] = "gemini"
+	mutated, err := json.Marshal(decoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Validate(schema, mutated, ResolveSchemaRef(filepath.Dir(schemaPath))); err == nil {
+		t.Fatal("representative_provider enum accepted the out-of-enum value \"gemini\"")
 	}
 }
 
