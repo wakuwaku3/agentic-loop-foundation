@@ -47,6 +47,7 @@ These policies apply to every investigation, change, validation, release, and op
 - Polling, retries, leases, logs, history, input size, concurrency, Provider usage, storage, and external I/O are bounded.
 - Every design records how throughput and I/O grow with Backlog, Repository, and Runner counts.
 - Cost, quota, or capacity exhaustion becomes explicit `waiting` or `needs-input` state; it is never reported as success.
+- Provider usage inside a contracted flat-rate subscription is pre-authorized by the owner's recorded standing authorization; per-invocation or per-task monetary approval is not required. Preflight `limits` on Provider invocations are runaway-detection thresholds that stop an unbounded loop from consuming the subscription window; they are not billing budgets. Reaching a threshold is an explicit stop for inspection, never a success.
 
 ## Documentation
 

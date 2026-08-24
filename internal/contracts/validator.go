@@ -37,6 +37,8 @@ func Validate(schema, value []byte, resolver func(string) ([]byte, error)) error
 		return validateDeploymentPreflight(obj)
 	case "provider-preflight":
 		return validateProviderPreflight(obj)
+	case "provider-standing-authorization":
+		return validateProviderStandingAuthorization(obj)
 	}
 	return nil
 }

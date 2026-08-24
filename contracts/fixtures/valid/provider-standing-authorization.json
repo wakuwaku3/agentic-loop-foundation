@@ -1,0 +1,1 @@
+{"schema_version":"v1","id":"psa-example-0.1.0","kind":"provider-standing-authorization","created_at":"2026-08-24T10:00:00Z","approver":"owner@example.com","approved_at":"2026-08-24T09:00:00Z","scope":"Provider CLI usage inside the contracted flat-rate subscription across all tasks","providers":["codex","claude","opencode"],"reference":"demo-ref"}

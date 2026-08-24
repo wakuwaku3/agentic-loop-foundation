@@ -26,11 +26,12 @@
     },
     "limits": {
       "type": "object",
+      "description": "Runaway-detection thresholds for subscription-metered Provider usage. Not a billing budget: reaching a threshold is a fail-closed stop for inspection, never a success and never a billing event.",
       "additionalProperties": false,
       "required": ["max_invocations", "max_total_cost_usd", "worst_case_reservation_usd", "currency", "window", "ledger_path", "enforced_by", "fail_closed"],
       "properties": {
         "max_invocations": {"type": "integer", "minimum": 1, "maximum": 64},
-        "max_total_cost_usd": {"type": "number", "minimum": 0, "maximum": 100},
+        "max_total_cost_usd": {"type": "number", "minimum": 0, "maximum": 100, "description": "Ceiling on the CLI-reported cumulative total_cost_usd, used as a consumption proxy to detect runaway loops under a flat-rate subscription. Kept because it is the only per-invocation consumption scalar the CLI reports; invocation count alone cannot catch a single invocation with unbounded context growth."},
         "worst_case_reservation_usd": {"type": "number", "minimum": 0, "maximum": 100},
         "currency": {"const": "USD"},
         "window": {"enum": ["total"]},
@@ -75,6 +76,7 @@
     },
     "approval": {
       "type": "object",
+      "description": "References the human owner's standing provider authorization, recorded once. subject_path and subject_digest bind this record to the standing authorization packet, not to a per-task approval.",
       "additionalProperties": false,
       "required": ["approver", "approved_at", "approval_reference", "scope", "subject_path", "subject_digest"],
       "properties": {
