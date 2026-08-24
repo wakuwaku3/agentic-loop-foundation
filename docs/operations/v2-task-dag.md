@@ -106,7 +106,7 @@ gate taskのcomplete transitionの`reason`に「`gate M<N> passed`」という�
 | milestone | 対応task | 想定component | live必須か |
 | --- | --- | --- | --- |
 | M0 | V2-008, V2-009, V2-006 | 必須evidence: `ev-v2-025-contracts`, `ev-v2-008-candidate-aggregate`, `ev-v2-009-release-contract` | 不要（local閉域） |
-| M1 | V2-010, V2-011 | domain（Safety Invariant） | 不要 |
+| M1 | V2-010, V2-011 | domain（Safety Invariant 5件＋依存ゼロguard。validation.md §2のうちpriority comparison／飢餓防止はV2-030（M7）、retention eligibilityはV2-021（M5）とV2-034（M8）で成熟させる） | 不要 |
 | M2設計 | V2-012 | infra（設計docのみ） | 不要 |
 | M2 | V2-013 | infra-plan（emulator+tofu validate） | 不要 |
 | M2live | V2-014 | gcp-live-apply（apply/verify/rollback/scale-to-zero/budget guard） | 必須 |
@@ -139,6 +139,16 @@ component名で書くとindexの実際のcomponent値と食い違うため、M0 
 taskへ新しいevidenceを帰属させると、V2-024をfailedにした
 active-evidence-task-identity-mismatchを再発させるためである。以後のevidenceも
 `task_id`は生産者に置く。
+
+M1成果の「Priority Assessment」は判断記録としての存在で充足する。比較はdomain-model.mdの
+Priority Assessment節の設計どおりschedulerがDecisionとして残す責務であり、domain packageに
+比較関数を置かない。`internal/scheduler`にはscalar `Priority`によるscore付け、経過時間による
+aging（飢餓防止）、failure storm隔離、bounded candidate snapshotが実装とtestを伴って既に存在する。
+これを`PriorityAssessment`の多因子評価へ接続することはV2-030（M7）のscopeである。
+
+validation.md §2はmilestone gateのchecklistではなくtest pyramidの到達目標であり、各項目は
+対応するproduction振る舞いが成立したmilestoneで成熟する。存在しない振る舞いをgateで要求すると
+検証の代わりに宣言を書くことになるため、M1では要求しない。
 
 ## 6. 失敗タスクの処置とsuperseded規則
 
