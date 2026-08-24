@@ -180,6 +180,8 @@ Firestore read／write数、Cloud Run CPU時間、Provider usageをtest result�
 
 secret scanのallowlistを追加・変更するときは、同じ形（同じpattern）のsecretをallowlist対象外のpathに置いても検出されることをpositive controlとして実測し、そのbefore/afterをevidenceに残す。allowlistの条件を並べただけでは既定がORになり、意図より広く抑制される。
 
+`.agents/v2/` 配下のgeneric-api-key allowlistは、canonical schemaが要求する台帳の参照情報のうち二つの形だけを対象にする：task-state（`input_hash`／`output_hash`）とevidence（`evidence_key`）が要求する64桁hexの参照digest、および`ev-`/`wo-`/`dp-`/`pb-`/`ts-`で始まる参照識別子（evidence／work-order／design-packet／problem-brief／task-stateのid）。後者を許可する必要があるのは実測された理由による：generic-api-keyはkeyword（例えば`secret`）の直後に続くquoted valueを捕捉するところ、evidence id `ev-v2-041-secrets-gate`はkeyword部分文字列`secret`を含むため、`input_refs`配列で隣接する別の参照id（`ev-v2-025-contracts`）があたかもsecret値であるかのように誤って捕捉される。
+
 ## 7. Feedback time targets
 
 | Gate | 目的 | 目標 |

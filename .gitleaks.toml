@@ -1,24 +1,52 @@
 title = "agentic-loop-foundation gitleaks config"
 
 # Extend the upstream default ruleset. No rule is removed or globally
-# disabled here; only one narrowly scoped allowlist is added below.
+# disabled here; only two narrowly scoped allowlists are added below, both
+# attached to the same upstream rule.
 [extend]
 useDefault = true
 
-# Committed component evidence records (.agents/v2/evidence/**) legitimately
-# contain 64-hex-digit evidence_key and digest values. These are content
-# hashes, not secrets, but they are indistinguishable from a generic API key
-# by entropy alone, so the generic-api-key rule flags them as false
-# positives. Narrow the allowlist to that exact path and that exact pattern
-# so every other path and every other rule keeps enforcing normally.
+# Committed task-ledger content under .agents/v2/ legitimately contains two
+# shapes that generic-api-key's keyword-triggered capture flags as false
+# positives:
+#
+#   1. 64-hex-digit reference digests: evidence_key and digest values in
+#      .agents/v2/evidence/**, and input_hash/output_hash in
+#      .agents/v2/task-state/** (contracts/schemas/task-state.json requires
+#      ^[a-f0-9]{64}$ for both). These are content hashes, not secrets, but
+#      they are indistinguishable from a generic API key by entropy alone.
+#
+#   2. Ledger reference identifiers such as evidence, work-order, design-
+#      packet, problem-brief and task-state ids (ev-/wo-/dp-/pb-/ts- prefixed,
+#      e.g. ev-v2-025-contracts). Measured with `gitleaks git -v`: every
+#      finding in .agents/v2/task-state/V2-006.json captures the quoted
+#      string "ev-v2-025-contracts", not a hash. generic-api-key's regex
+#      captures whatever quoted value follows a keyword substring, and the
+#      neighbouring id "ev-v2-041-secrets-gate" in the same input_refs array
+#      contains the keyword substring "secret", so the adjacent reference id
+#      is captured as if it were the secret value. These ids are
+#      schema-constrained, machine-generated names, never credentials.
+#
+# Narrow both allowlists to the .agents/v2/ path prefix and to their exact
+# value shape so every other path and every other value keeps being flagged
+# normally.
 [[rules]]
 id = "generic-api-key"
 
 [[rules.allowlists]]
 # Both conditions must hold. gitleaks defaults an allowlist with several
 # conditions to OR, which would suppress every 64-hex finding repository-wide
-# and every generic-api-key finding under the evidence path. A real API token
-# is very often exactly 64 hex digits, so OR would be a silent hole.
+# and every generic-api-key finding under .agents/v2/. A real API token is
+# very often exactly 64 hex digits, so OR would be a silent hole.
 condition = "AND"
-paths = ['''\.agents/v2/evidence/.*''']
+paths = ['''\.agents/v2/.*''']
 regexes = ['''^[a-f0-9]{64}$''']
+
+[[rules.allowlists]]
+# Same AND discipline as above, applied to the second shape. Anchored so it
+# cannot match an arbitrary string that merely contains one of these
+# prefixes, and scoped to .agents/v2/ so a value of this exact shape sitting
+# outside the ledger is still reported.
+condition = "AND"
+paths = ['''\.agents/v2/.*''']
+regexes = ['''^(ev|wo|dp|pb|ts)-v2-[0-9]{3}(-[a-z0-9-]+)?$''']
