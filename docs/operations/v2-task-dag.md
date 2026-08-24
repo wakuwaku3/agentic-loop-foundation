@@ -33,6 +33,7 @@ task-state側を信じ、本文書を更新する。
 | V2-046 | M4 | luna | V2-017 | live (privileged container/VM) | none |
 | V2-047 | M3 remediation | luna | V2-016 | local | none |
 | V2-048 | M3 remediation | luna | V2-047 | local | none |
+| V2-049 | M5 remediation | luna | V2-011 | local | none |
 | V2-010 | M1 | luna | V2-006 | local | none |
 | V2-011 | M1 gate | sol | V2-010 | local | none |
 | V2-012 | M2設計 | terra | V2-006 | local | none |
@@ -45,7 +46,7 @@ task-state側を信じ、本文書を更新する。
 | V2-019 | M4 | luna | V2-016 | local | none |
 | V2-020 | M4 gate | sol | V2-019 | local | none |
 | V2-021 | M5 | luna | V2-009, V2-011 | local | none |
-| V2-022 | M5 | luna | V2-021, V2-017, V2-020, V2-015 | live | cost |
+| V2-022 | M5 | luna | V2-021, V2-017, V2-020, V2-015, V2-049 | live | cost |
 | V2-026 | M5 gate | sol | V2-022 | local | none |
 | V2-027 | M6 | luna | V2-018 | local | none |
 | V2-028 | M6 | luna | V2-027, V2-026 | live | credential-scope |
@@ -113,6 +114,23 @@ gate taskのcomplete transitionの`reason`に「`gate M<N> passed`」という�
 判定根拠にしたevidence idの列を記録する。これがgate passedのcanonicalな記録であり、
 専用fieldは追加しない。`reason`は自由文字列だが、この記録がなければ「なぜpassed
 だったか」を後から再構成できないため、gate task実装者は必ずこの形式に従う。
+
+- **G6（evidenceの鮮度）**: gateが根拠に列挙した各componentについて、判定commitで
+  `devbox run --pure -- make evidence-keys`が出力するcomponent keyと一致する
+  `evidence_key`を持つ`result == "passed"`のentryが`evidence/index.json`に少なくとも
+  1つ存在すること。鮮度を満たすentryは根拠のsemantic recordと同一である必要はなく、
+  後続の再発行（例: V2-045の全component再発行）でよい。根拠に列挙されていない
+  componentのkey staleはgateを妨げない。milestone完了条件のwitness testが根拠
+  componentのcheck targetに含まれない場合（例: M4完了条件1のwitnessはrunnerのtestだが
+  M4の根拠componentはreconcilerである）、gateは判定時に当該`make component-<id>`を
+  再実行し、verdictをcomplete transitionのreasonへ記録する。この再実行はevidence
+  entryを追加しない。
+
+  G2は「記録の完全性」（存在・passed・hash一致）を見るのに対し、G6は「記録と現在の
+  treeの結合」を見る。M1 gateの判定でこの検査を実務として行っていたが成文化されて
+  いなかったため、per-recordではなくper-componentとして明文化する。per-recordにすると
+  V2-045の全component再発行が着地した時点で過去の全gate根拠が機械的にstaleになり、
+  規則が自壊する。
 
 ## 5. milestone別の必須evidence一覧
 
