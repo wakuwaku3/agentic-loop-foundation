@@ -22,8 +22,10 @@ claim_next() {
   while IFS=$'\t' read -r issue body_b64; do
     [[ -n $issue ]] || continue
     if [[ -r $STATE_ROOT/workers/$issue.pid ]]; then
-      read -r pid < "$STATE_ROOT/workers/$issue.pid" || true
-      [[ $pid =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null && continue
+      worker_pid_owned "$issue" && continue
+      # A stale pidfile must not permanently suppress this queued Issue.  The
+      # ownership check also ensures no signal is sent to a reused pid.
+      quarantine_stale_worker_pidfiles
     fi
     body=$(base64 -d <<< "$body_b64" 2>/dev/null || true)
     if body_unexpanded_file_reference "$body"; then
@@ -77,7 +79,7 @@ drain_paused_workers() {
   local issue
   while IFS= read -r issue; do
     [[ -n $issue ]] || continue
-    worker_pid_live "$issue" || continue
+    worker_pid_owned "$issue" || continue
     control_drain_local_worker "$issue"
   done < <(snapshot_state_rows paused | cut -f1 || true)
 }
@@ -89,13 +91,16 @@ drain_paused_workers() {
 # claim_next's `worker_count() < MAX_WORKERS` gate above claim past the
 # configured limit.
 worker_count() {
+  quarantine_stale_worker_pidfiles || true
   reconcile_worker_pidfiles || true
-  local count=0 pid
+  local count=0 pid issue
   shopt -s nullglob
   for pidfile in "$STATE_ROOT"/workers/*.pid; do
+    issue=$(basename "$pidfile" .pid)
+    [[ $issue =~ ^[0-9]+$ ]] || continue
     pid=''
     read -r pid < "$pidfile" 2>/dev/null || true
-    if [[ $pid =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then count=$((count + 1)); else rm -f "$pidfile"; fi
+    if worker_pid_owned "$issue"; then count=$((count + 1)); else clear_worker_local "$issue"; fi
   done
   shopt -u nullglob
   printf '%s\n' "$count"
@@ -120,13 +125,14 @@ worker_count() {
 supervisor_graceful_shutdown() {
   : > "$STATE_ROOT/stop.requested" 2>/dev/null || true
   event_append supervisor stop -
+  quarantine_stale_worker_pidfiles || true
   reconcile_worker_pidfiles || true
   local pidfile issue pid waited
   shopt -s nullglob
   for pidfile in "$STATE_ROOT"/workers/*.pid; do
     issue=$(basename "$pidfile" .pid)
     read -r pid < "$pidfile" 2>/dev/null || true
-    if [[ $pid =~ ^[0-9]+$ ]]; then
+    if [[ $pid =~ ^[0-9]+$ ]] && worker_pid_owned "$issue"; then
       signal_process_tree "$pid" TERM
       waited=0
       while (( waited < 5 )) && kill -0 "$pid" 2>/dev/null; do sleep 1; waited=$((waited + 1)); done
@@ -225,6 +231,7 @@ supervise() {
     # reap_orphan_workers below, so a pidfile lost between polls (Issue #219)
     # is repaired from the live /proc scan before anything else concludes a
     # genuinely-alive worker's Issue has no local worker.
+    quarantine_stale_worker_pidfiles || true
     reconcile_worker_pidfiles || true
     if [[ -e $STATE_ROOT/stop.requested ]]; then
       enforce_worker_timeout || true

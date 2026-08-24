@@ -365,7 +365,11 @@ worker_alive() {
   [[ $pid =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null || return 1
   [[ -r /proc/$pid/cmdline ]] || return 1
   command_line=$(tr '\0' ' ' < "/proc/$pid/cmdline") || return 1
-  [[ $command_line == *"$SCRIPT_ROOT/bin/agentic-loop"* && $command_line == *" _worker $issue "* ]]
+  # A worker started through the script's shebang has argv[0]=bash and the
+  # absolute program path in argv[1].  Accept both forms while keeping the
+  # program path and complete Issue number as token boundaries.
+  [[ $command_line == "$PROGRAM_PATH _worker $issue "* ||
+    $command_line == *"$PROGRAM_PATH _worker $issue "* ]]
 }
 
 
@@ -378,6 +382,29 @@ worker_pid_live() {
   [[ -r $pidfile ]] || return 1
   read -r pid < "$pidfile" || return 1
   [[ $pid =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null
+}
+
+# A pidfile is actionable only while the recorded process is this repository's
+# worker for the same Issue.  A live but unrelated pid is a stale pidfile
+# (including after host restart and pid reuse), never a worker to stop or count.
+worker_pid_owned() {
+  worker_alive "$1"
+}
+
+# Remove stale local state before maintenance can derive elapsed time or
+# reserve a worker slot from an unrelated process.  This is deliberately
+# limited to pidfiles whose Issue number is local bookkeeping; it never sends
+# a signal to the recorded pid.
+quarantine_stale_worker_pidfiles() {
+  local pidfile issue
+  shopt -s nullglob
+  for pidfile in "$STATE_ROOT"/workers/*.pid; do
+    issue=$(basename "$pidfile" .pid)
+    [[ $issue =~ ^[0-9]+$ ]] || continue
+    worker_pid_owned "$issue" && continue
+    clear_worker_local "$issue"
+  done
+  shopt -u nullglob
 }
 
 
@@ -604,7 +631,7 @@ enforce_worker_timeout() {
   for pidfile in "$STATE_ROOT"/workers/*.pid; do
     issue=$(basename "$pidfile" .pid)
     [[ $issue =~ ^[0-9]+$ ]] || continue
-    worker_pid_live "$issue" || continue
+    worker_pid_owned "$issue" || continue
     elapsed=$(worker_elapsed_seconds "$issue") || continue
     (( elapsed >= WORKER_TIMEOUT_SECONDS )) || continue
     read -r pid < "$pidfile" || continue
@@ -681,7 +708,7 @@ reap_orphan_workers() {
   for pidfile in "${pidfiles[@]}"; do
     issue=$(basename "$pidfile" .pid)
     [[ $issue =~ ^[0-9]+$ ]] || continue
-    if ! worker_pid_live "$issue"; then
+    if ! worker_pid_owned "$issue"; then
       rm -f "$(worker_orphan_since_file "$issue")"
       continue
     fi
@@ -802,7 +829,7 @@ prune_residual_worktrees() {
   local issue branch worktree_root current state ahead
   while IFS= read -r issue; do
     [[ -n $issue ]] || continue
-    worker_pid_live "$issue" && continue
+    worker_pid_owned "$issue" && continue
     branch="agent/issue-$issue"
     worktree_root="$WORKTREE_ROOT/issue-$issue"
     # workload-unbounded: one per-Issue state lookup per residual worktree/

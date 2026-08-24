@@ -2078,6 +2078,23 @@ if [[ $TEST_GROUP == all || $TEST_GROUP == queue ]]; then
 # exercises only the ordering, which the scope filter must never reorder.
 write_queue_config "$target/.agentic-loop.toml" POLL_SECONDS=1 MAX_WORKERS=12 LEASE_SECONDS=30 STOP_TIMEOUT=10 STALE_DAYS=30
 printf 'unknown_scope = "open"\n' >> "$target/.agentic-loop.toml"
+# A live PID belonging to this test shell is deliberately recorded as a worker
+# for a queued Issue.  It is stale bookkeeping, not an actionable worker: the
+# supervisor must remove only local state, leave this process alive, and claim
+# the Issue normally.
+stale_pid_state="$state_root/workers/199"
+mkdir -p "$state_root/workers"
+printf '%s\n' "$$" > "$stale_pid_state.pid"
+printf 'stale lease\n' > "$stale_pid_state.lease"
+printf 'stale start\n' > "$stale_pid_state.started"
+printf '199 queued open none 2026-01-01T00:00:00Z none improvement\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+AGENTIC_LOOP_RUN_ONCE=1 FAKE_CODEX_SLEEP=1 "$target/bin/agentic-loop" _supervise
+kill -0 "$$" 2>/dev/null || fail 'stale worker pidfile signaled an unrelated live process'
+[[ ! -e "$stale_pid_state.pid" && ! -e "$stale_pid_state.lease" && ! -e "$stale_pid_state.started" ]] \
+  || fail 'stale worker local state was not quarantined'
+grep -Eq '^199 completed closed' "$state" || fail 'stale worker pidfile suppressed a queued Issue'
+
 prio90=$(printf '<!-- agentic-loop:priority 90 -->' | base64 -w0)
 printf '101 queued open none 2026-01-01T00:00:00Z none loop-continuity %s\n102 queued open none 2026-01-01T00:00:00Z none confidentiality-incident %s\n103 queued open none 2026-01-01T00:00:00Z none integrity-incident\n104 queued open none 2026-01-01T00:00:00Z none availability-incident\n105 queued open none 2026-01-01T00:00:00Z none feature\n106 queued open none 2026-01-01T00:00:00Z none improvement %s\n107 queued open none 2026-01-02T00:00:00Z none improvement %s\n108 queued open none 2025-01-01T00:00:00Z none improvement\n109 queued open none 2026-01-02T00:00:00Z none improvement %s\n110 queued open none 2026-01-03T00:00:00Z none none\n111 queued open none 2026-01-01T00:00:00Z none feature,availability-incident\n112 queued open none 2026-01-01T00:00:00Z none bug\n' "$prio90" "$prio90" "$prio90" "$prio90" "$prio90" > "$state"
 : > "$FAKE_GH_ROOT/$state_key.comments"
