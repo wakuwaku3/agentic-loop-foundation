@@ -91,6 +91,6 @@ Stable候補は、Release Contractにある全capabilityを、その候補versio
 ## 7. 秘密の扱い
 
 - 実Provider確認に使うcredentialをtest fixture、証跡、文書、canonical stateへ保存しない
-- 証跡にはProvider、version、capability、時刻、結果、消費量だけを残し、promptやraw応答を既定で保存しない
+- 証跡にはProvider、version、capability、時刻、結果、消費量、およびProvider発行の実行識別子（session／execution ID。prompt・応答内容・credentialを含まない不透明な識別子に限る）だけを残し、promptやraw応答を既定で保存しない
 - 実証processには対象capabilityに必要な最小scopeのcredentialだけを実行時に渡す
 - leak検知時は昇格を止め、影響credentialを失効・交換し、安全確認後に全capabilityを再実証する
