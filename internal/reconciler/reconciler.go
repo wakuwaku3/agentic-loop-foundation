@@ -21,7 +21,24 @@ type Reconciler struct {
 	Clock application.Clock
 }
 
-type Report struct{ Scanned, Recovered, Skipped int }
+// Report tallies one Tick pass. Closed counts a Lease whose Execution had
+// already reached a terminal outcome before its TTL elapsed: the Lease is
+// still closed (so it stops being scanned again), but nothing was actually
+// recovered, so Closed must stay distinguishable from Recovered
+// (dp-v2-019 d6, acceptance A2).
+type Report struct{ Scanned, Recovered, Skipped, Closed int }
+
+// executionIsTerminal reports whether an Execution has already reached an
+// outcome that domain.MarkExecutionLost refuses to move away from. Shared by
+// the lease-expiry pass (recoverOne) and the orphan sweep (orphan.go) so both
+// use one definition of "nothing left to recover".
+func executionIsTerminal(status domain.ExecutionStatus) bool {
+	switch status {
+	case domain.ExecutionSucceeded, domain.ExecutionFailed, domain.ExecutionTerminated, domain.ExecutionLost:
+		return true
+	}
+	return false
+}
 
 func (r *Reconciler) Tick(ctx context.Context, cursor string) (Report, string, error) {
 	if r == nil || r.Tx == nil || r.Clock == nil {
@@ -42,20 +59,38 @@ func (r *Reconciler) Tick(ctx context.Context, cursor string) (Report, string, e
 	}
 	report := Report{Scanned: len(leases)}
 	for _, candidate := range leases {
-		if err := r.recoverOne(ctx, candidate.ID.String(), now); err != nil {
+		closed, err := r.recoverOne(ctx, candidate.ID.String(), now)
+		if err != nil {
 			if errors.Is(err, domain.ErrStaleVersion) || errors.Is(err, domain.ErrStaleFence) {
 				report.Skipped++
 				continue
 			}
+			// quota.ErrOverBudget (and any other unrecognised error) must
+			// still abort the pass here: a hard Budget stop must not be
+			// converted into a silently partial sweep (dp-v2-019 d6, A3).
 			return report, next, err
 		}
-		report.Recovered++
+		if closed {
+			report.Closed++
+		} else {
+			report.Recovered++
+		}
 	}
 	return report, next, nil
 }
 
-func (r *Reconciler) recoverOne(ctx context.Context, leaseID string, now time.Time) error {
-	return r.Tx.Transact(ctx, func(u application.UnitOfWork) error {
+// recoverOne expires one candidate Lease and, if its Execution is not
+// already terminal, fences the Execution and returns its Increment to
+// ready. If the Execution already reached a terminal state (for example
+// ExecutionSucceeded reached before the Lease's TTL elapsed), the Lease is
+// still closed so it stops recurring in every future pass, but the second
+// return value reports true so the caller counts it as Closed rather than
+// Recovered: domain.MarkExecutionLost correctly refuses to transition a
+// terminal Execution, and previously that refusal (ErrInvalidTransition)
+// propagated out of Tick and aborted the whole pass forever (dp-v2-019 d6).
+func (r *Reconciler) recoverOne(ctx context.Context, leaseID string, now time.Time) (bool, error) {
+	closed := false
+	err := r.Tx.Transact(ctx, func(u application.UnitOfWork) error {
 		if err := u.ReserveQuota(ctx, "reconcile:"+leaseID, now, quota.MutationUsage); err != nil {
 			return err
 		}
@@ -74,24 +109,29 @@ func (r *Reconciler) recoverOne(ctx context.Context, leaseID string, now time.Ti
 		if err != nil {
 			return err
 		}
+		terminal := false
 		if found {
-			exec, err = domain.MarkExecutionLost(exec, lease)
-			if err != nil {
-				return err
-			}
-			if err = u.SaveExecution(ctx, exec, exec.Version-1); err != nil {
-				return err
-			}
-			inc, exists, err := u.Increment(ctx, exec.IncrementID.String())
-			if err != nil {
-				return err
-			}
-			if exists {
-				actor, _ := domain.NewActorID("reconciler")
-				next, recoverErr := domain.DecideIncrement(inc, domain.IncrementCommand{Kind: domain.IncrementRecover, Actor: actor, At: now, ExpectedVersion: inc.Version})
-				if recoverErr == nil {
-					if err = u.SaveIncrement(ctx, next, inc.Version); err != nil {
-						return err
+			if executionIsTerminal(exec.Status) {
+				terminal = true
+			} else {
+				exec, err = domain.MarkExecutionLost(exec, lease)
+				if err != nil {
+					return err
+				}
+				if err = u.SaveExecution(ctx, exec, exec.Version-1); err != nil {
+					return err
+				}
+				inc, exists, err := u.Increment(ctx, exec.IncrementID.String())
+				if err != nil {
+					return err
+				}
+				if exists {
+					actor, _ := domain.NewActorID("reconciler")
+					next, recoverErr := domain.DecideIncrement(inc, domain.IncrementCommand{Kind: domain.IncrementRecover, Actor: actor, At: now, ExpectedVersion: inc.Version})
+					if recoverErr == nil {
+						if err = u.SaveIncrement(ctx, next, inc.Version); err != nil {
+							return err
+						}
 					}
 				}
 			}
@@ -99,7 +139,16 @@ func (r *Reconciler) recoverOne(ctx context.Context, leaseID string, now time.Ti
 		if err = u.SaveLease(ctx, expired, lease.Version); err != nil {
 			return err
 		}
+		eventType := "lease.expired.reconciled"
+		if terminal {
+			eventType = "lease.closed.terminal-execution"
+		}
 		eventID := fmt.Sprintf("reconcile-lease:%s:%d", leaseID, lease.Version)
-		return u.Record(application.Event{ID: eventID, AggregateID: leaseID, Type: "lease.expired.reconciled", At: now}, nil)
+		if err := u.Record(application.Event{ID: eventID, AggregateID: leaseID, Type: eventType, At: now}, nil); err != nil {
+			return err
+		}
+		closed = terminal
+		return nil
 	})
+	return closed, err
 }

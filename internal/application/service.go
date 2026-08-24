@@ -160,6 +160,12 @@ type LifecycleResponse struct {
 	LatestRevision      domain.Revision             `json:"latest_revision,omitempty"`
 	LatestEffectiveAt   time.Time                   `json:"latest_effective_at,omitempty"`
 	ProcessObservations []domain.ProcessObservation `json:"process_observations,omitempty"`
+	// LatestMode is additive (dp-v2-019 d4, acceptance A10): the effective
+	// domain.ControlMode as of LatestRevision, letting a runner-side
+	// ControlAgent choose checkpoint (graceful stop) over terminate
+	// (immediate/emergency stop/cancel) instead of guessing. It is carried
+	// only on the response of heartbeat and of checkpoint.
+	LatestMode domain.ControlMode `json:"latest_mode,omitempty"`
 }
 type RenewRequest struct {
 	RequestID, LeaseID   string
@@ -437,7 +443,7 @@ func (s *Service) Heartbeat(ctx context.Context, req HeartbeatRequest) (out Life
 		if e = u.SaveRunnerObservation(ctx, observation); e != nil {
 			return e
 		}
-		out = LifecycleResponse{Accepted: true, AppliedRevision: req.ControlRevision, LatestRevision: latest, LatestEffectiveAt: deadline, ProcessObservations: observation.Processes}
+		out = LifecycleResponse{Accepted: true, AppliedRevision: req.ControlRevision, LatestRevision: latest, LatestEffectiveAt: deadline, ProcessObservations: observation.Processes, LatestMode: effective.Mode}
 		return s.record(ctx, u, eid, oid, fp, req.RequestID, "heartbeat", "runner", runner.String(), 1, "runner.heartbeat", actor.String(), nil, out)
 	})
 	return out, err
@@ -510,7 +516,7 @@ func (s *Service) Checkpoint(ctx context.Context, req CheckpointRequest) (out Li
 		if _, x = domain.Permit(effective, domain.PermitRequest{Kind: domain.PermitCheckpoint, Target: target, ControlRevision: req.ControlRevision, FencingToken: req.FencingToken, ExpectedFencingToken: lease.FencingToken, Resource: req.ExecutionID}); x != nil {
 			return x
 		}
-		out = LifecycleResponse{Accepted: true}
+		out = LifecycleResponse{Accepted: true, LatestMode: effective.Mode}
 		return s.record(ctx, u, eid, oid, fp, req.RequestID, "checkpoint", "execution", req.ExecutionID, exec.Version, "execution.checkpointed", actor.String(), nil, out)
 	})
 	return out, err
@@ -1067,6 +1073,19 @@ func (s *Service) Control(ctx context.Context, req ControlRequest) (out ControlR
 			}
 			if !found {
 				target = domain.ControlTarget{InstallationID: s.config.InstallationID, RepositoryID: s.config.RepositoryID, IncrementID: lease.IncrementID, RunnerID: lease.RunnerID}
+			} else if target.RunnerID == "" {
+				// CanonicalTarget is saved once at Plan time, before any
+				// Runner has claimed the Increment, so it never durably
+				// carries a RunnerID (SaveCanonicalTarget takes no runner
+				// parameter). Without this, a ControlTargetSnapshot built
+				// from a found-but-runner-less canonical target would carry
+				// an empty Target.RunnerID, and the verification
+				// reconciler's per-target RunnerObservation lookup
+				// (keyed by Target.RunnerID) would then never match any
+				// real Runner's observation. This mirrors the same
+				// fill-only-when-empty merge canonicalizeTarget already
+				// does for Claim's request-vs-canonical target.
+				target.RunnerID = lease.RunnerID
 			}
 			if domain.ControlApplies(req.Scope, target) {
 				snapshots = append(snapshots, domain.ControlTargetSnapshot{Target: target, LeaseID: lease.ID, ExecutionID: lease.ExecutionID, FencingToken: lease.FencingToken})

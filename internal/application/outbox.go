@@ -213,6 +213,31 @@ func (d *OutboxDispatcher) Dispatch(ctx context.Context) (DispatchReport, error)
 				report.Waiting++
 				continue
 			}
+			// Step 1 of failure-model.md section 6: consult the local
+			// record for the same Operation ID before reading the
+			// external system. candidates above is a batch snapshot; by
+			// the time this iteration runs, this item's own durable row
+			// may already have resolved (for example a concurrent
+			// dispatcher instance already observed and recorded the
+			// outcome). Re-read it fresh and skip the external Observe
+			// call entirely once it is no longer ambiguous, so an
+			// already-confirmed or already-delivered item is never
+			// re-observed (acceptance A15).
+			current, found, err := d.localRecord(ctx, candidate.ID)
+			if err != nil {
+				return report, err
+			}
+			if found && current.Status != OutboxAmbiguous && current.Status != OutboxReconciling {
+				switch current.Status {
+				case OutboxConfirmed, OutboxDelivered, OutboxSuperseded:
+					report.Delivered++
+				case OutboxPending, OutboxWaiting, OutboxDelivering:
+					report.Waiting++
+				default:
+					report.Failed++
+				}
+				continue
+			}
 			observation, observeErr := d.config.Observer.Observe(ctx, EffectDelivery{OutboxID: candidate.ID, OperationID: candidate.OperationID, IdempotencyKey: candidate.OperationID, RequestID: candidate.RequestID, Kind: candidate.Kind, Target: candidate.Target, Payload: append([]byte(nil), candidate.Payload...)})
 			if observeErr != nil {
 				report.Failed++
@@ -482,6 +507,23 @@ func isAmbiguous(err error) bool {
 	var n net.Error
 	return errors.As(err, &n) && (n.Timeout() || n.Temporary())
 }
+
+// localRecord re-reads one OutboxItem's own durable row, fresh, inside its
+// own transaction. It is the "local record" of failure-model.md section 6
+// step 1: consulted before any external read, so a resolution that already
+// landed (by any path) since a batch snapshot was taken is never masked by
+// a second, redundant external observation.
+func (d *OutboxDispatcher) localRecord(ctx context.Context, id string) (OutboxItem, bool, error) {
+	var item OutboxItem
+	var found bool
+	err := d.tx.Transact(ctx, func(u UnitOfWork) error {
+		var err error
+		item, found, err = u.Outbox(ctx, id)
+		return err
+	})
+	return item, found, err
+}
+
 func (d *OutboxDispatcher) resolveObservation(ctx context.Context, id string, observation OutboxObservation) error {
 	return d.tx.Transact(ctx, func(u UnitOfWork) error {
 		item, ok, err := u.Outbox(ctx, id)

@@ -253,7 +253,7 @@ components:
       type: object
       additionalProperties: false
       required: [accepted]
-      properties: {accepted: {type: boolean}, applied_revision: {type: integer}, latest_revision: {type: integer}, latest_effective_at: {type: string, format: date-time}, process_observations: {type: array, items: {$ref: '#/components/schemas/ProcessObservation'}}}
+      properties: {accepted: {type: boolean}, applied_revision: {type: integer}, latest_revision: {type: integer}, latest_effective_at: {type: string, format: date-time}, process_observations: {type: array, items: {$ref: '#/components/schemas/ProcessObservation'}}, latest_mode: {type: string}}
     RenewResponse:
       type: object
       additionalProperties: false

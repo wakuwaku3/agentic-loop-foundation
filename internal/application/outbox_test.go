@@ -361,3 +361,76 @@ func (s *blockingSink) Deliver(ctx context.Context, e application.EffectDelivery
 	}
 	return s.sink.Deliver(ctx, e)
 }
+
+// resolvesJustInTimeTx wraps a real application.Transactor and, on its
+// second Transact call, first mutates target's OutboxItem to look exactly
+// like a concurrently-resolved record before delegating to the wrapped
+// Transact. It simulates the local record having already resolved (by some
+// other path) between a Dispatch pass's initial batch snapshot and the
+// per-item re-read that must consult it first (acceptance A15,
+// failure-model.md section 6 step 1).
+type resolvesJustInTimeTx struct {
+	inner  application.Transactor
+	target string
+	at     time.Time
+	calls  int
+}
+
+func (w *resolvesJustInTimeTx) Transact(ctx context.Context, fn func(application.UnitOfWork) error) error {
+	w.calls++
+	if w.calls == 2 {
+		if err := w.inner.Transact(ctx, func(u application.UnitOfWork) error {
+			item, ok, err := u.Outbox(ctx, w.target)
+			if err != nil || !ok {
+				return err
+			}
+			item.Status = application.OutboxConfirmed
+			item.Observation = application.ObservationConfirmed
+			item.DeliveredAt = w.at
+			return u.SaveOutbox(ctx, item, item.Version)
+		}); err != nil {
+			return err
+		}
+	}
+	return w.inner.Transact(ctx, fn)
+}
+
+// TestOutboxAmbiguousConsultsLocalRecordBeforeReobserving reproduces and
+// then closes acceptance A15's missing step: before this fix, Dispatch
+// called the external Observer for every batch-snapshot-ambiguous item
+// unconditionally, so an item whose durable row had already resolved
+// (Confirmed here, simulating a concurrent resolution) by the time this
+// iteration ran would still be re-observed. After the fix, the local
+// record is consulted first and the external Observer is never called for
+// an item that has already resolved.
+func TestOutboxAmbiguousConsultsLocalRecordBeforeReobserving(t *testing.T) {
+	st, clock := memory.New(), &outboxTestClock{now: time.Unix(1700000000, 0).UTC()}
+	seedOutbox(t, st, clock.Now(), "outbox-local-record")
+	sink := &deadlineSink{}
+	first, _ := application.NewOutboxDispatcher(st, clock, sink, application.DispatcherConfig{Owner: "first"})
+	if _, err := first.Dispatch(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	item, _ := st.OutboxByID("outbox-local-record")
+	if item.Status != application.OutboxAmbiguous {
+		t.Fatalf("precondition: status=%s, want ambiguous", item.Status)
+	}
+
+	wrapped := &resolvesJustInTimeTx{inner: st, target: "outbox-local-record", at: clock.Now()}
+	observer := &fakeObserver{status: application.ObservationConfirmed}
+	second, _ := application.NewOutboxDispatcher(wrapped, clock, sink, application.DispatcherConfig{Owner: "second", Observer: observer})
+	report, err := second.Dispatch(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if observer.calls != 0 {
+		t.Fatalf("observer.calls=%d, want 0: an item whose local record already resolved must not be re-observed", observer.calls)
+	}
+	if report.Delivered != 1 {
+		t.Fatalf("report=%#v, want Delivered:1 credited from the local record", report)
+	}
+	item, _ = st.OutboxByID("outbox-local-record")
+	if item.Status != application.OutboxConfirmed {
+		t.Fatalf("status=%s, want still Confirmed (untouched by a redundant Observe)", item.Status)
+	}
+}
