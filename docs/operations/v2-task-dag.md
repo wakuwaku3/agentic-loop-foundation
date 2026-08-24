@@ -28,6 +28,9 @@ task-state側を信じ、本文書を更新する。
 | V2-041 | M0 remediation | luna | V2-008 | local | none |
 | V2-042 | M0 remediation | luna | V2-041 | local | none |
 | V2-043 | M1 remediation | luna | V2-011 | local | none |
+| V2-044 | M3 remediation | terra | V2-016 | local | none |
+| V2-045 | M3 remediation | terra | V2-016, V2-017 | local | none |
+| V2-046 | M4 | luna | V2-017 | live (privileged container/VM) | none |
 | V2-010 | M1 | luna | V2-006 | local | none |
 | V2-011 | M1 gate | sol | V2-010 | local | none |
 | V2-012 | M2設計 | terra | V2-006 | local | none |
@@ -36,7 +39,7 @@ task-state側を信じ、本文書を更新する。
 | V2-015 | M2 gate | sol | V2-014 | local | none |
 | V2-016 | M3 | luna | V2-011 | local | none |
 | V2-017 | M3 | luna | V2-016, V2-015 | live | credential-scope |
-| V2-018 | M3 gate | sol | V2-017 | local | none |
+| V2-018 | M3 gate | sol | V2-017, V2-045 | local | none |
 | V2-019 | M4 | luna | V2-016 | local | none |
 | V2-020 | M4 gate | sol | V2-019 | local | none |
 | V2-021 | M5 | luna | V2-009, V2-011 | local | none |
@@ -151,6 +154,11 @@ aging（飢餓防止）、failure storm隔離、bounded candidate snapshotが実
 validation.md §2はmilestone gateのchecklistではなくtest pyramidの到達目標であり、各項目は
 対応するproduction振る舞いが成立したmilestoneで成熟する。存在しない振る舞いをgateで要求すると
 検証の代わりに宣言を書くことになるため、M1では要求しない。
+
+V2-045はM3 gateの直前に実行する。ci/components.jsonとinternal/ciの変更は全component
+のevidence keyを無効化するため、gateがどのみち全component分のevidence-allを払う地点に
+相乗りさせれば再evidence化の追加費用がゼロになる。逆に先に実行すると、進行中の
+V2-016／V2-017のevidenceを着地前に無効化する。
 
 ## 6. 失敗タスクの処置とsuperseded規則
 
