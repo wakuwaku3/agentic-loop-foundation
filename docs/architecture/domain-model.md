@@ -272,21 +272,22 @@ Requirementはrecovering、waiting、needs-inputのいずれかになる。
 
 ## 5. Increment lifecycle
 
-```text
-proposed → ready → leased → executing → verifying → integrated
-    ↑         │        │         │           │          │
-    └─ revise ┘        ├─ lost → ready       ├─ revise ├─ preview-validating
-                       ├─ paused              └─ failed │
-                       └─ cancelled                     ↓
-                                         accepted ← preview-validating
-                                             │
-                                          released
-```
+| 状態 | 意味 | command → 遷移先 |
+| --- | --- | --- |
+| `proposed` | 提案されただけで未着手 | `prepare` → `ready`, `abandon` → `abandoned`, `cancel` → `cancelled` |
+| `ready` | 実行可能な状態 | `lease` → `leased`, `abandon` → `abandoned`, `cancel` → `cancelled` |
+| `leased` | RunnerにLeaseされ実行待ち | `execute` → `executing`, `recover` → `ready`, `abandon` → `abandoned`, `cancel` → `cancelled` |
+| `executing` | 実行中 | `verify` → `verifying`, `fail` → `failed`, `recover` → `ready`, `abandon` → `abandoned`, `cancel` → `cancelled` |
+| `verifying` | 検証中 | `integrate` → `integrated`, `fail` → `failed`, `abandon` → `abandoned`, `cancel` → `cancelled` |
+| `integrated` | 統合済み | `preview` → `preview-validating`, `abandon` → `abandoned`, `cancel` → `cancelled` |
+| `preview-validating` | Preview環境で検証中 | `accept` → `accepted`, `execute` → `executing`, `fail` → `failed`, `abandon` → `abandoned`, `cancel` → `cancelled` |
+| `failed` | 実行または検証が失敗した | `recover` → `ready`, `abandon` → `abandoned`, `cancel` → `cancelled` |
+| `accepted` | Increment固有の条件とPreview capability evidenceを満たした | `release` → `released`, `abandon` → `abandoned`, `cancel` → `cancelled` |
+| `released` | 終端。Incrementを含むApplication ReleaseがStableへ昇格した | なし |
+| `abandoned` | 終端（非成功）。approachが不要・不適切になった。Requirementは継続できる | なし |
+| `cancelled` | 終端。Requirementまたは人間のControl Intentにより停止した | なし |
 
-- `accepted`: Increment固有の条件とPreview capability evidenceを満たした
-- `released`: Incrementを含むApplication ReleaseがStableへ昇格した
-- `abandoned`: approachが不要・不適切になった非成功終端。Requirementは継続できる
-- `cancelled`: Requirementまたは人間のControl Intentにより停止した終端
+Incrementの一時停止は、IncrementStatusに専用の状態を設けず、Incrementをscopeに含むControl Intent（`pause-intake`／`pause-claim`など）と親RequirementのpausedへのStatus遷移の組み合わせで表現する。再提案は既存Incrementをproposedへ戻すのではなく、新しいIncrementを作成することで表現する。
 
 Integration後にPreviewで失敗した場合、同じArtifactを上書きせず修正Incrementまたは新Artifactを作る。
 

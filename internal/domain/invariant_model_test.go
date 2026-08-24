@@ -873,29 +873,19 @@ type incrementEdge struct {
 	to   IncrementStatus
 }
 
-// expectedIncrementEdges is transcribed from the lifecycle described in
+// expectedIncrementEdges is transcribed from the lifecycle table in
 // docs/architecture/domain-model.md section 5, matched against the twelve
-// IncrementCommandKind values DecideIncrement actually implements. Two
-// narrative arrows drawn in that section's ASCII diagram have no
-// corresponding implemented edge and are intentionally NOT included below,
-// because they cannot be encoded in this closure without inventing
-// architecture the packet did not authorize:
-//
-//   - a "ready --revise--> proposed" loop: IncrementCommandKind has no
-//     command that ever sets the next status to IncrementProposed (Proposed
-//     is only ever the initial status of a freshly created Increment).
-//   - a "leased --paused-->" branch: IncrementStatus has no Paused member at
-//     all (unlike RequirementStatus, which does define RequirementPaused and
-//     does implement it). The diagram's mention of a paused Increment names
-//     a status the enum does not define, so it cannot appear as a "to" value
-//     in this table.
-//
-// Both gaps make the implementation strictly narrower than the informal
-// diagram, not wider: DecideIncrement never permits a transition the diagram
-// does not also describe, which is the direction invariant 5 ("forbidden
-// transitions") actually cares about. Closing this gap, if desired, is a
-// documentation or product-scope decision for a different Work Order, not a
-// production domain change this task is authorized to make.
+// IncrementCommandKind values DecideIncrement actually implements. That
+// section's table and this declared edge table now agree exactly: it lists
+// no "ready --revise--> proposed" loop (IncrementCommandKind has no command
+// that ever sets the next status to IncrementProposed; Proposed is only ever
+// the initial status of a freshly created Increment) and no transition into
+// a paused status (IncrementStatus has no Paused member, unlike
+// RequirementStatus, which does define RequirementPaused and does implement
+// it). Docs section 5 states that pausing work on an Increment is expressed
+// by a Control Intent scoped to the Increment together with the parent
+// Requirement's paused state, and that re-proposal is expressed by creating
+// a new Increment rather than returning an existing one to Proposed.
 var expectedIncrementEdges = []incrementEdge{
 	{IncrementProposed, IncrementPrepare, IncrementReady},
 	{IncrementReady, IncrementLease, IncrementLeased},
