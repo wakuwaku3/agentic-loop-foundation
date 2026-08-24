@@ -19,6 +19,7 @@ else
 fi
 report_file=''
 runner="$PROJECT_ROOT/tests/test-agentic-loop.sh"
+"$PROJECT_ROOT/tests/test-stage-evidence.sh"
 attempts_max=3
 registry_path="$PROJECT_ROOT/tests/flaky-registry.toml"
 record_path="$PROJECT_ROOT/tmp/flaky-last.json"
