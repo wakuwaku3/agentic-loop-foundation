@@ -26,6 +26,8 @@ task-state側を信じ、本文書を更新する。
 | V2-006 | M0 gate | sol | V2-025, V2-008, V2-009, V2-040, V2-041 | local | none |
 | V2-040 | M0 remediation | luna | V2-009, V2-041 | local | none |
 | V2-041 | M0 remediation | luna | V2-008 | local | none |
+| V2-042 | M0 remediation | luna | V2-041 | local | none |
+| V2-043 | M1 remediation | luna | V2-011 | local | none |
 | V2-010 | M1 | luna | V2-006 | local | none |
 | V2-011 | M1 gate | sol | V2-010 | local | none |
 | V2-012 | M2設計 | terra | V2-006 | local | none |

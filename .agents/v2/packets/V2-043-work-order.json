@@ -1,0 +1,74 @@
+{
+ "schema_version": "v1",
+ "id": "wo-v2-043",
+ "kind": "work-order",
+ "created_at": "2026-08-24T12:48:52Z",
+ "correlation_id": "v2-043-increment-lifecycle-docs",
+ "problem_brief_ref": "pb-v2-043",
+ "design_packet_ref": "dp-v2-043",
+ "observable_outcome": "The Increment lifecycle in docs/architecture/domain-model.md describes exactly the twelve statuses and thirty-three transitions that DecideIncrement implements, the closure test comment no longer claims a documentation gap, the M1 evidence states the measured test count, and make check and make candidate are green.",
+ "allowed_paths": [
+  "docs/architecture/domain-model.md",
+  "internal/domain/invariant_model_test.go",
+  ".agents/v2/evidence/V2-010-domain.json",
+  ".agents/v2/evidence/V2-043-docs-alignment.json",
+  ".agents/v2/evidence/index.json"
+ ],
+ "prohibited_paths": [
+  "internal/domain/model.go",
+  "internal/domain/control.go",
+  "internal/domain/lease.go",
+  "internal/domain/release.go",
+  "internal/domain/id.go",
+  "internal/domain/core_test.go",
+  "internal/domain/id_test.go",
+  "internal/domain/source_guard_test.go",
+  "docs/product/**",
+  "docs/principles.md",
+  "docs/policies/**",
+  ".agents/v2/task-state/**",
+  ".agents/v2/packets/**",
+  "contracts/**",
+  "ci/**",
+  "cmd/**",
+  "Makefile",
+  ".github/**",
+  "infra/**",
+  "scripts/**",
+  ".gitleaks.toml"
+ ],
+ "contracts_changed": [],
+ "acceptance_criteria": [
+  "A1. docs/architecture/domain-model.md section 5 no longer shows a ready-to-proposed transition or any Increment transition into a paused status, and states in one or two sentences that pausing work on an Increment is expressed by a Control Intent scoped to the Increment together with the Requirement paused state, and that re-proposal creates a new Increment rather than returning an existing one to Proposed. The Requirement lifecycle section keeps its own paused state unchanged.",
+  "A2. The Increment status list and transition table in that section match the implementation exactly: the twelve IncrementStatus values and the thirty-three accepted (from-status, command, to-status) edges asserted by the closure test in internal/domain/invariant_model_test.go.",
+  "A3. The comment in internal/domain/invariant_model_test.go that describes the documentation gap is updated to state that the diagram and the declared edge table now agree; the declared edge table itself and every assertion are unchanged.",
+  "A4. .agents/v2/evidence/V2-010-domain.json has its test-count prose corrected from 27 to the measured 26 (16 baseline plus 10 new). Every measured count, both evidence keys, created_at and the check list stay otherwise byte-identical in meaning; no observation is removed.",
+  "A5. .agents/v2/evidence/index.json is updated so the evidence_hash of the V2-010 artifact equals the sha256 of its new bytes, and a new entry is appended for .agents/v2/evidence/V2-043-docs-alignment.json (id ev-v2-043-docs-alignment, task_id V2-043, component docs, result passed) whose evidence_hash equals the sha256 of that artifact.",
+  "A6. devbox run --pure -- go test -count=1 ./internal/domain passes with the same 26 top-level tests, and devbox run --pure -- go test -count=1 ./internal/contracts passes including TestActiveEvidenceIndex.",
+  "A7. devbox run --pure -- make check is green, executed after committing so the secret scan reads committed history, and devbox run --pure -- make candidate returns candidate true after regenerating build/evidence.",
+  "A8. No file outside allowed_paths changes."
+ ],
+ "validation": {
+  "argv": [
+   "devbox",
+   "run",
+   "--pure",
+   "--",
+   "make",
+   "check"
+  ],
+  "working_directory": ".",
+  "timeout_seconds": 2400
+ },
+ "constraints": [
+  "Work only inside the assigned isolated task worktree; never push.",
+  "Never use git reset, git checkout --, git stash or git commit --amend.",
+  "Do not widen the implementation to match the diagram; the ruling is that the diagram follows the implementation.",
+  "Read the evidence key only after make check is green on the final tree, because a formatting-only change moves a component key."
+ ],
+ "failure_stop": true,
+ "tasks": [
+  "V2-043"
+ ],
+ "priority": 60
+}
