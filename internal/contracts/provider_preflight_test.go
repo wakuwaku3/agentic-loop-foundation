@@ -4,7 +4,6 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -16,18 +15,36 @@ import (
 // files and the evidence index holds no provider-live- component entry, so
 // this must pass trivially: an absent or empty directory is a pass, not an
 // error.
-func TestProviderPreflightLedgerPassesWithNoRecords(t *testing.T) {
+// TestProviderPreflightLedgerPassesOnTheRealTree asserts the ledger invariant
+// that must hold at every commit: every provider-live evidence entry is backed
+// by an approved preflight record whose digest matches and whose approval
+// precedes the observation. It holds both when the repository carries no such
+// record at all and when it carries correctly paired ones.
+//
+// It deliberately does NOT assert that the repository is empty of preflight
+// records. An earlier version did, as a way of pinning V2-047's end state, but
+// that made a transient state of the tree into a permanent invariant: the first
+// task to record a real provider-live exercise would have had to break this
+// test to satisfy its own work order, while internal/contracts was closed to
+// it. The zero-record case is a property of the function, proven below on a
+// temporary root, not a property the repository has to keep forever.
+func TestProviderPreflightLedgerPassesOnTheRealTree(t *testing.T) {
 	root := filepath.Join("..", "..")
-	if entries, err := os.ReadDir(filepath.Join(root, ".agents", "v2", "provider-preflight")); err == nil && len(entries) > 0 {
-		t.Fatalf("V2-047 end state must leave .agents/v2/provider-preflight/ empty, found %d entries", len(entries))
+	if err := CheckProviderPreflightLedger(root); err != nil {
+		t.Fatalf("ledger check must pass on the real tree: %v", err)
 	}
-	index := readJSON(t, filepath.Join(root, ".agents", "v2", "evidence", "index.json"))
-	for _, raw := range index["entries"].([]any) {
-		entry := raw.(map[string]any)
-		if strings.HasPrefix(stringValue(entry["component"]), "provider-live-") {
-			t.Fatalf("V2-047 end state must hold no provider-live- evidence component, found %v", entry["id"])
-		}
-	}
+}
+
+// TestProviderPreflightLedgerPassesWithNoRecords keeps the zero-record
+// tolerance as a property of the function, measured on an empty temporary root.
+func TestProviderPreflightLedgerPassesWithNoRecords(t *testing.T) {
+	root := t.TempDir()
+	mustMkdirAll(t, filepath.Join(root, ".agents", "v2", "evidence"))
+	mustMkdirAll(t, filepath.Join(root, "contracts", "schemas"))
+	mustWrite(t, filepath.Join(root, "contracts", "schemas", "provider-preflight.json"),
+		mustRead(t, filepath.Join("..", "..", "contracts", "schemas", "provider-preflight.json")))
+	mustWrite(t, filepath.Join(root, ".agents", "v2", "evidence", "index.json"),
+		[]byte(`{"schema_version":"v1","kind":"evidence-index","release_eligible":false,"entries":[]}`))
 	if err := CheckProviderPreflightLedger(root); err != nil {
 		t.Fatalf("ledger check must pass with no preflight records and no provider-live evidence: %v", err)
 	}
