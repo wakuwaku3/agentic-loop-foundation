@@ -2287,7 +2287,8 @@ printf '7 queued open none 2026-01-01T00:00:00Z\n' > "$state"
 : > "$FAKE_GH_ROOT/$state_key.comments"
 : > "$FAKE_GH_ROOT/claude-calls"
 AGENT_PROVIDER=claude AGENTIC_LOOP_RUN_ONCE=1 FAKE_CLAUDE_SLEEP=1 "$target/bin/agentic-loop" _supervise
-grep -Eq '^7 completed closed' "$state" || fail 'claude provider did not complete the Issue'
+wait_for 'claude provider completed the Issue' --timeout 15 grep -Eq '^7 completed closed' "$state" \
+  || fail 'claude provider did not complete the Issue'
 assert_contains "$FAKE_GH_ROOT/claude-calls" '--print' 'claude worker did not run non-interactively'
 assert_contains "$FAKE_GH_ROOT/claude-calls" '--dangerously-skip-permissions' 'claude worker did not skip permission prompts'
 assert_contains "$FAKE_GH_ROOT/claude-calls" "--add-dir $target/.git" 'claude worker did not grant its exact Git common directory'
@@ -2311,7 +2312,8 @@ rm -f "$FAKE_GH_ROOT/claude-json-count"
 printf 'stale raw content with rate limit\n' > "$state_root/issue-270-result.txt.raw.999999"
 printf '{"type":"result"}\n' > "$state_root/issue-270-result.txt.final.999999"
 AGENT_PROVIDER=claude AGENTIC_LOOP_RUN_ONCE=1 FAKE_CLAUDE_SLEEP=1 "$target/bin/agentic-loop" _supervise
-grep -Eq '^270 completed closed' "$state" || fail 'claude provider with stale stage output residue did not complete'
+wait_for 'claude provider completed after stale stage cleanup' --timeout 15 grep -Eq '^270 completed closed' "$state" \
+  || fail 'claude provider with stale stage output residue did not complete'
 [[ ! -e $state_root/issue-270-result.txt.raw.999999 ]] || fail 'stale .raw output from a prior killed stage run was not cleared at stage start'
 [[ ! -e $state_root/issue-270-result.txt.final.999999 ]] || fail 'stale .final output from a prior killed stage run was not cleared at stage start'
 
@@ -3831,6 +3833,20 @@ assert_contains "$TEST_ROOT/decomposition-calls.log" "issues/700/dependencies/bl
 assert_contains "$TEST_ROOT/decomposition-calls.log" "issues/$child_b/dependencies/blocked_by --method POST -F issue_id=$((child_a + 900000))" 'decomposition_materialize did not register child B as blocked_by child A (depends_on) with a typed database id'
 grep -q -- '-f sub_issue_id=\|-f issue_id=' "$TEST_ROOT/decomposition-calls.log" && fail 'decomposition_materialize still sends sub_issue_id/issue_id as an untyped -f string parameter'
 grep -Eq -- "issue_id=($child_a|$child_b)([^0-9]|\$)" "$TEST_ROOT/decomposition-calls.log" && fail 'decomposition_materialize sent a child Issue number instead of its database id'
+
+# Invalid dependency graphs must fail before native sub-issue/dependency calls.
+for invalid_decomposition_manifest in \
+  '{"schema":1,"mode":"children","integration_acceptance_criteria":"integration ok","children":[{"key":"child-a","title":"Child A","purpose":"purpose a","acceptance_criteria":"crit a","scope":"paths=docs/child-a","depends_on":["child-b"]},{"key":"child-b","title":"Child B","purpose":"purpose b","acceptance_criteria":"crit b","scope":"paths=docs/child-b","depends_on":["child-a"]}]}' \
+  '{"schema":1,"mode":"children","integration_acceptance_criteria":"integration ok","children":[{"key":"child-a","title":"Child A","purpose":"purpose a","acceptance_criteria":"crit a","scope":"paths=docs/child-a","depends_on":["child-a"]},{"key":"child-b","title":"Child B","purpose":"purpose b","acceptance_criteria":"crit b","scope":"paths=docs/child-b","depends_on":[]}]}'; do
+  printf '701 running open\n' > "$state"
+  : > "$FAKE_GH_ROOT/$state_key.comments"
+  calls_before=$(wc -l < "$FAKE_GH_ROOT/calls")
+  FAKE_CODEX_RESULT=$'計画: 無効な分解\n```agentic-loop:decomposition\n'"$invalid_decomposition_manifest"$'\n```' \
+    "$target/bin/agentic-loop" _worker 701 decomposition-invalid-worker
+  grep -Eq '^701 needs-input open' "$state" || fail 'invalid decomposition manifest was accepted'
+  tail -n "+$((calls_before + 1))" "$FAKE_GH_ROOT/calls" > "$TEST_ROOT/decomposition-invalid-calls.log"
+  grep -Eq -- '--method POST .*(/sub_issues|/dependencies/blocked_by)' "$TEST_ROOT/decomposition-invalid-calls.log" && fail 'invalid decomposition manifest reached native dependency materialization'
+done
 
 # decomposition_validate is a rejecting validator: every malformed dependency
 # or scope must stop before GitHub child-Issue mutations.  Keep these cases

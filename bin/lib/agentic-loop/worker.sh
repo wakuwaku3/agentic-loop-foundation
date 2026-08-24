@@ -246,7 +246,7 @@ decomposition_manifest_from_plan() {
 
 
 decomposition_validate() {
-  local manifest=$1 parent_depth=${2:-0} keys key dep count scope child_depth scope_raw
+  local manifest=$1 parent_depth=${2:-0} keys key dep count scope child_depth scope_raw deps rows
   [[ -n $manifest ]] || return 1
   command -v yq >/dev/null 2>&1 || return 1
   [[ $(yq -p json -r '.schema // ""' <<< "$manifest" 2>/dev/null) == "$DECOMPOSITION_SCHEMA_VERSION" ]] || return 1
@@ -259,18 +259,18 @@ decomposition_validate() {
   keys=$(yq -p json -r '.children[].key // ""' <<< "$manifest" 2>/dev/null) || return 1
   [[ $(sort -u <<< "$keys" | sed '/^$/d' | wc -l) -eq $count ]] || return 1
   local title purpose
+  rows=$(yq -p json -r '.children[] | [.key, (.title // ""), (.purpose // ""), (.acceptance_criteria // ""), .scope] | @tsv' <<< "$manifest" 2>/dev/null) || return 1
   while IFS=$'\t' read -r key title purpose child_depth scope; do
     [[ $key =~ ^[a-z0-9][a-z0-9-]*$ && -n $title && -n $purpose && -n $child_depth && -n $scope ]] || return 1
-    # Reuse the existing normalizer; a malformed scope never becomes an
-    # optimistic empty scope.
     scope_raw=$(scope_marker_from_body "<!-- agentic-loop:scope $scope -->")
     [[ -n $scope_raw ]] || return 1
     [[ -n $(scope_tokens_normalize "$scope_raw") ]] || return 1
-  done < <(yq -p json -r '.children[] | [.key, (.title // ""), (.purpose // ""), (.acceptance_criteria // ""), .scope] | @tsv' <<< "$manifest" 2>/dev/null)
+  done <<< "$rows"
+  deps=$(yq -p json -r '.children[].depends_on[]? // ""' <<< "$manifest" 2>/dev/null) || return 1
   while IFS= read -r dep; do
     [[ -z $dep ]] && continue
     grep -Fxq "$dep" <<< "$keys" || return 1
-  done < <(yq -p json -r '.children[].depends_on[]? // ""' <<< "$manifest" 2>/dev/null)
+  done <<< "$deps"
   # A dependency can only point to an earlier key: this is both a cheap DAG
   # proof and makes materialization/retry deterministic.
   local seen=''
@@ -278,7 +278,8 @@ decomposition_validate() {
     # mikefarah yq does not implement jq's --arg flag (Issue #222). Pass the
     # untrusted key through env() so DAG validation is executed rather than
     # silently becoming a no-op when the installed CLI changes.
-    while IFS= read -r dep; do [[ -z $dep ]] || grep -Fxq "$dep" <<< "$seen" || return 1; done < <(k="$key" yq -p json -r '.children[] | select(.key == env(k)) | .depends_on[]? // ""' <<< "$manifest")
+    deps=$(k="$key" yq -p json -r '.children[] | select(.key == env(k)) | .depends_on[]? // ""' <<< "$manifest" 2>/dev/null) || return 1
+    while IFS= read -r dep; do [[ -z $dep ]] || grep -Fxq "$dep" <<< "$seen" || return 1; done <<< "$deps"
     seen+="$key"$'\n'
   done <<< "$keys"
 }
