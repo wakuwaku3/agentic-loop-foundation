@@ -1,0 +1,38 @@
+{
+ "schema_version": "v1",
+ "id": "dp-v2-049",
+ "kind": "design-packet",
+ "created_at": "2026-08-24T22:58:21Z",
+ "correlation_id": "v2-049-failure-taxonomy",
+ "problem_brief_id": "pb-v2-049",
+ "decisions": [
+  {
+   "id": "d1",
+   "decision": "Add exactly three failure classes to the domain taxonomy -- promotion-partial, secret-suspected and contract-incompatible -- so that the documented taxonomy of seventeen classes and the domain constants agree.",
+   "rationale": "The M4 enumeration measured a drift: the failure model documents seventeen classes while the domain declares fourteen, and the three missing ones had no owner. Documentation is the normative source for the taxonomy, so the code follows it. The three names are taken verbatim from the failure model so no new vocabulary is invented."
+  },
+  {
+   "id": "d2",
+   "decision": "Change nothing but the constant block: no transition function, no classifier, no behaviour.",
+   "rationale": "The M1 gate proved closure over the domain package by exhaustive enumeration. Adding a value to a string-typed constant group cannot change any transition, and keeping the change to that shape means the closure proofs stay valid without re-deriving them."
+  },
+  {
+   "id": "d3",
+   "decision": "Update the drift assertion in the M4 enumeration test from fourteen constants with three missing to seventeen constants with none missing, and keep the assertion that the provider package declares a separate taxonomy of its own.",
+   "rationale": "The drift record was the witness that the gap existed; once the gap is closed the same test must witness the agreement, or it would silently pass on a stale expectation. The provider-local taxonomy is a different type serving a different boundary and must not be merged."
+  }
+ ],
+ "components": [
+  "domain",
+  "reconciler"
+ ],
+ "verification": [
+  "devbox run --pure -- go test -count=1 ./internal/domain",
+  "devbox run --pure -- go test -count=1 ./internal/reconciler",
+  "devbox run --pure -- make check"
+ ],
+ "risks": [
+  "A future reader could assume the domain and provider taxonomies are now unified; the test must keep asserting they are distinct.",
+  "Adding a constant moves the domain component evidence key, so the record must be read on the final tree."
+ ]
+}
