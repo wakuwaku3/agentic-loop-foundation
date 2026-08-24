@@ -23,7 +23,9 @@ task-state側を信じ、本文書を更新する。
 | --- | --- | --- | --- | --- | --- |
 | V2-008 | M0 | terra | V2-025 | local | none |
 | V2-009 | M0 | terra | V2-025 | local | none |
-| V2-006 | M0 gate | sol | V2-025, V2-008, V2-009 | local | none |
+| V2-006 | M0 gate | sol | V2-025, V2-008, V2-009, V2-040, V2-041 | local | none |
+| V2-040 | M0 remediation | luna | V2-009, V2-041 | local | none |
+| V2-041 | M0 remediation | luna | V2-008 | local | none |
 | V2-010 | M1 | luna | V2-006 | local | none |
 | V2-011 | M1 gate | sol | V2-010 | local | none |
 | V2-012 | M2設計 | terra | V2-006 | local | none |
@@ -130,9 +132,13 @@ aggregate attestationのcomponent値は`candidate-aggregate`であり、これ�
 `ci/components.json`のcomponent一覧に存在しない（23個の実componentの評価結果を
 束ねる合成attestationのためのcomponent値であり、単体のcomponentではない）。
 component名で書くとindexの実際のcomponent値と食い違うため、M0 gate（V2-006）が
-根拠として直接読むevidence idをそのまま書く。V2-009が生成すべき
-`ev-v2-009-release-contract`は2026-08-24時点でindexに未登録であり、これがV2-006が
-M0 gateをnot passedと判定した理由の一つである。
+根拠として直接読むevidence idをそのまま書く。
+
+`ev-v2-009-release-contract`はV2-040が発行済みである。この evidence は id を検証対象
+（V2-009の成果物）に、`task_id`を実行主体（生産者V2-040）に置く。すでにcompleteした
+taskへ新しいevidenceを帰属させると、V2-024をfailedにした
+active-evidence-task-identity-mismatchを再発させるためである。以後のevidenceも
+`task_id`は生産者に置く。
 
 ## 6. 失敗タスクの処置とsuperseded規則
 
@@ -263,7 +269,12 @@ V2-012（設計）とV2-013（実装）の責務である。
 
 ## 11. 次の安全な1アクション
 
-Terraが V2-008 に着手する（`blocked → queued → running`という遷移列のうち、
-V2-008は既に`queued`（Sol承認済み）まで進んでいるため、残るのは`queued → running`
-への着手）。V2-008は`dependencies: ["V2-025"]`のみでV2-025は既にcomplete、
-local閉域・副作用noneであり、現時点で実行を妨げる既知の外部制約は無い。
+M0 gate（V2-006）はpassedで記録済みである。次はV2-010（M1、luna）とV2-012（M2設計、
+terra）の並列着手であり、両者はV2-006だけに依存する。critical path上はV2-010が先で、
+V2-010のcompleteが枯渇したV2-007をsupersededに転じさせてM1 gate（V2-011）のG4を解く。
+
+gate対象taskのWork Orderには、次を必ずacceptanceとして書く。「testが通った」ではなく
+「evidenceがindexに登録され台帳testが緑」を完了の定義とすること、evidenceの`task_id`を
+実行主体に置くこと、evidenceをcommitした後に`make check`の緑を確認すること、そして
+remediation taskであってもDesign PacketとWork Orderを`.agents/v2/packets/`へ残すこと
+（V2-040はpacketなしで実行されており、この規約の例外として記録しておく）。
