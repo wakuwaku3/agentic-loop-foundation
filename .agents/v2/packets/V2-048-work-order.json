@@ -1,0 +1,75 @@
+{
+ "schema_version": "v1",
+ "id": "wo-v2-048",
+ "kind": "work-order",
+ "created_at": "2026-08-24T15:04:14Z",
+ "correlation_id": "v2-048-execution-identifier",
+ "problem_brief_ref": "pb-v2-048",
+ "design_packet_ref": "dp-v2-048",
+ "observable_outcome": "The evidence enumeration in release-contract.md section 7 names the provider-issued execution identifier while keeping the prohibition on prompts and raw responses intact, so a live provider evidence record can retain the identifier without widening the contract silently.",
+ "allowed_paths": [
+  "docs/architecture/release-contract.md",
+  ".agents/v2/evidence/V2-048-execution-identifier.json",
+  ".agents/v2/evidence/index.json"
+ ],
+ "prohibited_paths": [
+  "contracts/**",
+  "internal/**",
+  "cmd/**",
+  "ci/**",
+  "Makefile",
+  "go.mod",
+  "go.sum",
+  "devbox.json",
+  "devbox.lock",
+  ".github/**",
+  "infra/**",
+  "scripts/**",
+  ".gitleaks.toml",
+  ".agents/v2/task-state/**",
+  ".agents/v2/packets/**",
+  ".agents/v2/provider-preflight/**",
+  "docs/principles.md",
+  "docs/policies/**",
+  "docs/product/**",
+  "docs/preview/**",
+  "docs/stable/**",
+  "docs/operations/**",
+  "docs/architecture/roadmap.md",
+  "docs/architecture/validation.md",
+  "docs/architecture/domain-model.md"
+ ],
+ "contracts_changed": [],
+ "acceptance_criteria": [
+  "A1. The second bullet of release-contract.md section 7 names the provider-issued execution identifier (session or execution ID) as retainable, confines it to an opaque identifier that contains no prompt, no response content and no credential, and keeps the existing prohibition on storing prompts and raw responses by default in the same sentence.",
+  "A2. git diff --unified=0 docs/architecture/release-contract.md shows exactly one changed line, and no other sentence of section 7 changes.",
+  "A3. No enumeration item other than the execution identifier is added.",
+  "A4. A new evidence artifact .agents/v2/evidence/V2-048-execution-identifier.json (id ev-v2-048-execution-identifier, task_id V2-048, component docs, result passed) records the argv actually executed and is registered with exactly one appended entry in .agents/v2/evidence/index.json whose evidence_hash equals the sha256 of the artifact bytes.",
+  "A5. The evidence_key is the docs component key read with devbox run --pure -- make evidence-keys on the final committed tree at which make check is green; a file that is not yet added to the index is invisible to that key.",
+  "A6. devbox run --pure -- go test -count=1 ./internal/contracts is green and devbox run --pure -- make check is green when run after committing.",
+  "A7. No file outside allowed_paths changes."
+ ],
+ "validation": {
+  "argv": [
+   "devbox",
+   "run",
+   "--pure",
+   "--",
+   "make",
+   "check"
+  ],
+  "working_directory": ".",
+  "timeout_seconds": 2400
+ },
+ "constraints": [
+  "Work only inside the assigned isolated task worktree; never push.",
+  "Never use git reset, git checkout --, git stash or git commit --amend.",
+  "Do not touch the task-state directory; the coordinator records transitions.",
+  "Japanese prose, matching the surrounding section."
+ ],
+ "failure_stop": true,
+ "tasks": [
+  "V2-048"
+ ],
+ "priority": 85
+}
