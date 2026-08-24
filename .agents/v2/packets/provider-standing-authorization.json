@@ -1,0 +1,15 @@
+{
+ "schema_version": "v1",
+ "id": "psa-foundation-001",
+ "kind": "provider-standing-authorization",
+ "created_at": "2026-08-24T23:22:47Z",
+ "approver": "takushi.yokoyama@sansan.com",
+ "approved_at": "2026-08-24T23:22:47Z",
+ "scope": "The owner authorises the Loop to invoke the contracted flat-rate Provider subscriptions on the owner's own machines with no per-invocation approval and no count or monetary ceiling, for the duration of the v2 work. Preflight limits stay in force only as runaway-detection thresholds; reaching one is a stop for inspection, never a success. Transcribed by the coordinator under the owner's instruction; ev-v2-055-standing-authorization holds the verbatim instruction and the limits of this record's machine check.",
+ "providers": [
+  "codex",
+  "claude",
+  "opencode"
+ ],
+ "reference": "owner instruction recorded in the coordinating session of 2026-08-25, transcribed by the coordinator; see ev-v2-055-standing-authorization"
+}
