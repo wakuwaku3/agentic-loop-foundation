@@ -1,0 +1,150 @@
+{
+ "schema_version": "v1",
+ "id": "ev-v2-016-runner",
+ "kind": "evidence",
+ "created_at": "2026-08-24T13:40:00Z",
+ "correlation_id": "v2-016-runner-local",
+ "task_id": "V2-016",
+ "component": "runner",
+ "evidence_key": "910f25e6a11c54b5e744e2e8404ba0a4be2e5a81b5c7ec5c53c9a97c9e205181",
+ "result": "passed",
+ "checks": [
+  {
+   "name": "runner-suite-verbose-A1-A13",
+   "status": "passed",
+   "argv": ["devbox", "run", "--pure", "--", "go", "test", "-count=1", "-v", "./internal/runner"],
+   "working_directory": ".",
+   "timeout_seconds": 600,
+   "summary": "31 top-level test functions run (30 PASS, 1 SKIP). The pre-existing 11 (TestControlLoopFsyncsReceiptAndObservation, TestControlLoopImmediateStopUnknownObservation, TestJournalRecoveryAndIdempotentAppend, TestJournalRejectsCorruptCompleteLine, TestWorkspaceAndGuard, TestSyntheticAndFakeProvider, TestOrchestratorFakeJourney, TestEnrollmentChallengeSignatureAndReplay, TestEnrollmentRejectsTamperedChallenge, TestEnrollmentTokenIsConsumedOnFirstBegin, TestSupervisorCancelsProcessGroupTERMThenKILL) all still pass under the same name (A1); the only edits to any of them are TestOrchestratorFakeJourney's Calls[0].Prompt assertion replaced by a Packet.Validate() structural assertion (A4) and TestSupervisorCancelsProcessGroupTERMThenKILL strengthened in place (A7, not replaced). 19 new top-level tests were added: TestJourneyOneLocalIssueIntakeToIncrementArtifact (A4), TestJourneyFourLocalCrashResumeAcrossExecutions with 3 subtests case A / case B match / case B mismatch (A3, A5), TestJournalSurvivesRealSIGKILLOfProcessGroup plus its SKIPped helper-process body TestHelperProcessJournalAppendAndBlock (A6), TestLeaseKeeper* x3 (A13), TestSecretBroker* x7 (A8, A11), TestBoundedLog* x4 (A9), TestRunnerCredentialDenyListMatcherIsVerified and TestNoCredentialFieldInRunnerNonTestFiles (A10). Pre-change baseline measured at task start: 11 in internal/runner, 3 in internal/provider (both unchanged in name)."
+  },
+  {
+   "name": "provider-component-unchanged-A2",
+   "status": "passed",
+   "argv": ["devbox", "run", "--pure", "--", "go", "test", "-count=1", "-v", "./internal/provider"],
+   "working_directory": ".",
+   "timeout_seconds": 300,
+   "summary": "internal/provider is byte-for-byte untouched by this task; its 3 pre-existing tests (TestAdaptersBuildSafeArgvAndParseMetadata, TestFixturesRejectSecretsAndMalformed, TestFailureClassificationAndHandoff) still pass unchanged, confirming A2/A15's no-change constraint on internal/provider non-test files."
+  },
+  {
+   "name": "runner-race-A6-A7-A13",
+   "status": "passed",
+   "argv": ["devbox", "run", "--pure", "--", "go", "test", "-count=1", "-race", "./internal/runner", "./cmd/runner"],
+   "working_directory": ".",
+   "timeout_seconds": 900,
+   "summary": "Race-clean, including the real-process crash test (A6), the strengthened process-group supervisor test (A7), and the lease keeper (A13). cmd/runner has no test files of its own; it still builds."
+  },
+  {
+   "name": "component-runner-A1-A13",
+   "status": "passed",
+   "argv": ["devbox", "run", "--pure", "--", "make", "component-runner"],
+   "working_directory": ".",
+   "timeout_seconds": 600,
+   "summary": "make component-runner (go test ./cmd/runner ./cmd/bootstrap ./internal/domain ./internal/runner) is green."
+  },
+  {
+   "name": "runner-determinism-3x",
+   "status": "passed",
+   "argv": ["devbox", "run", "--pure", "--", "go", "test", "-count=1", "./internal/runner"],
+   "working_directory": ".",
+   "timeout_seconds": 300,
+   "summary": "Executed three times in sequence; verdict was 'ok  github.com/takushi/agentic-loop-foundation/v2/internal/runner' every time with no varying output. No fixed sleep, no goroutine timer, and no cross-test process/order dependency anywhere in the new tests; every synchronisation is either an injected clock tick or a bounded-deadline poll on an observable file (waitForPath, waitUntilProcessGone) that calls t.Fatal on timeout."
+  },
+  {
+   "name": "internal-contracts-A16",
+   "status": "passed",
+   "argv": ["devbox", "run", "--pure", "--", "go", "test", "-count=1", "./internal/contracts"],
+   "working_directory": ".",
+   "timeout_seconds": 300,
+   "summary": "TestTaskPacketsValidate and TestActiveEvidenceIndex both pass with this record appended to index.json (evidence_hash recomputed as sha256 of this file's final bytes) and no other task's entry touched."
+  },
+  {
+   "name": "evidence-keys-runner-A16",
+   "status": "passed",
+   "argv": ["devbox", "run", "--pure", "--", "make", "evidence-keys"],
+   "working_directory": ".",
+   "timeout_seconds": 600,
+   "summary": "Read at the committed tree where make check is fully green (see candidate-check-A17 below). runner component evidence_key = 910f25e6a11c54b5e744e2e8404ba0a4be2e5a81b5c7ec5c53c9a97c9e205181, matching this record's top-level evidence_key. Note: an earlier reading taken before `git add`/commit of this task's new files read d0ed86107904ddb072a2320159a3a0cda38fed187740a77a84ede29dabde2500 for the same working-tree bytes; evidenceKey() enumerates the runner component's files through git, so untracked new files were not yet included in that pre-commit reading. The value recorded here is the correct one, read after commit, per this task's own constraint that the key must be read at the final tree."
+  },
+  {
+   "name": "candidate-check-A17",
+   "status": "passed",
+   "argv": ["devbox", "run", "--pure", "--", "make", "check"],
+   "working_directory": ".",
+   "timeout_seconds": 2400,
+   "summary": "Run after committing this task's changes, so gitleaks git scans committed history that already includes every changed byte. All of environment, format, lint, test (full ./... suite), contracts, docs, secrets, ownership and component-store-firestore pass. Earlier in this task's session (before this commit), the same argv failed at the secrets step: gitleaks git --no-banner --redact reported 2 leaks on commit hashes 3029b8dd4ca518734f9f311c163ddec565102f2e and 23fdc651a448027c9a0fdf0803ff027fa2fe41f7 (messages 'probe(a6): non-hex secret inside .agents/v2/preflight/ must still be reported' and 'probe(a6): 64-hex shape outside any allowlisted path must still be reported'), reachable only via a sibling ref `v2-task/V2-013-control-plane-local` that was never an ancestor of this task's branch and that this task's allowed_paths forbade touching (gitleaks git scans every ref in the shared repository, not just HEAD's history). That branch was independently removed by another actor between the two make check runs in this session (it no longer resolves; git branch -a no longer lists it), after which gitleaks reported 'no leaks found' with no change to any V2-016 file. Recorded here as an external, out-of-scope condition that resolved itself during this task rather than being fixed by this task, per A18's requirement not to claim credit not actually earned."
+  },
+  {
+   "name": "a7-before-after-proof",
+   "status": "passed",
+   "argv": ["devbox", "run", "--pure", "--", "go", "test", "-count=1", "-v", "-run", "TestSupervisorCancelsProcessGroupTERMThenKILL", "-timeout", "30s", "./internal/runner"],
+   "working_directory": ".",
+   "timeout_seconds": 60,
+   "summary": "Before: with both syscall.Kill(-cmd.Process.Pid, ...) calls in supervisor.go commented out, this exact argv FAILS after 10.01s with 'supervisor did not return after cancellation' (the strengthened test's own bounded-deadline channel select, not a hang) because the child and grandchild never receive TERM and loop forever. After: with the two calls restored (their original, unmodified form), this exact argv PASSES in 0.20s. The pre-strengthening version of this test could not have caught this because it only asserted Run returned a non-nil error, which the bare context deadline alone already guarantees."
+  },
+  {
+   "name": "a10-source-guard-scan-count",
+   "status": "passed",
+   "argv": ["devbox", "run", "--pure", "--", "go", "test", "-count=1", "-v", "-run", "TestNoCredentialFieldInRunnerNonTestFiles|TestRunnerCredentialDenyListMatcherIsVerified", "./internal/runner"],
+   "working_directory": ".",
+   "timeout_seconds": 60,
+   "summary": "AST scan (go/parser + go/ast, not text grep) over internal/runner's non-test *.go files: scanned non-test files=12 structs=34 fields=114 json-tags=14 (t.Logf line preserved verbatim). The matcher is verified against positive controls (Password, APIKey, AccessToken, SecretValue, PlaintextCredential, raw_provider_output) and negative controls that are this package's own legitimate vocabulary (FencingToken, ExpectedFencingToken, CredentialSource, Credential, PermitCredential, ExecutionID, WorkPacketDigest, ControlRevision), so the scan cannot pass vacuously and does not flag SecretBroker/Scope/Grant/CredentialSource's own correct names."
+  },
+  {
+   "name": "a11-runtime-leak-absence-and-presence",
+   "status": "passed",
+   "argv": ["devbox", "run", "--pure", "--", "go", "test", "-count=1", "-v", "-run", "TestSecretBrokerCredentialNeverLeaksExceptIntoOneInvocationEnvironment", "./internal/runner"],
+   "working_directory": ".",
+   "timeout_seconds": 60,
+   "summary": "A crypto/rand-derived credential fixture (never a real credential, never read from env or disk outside t.TempDir()) is leased through SecretBroker.Lease and merged onto one provider.Invocation. Absence is asserted against six independent targets: the journal file on disk, the marshalled provider.WorkPacket, the bounded diagnostic log file, the canonical store's EventsPage() events (marshalled to JSON), the marshalled AcceptResultResponse, and every element of os.Args and of the built Invocation.Argv. Presence (the positive control) is asserted against Invocation.Environment; the test fails outright if presence is not found, so the six absence checks cannot pass vacuously."
+  },
+  {
+   "name": "a8-five-fail-closed-refusals",
+   "status": "passed",
+   "argv": ["devbox", "run", "--pure", "--", "go", "test", "-count=1", "-v", "-run", "TestSecretBrokerRefuses", "./internal/runner"],
+   "working_directory": ".",
+   "timeout_seconds": 60,
+   "summary": "Five independent assertions, each its own test: TestSecretBrokerRefusesAlreadyExpiredScope (ExpiresAt == now -> ErrSecretExpired), TestSecretBrokerRefusesUnderEffectiveStop (domain.ControlEmergencyStop in force -> ErrSecretDenied wrapping domain.ErrControlDenied via a real application.Service.Permit(Kind: PermitCredential) call), TestSecretBrokerRefusesCredentialNameOutsideProviderAllowlist (-> ErrSecretNotAllowed), TestSecretBrokerRefusesZeroOrMismatchedFencingToken (two sub-assertions: FencingToken==0 -> ErrSecretFencingRequired, ExpectedFencingToken set and mismatched -> ErrSecretFencingMismatch), TestSecretBrokerRefusesSecondUseOfConsumedOrRevokedGrant (a second Lease for the same execution id -> ErrSecretGrantConsumed; a distinct, never-leased execution id after Revoke -> ErrSecretGrantRevoked). TestSecretBrokerTwoChannelsAreSeparate additionally confirms GuardEnvironment's pre-existing rejection of API_TOKEN=abc is untouched by the broker's existence."
+  },
+  {
+   "name": "a9-bounded-log-caps-and-redaction",
+   "status": "passed",
+   "argv": ["devbox", "run", "--pure", "--", "go", "test", "-count=1", "-v", "-run", "TestBoundedLog", "./internal/runner"],
+   "working_directory": ".",
+   "timeout_seconds": 60,
+   "summary": "TestBoundedLogTruncatesAtCap: writing 2x a 200-byte cap yields a file <= cap + len(truncation marker). TestBoundedLogTruncatesAtLineCap: a 5-line cap under a huge byte cap still truncates at exactly 5 content lines + 1 marker line, proving the line cap is independently enforced. TestBoundedLogRedactsSecretShapedOutput: a Bearer-token-shaped line is written as [REDACTED] while a non-secret value of the same shape/length survives byte for byte (the positive control). TestBoundedLogFileIsPerExecutionAndNotUnderWorkspace: file is 0600, named <execution-id>.log, and its path does not fall under a sibling workspace root. TestWorkspaceAndGuard's own RedactLog assertion in journal_test.go is untouched."
+  },
+  {
+   "name": "a5-crash-resume-digest-binding",
+   "status": "passed",
+   "argv": ["devbox", "run", "--pure", "--", "go", "test", "-count=1", "-v", "-run", "TestJourneyFourLocalCrashResumeAcrossExecutions", "./internal/runner"],
+   "working_directory": ".",
+   "timeout_seconds": 60,
+   "summary": "Case A (crash before provider result journaled): FindPendingProviderResult finds nothing; the resumed Execution re-runs the provider exactly once (FakeInvocationRunner.CallCount()==1). Case B digest match (crash after journaling, Work Packet unchanged): the recovered record's WorkPacketDigest equals the new attempt's own digest; the recovered raw payload re-passes provider.CodexAdapter.Parse; a fresh FakeInvocationRunner records zero calls (adoption, not re-run). Case B digest mismatch (Work Packet content changed between attempts): digests differ; the resumed Execution re-runs the provider exactly once. In every case: attempt2.claim.ExecutionID != attempt1.claim.ExecutionID, attempt2.claim.FencingToken > attempt1.claim.FencingToken (strict), the crashed attempt's own late AcceptResult (its original lease/version/fencing token) is rejected with domain.ErrLeaseExpired (errors.Is confirmed), and a domain.Execution snapshot of the resumed Execution taken immediately before and immediately after that rejected call is unchanged (direct store.Transact/u.Execution comparison, not inference)."
+  },
+  {
+   "name": "a6-real-sigkill-durability",
+   "status": "passed",
+   "argv": ["devbox", "run", "--pure", "--", "go", "test", "-count=1", "-v", "-run", "TestJournalSurvivesRealSIGKILLOfProcessGroup", "./internal/runner"],
+   "working_directory": ".",
+   "timeout_seconds": 60,
+   "summary": "Parent re-executes os.Args[0] with -test.run=^TestHelperProcessJournalAppendAndBlock$ and env var AGENTIC_LOOP_RUNNER_CRASH_HELPER=1 plus AGENTIC_LOOP_RUNNER_CRASH_DIR=<t.TempDir()>. The child opens a real runner.Journal in that directory, Appends (fsyncs) one event, writes a marker file, then blocks in select{}. The parent polls only for that marker file with a 15s bounded deadline (no fixed sleep), then syscall.Kill(-pid, SIGKILL)s the whole process group, confirms cmd.Wait() returns a non-nil error within a further bounded 15s deadline, then OpenJournal on the same directory from a fresh *Journal and replays exactly the one fsync'd event. Deterministic on GitHub Actions ubuntu-latest: no privilege, no namespace, no container; the only synchronisation is the marker-file poll."
+  },
+  {
+   "name": "a13-lease-keeper",
+   "status": "passed",
+   "argv": ["devbox", "run", "--pure", "--", "go", "test", "-count=1", "-v", "-run", "TestLeaseKeeper", "./internal/runner"],
+   "working_directory": ".",
+   "timeout_seconds": 60,
+   "summary": "TestLeaseKeeperRenewsAndHeartbeatsAsDistinctOperations: 4 explicit ticks of 20s each over an injected mutableClock (80s total, > the 1-minute LeaseTTL) each issue a distinct Renew and a distinct Heartbeat request id (RequestBase:renew-N / RequestBase:heartbeat-N); every RenewResponse.ExpiresAt strictly advances, proving each is a genuine renewal rather than an idempotent replay. TestLeaseKeeperRefusesRenewUnderStaleFencingToken: a mismatched fencing token bubbles domain.ErrStaleFence unmodified. TestLeaseKeeperStopsRenewingOnceLeaseIsExpiredWithoutResurrectingIt: after the clock is advanced past the TTL with no renewal, the first Tick returns domain.ErrLeaseExpired and out.Expired=true; a second Tick issues no further Renew call (out.Renewed=false) while still heartbeating."
+  },
+  {
+   "name": "a4-and-a12-journey-one",
+   "status": "passed",
+   "argv": ["devbox", "run", "--pure", "--", "go", "test", "-count=1", "-v", "-run", "TestJourneyOneLocalIssueIntakeToIncrementArtifact", "./internal/runner"],
+   "working_directory": ".",
+   "timeout_seconds": 60,
+   "summary": "One self-contained test function, own t.TempDir() fixtures, own context deadline, injected mutableClock and journeyIDs generator, no sleep, no goroutine timer. Drives: enrollment issue -> Begin -> Complete -> VerifySession (runner id used as claim caller) -> Capture -> Plan -> Prepare -> Claim -> Workspace.Create -> Start -> 4 LeaseKeeper ticks spanning > 1 LeaseTTL -> process Permit -> Work Packet build+Validate -> FakeInvocationRunner via ProviderClient (real provider.CodexAdapter.Build/Parse) -> Checkpoint -> result Permit -> AcceptResult. Terminal status asserted == domain.ExecutionSucceeded, checkpoint == 'checkpoint-journey-1', and the Increment Artifact digest (provider.Result.OutputDigest, exposed as ProviderResult.Output) is non-empty. A12 workspace confinement asserted in the same test: Invocation.WorkingDirectory equals the symlink-resolved workspace path, no argv element resolves outside the workspace root, Invocation.Environment is empty (no grant merged in this journey), the workspace is not a symlink and is not group/world accessible (perm & 0077 == 0), and Workspace.Path rejects a '../escape-attempt' path."
+  }
+ ],
+ "observed_at": "2026-08-24T13:40:00Z"
+}

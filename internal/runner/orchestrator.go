@@ -2,6 +2,8 @@ package runner
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,6 +11,7 @@ import (
 
 	"github.com/takushi/agentic-loop-foundation/v2/internal/application"
 	"github.com/takushi/agentic-loop-foundation/v2/internal/domain"
+	"github.com/takushi/agentic-loop-foundation/v2/internal/provider"
 )
 
 type Orchestrator struct {
@@ -86,7 +89,8 @@ func (o *Orchestrator) RunFakeJourney(ctx context.Context, req JourneyRequest) (
 				return JourneyResult{}, fmt.Errorf("provider guard: %w", err)
 			}
 		}
-		result, err = o.Provider.Run(ctx, ProviderRequest{OperationID: claim.ExecutionID, Workspace: ws})
+		packet := provider.WorkPacket{Version: provider.ContractVersion, RequirementID: cap.RequirementID, RequirementSummary: req.Text, IncrementID: plan.IncrementID}
+		result, err = o.Provider.Run(ctx, ProviderRequest{OperationID: claim.ExecutionID, Packet: packet, Workspace: ws})
 		if err != nil {
 			return JourneyResult{}, fmt.Errorf("provider: %w", err)
 		}
@@ -154,6 +158,110 @@ func (o *Orchestrator) journal(kind, id string, payload any) error {
 }
 func mustRequirement(v string) domain.RequirementID { x, _ := domain.NewRequirementID(v); return x }
 func mustIncrement(v string) domain.IncrementID     { x, _ := domain.NewIncrementID(v); return x }
+
+// WorkPacketDigest returns a stable content digest of a Work Packet. It binds
+// a journaled provider event to the exact Work Packet that produced it
+// (A5/A3), so a resuming Execution can tell whether a recovered checkpoint
+// was produced for a Work Packet identical to the one it would issue itself.
+func WorkPacketDigest(p provider.WorkPacket) (string, error) {
+	b, err := json.Marshal(p)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:]), nil
+}
+
+// PendingProviderRecord is the journal payload for a provider result that has
+// been produced but not yet canonically accepted. It is keyed for recovery
+// by IncrementID (the stable identity that survives a crash across
+// Executions), not by the per-attempt canonical request id, per dp-v2-016 d5.
+type PendingProviderRecord struct {
+	IncrementID      string `json:"increment_id"`
+	ExecutionID      string `json:"execution_id"`
+	WorkPacketDigest string `json:"work_packet_digest"`
+	RawResult        []byte `json:"raw_result,omitempty"`
+	Succeeded        bool   `json:"succeeded"`
+	Checkpoint       string `json:"checkpoint"`
+}
+
+// JournalProviderPending records a provider result pending canonical
+// acceptance. The event id includes executionID so two different Executions
+// (e.g. a crashed attempt and the Execution that resumes it) never collide in
+// the journal's own per-id idempotency; FindPendingProviderResult recovers
+// by IncrementID so a resuming Execution can find a prior attempt's dangling
+// record even though its own ExecutionID is new.
+func JournalProviderPending(j *Journal, rec PendingProviderRecord) error {
+	if rec.IncrementID == "" || rec.ExecutionID == "" {
+		return errors.New("pending provider record requires increment and execution ids")
+	}
+	payload, err := json.Marshal(rec)
+	if err != nil {
+		return err
+	}
+	err = j.Append(JournalEvent{ID: rec.ExecutionID + ":result_pending", Kind: "result_pending", Payload: payload})
+	if errors.Is(err, ErrJournalDuplicate) {
+		return nil
+	}
+	return err
+}
+
+// FindPendingProviderResult returns the most recent result_pending event for
+// incrementID that has no corresponding result_accepted event for the same
+// ExecutionID recorded after it -- i.e. a provider result a crashed
+// Execution produced (or was about to produce) but never got to canonically
+// accept.
+func FindPendingProviderResult(j *Journal, incrementID string) (PendingProviderRecord, bool, error) {
+	events, err := j.Replay()
+	if err != nil {
+		return PendingProviderRecord{}, false, err
+	}
+	accepted := map[string]bool{}
+	for _, e := range events {
+		if e.Kind != "result_accepted" {
+			continue
+		}
+		var a struct {
+			ExecutionID string `json:"execution_id"`
+		}
+		if jsonErr := json.Unmarshal(e.Payload, &a); jsonErr != nil {
+			return PendingProviderRecord{}, false, ErrJournalCorrupt
+		}
+		accepted[a.ExecutionID] = true
+	}
+	var found PendingProviderRecord
+	ok := false
+	for _, e := range events {
+		if e.Kind != "result_pending" {
+			continue
+		}
+		var rec PendingProviderRecord
+		if jsonErr := json.Unmarshal(e.Payload, &rec); jsonErr != nil {
+			return PendingProviderRecord{}, false, ErrJournalCorrupt
+		}
+		if rec.IncrementID != incrementID || accepted[rec.ExecutionID] {
+			continue
+		}
+		found = rec
+		ok = true
+	}
+	return found, ok, nil
+}
+
+// JournalResultAccepted records that executionID's result was canonically
+// accepted, so FindPendingProviderResult stops treating its result_pending
+// event as dangling.
+func JournalResultAccepted(j *Journal, executionID string, status domain.ExecutionStatus) error {
+	payload, err := json.Marshal(map[string]any{"execution_id": executionID, "status": status})
+	if err != nil {
+		return err
+	}
+	err = j.Append(JournalEvent{ID: executionID + ":result_accepted", Kind: "result_accepted", Payload: payload})
+	if errors.Is(err, ErrJournalDuplicate) {
+		return nil
+	}
+	return err
+}
 
 // RunProcess is the local-only process boundary. Callers must obtain an
 // application Permit before invoking it; no shell/raw prompt is accepted.

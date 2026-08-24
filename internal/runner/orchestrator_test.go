@@ -63,8 +63,14 @@ func TestOrchestratorFakeJourney(t *testing.T) {
 	if _, err := o.RunFakeJourney(context.Background(), JourneyRequest{RequestID: "journey-1", Text: "build the fixture"}); err != nil {
 		t.Fatalf("retry journey: %v", err)
 	}
-	if len(provider.Calls) != 1 || provider.Calls[0].Prompt != "" {
-		t.Fatalf("provider boundary leaked prompt or called unexpectedly: %#v", provider.Calls)
+	if len(provider.Calls) != 1 {
+		t.Fatalf("provider boundary called unexpectedly: %#v", provider.Calls)
+	}
+	// ProviderRequest no longer has a Prompt field at all (a raw prompt is
+	// structurally unrepresentable); it carries a validated Work Packet
+	// instead. This replaces the old Calls[0].Prompt == "" assertion.
+	if err := provider.Calls[0].Packet.Validate(); err != nil {
+		t.Fatalf("provider boundary carried an invalid work packet instead of a raw prompt: %v", err)
 	}
 	events, err := journal.Replay()
 	if err != nil {
