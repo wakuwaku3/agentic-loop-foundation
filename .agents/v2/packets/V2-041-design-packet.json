@@ -1,0 +1,51 @@
+{
+ "schema_version": "v1",
+ "id": "dp-v2-041",
+ "kind": "design-packet",
+ "created_at": "2026-08-24T11:02:41Z",
+ "correlation_id": "v2-041-secrets-gate",
+ "problem_brief_id": "pb-v2-041",
+ "decisions": [
+  {
+   "id": "d1",
+   "decision": "Add a repository-root .gitleaks.toml whose allowlist is scoped to the .agents/v2/evidence/ path and to a 64-hex-digest pattern under the generic-api-key rule, instead of disabling the rule or the secrets target.",
+   "rationale": "Committed evidence records must contain component evidence keys and artifact digests, which are 64-hex strings indistinguishable from a generic API key by entropy alone. Narrowing by path and pattern keeps every other path and rule enforcing."
+  },
+  {
+   "id": "d2",
+   "decision": "Make the secret scan part of continuous integration by running it unconditionally in .github/workflows/ci.yml rather than attaching it to a component check.",
+   "rationale": "Measured gap: ci.yml runs only make affected and make candidate-affected, and no component check runs gitleaks, so the secrets gate existed only on a developer machine. A history-wide scan is not component-scoped, so a workflow step is the correct boundary."
+  },
+  {
+   "id": "d3",
+   "decision": "Amend the two-commit attestation protocol in validation.md 11 so that commit B is validated with make check, not only make candidate.",
+   "rationale": "gitleaks git scans committed history, so an uncommitted artifact is never scanned. Validating the attestation before committing it is what let 24 findings reach the branch."
+  },
+  {
+   "id": "d4",
+   "decision": "Record the serial-push rule and the known deploy workflow defect in docs/operations/v2-task-dag.md.",
+   "rationale": "verify-parent-ci.sh requires the parent commit to already hold a successful attestation, so pushing two checkpoints back to back fails spuriously. The deploy workflow pins a non-existent action revision and belongs to the M2 scope; both facts must survive outside a conversation."
+  },
+  {
+   "id": "d5",
+   "decision": "Give .gitleaks.toml an owning component in ci/components.json rather than leaving it unowned.",
+   "rationale": "make ownership fails on any tracked file with no owning component; the file belongs with the validation toolchain of the environment component."
+  }
+ ],
+ "components": [
+  "environment",
+  "docs",
+  "ci"
+ ],
+ "verification": [
+  "devbox run --pure -- make check",
+  "devbox run --pure -- gitleaks git --no-banner --redact",
+  "devbox run --pure -- make ownership",
+  "devbox run --pure -- go test -count=1 ./internal/contracts ./internal/ci ./internal/release"
+ ],
+ "risks": [
+  "An allowlist that is too broad would silence real findings on evidence paths; it must be pattern-scoped as well as path-scoped.",
+  "gitleaks configuration discovery differs between invocations; the config must be proven effective by running the scan from the repository root as make secrets does.",
+  "Changing ci/components.json invalidates every component evidence key, so the candidate aggregate must be regenerated afterwards."
+ ]
+}
