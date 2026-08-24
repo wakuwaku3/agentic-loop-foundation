@@ -1,0 +1,36 @@
+{
+ "schema_version": "v1",
+ "id": "dp-v2-042",
+ "kind": "design-packet",
+ "created_at": "2026-08-24T11:38:36Z",
+ "correlation_id": "v2-042-ledger-digest-allowlist",
+ "problem_brief_id": "pb-v2-042",
+ "decisions": [
+  {
+   "id": "d1",
+   "decision": "Widen the allowlist path scope from .agents/v2/evidence/ to .agents/v2/, keeping condition = AND with the anchored ^[a-f0-9]{64}$ value pattern.",
+   "rationale": "task-state.json mandates input_hash and output_hash as ^[a-f0-9]{64}$, and the packets and historical indexes carry the same kind of content digest. The value pattern, not the directory, is what makes these safe to allow; scoping by directory alone under-covers the ledger and scoping by pattern alone would cover the whole repository."
+  },
+  {
+   "id": "d2",
+   "decision": "Do not allow any digest length other than exactly 64 hex characters, and do not add a second allowlist.",
+   "rationale": "evidence_key permits 16 to 128 hex characters in the schema, but every key produced by ci-plan and by the aggregate recipe is a sha256, so 64 is sufficient. A narrower rule that fails loudly is preferable to a broad one that hides a real finding."
+  },
+  {
+   "id": "d3",
+   "decision": "Prove the change with three positive controls before accepting it: a 64-hex secret outside .agents/v2/ must still be reported, a non-hex secret inside .agents/v2/ must still be reported, and the clean tree must report no leaks.",
+   "rationale": "The first version of this allowlist listed its conditions without condition = AND, which silently suppressed every 64-hex finding in the repository. Only a positive control distinguishes a narrow allowlist from a hole."
+  }
+ ],
+ "components": [
+  "environment"
+ ],
+ "verification": [
+  "devbox run --pure -- make secrets",
+  "devbox run --pure -- make check",
+  "devbox run --pure -- gitleaks git --no-banner --redact"
+ ],
+ "risks": [
+  "A real 64-hex secret committed under .agents/v2/ would not be reported by generic-api-key; the ledger is machine-generated and policy already forbids secrets there, and every other pattern in that directory is still scanned."
+ ]
+}

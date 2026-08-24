@@ -1,0 +1,66 @@
+{
+ "schema_version": "v1",
+ "id": "wo-v2-042",
+ "kind": "work-order",
+ "created_at": "2026-08-24T11:38:36Z",
+ "correlation_id": "v2-042-ledger-digest-allowlist",
+ "problem_brief_ref": "pb-v2-042",
+ "design_packet_ref": "dp-v2-042",
+ "observable_outcome": "make check is green at the committed HEAD with the secret-scan allowlist covering exactly the 64-hex reference digests under .agents/v2/, proven by three positive controls, and the change is recorded as evidence in the index.",
+ "allowed_paths": [
+  ".gitleaks.toml",
+  "docs/architecture/validation.md",
+  ".agents/v2/evidence/V2-042-ledger-digest-allowlist.json",
+  ".agents/v2/evidence/index.json"
+ ],
+ "prohibited_paths": [
+  ".agents/v2/task-state/**",
+  ".agents/v2/packets/**",
+  ".agents/v2/evidence/V2-025-contracts.json",
+  ".agents/v2/evidence/V2-008-candidate-aggregate.json",
+  ".agents/v2/evidence/V2-041-secrets-gate.json",
+  ".agents/v2/evidence/V2-009-release-contract.json",
+  ".agents/v2/evidence/V2-040-candidate-aggregate.json",
+  "ci/**",
+  "contracts/**",
+  "internal/**",
+  "cmd/**",
+  "Makefile",
+  ".github/**",
+  "infra/**",
+  "scripts/**"
+ ],
+ "contracts_changed": [],
+ "acceptance_criteria": [
+  "A1. .gitleaks.toml keeps extend.useDefault, keeps condition = \"AND\", and changes only the path regex so that it covers .agents/v2/ instead of .agents/v2/evidence/. The value regex stays anchored as ^[a-f0-9]{64}$. No second allowlist and no rule removal.",
+  "A2. Positive control one: a commit adding a 64-hex secret assignment outside .agents/v2/ is still reported by generic-api-key. Record the finding count.",
+  "A3. Positive control two: a commit adding a non-hex high-entropy secret inside .agents/v2/ is still reported. Record the finding count.",
+  "A4. Positive control three: with both probe commits removed, devbox run --pure -- gitleaks git --no-banner --redact reports no leaks found at the committed HEAD.",
+  "A5. devbox run --pure -- make check passes every target including secrets, run after committing so the scan reads committed history.",
+  "A6. docs/architecture/validation.md records that the allowlist covers the ledger reference digests mandated by the canonical schemas, not only evidence records.",
+  "A7. A new evidence artifact .agents/v2/evidence/V2-042-ledger-digest-allowlist.json (id ev-v2-042-ledger-digest-allowlist, task_id V2-042, component environment) records the three positive controls and is registered in .agents/v2/evidence/index.json with a sha256-matching evidence_hash; devbox run --pure -- go test ./internal/contracts is green.",
+  "A8. No file outside allowed_paths changes."
+ ],
+ "validation": {
+  "argv": [
+   "devbox",
+   "run",
+   "--pure",
+   "--",
+   "make",
+   "check"
+  ],
+  "working_directory": ".",
+  "timeout_seconds": 2400
+ },
+ "constraints": [
+  "Work only inside the assigned task worktree.",
+  "Never use git reset, git checkout --, git stash or git commit --amend; probe commits are removed by the coordinator or by reverting the specific file with a fresh edit.",
+  "Do not report a control as passed unless it was actually executed."
+ ],
+ "failure_stop": true,
+ "tasks": [
+  "V2-042"
+ ],
+ "priority": 95
+}
