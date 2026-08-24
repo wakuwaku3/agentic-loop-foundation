@@ -65,4 +65,4 @@ These policies apply to every investigation, change, validation, release, and op
 
 - User-facing repository operations, migration reports, and external collaboration records are written in Japanese unless a machine contract requires otherwise.
 - PRs are optional integration adapters. Human review is not a completion gate.
-- The coordinator is the only writer to the `v2` integration branch; task agents write isolated worktrees.
+- The coordinator is the only writer to the `v2` integration branch. Task agents work in isolated worktrees by default. Verifying repository-global properties (all-ref secret scans, push-coupled parent CI attestation, repository-level hooks and settings) may use the primary checkout; the task records in its state or evidence exactly what was verified there, and the invariant is that v1's operation on `main` is never broken.

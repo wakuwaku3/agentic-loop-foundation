@@ -88,17 +88,22 @@ v1 sourceのarchiveはGit historyとcutover tagを正本とし、v2 treeへ残�
 
 成果:
 
-- OpenTofuによるuser GCP projectへのCloud Run／Firestore／IAP／Scheduler配備
 - 専用UIで課題登録、Backlog、Requirement、Control表示
-- Firestore current state＋Event＋Outbox
-- owner認証、budget hard guard、logical export
+- Firestore current state＋Event＋Outbox（emulator互換）
+- owner認証（ローカルではsession/token境界。IAP境界はD1）
+- budget hard guard、logical export
+- OpenTofuによるGCP配備構成（plan/validateとplan digest生成まで。applyはD1）
 
 完了条件:
 
-- clean projectへapply／verify／rollbackできる
-- idle時scale-to-zeroする
-- Firestore無料quotaの50% hard budgetを越えない
-- GitHub Issueなしで課題を永続化できる
+- 候補versionのControl Planeがowner実機のlocalhostで実プロセスとして稼働し、GitHub Issueなしで課題を永続化できる
+- Firestore emulator上でcurrent state＋Event＋Outboxが動き、無料quotaの50% hard budgetをside effect前に強制する
+- OpenTofu構成がclean project前提のplan/validateを通り、D1で使う承認対象plan digestを生成できる
+- 次の4点はM2では判定せず、初回deploy gate（D1）へ後置する: (i) IAPの認証境界（未認証requestの拒否）、(ii) idle時scale-to-zero、(iii) 実Firestoreの権限と競合、(iv) deploy経路（承認済みplan digest→apply→revision rollback）
+
+### D1: 初回deploy gate
+
+deploy先はGCPとする。M2 gate通過後の任意の時点で実行でき、M9 cutoverより前に必須。完了条件は上記4点を`preview-gcp`のlive evidenceで実証すること。
 
 ### M3: One Runner・代表Provider vertical slice
 
@@ -154,6 +159,8 @@ v1 sourceのarchiveはGit historyとcutover tagを正本とし、v2 treeへ残�
 - docsだけのdriftでもpromotionが止まる
 - 全機能Evidenceを持つcandidateだけStableになる
 
+本milestoneのPreviewは`preview-local`（release-contract.md §3の環境等級）で満たす。D1の4点はこのmilestoneの完了条件ではない。
+
 ### M6: Claude／opencode and shared provider resources
 
 成果:
@@ -178,10 +185,11 @@ v1 sourceのarchiveはGit historyとcutover tagを正本とし、v2 treeへ残�
 - Resource Claim、競合、dependency
 - 複数Runner capacityとpriority scheduling
 - cross-repository Increment
+- 2台目実機のsetup手順書
 
 完了条件:
 
-- 2 machine以上、2 Repository以上で並列実行する
+- 2つ以上の独立したRunner実行実体（別machine、または同一hostの別container＋注入したclockのずれ）と2 Repository以上で並列実行する。同一ownerの実機2台での初回起動はdocs/operationsのsetup手順として整備し、gate条件にしない。
 - 同一Incrementの二重ownerが生じない
 - 1 Repositoryのfailure stormで他の重要Requirementが飢餓しない
 - cross-repository rollbackが収束する
@@ -303,6 +311,13 @@ UIの見栄え、複雑なpriority AI、高度なanalyticsは、この順序を�
 - external GitHub Issue intake
 
 需要を確認するまでdomainとAPIへ予約fieldを増やさない。
+
+### 非目標
+
+次はdeferではなく非目標である。需要が生じても本systemの保証対象へ引き上げず、外部で担う。
+
+- サーバー（Installation）をまたぐ重複調停。lease／fencingが防ぐ二重ownerは一つのControl Planeの内側だけであり、リポジトリを共有する複数のサーバー間の調停は人の運用と外部システム（例: GitHub Project）が担う。
+- 複数人でのタスク管理。Control Planeはowner 1人が使う。認証（IAP＋owner単独）は本人確認のために維持する。
 
 ## 9. v2 white-slate branch 戦略
 

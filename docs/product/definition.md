@@ -273,6 +273,8 @@ binary/runtimeの独立、状態schema互換、routing、即時停止、rollback
 - 要求とPRを1対1に固定すること
 - SaaSとして複数の利用者を1つのcontrol planeへ同居させること
 - すべての変更に人間レビューを要求すること
+- サーバー（Installation）をまたぐ重複調停。lease／fencingが防ぐ二重ownerは一つのControl Planeの内側だけであり、リポジトリを共有する複数のサーバー間の調停は人の運用と外部システム（例: GitHub Project）が担う
+- 複数人でのタスク管理。Control Planeはowner 1人が使う。認証（IAP＋owner単独）は本人確認のために維持する
 
 ## 14. 成功指標
 

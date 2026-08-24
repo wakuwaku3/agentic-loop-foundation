@@ -15,8 +15,11 @@ Routing:
 - Work packets and evidence: `.agents/v2/`
 
 The v2 tree is independent of the v1 GitHub Issue/PR loop. Do not restore v1
-source or add routing through legacy Issues. Changes must use a dedicated task
-worktree and the common `make` validation entrypoint.
+source or add routing through legacy Issues. Changes use a dedicated task
+worktree by default, with the common `make` validation entrypoint. Verifying
+repository-wide properties (all-ref scans, push-coupled CI attestation,
+repository-level hooks and settings) may use the primary checkout; record
+what was verified and never break the v1 loop on `main`.
 
 Secrets must never enter Git, task records, work packets, evidence summaries,
 prompts, or logs. Destructive, irreversible, credential-scope, deployment, or

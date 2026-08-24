@@ -52,7 +52,7 @@ Firestore emulatorを使い、transactionとqueryを実装と同じclient librar
 - Outboxのat-least-once deliveryとidempotent completion
 - schema expand／coexist／migrate／contract
 
-emulatorの成功を実Firestoreの代替にはせず、Previewでcontentionと権限を確認する。
+emulatorの成功を実Firestoreの代替にはせず、実Firestoreのcontentionと権限は初回deploy gate（D1）で確認する。
 
 ### API contract tests
 
@@ -81,7 +81,7 @@ OpenAPIを契約の正本にし、server、Runner client、test fixture、refere
 - atomic binary update／rollback
 - offline時の新規claim／Result拒否
 
-Linux namespace、git、process signalはcontainerまたはVM上のintegration testで実物を使う。
+Linux namespace、git、process signalは実kernel上のintegration testで実物を使う。workspace封じ込めはrootless user+mount namespace（`unshare --user --map-root-user --mount`＋外側pathの`remount,bind,ro`）で非特権のまま証明し、namespaceなしで外側への書き込みが成功する対照をpositive controlとして残す。実行環境のkernelがunprivileged user namespaceを許可しない場合はcontainerまたはVMを代替実行場所とするが、skipをpassとして数えない。gateはtestが実際に実行されたverdictと実行環境識別子（kernel version等）を要求する。
 
 ### Provider adapter contract tests
 
@@ -118,8 +118,7 @@ fixture更新には、実CLI version、観測日時、変更理由、対応Previ
 
 ## 3. Preview capability exercise
 
-Release Contractの各capabilityを実際のPreview revision、Firestore、Runner、Repository、Provider、deploy
-targetで実行する。
+Release Contractの各capabilityを実際のPreview revision、Firestore、Runner、Repository、Providerで実行する。canonical storeとdeploy環境の実体はrelease-contract.md §3の環境等級に従う。deploy targetを要する4点はD1の管轄である。
 
 - Stable候補の全capabilityを毎release実行する
 - Provider依存変更は対象Provider、共通adapter変更は3 Providerすべてを実行する

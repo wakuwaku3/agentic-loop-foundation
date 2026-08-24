@@ -40,6 +40,16 @@ Stable候補は、Release Contractにある全capabilityを、その候補versio
 費用やquotaを理由に確認を省略しない。上限内で実証できるよう頻度と入力を設計し、上限内で実行
 できない候補はPreviewに留める。
 
+### Preview実環境の等級
+
+Preview実環境はreleaseごとに宣言する。Foundationの現行releaseでは二等級を用いる。
+
+- `preview-local`: ownerの実機上で、候補versionのControl PlaneとRunnerを実プロセスとしてlocalhostで稼働させ、canonical storeにFirestore emulatorを使う環境。実プロセス・実Provider CLI・実GitHubを用いる点でfake／stub／契約testとは異なり、Loop自身の挙動を対象とするcapability exerciseの実環境として扱う。
+- `preview-gcp`: 承認済みplan digestからapplyしたCloud Run／実Firestore／IAP上の環境。
+
+emulatorとlocalhostは実プロセスでありfakeではないが、Cloud RunとIAPの代替ではない。次の4点は`preview-local`では実証できず、初回deploy gate（D1）で`preview-gcp`により実証する: (i) IAP認証境界、(ii) scale-to-zero、(iii) 実Firestoreの権限と競合、(iv) deploy経路。D1が未通過の間、Stableは自らの提供環境をowner実機上のself-hostとして宣言し、GCP上での運用をcapabilityとして主張しない。
+- capability evidenceは環境class（`preview-local`／`preview-gcp`）、machine識別子、emulator名とversion、関与した実外部systemの識別子を必ず記録する。
+
 ## 4. 昇格
 
 次を同じrelease versionに対して満たしたときだけStableへ自動昇格する。
