@@ -32,6 +32,7 @@ task-state側を信じ、本文書を更新する。
 | V2-045 | M3 remediation | terra | V2-016, V2-017 | local | none |
 | V2-046 | M4 | luna | V2-017 | live (privileged container/VM) | none |
 | V2-047 | M3 remediation | luna | V2-016 | local | none |
+| V2-048 | M3 remediation | luna | V2-047 | local | none |
 | V2-010 | M1 | luna | V2-006 | local | none |
 | V2-011 | M1 gate | sol | V2-010 | local | none |
 | V2-012 | M2設計 | terra | V2-006 | local | none |
@@ -39,8 +40,8 @@ task-state側を信じ、本文書を更新する。
 | V2-014 | M2 | luna | V2-013 | live | cost |
 | V2-015 | M2 gate | sol | V2-014 | local | none |
 | V2-016 | M3 | luna | V2-011 | local | none |
-| V2-017 | M3 | luna | V2-016, V2-047 | live | cost, credential-scope |
-| V2-018 | M3 gate | sol | V2-017, V2-045, V2-047 | local | none |
+| V2-017 | M3 | luna | V2-016, V2-047, V2-048 | live | cost, credential-scope |
+| V2-018 | M3 gate | sol | V2-017, V2-045, V2-047, V2-048 | local | none |
 | V2-019 | M4 | luna | V2-016 | local | none |
 | V2-020 | M4 gate | sol | V2-019 | local | none |
 | V2-021 | M5 | luna | V2-009, V2-011 | local | none |
@@ -87,6 +88,7 @@ V2-022へ合流する並行枝として扱う。roadmap M3の完了条件はGCP 
 - V2-012はV2-010と並列（両方ともV2-006だけに依存）
 - V2-016、V2-019、V2-021はV2-011後（V2-021はV2-009にも依存）に並列
 - V2-047はV2-016後にV2-019／V2-021と並列（M3 liveの前提整備）
+- V2-048はV2-047後、V2-017のowner承認待ちと並行して進められる
 - V2-027はV2-018 gate後、V2-030はV2-020 gate後にそれぞれ並列
 
 ## 4. gate共通判定規則 G1〜G5
@@ -126,6 +128,17 @@ gate taskのcomplete transitionの`reason`に「`gate M<N> passed`」という�
 | M2live | V2-014 | gcp-live-apply（apply/verify/rollback/scale-to-zero/budget guard） | 必須 |
 | M3 | V2-016 | runner（fake Providerでの縦断） | 不要 |
 | M3live | V2-017 | provider-live-claude（代表Provider claudeでの縦断・credential隔離・費用bound 16 invocation／累計$10.00） | 必須 |
+
+M3 gate（V2-018）が受理する実物のerror証明はtransport failure（到達不能base URLで
+誘発するもの）だけである。FailureModelとFailureQuotaの実物誘発は3 Provider全部に
+ついてV2-028（M6 live）の管轄であり、V2-018はtransport failureをerror matrixの
+claude分として計上しない。roadmap M3の完了条件はerror taxonomyの網羅を要求して
+いない（要求しているのはM6である）。
+
+代表Provider宣言の置き場所はcapability declaration set側で確定した（Sol裁定）。
+foundation.jsonへ移すと同じ事実が二箇所に生まれ、release-contract.json schemaと
+release.goのstructとbaseline fixtureと契約testの4点改修に対して新しい保証がゼロに
+なる。将来foundation.jsonが同fieldを持った場合の一致はk4 assertionが既に守る。
 | M4 | V2-019 | reconciler（制御・障害注入の収束） | 不要 |
 | M5 | V2-021 | release（candidate/promotion/rollback/docs drift） | 不要 |
 | M5live | V2-022 | release-live-dogfood（本Repositoryでの実運用） | 必須 |
