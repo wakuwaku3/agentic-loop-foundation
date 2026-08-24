@@ -1,9 +1,11 @@
 package reconciler
 
 import (
+	"reflect"
 	"testing"
 
 	"github.com/takushi/agentic-loop-foundation/v2/internal/domain"
+	"github.com/takushi/agentic-loop-foundation/v2/internal/provider"
 )
 
 // wantDocumentedFailureClassCount is acceptance A13 Table 1's named
@@ -151,20 +153,20 @@ func TestFailureTaxonomyIsFinitelyEnumeratedAndPartitioned(t *testing.T) {
 		}
 	}
 
-	// Acceptance A14: domain.FailureClass declares exactly 14 constants;
-	// exactly the three documented classes with no domain constant --
-	// promotion-partial, secret-suspected, contract-incompatible -- fall in
-	// the deferred bucket, recording the drift without editing
-	// internal/domain (prohibited for this task; V2-049 owns closing it).
+	// Acceptance A3: domain.FailureClass declares exactly 17 constants, one
+	// for every documented class in Table 1, so this test now witnesses
+	// agreement between the failure model document and internal/domain
+	// instead of the drift that V2-019 recorded (14 constants, 3 missing).
 	domainDeclared := map[domain.FailureClass]bool{
 		domain.FailureInvalidInput: true, domain.FailurePolicyDenied: true, domain.FailureCapacity: true,
 		domain.FailureProviderTransport: true, domain.FailureProviderModel: true, domain.FailureProviderQuota: true,
 		domain.FailureExecutionLost: true, domain.FailureProgressStalled: true, domain.FailureVerification: true,
 		domain.FailureExternalAmbiguous: true, domain.FailureIntegration: true, domain.FailurePreviewRegression: true,
-		domain.FailureBudgetExceeded: true, domain.FailureUnknown: true,
+		domain.FailurePromotionPartial: true, domain.FailureSecretSuspected: true,
+		domain.FailureBudgetExceeded: true, domain.FailureContractIncompat: true, domain.FailureUnknown: true,
 	}
-	if len(domainDeclared) != 14 {
-		t.Fatalf("domain.FailureClass constants referenced here=%d, want 14", len(domainDeclared))
+	if len(domainDeclared) != wantDocumentedFailureClassCount {
+		t.Fatalf("domain.FailureClass constants referenced here=%d, want %d", len(domainDeclared), wantDocumentedFailureClassCount)
 	}
 	var missingFromDomain []string
 	for _, row := range documentedFailureClasses {
@@ -172,24 +174,27 @@ func TestFailureTaxonomyIsFinitelyEnumeratedAndPartitioned(t *testing.T) {
 			missingFromDomain = append(missingFromDomain, row.class)
 		}
 	}
-	wantMissing := map[string]bool{"promotion-partial": true, "secret-suspected": true, "contract-incompatible": true}
-	if len(missingFromDomain) != len(wantMissing) {
-		t.Fatalf("classes missing a domain.FailureClass constant=%v, want exactly %v", missingFromDomain, wantMissing)
+	if len(missingFromDomain) != 0 {
+		t.Fatalf("classes missing a domain.FailureClass constant=%v, want none: every documented class must have an owning domain constant", missingFromDomain)
 	}
-	for _, class := range missingFromDomain {
-		if !wantMissing[class] {
-			t.Fatalf("unexpected class missing a domain constant: %q", class)
-		}
-		row := documentedFailureClasses[indexOfClass(t, class)]
-		if row.bucket != "deferred" {
-			t.Fatalf("class %q has no domain constant but is not deferred (bucket=%q)", class, row.bucket)
-		}
+
+	// Acceptance A4: internal/provider declares its own, separate
+	// FailureClass type (values including "contract-incompatible" and
+	// "timeout"). Assert it stays a distinct Go type from
+	// domain.FailureClass -- a different taxonomy serving the provider
+	// boundary, not a duplicate merged into the domain one -- even though
+	// it shares the "contract-incompatible" string value with domain.
+	if string(provider.FailureContract) != "contract-incompatible" {
+		t.Fatalf("provider.FailureContract=%q, want %q", provider.FailureContract, "contract-incompatible")
 	}
-	// internal/provider declares its own, separate FailureClass type
-	// (values including "contract-incompatible" and "timeout"): that is a
-	// different taxonomy from this domain one, not a duplicate of it, and
-	// is not asserted here because internal/provider is out of this task's
-	// allowed_paths.
+	if string(provider.FailureTimeout) != "timeout" {
+		t.Fatalf("provider.FailureTimeout=%q, want %q", provider.FailureTimeout, "timeout")
+	}
+	domainType := reflect.TypeOf(domain.FailureContractIncompat)
+	providerType := reflect.TypeOf(provider.FailureContract)
+	if domainType == providerType {
+		t.Fatalf("domain.FailureClass and provider.FailureClass must remain distinct types (got the same reflect.Type %v), not unified into one taxonomy", domainType)
+	}
 }
 
 func indexOfClass(t *testing.T, class string) int {

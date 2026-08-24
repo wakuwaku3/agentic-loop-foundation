@@ -183,7 +183,10 @@ const (
 	FailureExternalAmbiguous FailureClass = "external-ambiguous"
 	FailureIntegration       FailureClass = "integration-conflict"
 	FailurePreviewRegression FailureClass = "preview-regression"
+	FailurePromotionPartial  FailureClass = "promotion-partial"
+	FailureSecretSuspected   FailureClass = "secret-suspected"
 	FailureBudgetExceeded    FailureClass = "budget-exceeded"
+	FailureContractIncompat  FailureClass = "contract-incompatible"
 	FailureUnknown           FailureClass = "unknown"
 )
 
