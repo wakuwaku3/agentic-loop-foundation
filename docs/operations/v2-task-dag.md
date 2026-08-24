@@ -30,19 +30,24 @@ task-state側を信じ、本文書を更新する。
 | V2-043 | M1 remediation | luna | V2-011 | local | none |
 | V2-044 | M3 remediation | terra | V2-016 | local | none |
 | V2-045 | M3 remediation | terra | V2-016, V2-017 | local | none |
-| V2-046 | M4 | luna | V2-017 | live (privileged container/VM) | none |
+| V2-046 | M4 | luna | V2-016 | local（rootless namespace） | none |
 | V2-047 | M3 remediation | luna | V2-016 | local | none |
 | V2-048 | M3 remediation | luna | V2-047 | local | none |
 | V2-049 | M5 remediation | luna | V2-011 | local | none |
+| V2-050 | M3 remediation | luna | V2-047 | local | none |
+| V2-051 | M2 | luna | V2-013 | live（preview-local） | none |
+| V2-052 | M2 remediation | luna | V2-013 | local | none |
+| V2-053 | 文書remediation | luna | V2-006 | local | none |
+| V2-054 | D1 gate | sol | V2-014 | live（preview-gcp） | none |
 | V2-010 | M1 | luna | V2-006 | local | none |
 | V2-011 | M1 gate | sol | V2-010 | local | none |
 | V2-012 | M2設計 | terra | V2-006 | local | none |
 | V2-013 | M2 | luna | V2-011, V2-012 | local | none |
-| V2-014 | M2 | luna | V2-013 | live | cost |
-| V2-015 | M2 gate | sol | V2-014 | local | none |
+| V2-014 | D1（初回deploy） | luna | V2-013, V2-015 | live（preview-gcp） | cost |
+| V2-015 | M2 gate | sol | V2-013, V2-051, V2-053 | local | none |
 | V2-016 | M3 | luna | V2-011 | local | none |
-| V2-017 | M3 | luna | V2-016, V2-047, V2-048 | live | cost, credential-scope |
-| V2-018 | M3 gate | sol | V2-017, V2-045, V2-047, V2-048 | local | none |
+| V2-017 | M3 | luna | V2-016, V2-047, V2-048, V2-050 | live（preview-local） | credential-scope |
+| V2-018 | M3 gate | sol | V2-017, V2-045, V2-047, V2-048, V2-050 | local | none |
 | V2-019 | M4 | luna | V2-016 | local | none |
 | V2-020 | M4 gate | sol | V2-019, V2-046 | local | none |
 | V2-021 | M5 | luna | V2-009, V2-011 | local | none |
@@ -52,14 +57,14 @@ task-state側を信じ、本文書を更新する。
 | V2-028 | M6 | luna | V2-027, V2-026 | live | credential-scope |
 | V2-029 | M6 gate | sol | V2-028 | local | none |
 | V2-030 | M7 | luna | V2-020 | local | none |
-| V2-031 | M7 | luna | V2-030, V2-029 | live | cost |
+| V2-031 | M7 | luna | V2-030, V2-029 | live（container×2） | none |
 | V2-032 | M7 gate | sol | V2-031 | local | none |
 | V2-033 | M8設計 | terra | V2-026 | local | none |
 | V2-034 | M8 | luna | V2-033 | local | none |
 | V2-035 | M8 | luna | V2-034, V2-032 | live | cost |
 | V2-036 | M8 gate | sol | V2-035 | local | none |
 | V2-037 | M9 | luna | V2-036 | live (read-only) | credential-scope |
-| V2-038 | M9 | luna | V2-037 | live | irreversible |
+| V2-038 | M9 | luna | V2-037, V2-054 | live | irreversible |
 | V2-039 | M9 gate | sol | V2-038 | live | irreversible |
 
 V2-010は枯渇したV2-007の後継である。retryではなくscope再計画として新規taskに
@@ -101,10 +106,26 @@ V2-032, V2-036, V2-039）は次を満たしてはじめてcompleteにできる�
   blockedのまま。
 - **G2**: acceptanceに列挙したevidence entryが`evidence/index.json`に存在し、
   `result == "passed"`、`evidence_hash`がファイル本体のsha256と一致する。
-- **G3**: 実環境必須の完了条件は、実target（GCP project ID、実CLI/Providerの
-  version、machine識別子）を記録したlive evidenceでのみ充足する。local/emulator/fake
-  evidenceでの代替をgateは明示的に拒否する。component名でlocalとliveを区別する
-  （例: `infra-plan`はlocal、`gcp-live-apply`はlive）。
+- **G3（実環境の等級）**: 実環境必須の完了条件は、その条件が名指しする実targetを
+  実際に使ったevidenceでのみ充足する。
+  1. 条件が**外部resource**（GCP project、IAP、実Firestore、deploy経路、実Provider CLI、
+     複数の独立実行実体、GitHub）を名指しする場合、そのresourceの識別子（project ID、
+     CLI version、machine／container識別子）を記録したlive evidenceだけが充足し、
+     local／emulator／fakeでの代替を拒否する。
+  2. 条件が**Loop自身の観測可能な挙動**を対象とする場合、環境class `preview-local`
+     （owner実機・実プロセス・実CLI・Firestore emulator）のevidenceが**その条件の
+     実環境evidence**であり、「代替」とは呼ばない。この場合もevidenceは環境class、
+     machine識別子、emulator名とversion、関与した実外部systemの識別子を含むこと。
+  3. unit／fake／stub／契約testのevidenceは、いずれの等級でも実環境条件を充足しない。
+
+  環境classはcomponent名で区別する（`infra-plan`はlocal、
+  `control-plane-local-live`と`provider-live-claude`はpreview-local、
+  `gcp-live-apply`はpreview-gcp）。
+- **G7（skipはpassでない）**: gateはskipされたtestをpassとして数えない。live系と
+  namespace系のevidenceは、testが実際に実行された事実（skip 0件のverdict、実行環境
+  識別子: kernel version、unshareの成功、CLI versionなど）を含むこと。実行環境が
+  その検証を実行できない場合はevidenceを発行せず、blockedと
+  `external-unavailable:`で表現する。
 - **G4**: 依存にfailedがある場合はそのfailedタスクがsuperseded判定（6章）を
   満たしていること。未決着failedが1件でもあればgateはblockedのまま。
 - **G5**: 同一candidateで結果が変動した（flakyにretryで上書きした）evidenceを
@@ -142,10 +163,10 @@ gate taskのcomplete transitionの`reason`に「`gate M<N> passed`」という�
 | M0 | V2-008, V2-009, V2-006 | 必須evidence: `ev-v2-025-contracts`, `ev-v2-008-candidate-aggregate`, `ev-v2-009-release-contract` | 不要（local閉域） |
 | M1 | V2-010, V2-011 | domain（Safety Invariant 5件＋依存ゼロguard。validation.md §2のうちpriority comparison／飢餓防止はV2-030（M7）、retention eligibilityはV2-021（M5）とV2-034（M8）で成熟させる） | 不要 |
 | M2設計 | V2-012 | infra（設計docのみ） | 不要 |
-| M2 | V2-013 | infra-plan（emulator+tofu validate） | 不要 |
-| M2live | V2-014 | gcp-live-apply（apply/verify/rollback/scale-to-zero/budget guard） | 必須 |
+| M2 | V2-013, V2-051, V2-052 | infra-plan（emulator+tofu validate）と control-plane-local-live（実機の実プロセス＋emulator＋localhost） | preview-local必須 |
+| D1（初回deploy gate） | V2-014, V2-054 | gcp-live-apply（IAP認証境界・scale-to-zero・実Firestoreの権限と競合・deploy経路） | preview-gcp必須 |
 | M3 | V2-016 | runner（fake Providerでの縦断） | 不要 |
-| M3live | V2-017 | provider-live-claude（代表Provider claudeでの縦断・credential隔離・費用bound 16 invocation／累計$10.00） | 必須 |
+| M3live | V2-017 | provider-live-claude（代表Provider claudeでの縦断・credential隔離・暴走検知threshold 16 invocation／累計$10.00） | preview-local必須 |
 
 M3 gate（V2-018）が受理する実物のerror証明はtransport failure（到達不能base URLで
 誘発するもの）だけである。FailureModelとFailureQuotaの実物誘発は3 Provider全部に
@@ -163,7 +184,7 @@ release.goのstructとbaseline fixtureと契約testの4点改修に対して新�
 | M6 | V2-027 | provider（Claude/opencode adapter、fixture契約） | 不要 |
 | M6live | V2-028 | provider-live-multi（codex／claude／opencodeの実CLI検証） | 必須 |
 | M7 | V2-030 | scheduler（単一machineでの多Runner/多Repository） | 不要 |
-| M7live | V2-031 | scheduler-live-multi-machine（2台以上・2 Repository以上） | 必須 |
+| M7live | V2-031 | scheduler-live-multi-runner（同一host上のcontainer 2つ＋注入clockずれ・2 Repository以上。実機2台の初回起動はsetup手順） | 必須 |
 | M8設計 | V2-033 | update（設計docのみ） | 不要 |
 | M8 | V2-034 | update（署名検証・Bootstrapper・migration・GC） | 不要 |
 | M8live | V2-035 | update-live-self-deploy（新Loopの自己deploy・障害復旧・rollback） | 必須 |
