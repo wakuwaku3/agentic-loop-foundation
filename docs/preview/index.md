@@ -1,7 +1,11 @@
 # Preview
 
+Release: 0.1.0-baseline
+
 Preview候補の利用者向け文書の入口です。現在のv2 branchは実装候補であり、
-実環境へdeploy済みのPreview Releaseではありません。
+実環境へdeploy済みのPreview Releaseではありません。上記`Release:`行は
+`contracts/release-contract/foundation.json`のreleaseと機械的に一致確認される
+固定形式のmarkerであり、この文書自体は自身のdigestを保持しません。
 
 候補に含まれる機能:
 

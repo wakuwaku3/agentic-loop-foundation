@@ -24,6 +24,11 @@ type Bundle struct {
 	Repository string
 	Candidate  domain.ReleaseCandidate
 	CreatedAt  time.Time
+	// Members is the source-derived manifest this bundle was assembled from,
+	// used by VerifySource to re-verify against the source tree. It is nil
+	// for a Bundle built directly with NewBundle from a caller-built
+	// candidate with no source assembly (e.g. release_test.go's fixtures).
+	Members []Member
 }
 
 func NewBundle(repository string, candidate domain.ReleaseCandidate, at time.Time) (Bundle, error) {
@@ -35,7 +40,27 @@ func NewBundle(repository string, candidate domain.ReleaseCandidate, at time.Tim
 	}
 	return Bundle{Repository: repository, Candidate: candidate.Clone(), CreatedAt: at.UTC()}, nil
 }
-func (b Bundle) Snapshot() Bundle { b.Candidate = b.Candidate.Clone(); return b }
+func (b Bundle) Snapshot() Bundle {
+	b.Candidate = b.Candidate.Clone()
+	b.Members = append([]Member(nil), b.Members...)
+	return b
+}
+
+// AssembleBundle reads root, derives the candidate's source-bound digests
+// and capability set (AssembleCandidate), and returns a Bundle carrying the
+// member manifest that VerifySource re-verifies against at promotion time.
+func AssembleBundle(root, repository string, input CandidateInput, at time.Time) (Bundle, AssembledBundle, error) {
+	assembled, candidate, err := AssembleCandidate(root, input)
+	if err != nil {
+		return Bundle{}, AssembledBundle{}, err
+	}
+	bundle, err := NewBundle(repository, candidate, at)
+	if err != nil {
+		return Bundle{}, AssembledBundle{}, err
+	}
+	bundle.Members = append([]Member(nil), assembled.Members...)
+	return bundle, assembled, nil
+}
 
 type Store interface {
 	Put(Bundle) error
@@ -72,12 +97,29 @@ type Route struct {
 	Repository, PreviewDigest, StableDigest, PreviousStableDigest string
 	Generation                                                    uint64
 }
-type Router struct {
-	mu     sync.RWMutex
-	routes map[string]Route
+
+// RollbackRecord is written every time Router.Rollback succeeds. Rollback is
+// monotonic (dp-v2-021 d8): once recorded, PreviousStableDigest is cleared,
+// so a second consecutive Rollback is refused rather than re-promoting a
+// withdrawn digest with no gate pass. Moving forward again requires
+// SetPreview plus a full Promote through the gate.
+type RollbackRecord struct {
+	Repository string
+	From       string
+	To         string
+	Reason     string
+	At         time.Time
 }
 
-func NewRouter() *Router { return &Router{routes: map[string]Route{}} }
+type Router struct {
+	mu        sync.RWMutex
+	routes    map[string]Route
+	rollbacks map[string][]RollbackRecord
+}
+
+func NewRouter() *Router {
+	return &Router{routes: map[string]Route{}, rollbacks: map[string][]RollbackRecord{}}
+}
 func (r *Router) SetPreview(repository, digest string) error {
 	if repository == "" || digest == "" {
 		return errors.New("preview route requires repository and digest")
@@ -100,16 +142,43 @@ func (r *Router) Promote(repository, digest string) error {
 	r.routes[repository] = route
 	return nil
 }
+
+// Rollback restores the previous stable route. It is monotonic: it clears
+// the forward pointer (PreviousStableDigest) as it moves, so a second
+// consecutive call is refused with the same "no previous stable route"
+// error a first call gets on a route that was never promoted twice. Use
+// RollbackWithReason to also obtain the RollbackRecord.
 func (r *Router) Rollback(repository string) error {
+	_, err := r.RollbackWithReason(repository, "", time.Now().UTC())
+	return err
+}
+
+// RollbackWithReason is Rollback plus an explicit reason and timestamp,
+// returning the RollbackRecord it appended. Callers that need determinism
+// (tests) should pass an injected time rather than relying on Rollback's
+// wall-clock default.
+func (r *Router) RollbackWithReason(repository, reason string, at time.Time) (RollbackRecord, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	route := r.routes[repository]
 	if route.PreviousStableDigest == "" {
-		return errors.New("no previous stable route")
+		return RollbackRecord{}, errors.New("no previous stable route")
 	}
-	route.StableDigest, route.PreviousStableDigest, route.Generation = route.PreviousStableDigest, route.StableDigest, route.Generation+1
+	record := RollbackRecord{Repository: repository, From: route.StableDigest, To: route.PreviousStableDigest, Reason: reason, At: at.UTC()}
+	route.StableDigest = route.PreviousStableDigest
+	route.PreviousStableDigest = ""
+	route.Generation++
 	r.routes[repository] = route
-	return nil
+	r.rollbacks[repository] = append(r.rollbacks[repository], record)
+	return record, nil
+}
+
+// RollbackHistory returns every RollbackRecord recorded for repository, in
+// order.
+func (r *Router) RollbackHistory(repository string) []RollbackRecord {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return append([]RollbackRecord(nil), r.rollbacks[repository]...)
 }
 func (r *Router) Get(repository string) (Route, bool) {
 	r.mu.RLock()
