@@ -15,3 +15,8 @@ Preview候補の利用者向け文書の入口です。現在のv2 branchは実�
 候補をPreview Releaseにするには、GCP preflight、pinned image deployment、
 実Runner enrollment、Release Contract全capabilityの実行が必要です。Provider
 依存機能は対象Providerの実物Evidenceがない限りStableへ昇格しません。
+
+capability baselineの正本は
+[contracts/release-contract/foundation.json](../../contracts/release-contract/foundation.json)
+であり、各capabilityの宣言とanchorは
+[Preview capability一覧](capabilities.md) を参照してください。

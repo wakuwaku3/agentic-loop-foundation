@@ -1,0 +1,490 @@
+{
+  "schema_version": "v1",
+  "id": "cd-foundation-0.1.0-baseline",
+  "kind": "capability-declaration-set",
+  "created_at": "2026-08-24T00:00:00Z",
+  "correlation_id": "v2-009-release-contract",
+  "release": "0.1.0-baseline",
+  "contract_ref": "rc-foundation-0.1.0-baseline",
+  "capabilities": [
+    {
+      "id": "cap-repository-registration",
+      "name": "Repositoryを登録する",
+      "user_action": "利用者は改善対象RepositoryをInstallationへ登録する。",
+      "observable_result": "登録後、Repositoryの識別情報、ApplicationのPreview/Stable状態、適用中の大原則とRepository固有ルール、Requirement Backlogの状態、利用可能なRunnerとAI資源、ループが実行可能かとその理由を確認できる。登録によって既存Application、認証情報、外部resourceは無断で変更されない。",
+      "preview_exercise": "Preview実環境で対象RepositoryをInstallationへ1件登録し、登録直後にowner UIへ識別情報とループ実行可否が表示されるかを確認するjourney。",
+      "external_dependencies": {
+        "systems": [
+          "GitHub",
+          "Git",
+          "Firestore",
+          "owner UI"
+        ],
+        "providers": [],
+        "scopes": []
+      },
+      "outcome_conditions": {
+        "success": "登録したRepositoryの識別情報とループ実行可否がowner UIに表示され、既存Application・認証情報・外部resourceが変更されていない",
+        "failure": "登録が拒否される、または識別情報・実行可否のいずれかが表示されない",
+        "rollback": "登録前のInstallation状態へ戻し、他Repositoryへ影響が残っていないことを確認する"
+      },
+      "evidence_retention": {
+        "location": ".agents/v2/evidence/",
+        "retention": "rollback windowは、旧版を参照するRequirementがなくなり、Stableによる復旧が実証され、対応する利用者文書が保持されるまで閉じない。"
+      },
+      "documentation": {
+        "preview": "docs/preview/capabilities.md#cap-repository-registration"
+      },
+      "owner_surfaces": [
+        "/owner/"
+      ],
+      "evidence_schema": "contracts/schemas/evidence.json",
+      "promotion_prerequisites": [
+        "release-contract.md条件2: Preview実環境でcap-repository-registrationのuser journeyを実行し成功すること",
+        "release-contract.md条件3: GitHub、Git、Firestore、owner UIの実物へ接続して成功すること",
+        "release-contract.md条件4: stop、rollback、Stableによる再開を確認すること",
+        "release-contract.md条件6-8: 同じversionのStable利用者文書区間を公開し、Previewとの差分とmigration/rollback方法を説明すること",
+        "release-contract.md条件8: owner API pathを公開しcontracts/openapi/openapi-v1.yamlへ追加すること"
+      ]
+    },
+    {
+      "id": "cap-requirement-intake",
+      "name": "課題を登録する",
+      "user_action": "利用者はInstallationへ自然言語で課題またはfeedbackを登録し、困っていること、補足情報、事業・利用上の文脈、Howの提案、変更してはならない制約を任意に伝える。",
+      "observable_result": "登録が成功すると一意なRequirement IDと永続化された内容が表示され、専用UIがcanonical stateへの登録完了を確認した時点を成功条件とする。",
+      "preview_exercise": "Preview実環境の専用UIから/v1/requirementsへ1件のRequirementを登録し、一意なIDと永続化内容が返るかを確認するjourney。",
+      "external_dependencies": {
+        "systems": [
+          "owner UI",
+          "Firestore"
+        ],
+        "providers": [],
+        "scopes": []
+      },
+      "outcome_conditions": {
+        "success": "captureRequirementが一意なRequirement IDと永続化内容を返し、Backlogから同じ内容が参照できる",
+        "failure": "登録要求が拒否される、またはRequirement IDが発行されない",
+        "rollback": "作成されたRequirementを取り消し、Backlogから除去したことを確認する"
+      },
+      "evidence_retention": {
+        "location": ".agents/v2/evidence/",
+        "retention": "rollback windowは、旧版を参照するRequirementがなくなり、Stableによる復旧が実証され、対応する利用者文書が保持されるまで閉じない。"
+      },
+      "documentation": {
+        "preview": "docs/preview/capabilities.md#cap-requirement-intake"
+      },
+      "owner_surfaces": [
+        "/v1/requirements"
+      ],
+      "evidence_schema": "contracts/schemas/evidence.json",
+      "promotion_prerequisites": [
+        "release-contract.md条件2: Preview実環境でcap-requirement-intakeのuser journeyを実行し成功すること",
+        "release-contract.md条件3: owner UI、Firestoreの実物へ接続して成功すること",
+        "release-contract.md条件4: stop、rollback、Stableによる再開を確認すること",
+        "release-contract.md条件6-8: 同じversionのStable利用者文書区間を公開し、Previewとの差分とmigration/rollback方法を説明すること"
+      ]
+    },
+    {
+      "id": "cap-backlog-visibility",
+      "name": "Backlogを見る",
+      "user_action": "利用者はInstallationの一つのBacklogとしてRequirementを一覧し、関連Repositoryで絞り込む。",
+      "observable_result": "各Requirementについて要求内容、現在の利用者向け状態、優先度とその根拠、関連Repository、実行中/停滞中/自動回復中/人間対応待ちの区別、進行中Incrementと進捗、Preview/Stable反映状況、次のactionを確認できる。",
+      "preview_exercise": "Preview実環境でlistRequirementsとqueueSummaryを呼び出し、返るBacklog一覧が上記の確認項目を満たすかを検証するjourney。",
+      "external_dependencies": {
+        "systems": [
+          "owner UI",
+          "Firestore"
+        ],
+        "providers": [],
+        "scopes": []
+      },
+      "outcome_conditions": {
+        "success": "listRequirementsとqueueSummaryが現在のBacklog状態を過不足なく返す",
+        "failure": "一覧が取得できない、または必須の確認項目が欠落する",
+        "rollback": "取得処理が失敗してもBacklogのcanonical stateが変更されないことを確認する"
+      },
+      "evidence_retention": {
+        "location": ".agents/v2/evidence/",
+        "retention": "rollback windowは、旧版を参照するRequirementがなくなり、Stableによる復旧が実証され、対応する利用者文書が保持されるまで閉じない。"
+      },
+      "documentation": {
+        "preview": "docs/preview/capabilities.md#cap-backlog-visibility"
+      },
+      "owner_surfaces": [
+        "/v1/requirements",
+        "/v1/queue/summary"
+      ],
+      "evidence_schema": "contracts/schemas/evidence.json",
+      "promotion_prerequisites": [
+        "release-contract.md条件2: Preview実環境でcap-backlog-visibilityのuser journeyを実行し成功すること",
+        "release-contract.md条件3: owner UI、Firestoreの実物へ接続して成功すること",
+        "release-contract.md条件4: stop、rollback、Stableによる再開を確認すること",
+        "release-contract.md条件6-8: 同じversionのStable利用者文書区間を公開し、Previewとの差分とmigration/rollback方法を説明すること"
+      ]
+    },
+    {
+      "id": "cap-autonomous-resolution",
+      "name": "問題解決を自律実行する",
+      "user_action": "利用者が逐次指示せずとも、実行可能なRequirementをRunnerがclaimし、調査、深掘り、分解、変更、検証、統合、Preview観測、修正、充足評価、Stable反映までを反復する。",
+      "observable_result": "利用者はRequirement詳細から現在のstageと進捗、統合されたIncrement、Preview観測結果、Stable反映状況を確認でき、1回のRunner占有やsessionで完結しなくても元のRequirementとの関係が失われない。",
+      "preview_exercise": "Preview実環境で1件のRequirementをRunnerにclaimさせ、調査から統合、Preview観測までの反復journeyが/v1/requirements/{requirement_id}の状態遷移として観測できるかを確認するjourney。",
+      "external_dependencies": {
+        "systems": [
+          "local Runner machine",
+          "Git",
+          "GitHub",
+          "Firestore",
+          "OS process"
+        ],
+        "providers": [
+          "codex",
+          "claude",
+          "opencode"
+        ],
+        "scopes": []
+      },
+      "outcome_conditions": {
+        "success": "claimしたRequirementがIncrementへ分解、変更、検証、Previewでの観測まで進み、Requirement詳細に進捗が反映される",
+        "failure": "claim後に進捗が更新されない、またはRequirementとIncrementの関係が失われる",
+        "rollback": "実行中の変更を安全な境界まで戻し、Requirementをqueuedまたはpausedへ復帰させる"
+      },
+      "evidence_retention": {
+        "location": ".agents/v2/evidence/",
+        "retention": "rollback windowは、旧版を参照するRequirementがなくなり、Stableによる復旧が実証され、対応する利用者文書が保持されるまで閉じない。"
+      },
+      "documentation": {
+        "preview": "docs/preview/capabilities.md#cap-autonomous-resolution"
+      },
+      "owner_surfaces": [
+        "/v1/requirements/{requirement_id}"
+      ],
+      "evidence_schema": "contracts/schemas/evidence.json",
+      "promotion_prerequisites": [
+        "release-contract.md条件2: Preview実環境でcap-autonomous-resolutionのuser journeyを実行し成功すること",
+        "release-contract.md条件3: local Runner machine、Git、GitHub、Firestore、OS process、および対象Provider（codex、claude、opencode）の実物へ接続して成功すること",
+        "release-contract.md条件4: stop、rollback、Stableによる再開を確認すること",
+        "release-contract.md条件6-8: 同じversionのStable利用者文書区間を公開し、Previewとの差分とmigration/rollback方法を説明すること"
+      ]
+    },
+    {
+      "id": "cap-human-input-request",
+      "name": "人間の入力を求める",
+      "user_action": "ループは破壊的・不可逆な判断、費用・権限上限の変更、要求の本質的な曖昧さなど権限内で安全に選べない場合に利用者へ質問する。",
+      "observable_result": "利用者は質問において、なぜ自律判断できないか、何を決める必要があるか、選択肢と影響、回答まで何が停止し何が継続できるかを確認でき、回答後は新しいRequirementを作らず元のRequirementが継続する。",
+      "preview_exercise": "Preview実環境でneeds-input状態になったRequirementの詳細を取得し、質問理由・選択肢・停止/継続範囲が表示されるかを確認するjourney。",
+      "external_dependencies": {
+        "systems": [
+          "owner UI",
+          "Firestore"
+        ],
+        "providers": [],
+        "scopes": []
+      },
+      "outcome_conditions": {
+        "success": "Requirement詳細にneeds-inputの理由、選択肢、影響、停止/継続範囲が表示され、回答後に同じRequirementが再開する",
+        "failure": "質問内容が表示されない、または回答後に新しいRequirementが誤って作られる",
+        "rollback": "未回答のまま処理を安全に待機させ、Requirementの状態を変更しない"
+      },
+      "evidence_retention": {
+        "location": ".agents/v2/evidence/",
+        "retention": "rollback windowは、旧版を参照するRequirementがなくなり、Stableによる復旧が実証され、対応する利用者文書が保持されるまで閉じない。"
+      },
+      "documentation": {
+        "preview": "docs/preview/capabilities.md#cap-human-input-request"
+      },
+      "owner_surfaces": [
+        "/v1/requirements/{requirement_id}"
+      ],
+      "evidence_schema": "contracts/schemas/evidence.json",
+      "promotion_prerequisites": [
+        "release-contract.md条件2: Preview実環境でcap-human-input-requestのuser journeyを実行し成功すること",
+        "release-contract.md条件3: owner UI、Firestoreの実物へ接続して成功すること",
+        "release-contract.md条件4: stop、rollback、Stableによる再開を確認すること",
+        "release-contract.md条件6-8: 同じversionのStable利用者文書区間を公開し、Previewとの差分とmigration/rollback方法を説明すること"
+      ]
+    },
+    {
+      "id": "cap-preview-operation",
+      "name": "Previewを運用する",
+      "user_action": "利用者はRepository単位でPreview利用対象を選び、稼働versionと対象範囲を把握する。",
+      "observable_result": "稼働versionと対象範囲、Stableとの差分、処理したRequirementとIncrement、test・smoke・dogfooding結果、未解決の障害と自動回復状況、Stableへ昇格可能かとその不足事項を確認できる。障害時は新規claimが止まりStableへroutingが戻る。",
+      "preview_exercise": "Preview実環境で対象RepositoryのPreview状態を観測し、稼働version、差分、未充足事項がowner UIへ表示されるかを確認するjourney。",
+      "external_dependencies": {
+        "systems": [
+          "Google Cloud Run",
+          "Firestore",
+          "owner UI"
+        ],
+        "providers": [],
+        "scopes": []
+      },
+      "outcome_conditions": {
+        "success": "Preview稼働versionと未充足の昇格条件がowner UIへ表示され、障害時に新規claimが止まりStableへroutingが戻る",
+        "failure": "Preview状態が表示されない、または障害時にroutingがStableへ戻らない",
+        "rollback": "Previewの障害をStableへ影響させず、Preview routingだけを元に戻す"
+      },
+      "evidence_retention": {
+        "location": ".agents/v2/evidence/",
+        "retention": "rollback windowは、旧版を参照するRequirementがなくなり、Stableによる復旧が実証され、対応する利用者文書が保持されるまで閉じない。"
+      },
+      "documentation": {
+        "preview": "docs/preview/capabilities.md#cap-preview-operation"
+      },
+      "owner_surfaces": [
+        "/owner/"
+      ],
+      "evidence_schema": "contracts/schemas/evidence.json",
+      "promotion_prerequisites": [
+        "release-contract.md条件2: Preview実環境でcap-preview-operationのuser journeyを実行し成功すること",
+        "release-contract.md条件3: Google Cloud Run、Firestore、owner UIの実物へ接続して成功すること",
+        "release-contract.md条件4: stop、rollback、Stableによる再開を確認すること",
+        "release-contract.md条件6-8: 同じversionのStable利用者文書区間を公開し、Previewとの差分とmigration/rollback方法を説明すること",
+        "release-contract.md条件8: owner API pathを公開しcontracts/openapi/openapi-v1.yamlへ追加すること"
+      ]
+    },
+    {
+      "id": "cap-stable-promotion",
+      "name": "Stableへ昇格する",
+      "user_action": "利用者は、昇格条件を満たしたPreviewのApplicationまたはループversionが人間reviewを待たずStableへ自動昇格することを許可する。",
+      "observable_result": "昇格完了には全ユーザー向け機能のPreview実稼働確認、外部systemとProviderでの実物確認、稼働中Stableの利用、検証結果の記録、切り戻し先の利用可能性、進行中Requirementの継続、昇格内容と根拠の確認、同じversionのStable利用者文書公開が揃っていることを確認できる。",
+      "preview_exercise": "Preview実環境でStable候補の昇格条件チェック結果を取得し、release-contract.md条件1-8の充足状況がowner UIへ表示されるかを確認するjourney。",
+      "external_dependencies": {
+        "systems": [
+          "Google Cloud Run",
+          "Firestore",
+          "owner UI",
+          "GitHub"
+        ],
+        "providers": [],
+        "scopes": []
+      },
+      "outcome_conditions": {
+        "success": "昇格条件1-8が全て満たされたときだけ昇格が完了し、切り戻し先と検証結果がowner UIに表示される",
+        "failure": "未充足の条件があるまま昇格する、または昇格根拠が表示されない",
+        "rollback": "昇格前のStable版へ戻し、進行中Requirementを継続させる"
+      },
+      "evidence_retention": {
+        "location": ".agents/v2/evidence/",
+        "retention": "rollback windowは、旧版を参照するRequirementがなくなり、Stableによる復旧が実証され、対応する利用者文書が保持されるまで閉じない。"
+      },
+      "documentation": {
+        "preview": "docs/preview/capabilities.md#cap-stable-promotion"
+      },
+      "owner_surfaces": [
+        "/owner/"
+      ],
+      "evidence_schema": "contracts/schemas/evidence.json",
+      "promotion_prerequisites": [
+        "release-contract.md条件2: Preview実環境でcap-stable-promotionのuser journeyを実行し成功すること",
+        "release-contract.md条件3: Google Cloud Run、Firestore、owner UI、GitHubの実物へ接続して成功すること",
+        "release-contract.md条件4: stop、rollback、Stableによる再開を確認すること",
+        "release-contract.md条件6-8: 同じversionのStable利用者文書区間を公開し、Previewとの差分とmigration/rollback方法を説明すること",
+        "release-contract.md条件8: owner API pathを公開しcontracts/openapi/openapi-v1.yamlへ追加すること"
+      ]
+    },
+    {
+      "id": "cap-loop-control",
+      "name": "ループを制御する",
+      "user_action": "利用者は対象範囲を指定してRequirement受付の停止・再開、新規claimの停止・再開、graceful/immediate/emergency stop、Requirementのpause/resume/cancelを実行する。",
+      "observable_result": "制御要求の受付済みと完了が区別され、完了時は対象Runner、process、lease、新規副作用の可否が表示される。到達不能Runnerがある場合もそれを隠さず、古い権限で結果を確定できないことを示す。",
+      "preview_exercise": "Preview実環境でsetControlを使いgraceful stopを発行し、listControlReadsで受付済みから完了までの状態遷移が観測できるかを確認するjourney。",
+      "external_dependencies": {
+        "systems": [
+          "owner UI",
+          "Firestore",
+          "Google Cloud Run",
+          "local Runner machine",
+          "OS process"
+        ],
+        "providers": [],
+        "scopes": []
+      },
+      "outcome_conditions": {
+        "success": "制御要求が受付済みから完了まで遷移し、対象Runner・process・lease・新規副作用可否がowner UIに表示される",
+        "failure": "制御要求が完了と誤表示される、または到達不能Runnerの状態が隠される",
+        "rollback": "発行した制御を解除し、対象Repository/Runnerを制御前の状態へ戻す"
+      },
+      "evidence_retention": {
+        "location": ".agents/v2/evidence/",
+        "retention": "rollback windowは、旧版を参照するRequirementがなくなり、Stableによる復旧が実証され、対応する利用者文書が保持されるまで閉じない。"
+      },
+      "documentation": {
+        "preview": "docs/preview/capabilities.md#cap-loop-control"
+      },
+      "owner_surfaces": [
+        "/v1/controls"
+      ],
+      "evidence_schema": "contracts/schemas/evidence.json",
+      "promotion_prerequisites": [
+        "release-contract.md条件2: Preview実環境でcap-loop-controlのuser journeyを実行し成功すること",
+        "release-contract.md条件3: owner UI、Firestore、Google Cloud Run、local Runner machine、OS processの実物へ接続して成功すること",
+        "release-contract.md条件4: stop、rollback、Stableによる再開を確認すること",
+        "release-contract.md条件6-8: 同じversionのStable利用者文書区間を公開し、Previewとの差分とmigration/rollback方法を説明すること"
+      ]
+    },
+    {
+      "id": "cap-loop-self-update",
+      "name": "ループ自身を更新する",
+      "user_action": "利用者は、ループが自分のmoduleまたはversionを追加し、Previewへ切り替え、dogfoodingし、Stableへ昇格することを許可する。",
+      "observable_result": "問題発生時はStableへ戻り同じcanonical stateから処理を継続でき、rollback可能期間中は旧版が保持され、復旧条件を満たした後だけ旧版が削除される。updaterの失敗時も独立した管理経路から復旧できる。",
+      "preview_exercise": "Preview実環境でループの新versionへ切り替え、dogfooding後にStableへ戻すrollbackが同じcanonical stateから継続できるかを確認するjourney。",
+      "external_dependencies": {
+        "systems": [
+          "Google Cloud Run",
+          "Git",
+          "GitHub",
+          "Firestore",
+          "local Runner machine"
+        ],
+        "providers": [],
+        "scopes": []
+      },
+      "outcome_conditions": {
+        "success": "新versionへの切替とStableへのrollbackが同じcanonical stateから進行中処理を失わずに完了する",
+        "failure": "rollback後に進行中処理またはcanonical stateの継続性が失われる",
+        "rollback": "旧Stable versionを保持したまま新versionを破棄する"
+      },
+      "evidence_retention": {
+        "location": ".agents/v2/evidence/",
+        "retention": "rollback windowは、旧版を参照するRequirementがなくなり、Stableによる復旧が実証され、対応する利用者文書が保持されるまで閉じない。"
+      },
+      "documentation": {
+        "preview": "docs/preview/capabilities.md#cap-loop-self-update"
+      },
+      "owner_surfaces": [
+        "/owner/"
+      ],
+      "evidence_schema": "contracts/schemas/evidence.json",
+      "promotion_prerequisites": [
+        "release-contract.md条件2: Preview実環境でcap-loop-self-updateのuser journeyを実行し成功すること",
+        "release-contract.md条件3: Google Cloud Run、Git、GitHub、Firestore、local Runner machineの実物へ接続して成功すること",
+        "release-contract.md条件4: stop、rollback、Stableによる再開を確認すること",
+        "release-contract.md条件6-8: 同じversionのStable利用者文書区間を公開し、Previewとの差分とmigration/rollback方法を説明すること",
+        "release-contract.md条件8: owner API pathを公開しcontracts/openapi/openapi-v1.yamlへ追加すること"
+      ]
+    },
+    {
+      "id": "cap-shared-resource-allocation",
+      "name": "Backlogへ共有資源を配分する",
+      "user_action": "利用者はRequirementごとの優先順位とその判断理由、Repositoryごとの実行可否・権限・同時実行上限、Installation全体とRepositoryごとの同時実行上限、AI providerごとの利用可能状態と上限、現在の割当・待機理由・枯渇状態を確認・設定する。",
+      "observable_result": "一つのRepositoryの大量要求、障害、再試行によって他Repositoryが無期限に処理されなくなることがないと確認できる。",
+      "preview_exercise": "Preview実環境で複数RepositoryのRequirementを同時に処理させ、queueSummaryとsetControlの上限設定が共有資源の枯渇や飢餓を防いでいるかを確認するjourney。",
+      "external_dependencies": {
+        "systems": [
+          "Firestore",
+          "owner UI",
+          "local Runner machine"
+        ],
+        "providers": [
+          "codex",
+          "claude",
+          "opencode"
+        ],
+        "scopes": []
+      },
+      "outcome_conditions": {
+        "success": "共有Runner/AI資源が優先順位に従って複数Repositoryへ配分され、単一Repositoryが他Repositoryの処理を無期限に占有しない",
+        "failure": "特定Repositoryの要求が他Repositoryの処理を無期限に止める、または割当状況が表示されない",
+        "rollback": "配分設定を変更前の上限へ戻し、待機中Requirementの状態を保持する"
+      },
+      "evidence_retention": {
+        "location": ".agents/v2/evidence/",
+        "retention": "rollback windowは、旧版を参照するRequirementがなくなり、Stableによる復旧が実証され、対応する利用者文書が保持されるまで閉じない。"
+      },
+      "documentation": {
+        "preview": "docs/preview/capabilities.md#cap-shared-resource-allocation"
+      },
+      "owner_surfaces": [
+        "/v1/queue/summary",
+        "/v1/controls"
+      ],
+      "evidence_schema": "contracts/schemas/evidence.json",
+      "promotion_prerequisites": [
+        "release-contract.md条件2: Preview実環境でcap-shared-resource-allocationのuser journeyを実行し成功すること",
+        "release-contract.md条件3: Firestore、owner UI、local Runner machine、および対象Provider（codex、claude、opencode）の実物へ接続して成功すること",
+        "release-contract.md条件4: stop、rollback、Stableによる再開を確認すること",
+        "release-contract.md条件6-8: 同じversionのStable利用者文書区間を公開し、Previewとの差分とmigration/rollback方法を説明すること"
+      ]
+    },
+    {
+      "id": "cap-provider-operation",
+      "name": "AI Providerを利用・切替する",
+      "user_action": "利用者はCodex、Claude、opencodeを利用可能なAI Providerとして接続し、providerごとの状態を確認する。",
+      "observable_result": "接続済みか、対応versionと認証の健全性、同時実行上限・利用上限・枯渇状態、対応Loop Version、現在の割当先Requirementを確認でき、provider障害や枯渇時は互換providerへ安全にhandoffするか待機理由が表示される。",
+      "preview_exercise": "Preview実環境で対象Providerの接続状態を取得し、枯渇や障害を模擬した際にhandoffまたは待機理由が表示されるかを確認するjourney。",
+      "external_dependencies": {
+        "systems": [
+          "local Runner machine",
+          "owner UI",
+          "Firestore"
+        ],
+        "providers": [
+          "codex",
+          "claude",
+          "opencode"
+        ],
+        "scopes": []
+      },
+      "outcome_conditions": {
+        "success": "各Providerの接続状態・上限・割当先が表示され、障害時は互換providerへのhandoffまたは待機理由が明示される",
+        "failure": "provider状態が表示されない、または品質・権限条件を満たさず黙って縮退する",
+        "rollback": "handoff前のprovider割当へ戻し、文脈とRequirement、検証結果を保持する"
+      },
+      "evidence_retention": {
+        "location": ".agents/v2/evidence/",
+        "retention": "rollback windowは、旧版を参照するRequirementがなくなり、Stableによる復旧が実証され、対応する利用者文書が保持されるまで閉じない。"
+      },
+      "documentation": {
+        "preview": "docs/preview/capabilities.md#cap-provider-operation"
+      },
+      "owner_surfaces": [
+        "/owner/"
+      ],
+      "evidence_schema": "contracts/schemas/evidence.json",
+      "promotion_prerequisites": [
+        "release-contract.md条件2: Preview実環境でcap-provider-operationのuser journeyを実行し成功すること",
+        "release-contract.md条件3: local Runner machine、owner UI、Firestore、および対象Provider（codex、claude、opencode）の実物へ接続して成功すること",
+        "release-contract.md条件4: stop、rollback、Stableによる再開を確認すること",
+        "release-contract.md条件6-8: 同じversionのStable利用者文書区間を公開し、Previewとの差分とmigration/rollback方法を説明すること",
+        "release-contract.md条件8: owner API pathを公開しcontracts/openapi/openapi-v1.yamlへ追加すること"
+      ]
+    },
+    {
+      "id": "cap-user-documentation",
+      "name": "利用者文書を読む",
+      "user_action": "利用者は実際に利用しているchannelとversionに対応したユーザー向け文書を読む。",
+      "observable_result": "Stable文書は現在利用できる機能と操作を完全に説明し、Preview文書は現在のPreview全体の利用方法に加えStableとの差分・既知の問題・切り戻し方法を説明する。機能追加・変更・廃止は同じPreview versionの文書へ反映されるまでPreview完成とみなさない。",
+      "preview_exercise": "Preview実環境でdocs/preview配下の文書を参照し、稼働versionと機能説明が一致しているかを確認するjourney。",
+      "external_dependencies": {
+        "systems": [
+          "owner UI"
+        ],
+        "providers": [],
+        "scopes": []
+      },
+      "outcome_conditions": {
+        "success": "利用中channel/versionに対応する文書が完全に参照でき、実挙動との差異がない",
+        "failure": "文書が古いversionを説明する、または実挙動との差異がある",
+        "rollback": "rollback対象versionに対応する文書を参照可能な状態で保持する"
+      },
+      "evidence_retention": {
+        "location": ".agents/v2/evidence/",
+        "retention": "rollback windowは、旧版を参照するRequirementがなくなり、Stableによる復旧が実証され、対応する利用者文書が保持されるまで閉じない。"
+      },
+      "documentation": {
+        "preview": "docs/preview/capabilities.md#cap-user-documentation"
+      },
+      "owner_surfaces": [
+        "/owner/"
+      ],
+      "evidence_schema": "contracts/schemas/evidence.json",
+      "promotion_prerequisites": [
+        "release-contract.md条件2: Preview実環境でcap-user-documentationのuser journeyを実行し成功すること",
+        "release-contract.md条件3: owner UIの実物へ接続して成功すること",
+        "release-contract.md条件4: stop、rollback、Stableによる再開を確認すること",
+        "release-contract.md条件6-8: 同じversionのStable利用者文書区間を公開し、Previewとの差分とmigration/rollback方法を説明すること",
+        "release-contract.md条件8: owner API pathを公開しcontracts/openapi/openapi-v1.yamlへ追加すること"
+      ]
+    }
+  ]
+}

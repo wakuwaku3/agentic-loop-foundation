@@ -1,0 +1,94 @@
+{
+  "schema_version": "v1",
+  "id": "rc-foundation-0.1.0-baseline",
+  "kind": "release-contract",
+  "created_at": "2026-08-24T00:00:00Z",
+  "correlation_id": "v2-009-release-contract",
+  "release": "0.1.0-baseline",
+  "capabilities": [
+    {
+      "id": "cap-repository-registration",
+      "name": "Repositoryを登録する",
+      "status": "preview",
+      "evidence_ids": []
+    },
+    {
+      "id": "cap-requirement-intake",
+      "name": "課題を登録する",
+      "status": "preview",
+      "evidence_ids": []
+    },
+    {
+      "id": "cap-backlog-visibility",
+      "name": "Backlogを見る",
+      "status": "preview",
+      "evidence_ids": []
+    },
+    {
+      "id": "cap-autonomous-resolution",
+      "name": "問題解決を自律実行する",
+      "status": "preview",
+      "evidence_ids": []
+    },
+    {
+      "id": "cap-human-input-request",
+      "name": "人間の入力を求める",
+      "status": "preview",
+      "evidence_ids": []
+    },
+    {
+      "id": "cap-preview-operation",
+      "name": "Previewを運用する",
+      "status": "preview",
+      "evidence_ids": []
+    },
+    {
+      "id": "cap-stable-promotion",
+      "name": "Stableへ昇格する",
+      "status": "preview",
+      "evidence_ids": []
+    },
+    {
+      "id": "cap-loop-control",
+      "name": "ループを制御する",
+      "status": "preview",
+      "evidence_ids": []
+    },
+    {
+      "id": "cap-loop-self-update",
+      "name": "ループ自身を更新する",
+      "status": "preview",
+      "evidence_ids": []
+    },
+    {
+      "id": "cap-shared-resource-allocation",
+      "name": "Backlogへ共有資源を配分する",
+      "status": "preview",
+      "evidence_ids": []
+    },
+    {
+      "id": "cap-provider-operation",
+      "name": "AI Providerを利用・切替する",
+      "status": "preview",
+      "evidence_ids": []
+    },
+    {
+      "id": "cap-user-documentation",
+      "name": "利用者文書を読む",
+      "status": "preview",
+      "evidence_ids": []
+    }
+  ],
+  "verification": [
+    "devbox run --pure check",
+    "make component-contracts",
+    "make component-release",
+    "make ownership",
+    "go test ./internal/contracts -run TestFoundationReleaseContractBaseline",
+    "go test ./internal/release -run TestCompileFoundationBaselineContract"
+  ],
+  "rollback": {
+    "procedure": "git revert the commit that introduced contracts/release-contract/, then run devbox run --pure check; the known recovery point remains the v1 loop on the main branch as recorded in docs/stable/index.md",
+    "target": "main-v1"
+  }
+}

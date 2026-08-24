@@ -1,8 +1,14 @@
 # Local release core
 
-`internal/release` is the provider-neutral M5 core. `CompileContract` hashes the
-versioned release contract and documentation bytes; a `Bundle` stores cloned
-candidate state so callers cannot mutate an immutable candidate after `Put`.
+`internal/release` is the provider-neutral M5 core. `CompileContract` decodes the
+canonical Release Contract surface (`id`, `kind`, `created_at`, `correlation_id`,
+`release`, per-capability `name`/`status`/`evidence_ids`, `verification`, and
+`rollback{procedure,target}`) with `DisallowUnknownFields`, so a schema-valid
+contract compiles while any drifted or invented field is rejected. It also
+refuses a contract that declares a capability `status: "stable"` with no
+`evidence_ids`, then hashes the contract and documentation bytes; a `Bundle`
+stores cloned candidate state so callers cannot mutate an immutable candidate
+after `Put`.
 
 Promotion is a pure gate over capability evidence. Every declared capability
 must bind candidate digest, bundle/contract/docs digests, provider, target,

@@ -7,3 +7,8 @@
 現在不足している実証は、GCP Preview deployment、Foundation Repositoryでの
 dogfooding、実Codex/Claude/opencode接続、停止/rollback/resume、および複数の
 利用者管理machineとRepositoryによる並列実行です。
+
+capability baselineの正本は
+[contracts/release-contract/foundation.json](../../contracts/release-contract/foundation.json)
+であり、各capabilityの宣言とanchorは
+[Preview capability一覧](capabilities.md) を参照してください。

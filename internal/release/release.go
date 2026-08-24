@@ -128,10 +128,22 @@ type CompiledContract struct {
 func CompileContract(data []byte, docs []byte) (CompiledContract, error) {
 	var raw struct {
 		SchemaVersion string `json:"schema_version"`
+		ID            string `json:"id"`
+		Kind          string `json:"kind"`
+		CreatedAt     string `json:"created_at"`
+		CorrelationID string `json:"correlation_id"`
 		Release       string `json:"release"`
 		Capabilities  []struct {
-			ID string `json:"id"`
+			ID          string   `json:"id"`
+			Name        string   `json:"name"`
+			Status      string   `json:"status"`
+			EvidenceIDs []string `json:"evidence_ids"`
 		} `json:"capabilities"`
+		Verification []string `json:"verification"`
+		Rollback     struct {
+			Procedure string `json:"procedure"`
+			Target    string `json:"target"`
+		} `json:"rollback"`
 	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
@@ -150,6 +162,9 @@ func CompileContract(data []byte, docs []byte) (CompiledContract, error) {
 		}
 		seen[c.ID] = true
 		ids = append(ids, c.ID)
+		if c.Status == "stable" && len(c.EvidenceIDs) == 0 {
+			return CompiledContract{}, errors.New("release contract capability claims stable status without evidence")
+		}
 	}
 	h := sha256.Sum256(data)
 	d := sha256.Sum256(docs)
