@@ -248,6 +248,7 @@ Requirement Done:
 ### 検証 evidence の再利用
 
 component ごとに、component source、公開 contract、依存 surface、test source／runner、lockfile／toolchain／Devbox 等の環境定義を hash 化した evidence key を作る。同じ key の成功 evidence は再利用できる。候補 commit の gate は、全 component について現在の key に対応する新鮮な evidence が存在することを aggregate attestation で確認する。
+component の evidence key は、`make check`（`format` を含む）が緑になった最終 tree で読む。formatting のみの後続 commit でも tracked file の内容が変わるため component の key は動き、先に読んだ key はその後の tree を attest しない。
 
 ### aggregate attestation と identity 注入
 
