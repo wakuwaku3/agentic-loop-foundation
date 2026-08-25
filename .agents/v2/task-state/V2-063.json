@@ -1,0 +1,92 @@
+{
+  "schema_version": "v1",
+  "id": "ts-v2-063",
+  "kind": "canonical-task-state",
+  "task_id": "V2-063",
+  "status": "blocked",
+  "dependencies": [
+    "V2-045",
+    "V2-058"
+  ],
+  "outcome": "Re-run the representative Provider's live vertical exercise at the commit where the redesigned evidence key has landed, so the live record's declared key is measured rather than argued, and prove the corrected lease guard in the live journey that V2-058 could only change at the source.",
+  "non_goals": [
+    "Do not rewrite the earlier live record's bytes; issue a refresh entry instead",
+    "Do not accept a written argument in place of a re-observation",
+    "Do not widen the exercise beyond what the earlier live record covered"
+  ],
+  "actor": "sol",
+  "input_refs": [
+    "V2-063",
+    "V2-045",
+    "V2-058",
+    "V2-017"
+  ],
+  "input_hash": "4c1796e24b3110f9cb487fac3a48dab5abf3c7cff9e9a4cc69fc9eda0cb4de26",
+  "output_refs": [
+    "V2-063"
+  ],
+  "output_hash": "bc3cf6984f28be7047e0a4f467e17dc96f5791aef0ddbd00f75762b6f96c6346",
+  "owner": "luna",
+  "next_owner": "luna",
+  "retry_budget": {
+    "max_attempts": 2,
+    "attempts_used": 0,
+    "remaining": 2
+  },
+  "release_eligible": false,
+  "block_reason": "V2-045,V2-058",
+  "transitions": [
+    {
+      "sequence": 1,
+      "at": "2026-08-25T01:55:00Z",
+      "from_status": null,
+      "to_status": "queued",
+      "actor": "sol",
+      "input_refs": [
+        "V2-063",
+        "V2-045",
+        "V2-058",
+        "V2-017"
+      ],
+      "input_hash": "4c1796e24b3110f9cb487fac3a48dab5abf3c7cff9e9a4cc69fc9eda0cb4de26",
+      "output_refs": [
+        "V2-063"
+      ],
+      "output_hash": "bc3cf6984f28be7047e0a4f467e17dc96f5791aef0ddbd00f75762b6f96c6346",
+      "owner": "luna",
+      "next_owner": "luna",
+      "retry_budget": {
+        "max_attempts": 2,
+        "attempts_used": 0,
+        "remaining": 2
+      },
+      "reason": "the earlier live record declares its own evidence_key to be the runner component key, so the redesigned key makes that record stale by its own declared method; re-observing the live exercise is stronger than carrying the record forward on an argument, and the same run is the only way to exercise the second pinned lease guard that V2-058 must record as skipped"
+    },
+    {
+      "sequence": 2,
+      "at": "2026-08-25T01:55:01Z",
+      "from_status": "queued",
+      "to_status": "blocked",
+      "actor": "sol",
+      "input_refs": [
+        "V2-063",
+        "V2-045",
+        "V2-058",
+        "V2-017"
+      ],
+      "input_hash": "4c1796e24b3110f9cb487fac3a48dab5abf3c7cff9e9a4cc69fc9eda0cb4de26",
+      "output_refs": [
+        "V2-063"
+      ],
+      "output_hash": "bc3cf6984f28be7047e0a4f467e17dc96f5791aef0ddbd00f75762b6f96c6346",
+      "owner": "luna",
+      "next_owner": "luna",
+      "retry_budget": {
+        "max_attempts": 2,
+        "attempts_used": 0,
+        "remaining": 2
+      },
+      "reason": "the exercise must run at the commit where V2-045 and V2-058 have both landed, otherwise the measured key and the corrected guard are not the ones being attested"
+    }
+  ]
+}
