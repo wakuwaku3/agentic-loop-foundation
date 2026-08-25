@@ -13,6 +13,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -216,4 +217,80 @@ func TestNoCredentialFieldInRunnerNonTestFiles(t *testing.T) {
 		t.Fatal("scanned zero struct fields; the AST walk is not finding field names")
 	}
 	t.Logf("scanned non-test files=%d structs=%d fields=%d json-tags=%d", nonTestFiles, structCount, fieldCount, tagCount)
+}
+
+// --- V2-017 B4: ProcessSupervisor may be referenced from exactly one
+// location in the provider execution path (provider.go), so there is no
+// second, uncontrolled way to spawn a real process that bypasses
+// SupervisedInvocationRunner's CostLedger gate. ---
+
+func TestProcessSupervisorReferencedExactlyOnceInProviderExecutionPath(t *testing.T) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "provider.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parse provider.go: %v", err)
+	}
+	count := 0
+	ast.Inspect(file, func(n ast.Node) bool {
+		ident, ok := n.(*ast.Ident)
+		if !ok {
+			return true
+		}
+		if ident.Name == "ProcessSupervisor" {
+			count++
+		}
+		return true
+	})
+	if count != 1 {
+		t.Fatalf("provider.go must reference the ProcessSupervisor type from exactly one location (the SupervisedInvocationRunner.Supervisor field), found %d", count)
+	}
+}
+
+// --- V2-017 B13(f): no non-test file under internal/runner may reference
+// ".claude", ".credentials" or any path under the user's home directory, as
+// an absence proof that the Control Plane/runner never opens the claude
+// CLI's own credential store itself. This is a string-literal AST scan
+// (go/ast, not text grep) so it cannot be defeated by a literal built up
+// from concatenated non-literal pieces looking incidentally similar, while
+// still catching the actual risk: a hardcoded path string. ---
+
+func TestNoCredentialStorePathReferencedInRunnerNonTestFiles(t *testing.T) {
+	home := os.Getenv("HOME")
+	if h, err := os.UserHomeDir(); err == nil && h != "" {
+		home = h
+	}
+	files := parseRunnerPackage(t)
+	nonTestFiles := 0
+	literalsScanned := 0
+	for _, pf := range files {
+		if pf.isTest {
+			continue
+		}
+		nonTestFiles++
+		ast.Inspect(pf.file, func(n ast.Node) bool {
+			lit, ok := n.(*ast.BasicLit)
+			if !ok || lit.Kind != token.STRING {
+				return true
+			}
+			value, err := strconv.Unquote(lit.Value)
+			if err != nil {
+				return true
+			}
+			literalsScanned++
+			if strings.Contains(value, ".claude") {
+				t.Fatalf("%s: string literal %q references the claude CLI's config directory", pf.path, value)
+			}
+			if strings.Contains(value, ".credentials") {
+				t.Fatalf("%s: string literal %q references a credentials file name", pf.path, value)
+			}
+			if home != "" && strings.Contains(value, home) {
+				t.Fatalf("%s: string literal %q references a path under the user's home directory (%s)", pf.path, value, home)
+			}
+			return true
+		})
+	}
+	if nonTestFiles == 0 {
+		t.Fatal("source guard scanned zero non-test files")
+	}
+	t.Logf("scanned non-test files=%d string-literals=%d home=%q", nonTestFiles, literalsScanned, home)
 }

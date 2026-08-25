@@ -1,8 +1,10 @@
 package runner
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"io"
 	"os/exec"
 	"syscall"
 	"time"
@@ -21,10 +23,20 @@ import (
 // ErrNamespaceUnsupported and never starts the child -- when the kernel or
 // environment cannot actually provide that confinement, rather than
 // silently falling back to running the child unconfined.
+//
+// Stdin and Stdout are additive (V2-017): Stdin, if non-nil, is written to
+// the child's standard input; Stdout, if non-nil, receives the child's
+// standard output. Both are zero-value-compatible with every existing
+// caller (nil Stdin/Stdout leaves the child's stdin/stdout exactly as
+// os/exec.Cmd's own zero value does today: an already-closed stdin and a
+// discarded stdout). Neither field changes Run's signature or the
+// TERM-then-KILL process-group logic below.
 type ProcessSupervisor struct {
 	TermGrace time.Duration
 	Env       []string
 	Confine   *NamespaceConfinement
+	Stdin     []byte
+	Stdout    io.Writer
 }
 
 func (s ProcessSupervisor) Run(ctx context.Context, argv []string) error {
@@ -45,6 +57,12 @@ func (s ProcessSupervisor) Run(ctx context.Context, argv []string) error {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if s.Env != nil {
 		cmd.Env = s.Env
+	}
+	if s.Stdin != nil {
+		cmd.Stdin = bytes.NewReader(s.Stdin)
+	}
+	if s.Stdout != nil {
+		cmd.Stdout = s.Stdout
 	}
 	if err := cmd.Start(); err != nil {
 		return err

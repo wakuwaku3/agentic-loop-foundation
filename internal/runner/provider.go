@@ -1,10 +1,18 @@
 package runner
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
 	"sync"
+	"syscall"
+	"time"
 
 	"github.com/takushi/agentic-loop-foundation/v2/internal/provider"
 )
@@ -101,16 +109,292 @@ func (f *FakeInvocationRunner) CallCount() int {
 	return len(f.Calls)
 }
 
-// SupervisedInvocationRunner is the seam a real Provider CLI fills: it would
-// run a real Invocation through ProcessSupervisor and the bounded diagnostic
-// log. V2-016 wires the type but not a real executable; V2-017 fills it.
+// ErrSupervisedInvocationRunnerIncomplete is returned by Run (and starts no
+// process) whenever any required dependency is missing. There is no
+// exported constructor or field combination that lets a caller reach the
+// exec step without a CostLedger and an approved provider-preflight record
+// (dp-v2-017 B4): every field below is required, and Run checks all of them
+// before doing anything else.
+var ErrSupervisedInvocationRunnerIncomplete = errors.New("supervised invocation runner dependencies are incomplete")
+
+// SupervisedInvocationRunner is the seam a real Provider CLI fills: it runs
+// a real provider.Invocation through ProcessSupervisor (the package's only
+// other reference to that type, dp-v2-017 B4/TestProcessSupervisorReferenced
+// ExactlyOnceInProviderExecutionPath) after first debiting a CostLedger
+// reservation against a freshly-loaded, approved provider-preflight record
+// (dp-v2-017 d1). The order inside Run is strictly: (1) refuse if any
+// dependency is nil/empty; (2) LoadPreflightRecord (schema + repository-wide
+// validation, freshly read from disk); (3) Ledger.Reserve, which persists a
+// reservation to disk before anything may execute; (4) resolve argv[0] to
+// the approved record's absolute executable_path and exec through
+// ProcessSupervisor with the invocation's Stdin wired to the child's stdin
+// and its stdout captured in memory; (5) project the real CLI's stdout, in
+// memory, into the minimal fixture shape provider.ClaudeAdapter.Parse
+// accepts (dp-v2-017 d5) -- the raw stdout bytes are never written to any
+// file and are dropped as soon as the projection is built; (6)
+// Ledger.TrueUp from the parsed total_cost_usd and usage. If the process is
+// cancelled or killed before it produces output, TrueUp is skipped entirely
+// so the reservation stays charged at worst case forever (dp-v2-017 d9's
+// risk note) and no result is ever produced to journal.
 type SupervisedInvocationRunner struct {
 	Supervisor ProcessSupervisor
 	Log        *BoundedLog
+	Ledger     *CostLedger
+	// RepoRoot is the absolute path to the repository root (needed to
+	// locate contracts/schemas/provider-preflight.json and to resolve
+	// approval.subject_path).
+	RepoRoot string
+	// RecordPath is the absolute or RepoRoot-relative path to the approved
+	// provider-preflight record for this task.
+	RecordPath string
+	// Purpose names, for the ledger and for evidence, which named
+	// invocation (e.g. "V2-017-I1-happy-journey") this Run call is.
+	Purpose string
+	// Now, if set, replaces time.Now().UTC() everywhere this type needs a
+	// timestamp (tests only; production leaves it nil).
+	Now func() time.Time
+	// ExtraEnv is additive, "NAME=value" environment entries merged onto
+	// the base_names-derived environment for this one Run call only
+	// (dp-v2-017 B16/I7: inducing a deterministic transport failure by
+	// pointing the CLI at an unreachable base URL needs one diagnostic
+	// override that is not part of the approved record's base_names). It
+	// is nil for every other invocation in this task; when nil,
+	// Invocation.Environment stays exactly set-equal to
+	// environment.base_names (dp-v2-017 d8(c)).
+	ExtraEnv []string
 }
 
-func (SupervisedInvocationRunner) Run(context.Context, provider.Invocation) ([]byte, error) {
-	return nil, errors.New("supervised invocation execution is not wired until V2-017")
+func (r SupervisedInvocationRunner) now() time.Time {
+	if r.Now != nil {
+		return r.Now()
+	}
+	return time.Now().UTC()
+}
+
+// buildEnvironmentFromBaseNames returns "NAME=value" pairs for exactly
+// baseNames, sourced from this process's own environment. It fails closed
+// (returns an error, builds nothing) if any declared base name is not
+// actually set, so the built environment can never silently be a subset of
+// what the approved record declares (dp-v2-017 d8(c): Invocation.Environment
+// must be set-equal to environment.base_names).
+func buildEnvironmentFromBaseNames(baseNames []string) ([]string, error) {
+	env := make([]string, 0, len(baseNames))
+	for _, name := range baseNames {
+		v, ok := os.LookupEnv(name)
+		if !ok {
+			return nil, fmt.Errorf("required base environment variable %s is not set in this process", name)
+		}
+		env = append(env, name+"="+v)
+	}
+	return env, nil
+}
+
+func allowlistFromNames(names []string) map[string]bool {
+	m := make(map[string]bool, len(names))
+	for _, n := range names {
+		m[n] = true
+	}
+	return m
+}
+
+// realCLIOutcome is the subset of the real claude CLI's reported JSON that
+// SupervisedInvocationRunner projects and settles (dp-v2-017 B7/B12/d5). It
+// is never itself handed to provider.Adapter.Parse or persisted anywhere:
+// only the projection produced from it (whose "output" field is a sha256
+// digest, never response text) may reach the journal, the bounded log, the
+// ledger's SessionID field, or evidence.
+type realCLIOutcome struct {
+	Classification     string
+	SessionID          string
+	TotalCostUSD       float64
+	InputCount         int64
+	OutputCount        int64
+	CacheReadCount     int64
+	CacheCreationCount int64
+	DurationAPIMS      int64
+	DurationMS         int64
+	NumTurns           int
+}
+
+// projectRealCLIResult turns raw real-CLI stdout bytes into the minimal
+// fixture shape provider.ClaudeAdapter.Parse accepts (dp-v2-017 d5). raw is
+// read only here, in memory, and never persisted; the returned []byte is the
+// only representation of the response that may reach Adapter.Parse, the
+// journal or evidence, and it carries a sha256 digest of the response text
+// rather than the text itself.
+func projectRealCLIResult(raw []byte, runErr error) ([]byte, realCLIOutcome, error) {
+	body := raw
+	if len(body) > provider.MaxFixtureBytes {
+		body = body[:provider.MaxFixtureBytes]
+	}
+	var real struct {
+		Type          string  `json:"type"`
+		Subtype       string  `json:"subtype"`
+		IsError       bool    `json:"is_error"`
+		DurationMS    int64   `json:"duration_ms"`
+		DurationAPIMS int64   `json:"duration_api_ms"`
+		NumTurns      int     `json:"num_turns"`
+		Result        string  `json:"result"`
+		SessionID     string  `json:"session_id"`
+		TotalCostUSD  float64 `json:"total_cost_usd"`
+		Usage         struct {
+			InputTokens              int64 `json:"input_tokens"`
+			OutputTokens             int64 `json:"output_tokens"`
+			CacheCreationInputTokens int64 `json:"cache_creation_input_tokens"`
+			CacheReadInputTokens     int64 `json:"cache_read_input_tokens"`
+		} `json:"usage"`
+	}
+	parseErr := json.Unmarshal(body, &real)
+	outcome := realCLIOutcome{
+		SessionID:          real.SessionID,
+		TotalCostUSD:       real.TotalCostUSD,
+		InputCount:         real.Usage.InputTokens,
+		OutputCount:        real.Usage.OutputTokens,
+		CacheReadCount:     real.Usage.CacheReadInputTokens,
+		CacheCreationCount: real.Usage.CacheCreationInputTokens,
+		DurationAPIMS:      real.DurationAPIMS,
+		DurationMS:         real.DurationMS,
+		NumTurns:           real.NumTurns,
+	}
+	if parseErr == nil && real.Type == "result" && real.Subtype == "success" && !real.IsError {
+		outcome.Classification = "success"
+		fixture := map[string]any{
+			"type":       "result",
+			"subtype":    "success",
+			"checkpoint": "claude:" + real.SessionID,
+			"output":     provider.DigestOutput(real.Result),
+			"usage": map[string]any{
+				"input_tokens":  real.Usage.InputTokens,
+				"output_tokens": real.Usage.OutputTokens,
+				"total_tokens":  real.Usage.InputTokens + real.Usage.OutputTokens,
+			},
+		}
+		b, mErr := json.Marshal(fixture)
+		return b, outcome, mErr
+	}
+	outcome.Classification = "error"
+	exitCode := 1
+	if runErr != nil {
+		var exitErr *exec.ExitError
+		if errors.As(runErr, &exitErr) {
+			exitCode = exitErr.ExitCode()
+		}
+	}
+	code := real.Subtype
+	if code == "" {
+		code = "transport"
+	}
+	fixture := map[string]any{
+		"type":      "result",
+		"subtype":   "error",
+		"status":    "error",
+		"code":      code,
+		"error":     "provider run did not succeed (redacted)",
+		"exit_code": exitCode,
+	}
+	b, mErr := json.Marshal(fixture)
+	return b, outcome, mErr
+}
+
+// wasSignaled reports whether err wraps an *exec.ExitError whose process
+// was terminated by a signal (e.g. a real external SIGKILL to the process
+// group, as I5 sends directly) rather than exiting on its own, even
+// unsuccessfully (I7's transport failure exits normally with a non-zero
+// code, which wasSignaled correctly reports as false).
+func wasSignaled(err error) bool {
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		return false
+	}
+	ws, ok := exitErr.Sys().(syscall.WaitStatus)
+	return ok && ws.Signaled()
+}
+
+// Run implements InvocationRunner for a real, supervised claude CLI
+// process. See the type doc comment for the exact step order.
+func (r SupervisedInvocationRunner) Run(ctx context.Context, inv provider.Invocation) ([]byte, error) {
+	if r.Ledger == nil || r.Log == nil || r.RepoRoot == "" || r.RecordPath == "" || r.Purpose == "" {
+		return nil, ErrSupervisedInvocationRunnerIncomplete
+	}
+	if len(inv.Argv) == 0 || inv.Argv[0] == "" {
+		return nil, errors.New("supervised invocation runner: invocation argv is required")
+	}
+
+	record, err := LoadPreflightRecord(r.RepoRoot, r.RecordPath)
+	if err != nil {
+		return nil, err
+	}
+	adapterArgv0 := inv.Argv[0]
+	seq, err := r.Ledger.Reserve(record, adapterArgv0, r.Purpose, r.now())
+	if err != nil {
+		return nil, err
+	}
+
+	env, err := buildEnvironmentFromBaseNames(record.EnvironmentBaseNames)
+	if err != nil {
+		return nil, fmt.Errorf("supervised invocation runner: %w", err)
+	}
+	allowlistNames := append([]string(nil), record.EnvironmentBaseNames...)
+	if len(r.ExtraEnv) > 0 {
+		env = append(append([]string(nil), env...), r.ExtraEnv...)
+		for _, kv := range r.ExtraEnv {
+			if name, _, ok := strings.Cut(kv, "="); ok {
+				allowlistNames = append(allowlistNames, name)
+			}
+		}
+	}
+	if err := GuardEnvironment(env, allowlistFromNames(allowlistNames)); err != nil {
+		return nil, fmt.Errorf("supervised invocation runner: %w", err)
+	}
+
+	resolvedArgv := append([]string(nil), inv.Argv...)
+	resolvedArgv[0] = record.ExecutablePath
+	if err := GuardCommand(resolvedArgv, env); err != nil {
+		return nil, fmt.Errorf("supervised invocation runner: %w", err)
+	}
+
+	var stdout bytes.Buffer
+	sup := r.Supervisor
+	sup.Stdin = inv.Stdin
+	sup.Stdout = &stdout
+	sup.Env = env
+
+	_ = r.Log.Write(fmt.Sprintf("invocation purpose=%s seq=%d argv0_basename=%s starting", r.Purpose, seq, filepath.Base(resolvedArgv[0])))
+	runErr := sup.Run(ctx, resolvedArgv)
+	raw := stdout.Bytes()
+
+	if runErr != nil && (errors.Is(runErr, context.Canceled) || wasSignaled(runErr)) {
+		// I5/I8 (dp-v2-017 B15/B17): killed (a real external SIGKILL to the
+		// process group, I5) or cancelled through ctx (I8) before
+		// completion. Either way the true cost is unknowable from outside,
+		// so TrueUp is deliberately never called: the reservation stays
+		// charged at worst case forever, and no result is ever produced
+		// for a caller to journal.
+		_ = r.Log.Write(RedactLog(fmt.Sprintf("invocation purpose=%s seq=%d killed/cancelled before completion", r.Purpose, seq)))
+		return nil, fmt.Errorf("supervised invocation runner: %w", runErr)
+	}
+
+	projected, outcome, projErr := projectRealCLIResult(raw, runErr)
+	settleErr := r.Ledger.TrueUp(seq, Settlement{
+		ActualUSD:          outcome.TotalCostUSD,
+		SessionID:          outcome.SessionID,
+		InputCount:         outcome.InputCount,
+		OutputCount:        outcome.OutputCount,
+		CacheReadCount:     outcome.CacheReadCount,
+		CacheCreationCount: outcome.CacheCreationCount,
+		DurationAPIMS:      outcome.DurationAPIMS,
+		DurationMS:         outcome.DurationMS,
+		NumTurns:           outcome.NumTurns,
+	}, r.now())
+	_ = r.Log.Write(fmt.Sprintf("invocation purpose=%s seq=%d classification=%s finished", r.Purpose, seq, outcome.Classification))
+	if settleErr != nil {
+		_ = r.Log.Write(RedactLog(fmt.Sprintf("invocation purpose=%s seq=%d true-up: %v", r.Purpose, seq, settleErr)))
+		return projected, settleErr
+	}
+	if projErr != nil {
+		return nil, projErr
+	}
+	return projected, nil
 }
 
 // ProviderClient composes a provider.Adapter (Build/Parse) with an
