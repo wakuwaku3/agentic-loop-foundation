@@ -116,3 +116,86 @@ const id=()=>crypto.randomUUID();const json=v=>({headers:{"Content-Type":"applic
   if(form){form.onsubmit=function(e){e.preventDefault();loadBacklog((el("backlog-repository").value||"").trim());loadRows();};}
   loadRows();
 })();
+
+// V2-069 Runner version reports: additive, self-contained block appended at
+// the end of this file. It rewrites no existing byte, adds no external asset
+// and no library, starts no timer and no poll loop, and fetches only this
+// origin's own relative path. It renders named rows, never raw JSON: the
+// point of the section is that an operator can see which machines have not
+// reported and whether the shared interval is unknown without parsing
+// anything.
+(function(){
+  var el=function(i){return document.getElementById(i);};
+  var setList=function(id,items,empty){
+    var list=el(id);if(!list){return;}
+    list.textContent="";
+    if(!items.length){var li=document.createElement("li");li.className="muted";li.textContent=empty;list.appendChild(li);return;}
+    items.forEach(function(r){list.appendChild(r);});
+  };
+  var intervalText=function(r){
+    if(r.schema_min===undefined||r.schema_max===undefined){return "no interval was reported";}
+    return "canonical schema interval "+r.schema_min+" to "+r.schema_max;
+  };
+  var runnerRow=function(r){
+    var li=document.createElement("li");
+    var head=document.createElement("div");head.className="repo-id";
+    head.textContent=(r.runner_id||"unnamed runner")+" — "+(r.report_state||"unreported state");
+    li.appendChild(head);
+    var body=document.createElement("div");
+    body.className="repo-state state-"+(r.report_state==="reported"?"executable":"unobserved");
+    if(r.report_state==="not-reported"){
+      body.textContent="this machine has reported no version; nothing is assumed about it";
+    }else{
+      body.textContent="version "+(r.version||"unreported")+" — "+intervalText(r)+
+        (r.report_state==="stale"?" — last reported at "+(r.reported_at||"an unreported time")+", older than the staleness window":"");
+    }
+    li.appendChild(body);
+    var digest=document.createElement("div");digest.className="repo-reason";
+    digest.textContent=r.binary_sha256?("binary digest "+r.binary_sha256):"no binary digest was reported";
+    li.appendChild(digest);
+    return li;
+  };
+  var silentRow=function(r){
+    var li=document.createElement("li");
+    li.className="repo-id";
+    li.textContent=(r.runner_id||"unnamed runner")+" — "+(r.report_state==="stale"?"reported once, then went quiet":"has never reported a version");
+    return li;
+  };
+  var renderRunners=function(v){
+    var rows=(v&&v.runners)||[];
+    el("runners-count").textContent="Runners the Control Plane has heard from: "+
+      ((v&&v.truncated)?"at least ":"")+((v&&v.runner_count!==undefined)?v.runner_count:"unreported");
+    setList("runners-rows",rows.map(runnerRow),"No Runner has ever contacted this Control Plane.");
+    var silent=rows.filter(function(r){return r.report_state!=="reported";});
+    setList("runners-silent",silent.map(silentRow),"Every Runner the Control Plane has heard from has a current report.");
+    var state=(v&&v.intersection_state)||"unreported state";
+    if(state==="non-empty"){
+      el("runners-intersection").textContent="shared interval: "+v.intersection_schema_min+" to "+v.intersection_schema_max;
+      el("runners-intersection-reason").textContent="Every enumerated machine reported an interval and they overlap. This is reported for reading and gates nothing.";
+    }else if(state==="empty"){
+      el("runners-intersection").textContent="shared interval: empty";
+      el("runners-intersection-reason").textContent="Every enumerated machine reported, and no schema lies inside all of their intervals.";
+    }else{
+      el("runners-intersection").textContent="shared interval: "+state;
+      el("runners-intersection-reason").textContent=(v&&v.truncated)?
+        "The bounded enumeration truncated, so not every machine was seen.":
+        "At least one machine has not reported a version, so the shared interval cannot be stated.";
+    }
+  };
+  var failed=function(m){
+    el("runners-count").textContent=m;
+    el("runners-intersection").textContent="shared interval: unknown";
+    el("runners-intersection-reason").textContent=m;
+    setList("runners-rows",[],m);
+    setList("runners-silent",[],m);
+  };
+  var load=function(){
+    return fetch("/v1/runners").then(function(r){
+      if(!r.ok){failed("Unable to read the Runner version reports.");return;}
+      return r.json().then(renderRunners);
+    }).catch(function(){failed("Unable to read the Runner version reports.");});
+  };
+  var button=el("runners-refresh");
+  if(button){button.onclick=load;}
+  load();
+})();

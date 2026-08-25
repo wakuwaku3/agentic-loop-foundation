@@ -295,3 +295,125 @@ func TestRequirementRepositoryLinkIsWriteOnceAndBounded(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// ===========================================================================
+// Runner version report (V2-069), memory adapter
+// ===========================================================================
+//
+// The table below is application.RunnerVersionReportCases(), the same cases
+// internal/store/firestore runs against the emulator. The table is shared by
+// value so this adapter cannot pass behaviour the Firestore adapter does not
+// implement; only the driver is local.
+
+func runnerObservation(id string) domain.RunnerObservation {
+	return domain.RunnerObservation{RunnerID: domain.RunnerID(id), Reachable: true, ObservedAt: time.Unix(1700000000, 0).UTC()}
+}
+
+func TestRunnerVersionReportBehaviouralTable(t *testing.T) {
+	cases := application.RunnerVersionReportCases()
+	if len(cases) == 0 {
+		t.Fatal("the shared table is empty; the assertion would be vacuous")
+	}
+	ctx := context.Background()
+	for _, c := range cases {
+		store := New()
+		for _, id := range c.Observations {
+			observation := runnerObservation(id)
+			if err := store.Transact(ctx, func(u application.UnitOfWork) error {
+				return u.SaveRunnerObservation(ctx, observation)
+			}); err != nil {
+				t.Fatalf("%s: %v", c.Name, err)
+			}
+		}
+		for _, report := range c.Reports {
+			value := report
+			if err := store.Transact(ctx, func(u application.UnitOfWork) error {
+				return u.SaveRunnerVersionReport(ctx, value)
+			}); err != nil {
+				t.Fatalf("%s: %v", c.Name, err)
+			}
+		}
+		limit := c.Limit
+		if limit == 0 {
+			limit = application.MaxRunnerVersionReports
+		}
+		// The read happens in a separate transaction from every write, so a
+		// row that survives here really was committed.
+		var got []application.RunnerVersionReport
+		var truncated bool
+		if err := store.Transact(ctx, func(u application.UnitOfWork) error {
+			v, more, e := u.RunnerVersionReports(ctx, limit)
+			got, truncated = v, more
+			return e
+		}); err != nil {
+			t.Fatalf("%s: %v", c.Name, err)
+		}
+		if truncated != c.WantTruncated {
+			t.Fatalf("%s: truncated=%v want %v", c.Name, truncated, c.WantTruncated)
+		}
+		if len(got) != len(c.Want) {
+			t.Fatalf("%s: enumerated %d rows, want %d", c.Name, len(got), len(c.Want))
+		}
+		for i := range c.Want {
+			if got[i] != c.Want[i] {
+				t.Fatalf("%s: row %d = %#v want %#v", c.Name, i, got[i], c.Want[i])
+			}
+		}
+		// Every reported row is also readable by key.
+		for _, want := range c.Want {
+			if !want.Reported() {
+				continue
+			}
+			if err := store.Transact(ctx, func(u application.UnitOfWork) error {
+				v, ok, e := u.RunnerVersionReport(ctx, want.RunnerID)
+				if e != nil {
+					return e
+				}
+				if !ok || v != want {
+					t.Fatalf("%s: keyed read of %q = %#v ok=%v, want %#v", c.Name, want.RunnerID, v, ok, want)
+				}
+				return nil
+			}); err != nil {
+				t.Fatalf("%s: %v", c.Name, err)
+			}
+		}
+	}
+	t.Logf("memory adapter satisfied %d shared cases", len(cases))
+}
+
+func TestRunnerVersionReportRollbackLeaksNothing(t *testing.T) {
+	store := New()
+	ctx := context.Background()
+	failure := errors.New("rollback")
+	if err := store.Transact(ctx, func(u application.UnitOfWork) error {
+		if e := u.SaveRunnerVersionReport(ctx, application.RunnerVersionReport{RunnerID: "runner-x", Version: "1.0.0", BinarySHA256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", SchemaMin: 1, SchemaMax: 2, ReportedAt: time.Unix(1700000000, 0).UTC()}); e != nil {
+			return e
+		}
+		return failure
+	}); !errors.Is(err, failure) {
+		t.Fatalf("rollback = %v", err)
+	}
+	if err := store.Transact(ctx, func(u application.UnitOfWork) error {
+		if _, ok, e := u.RunnerVersionReport(ctx, "runner-x"); e != nil {
+			return e
+		} else if ok {
+			t.Fatal("a rolled-back transaction committed a Runner version report")
+		}
+		rows, _, e := u.RunnerVersionReports(ctx, application.MaxRunnerVersionReports)
+		if e != nil {
+			return e
+		}
+		if len(rows) != 0 {
+			t.Fatalf("a rolled-back transaction left %d enumerated rows", len(rows))
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// An empty runner id is refused rather than stored under the empty key.
+	if err := store.Transact(ctx, func(u application.UnitOfWork) error {
+		return u.SaveRunnerVersionReport(ctx, application.RunnerVersionReport{Version: "1.0.0"})
+	}); err == nil {
+		t.Fatal("a report with no runner id was accepted")
+	}
+}

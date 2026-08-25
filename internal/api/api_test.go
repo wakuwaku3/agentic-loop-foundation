@@ -720,3 +720,520 @@ func TestOwnerConsoleExposesTheRepositoryScopedBacklog(t *testing.T) {
 		}
 	}
 }
+
+// ===========================================================================
+// Runner version report (V2-069)
+// ===========================================================================
+
+const (
+	runnerDigestA = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	runnerDigestB = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+)
+
+// runnerVersionHandler builds a handler over a store and Service the test also
+// holds, so a fixture that no public route can create (an Increment, which is
+// deliberately not an owner operation) can be prepared through the Service
+// while every assertion below still goes over HTTP.
+func runnerVersionHandler(t *testing.T) (http.Handler, *application.Service) {
+	t.Helper()
+	st := memory.New()
+	svc, err := application.NewServiceWithConfig(st, clock{}, &ids{}, application.ServiceConfig{InstallationID: "install", LeaseTTL: time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	auth := api.BearerAuthenticator{"owner": {Role: application.RoleOwner, Subject: "owner"}, "runner": {Role: application.RoleRunner, Subject: "runner", RunnerID: "runner-1"}}
+	enrollment, err := runner.NewService(runner.NewMemoryStore())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return api.New(api.Config{Authenticator: auth, Service: svc, RunnerEnrollment: enrollment, AllowedOrigins: []string{"https://console.example"}}), svc
+}
+
+func runnerRowsFromAPI(t *testing.T, h http.Handler) (map[string]any, []map[string]any) {
+	t.Helper()
+	w := call(h, http.MethodGet, "/v1/runners", "", "owner")
+	if w.Code != 200 {
+		t.Fatalf("GET /v1/runners status=%d body=%s", w.Code, w.Body.String())
+	}
+	doc := decodeBody(t, w.Body.Bytes())
+	raw, ok := doc["runners"].([]any)
+	if !ok {
+		t.Fatalf("no runners array in %s", w.Body.String())
+	}
+	rows := make([]map[string]any, 0, len(raw))
+	for _, r := range raw {
+		row, ok := r.(map[string]any)
+		if !ok {
+			t.Fatalf("runner row is not an object: %v", r)
+		}
+		rows = append(rows, row)
+	}
+	return doc, rows
+}
+
+// TestRunnerVersionReportShapeIsClosedAtTheTransport is A3 at the transport
+// boundary: the request DTO the api package declares carries exactly the four
+// reported coordinates and no timestamp field, and neither it nor the
+// heartbeat body it hangs off names a contract, bundle or provenance
+// coordinate. The scan is over the package's own non-test .go files with
+// go/ast and fails outright on a zero-file scan.
+func TestRunnerVersionReportShapeIsClosedAtTheTransport(t *testing.T) {
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fset := token.NewFileSet()
+	scanned := 0
+	fields := map[string][]string{}
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".go") || strings.HasSuffix(e.Name(), "_test.go") {
+			continue
+		}
+		file, err := parser.ParseFile(fset, filepath.Join(".", e.Name()), nil, parser.AllErrors)
+		if err != nil {
+			t.Fatalf("parse %s: %v", e.Name(), err)
+		}
+		scanned++
+		ast.Inspect(file, func(n ast.Node) bool {
+			spec, ok := n.(*ast.TypeSpec)
+			if !ok || spec.Name.Name != "runnerVersionBody" {
+				return true
+			}
+			st, ok := spec.Type.(*ast.StructType)
+			if !ok {
+				return true
+			}
+			for _, field := range st.Fields.List {
+				for _, name := range field.Names {
+					fields["runnerVersionBody"] = append(fields["runnerVersionBody"], name.Name)
+				}
+				if field.Tag != nil {
+					if tag, err := strconv.Unquote(field.Tag.Value); err == nil {
+						fields["runnerVersionBody"] = append(fields["runnerVersionBody"], tag)
+					}
+				}
+			}
+			return true
+		})
+	}
+	if scanned == 0 {
+		t.Fatal("scanned zero non-test .go files; the working directory is not internal/api")
+	}
+	got := fields["runnerVersionBody"]
+	if len(got) == 0 {
+		t.Fatal("the scan did not find runnerVersionBody; it was renamed or the scan is broken")
+	}
+	joined := strings.ToLower(strings.Join(got, " "))
+	for _, forbidden := range []string{"timestamp", "hostname", "host", "ip", "path", "root", "env", "message", "detail", "output", "text", "contract_release", "contract_digest", "runner_api", "bundle_digest", "candidate_id", "key_id", "algorithm", "secret", "credential", "password", "bearer", "authorization"} {
+		if strings.Contains(joined, forbidden) {
+			t.Fatalf("runnerVersionBody mentions %q: %v", forbidden, got)
+		}
+	}
+	for _, required := range []string{"version", "binary_sha256", "schema_min", "schema_max"} {
+		if !strings.Contains(joined, required) {
+			t.Fatalf("runnerVersionBody does not carry %q: %v", required, got)
+		}
+	}
+	t.Logf("scanned %d non-test files; runnerVersionBody = %v", scanned, got)
+}
+
+// TestHeartbeatRunnerVersionValidationAtTheTransport is A4 driven through the
+// API: the shape table, the partial-object refusal, and the fact that a
+// refused report stores nothing at all.
+func TestHeartbeatRunnerVersionValidationAtTheTransport(t *testing.T) {
+	body := func(request string, object string) string {
+		if object == "" {
+			return `{"request_id":"` + request + `"}`
+		}
+		return `{"request_id":"` + request + `","runner_version":` + object + `}`
+	}
+	full := func(version, digest string, min, max string) string {
+		return `{"version":"` + version + `","binary_sha256":"` + digest + `","schema_min":` + min + `,"schema_max":` + max + `}`
+	}
+
+	accepted := []struct{ name, object string }{
+		{"the smallest legal report", full("0.1.0", runnerDigestA, "1", "1")},
+		{"a prerelease version", full("0.1.0-dev", runnerDigestA, "2", "7")},
+		{"a dotted prerelease", full("1.0.0-rc.1", runnerDigestB, "3", "9")},
+		{"a two-digit triple", full("10.20.30", runnerDigestB, "1", "4096")},
+	}
+	for i, c := range accepted {
+		h, _ := runnerVersionHandler(t)
+		w := call(h, http.MethodPost, "/v1/runner/heartbeat", body("hb-ok-"+strconv.Itoa(i), c.object), "runner")
+		if w.Code != 200 {
+			t.Fatalf("%s: status=%d body=%s", c.name, w.Code, w.Body.String())
+		}
+		_, rows := runnerRowsFromAPI(t, h)
+		if len(rows) != 1 || rows[0]["report_state"] != "reported" {
+			t.Fatalf("%s: rows=%v", c.name, rows)
+		}
+	}
+
+	rejected := []struct{ name, object string }{
+		// version shape: six refusals, including a bare major.minor, a
+		// leading v, an uppercase prerelease and an empty string.
+		{"a bare major.minor version", full("1.2", runnerDigestA, "1", "1")},
+		{"a leading v", full("v1.2.3", runnerDigestA, "1", "1")},
+		{"an uppercase prerelease", full("1.2.3-RC1", runnerDigestA, "1", "1")},
+		{"an empty version", full("", runnerDigestA, "1", "1")},
+		{"a four-part version", full("1.2.3.4", runnerDigestA, "1", "1")},
+		{"a trailing hyphen", full("1.2.3-", runnerDigestA, "1", "1")},
+		// digest shape.
+		{"a 63-character digest", full("1.2.3", strings.Repeat("a", 63), "1", "1")},
+		{"a 65-character digest", full("1.2.3", strings.Repeat("a", 65), "1", "1")},
+		{"an uppercase digest", full("1.2.3", strings.ToUpper(runnerDigestA), "1", "1")},
+		{"a non-hex digest", full("1.2.3", strings.Repeat("g", 64), "1", "1")},
+		// interval shape.
+		{"schema_min below one", full("1.2.3", runnerDigestA, "0", "4")},
+		{"schema_max below schema_min", full("1.2.3", runnerDigestA, "5", "4")},
+		{"schema_max above the ceiling", full("1.2.3", runnerDigestA, "1", "4097")},
+		{"schema_min above the ceiling", full("1.2.3", runnerDigestA, "4097", "4097")},
+		// partial objects: any strict non-empty subset, and the empty object.
+		{"schema_max with no schema_min", `{"schema_max":7}`},
+		{"schema_min alone", `{"schema_min":2}`},
+		{"the version alone", `{"version":"1.2.3"}`},
+		{"the digest alone", `{"binary_sha256":"` + runnerDigestA + `"}`},
+		{"the interval with no binary", `{"schema_min":2,"schema_max":7}`},
+		{"the binary with no interval", `{"version":"1.2.3","binary_sha256":"` + runnerDigestA + `"}`},
+		{"everything but schema_min", `{"version":"1.2.3","binary_sha256":"` + runnerDigestA + `","schema_max":7}`},
+		{"the wholly empty object", `{}`},
+	}
+	for i, c := range rejected {
+		h, _ := runnerVersionHandler(t)
+		w := call(h, http.MethodPost, "/v1/runner/heartbeat", body("hb-bad-"+strconv.Itoa(i), c.object), "runner")
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("%s: status=%d body=%s, want 400", c.name, w.Code, w.Body.String())
+		}
+		// Nothing was stored: the Runner is not even known, because the
+		// refused heartbeat wrote no observation either.
+		doc, rows := runnerRowsFromAPI(t, h)
+		if len(rows) != 0 {
+			t.Fatalf("%s: a refused report left %v", c.name, rows)
+		}
+		if doc["intersection_state"] != "unknown" {
+			t.Fatalf("%s: intersection_state=%v after a refusal", c.name, doc["intersection_state"])
+		}
+	}
+
+	// Omitting the object entirely is a 200 that stores no report, and the
+	// Runner still enumerates as not-reported.
+	h, _ := runnerVersionHandler(t)
+	if w := call(h, http.MethodPost, "/v1/runner/heartbeat", body("hb-absent", ""), "runner"); w.Code != 200 {
+		t.Fatalf("a heartbeat with no runner_version: status=%d body=%s", w.Code, w.Body.String())
+	}
+	doc, rows := runnerRowsFromAPI(t, h)
+	if len(rows) != 1 || rows[0]["report_state"] != "not-reported" {
+		t.Fatalf("rows=%v", rows)
+	}
+	for _, absent := range []string{"version", "binary_sha256", "schema_min", "schema_max", "reported_at"} {
+		if _, present := rows[0][absent]; present {
+			t.Fatalf("a not-reported row carries %q", absent)
+		}
+	}
+	if doc["intersection_state"] != "unknown" {
+		t.Fatalf("intersection_state=%v with one unreported Runner", doc["intersection_state"])
+	}
+
+	// An unknown field inside runner_version is a 400: DisallowUnknownFields
+	// plus additionalProperties:false in the contract.
+	h, _ = runnerVersionHandler(t)
+	unknown := `{"request_id":"hb-unknown","runner_version":{"version":"1.2.3","binary_sha256":"` + runnerDigestA + `","schema_min":1,"schema_max":2,"contract_release":"r"}}`
+	if w := call(h, http.MethodPost, "/v1/runner/heartbeat", unknown, "runner"); w.Code != http.StatusBadRequest {
+		t.Fatalf("an unknown field inside runner_version: status=%d body=%s", w.Code, w.Body.String())
+	}
+	h, _ = runnerVersionHandler(t)
+	reportedAt := `{"request_id":"hb-ts","runner_version":{"version":"1.2.3","binary_sha256":"` + runnerDigestA + `","schema_min":1,"schema_max":2,"reported_at":"2026-01-01T00:00:00Z"}}`
+	if w := call(h, http.MethodPost, "/v1/runner/heartbeat", reportedAt, "runner"); w.Code != http.StatusBadRequest {
+		t.Fatalf("a Runner-supplied reported_at: status=%d body=%s, want 400", w.Code, w.Body.String())
+	}
+	t.Logf("accepted %d literals, refused %d literals through the transport", len(accepted), len(rejected))
+}
+
+// TestRunnersRouteIsOwnerOnlyGetWithAClosedResponse is A10.
+func TestRunnersRouteIsOwnerOnlyGetWithAClosedResponse(t *testing.T) {
+	h, _ := runnerVersionHandler(t)
+	const path = "/v1/runners"
+	if w := call(h, http.MethodGet, path, "", ""); w.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated status=%d body=%s", w.Code, w.Body.String())
+	}
+	if w := call(h, http.MethodGet, path, "", "runner"); w.Code != http.StatusForbidden {
+		t.Fatalf("runner role status=%d body=%s", w.Code, w.Body.String())
+	}
+	if w := call(h, http.MethodPost, path, `{}`, "owner"); w.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("POST status=%d body=%s; there is deliberately no reporting endpoint here", w.Code, w.Body.String())
+	}
+	if w := call(h, http.MethodGet, path, "", "owner"); w.Code != 200 {
+		t.Fatalf("owner status=%d body=%s", w.Code, w.Body.String())
+	}
+
+	body := `{"request_id":"hb-1","runner_version":{"version":"1.2.3","binary_sha256":"` + runnerDigestA + `","schema_min":2,"schema_max":7}}`
+	if w := call(h, http.MethodPost, "/v1/runner/heartbeat", body, "runner"); w.Code != 200 {
+		t.Fatalf("heartbeat status=%d body=%s", w.Code, w.Body.String())
+	}
+	doc, rows := runnerRowsFromAPI(t, h)
+	topLevel := map[string]bool{"runners": true, "runner_count": true, "truncated": true, "intersection_state": true, "intersection_schema_min": true, "intersection_schema_max": true}
+	for key := range doc {
+		if !topLevel[key] {
+			t.Fatalf("the response carries an unnamed top-level field %q", key)
+		}
+	}
+	rowFields := map[string]bool{"runner_id": true, "report_state": true, "version": true, "binary_sha256": true, "schema_min": true, "schema_max": true, "reported_at": true}
+	for _, row := range rows {
+		for key := range row {
+			if !rowFields[key] {
+				t.Fatalf("a runner row carries an unnamed field %q", key)
+			}
+		}
+	}
+	if len(rows) != 1 || rows[0]["runner_id"] != "runner-1" || rows[0]["version"] != "1.2.3" {
+		t.Fatalf("rows=%v", rows)
+	}
+	if doc["intersection_state"] != "non-empty" || doc["intersection_schema_min"] != float64(2) || doc["intersection_schema_max"] != float64(7) {
+		t.Fatalf("intersection = %v %v %v", doc["intersection_state"], doc["intersection_schema_min"], doc["intersection_schema_max"])
+	}
+	// No synthetic or placeholder value anywhere in the document.
+	raw := runnersRawBody(t, h)
+	for _, forbidden := range []string{"contract_release", "contract_digest", "runner_api", "bundle_digest", "candidate_id", "key_id", "algorithm", "TODO", "placeholder", "unknown-version", "0.0.0"} {
+		if strings.Contains(raw, forbidden) {
+			t.Fatalf("the response contains %q: %s", forbidden, raw)
+		}
+	}
+}
+
+func runnersRawBody(t *testing.T, h http.Handler) string {
+	t.Helper()
+	w := call(h, http.MethodGet, "/v1/runners", "", "owner")
+	if w.Code != 200 {
+		t.Fatalf("status=%d", w.Code)
+	}
+	return w.Body.String()
+}
+
+// TestAuthFileDoesNotReadTheRunnerVersionReport is A7's mechanical half in
+// internal/api: auth.go, the transport authentication boundary, mentions no
+// report identifier. The matcher is verified against a synthetic
+// known-positive first, and a zero-declaration scan fails outright.
+func TestAuthFileDoesNotReadTheRunnerVersionReport(t *testing.T) {
+	identifiers := []string{"RunnerVersionInput", "RunnerVersionReport", "RunnerVersionReports", "runnerVersionBody", "RunnerVersionListView", "listRunners", "runnersPath"}
+	hits := func(n ast.Node) []string {
+		found := []string{}
+		ast.Inspect(n, func(node ast.Node) bool {
+			ident, ok := node.(*ast.Ident)
+			if !ok {
+				return true
+			}
+			for _, name := range identifiers {
+				if ident.Name == name {
+					found = append(found, name)
+				}
+			}
+			return true
+		})
+		return found
+	}
+	positive := "package api\n\nfunc (a CombinedAuthenticator) Authenticate() { var r RunnerVersionReport; _ = r }\n"
+	synthetic, err := parser.ParseFile(token.NewFileSet(), "positive.go", positive, parser.AllErrors)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hits(synthetic)) == 0 {
+		t.Fatal("positive control: a synthetic authenticator naming RunnerVersionReport was not flagged")
+	}
+
+	file, err := parser.ParseFile(token.NewFileSet(), "auth.go", nil, parser.AllErrors)
+	if err != nil {
+		t.Fatalf("parse auth.go: %v", err)
+	}
+	declarations := 0
+	names := map[string]bool{}
+	for _, decl := range file.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok {
+			continue
+		}
+		declarations++
+		names[fn.Name.Name] = true
+		if found := hits(fn); len(found) != 0 {
+			t.Fatalf("auth.go: %s names %v; the authentication boundary must never read a Runner's self-claim", fn.Name.Name, found)
+		}
+	}
+	if declarations == 0 {
+		t.Fatal("scanned zero function declarations in auth.go; the scan is broken")
+	}
+	if !names["Authenticate"] {
+		t.Fatal("auth.go declares no Authenticate method; the boundary moved and this guard is vacuous")
+	}
+	t.Logf("scanned auth.go: %d function declarations, none naming a report identifier", declarations)
+}
+
+// runnerOperation is one runner-facing HTTP call in the scripted sequence.
+type runnerOperation struct {
+	name, method, path, body string
+}
+
+// driveRunnerRoutes prepares an Increment through the Service (no public route
+// creates one), then calls each of the six runner-facing routes once and
+// returns the status code and body of each. When report is non-empty it is
+// posted first as this Runner's version report; when it is empty an
+// equally-shaped heartbeat carrying none is posted instead, so both arms
+// consume the same identifiers from the deterministic generator.
+func driveRunnerRoutes(t *testing.T, report string) []struct {
+	name   string
+	status int
+	body   string
+} {
+	t.Helper()
+	h, svc := runnerVersionHandler(t)
+	ctx := application.ContextWithCaller(context.Background(), application.Caller{Role: application.RoleOwner, Subject: "owner"})
+
+	first := `{"request_id":"hb-0"}`
+	if report != "" {
+		first = `{"request_id":"hb-0","runner_version":` + report + `}`
+	}
+	if w := call(h, http.MethodPost, "/v1/runner/heartbeat", first, "runner"); w.Code != 200 {
+		t.Fatalf("the first heartbeat: status=%d body=%s", w.Code, w.Body.String())
+	}
+
+	captured, err := svc.Capture(ctx, application.CaptureRequest{RequestID: "cap", Text: "work"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	planned, err := svc.Plan(ctx, application.PlanRequest{RequestID: "plan", RequirementID: captured.RequirementID, ExpectedRequirementVersion: captured.Version})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = svc.Prepare(ctx, application.PrepareRequest{RequestID: "prep", IncrementID: planned.IncrementID, ExpectedVersion: planned.Version}); err != nil {
+		t.Fatal(err)
+	}
+
+	claimed := call(h, http.MethodPost, "/v1/runner/claims:acquire",
+		`{"request_id":"claim","increment_id":"`+planned.IncrementID+`","expected_increment_version":2,"control_revision":0}`, "runner")
+	claim := decodeBody(t, claimed.Body.Bytes())
+	executionID, _ := claim["execution_id"].(string)
+	leaseID, _ := claim["lease_id"].(string)
+	fencing := 1
+	if v, ok := claim["fencing_token"].(float64); ok {
+		fencing = int(v)
+	}
+
+	operations := []runnerOperation{
+		{"permits:check", http.MethodPost, "/v1/runner/permits:check",
+			`{"request_id":"permit","kind":"external-effect","target":{},"control_revision":0,"fencing_token":` + strconv.Itoa(fencing) + `,"expected_fencing_token":` + strconv.Itoa(fencing) + `,"resource":"` + executionID + `"}`},
+		{"executions:start", http.MethodPost, "/v1/executions/" + executionID + ":start",
+			`{"request_id":"start","expected_execution_version":1,"control_revision":0}`},
+		{"checkpoints", http.MethodPost, "/v1/runner/checkpoints",
+			`{"request_id":"checkpoint","execution_id":"` + executionID + `","lease_id":"` + leaseID + `","fencing_token":` + strconv.Itoa(fencing) + `,"control_revision":0}`},
+		{"heartbeat", http.MethodPost, "/v1/runner/heartbeat", `{"request_id":"hb-1"}`},
+		{"executions/result", http.MethodPost, "/v1/executions/result",
+			`{"request_id":"result","execution_id":"` + executionID + `","lease_id":"` + leaseID + `","expected_execution_version":2,"fencing_token":` + strconv.Itoa(fencing) + `,"control_revision":0,"succeeded":true}`},
+	}
+	out := []struct {
+		name   string
+		status int
+		body   string
+	}{{"claims:acquire", claimed.Code, claimed.Body.String()}}
+	for _, op := range operations {
+		w := call(h, op.method, op.path, op.body, "runner")
+		out = append(out, struct {
+			name   string
+			status int
+			body   string
+		}{op.name, w.Code, w.Body.String()})
+	}
+	return out
+}
+
+// TestAnAbsurdRunnerVersionReportChangesNoStatusCode is A7's behavioural half
+// at the transport: a Runner whose reported interval sits at the declared
+// ceiling -- excluding every plausible canonical schema -- succeeds unchanged
+// at all six runner-facing operations, with identical status codes and
+// identical response bodies to a Runner that reported nothing.
+func TestAnAbsurdRunnerVersionReportChangesNoStatusCode(t *testing.T) {
+	absurd := `{"version":"1.2.3","binary_sha256":"` + runnerDigestA + `","schema_min":4096,"schema_max":4096}`
+	reported := driveRunnerRoutes(t, absurd)
+	silent := driveRunnerRoutes(t, "")
+	if len(reported) != 6 || len(silent) != 6 {
+		t.Fatalf("expected six runner-facing operations, got %d and %d", len(reported), len(silent))
+	}
+	for i := range reported {
+		if reported[i].status != silent[i].status {
+			t.Fatalf("%s: status %d after reporting an absurd interval, %d after reporting nothing", reported[i].name, reported[i].status, silent[i].status)
+		}
+		if reported[i].status != 200 {
+			t.Fatalf("%s: status %d; the operation did not succeed in either arm: %s", reported[i].name, reported[i].status, reported[i].body)
+		}
+		if reported[i].body != silent[i].body {
+			t.Fatalf("%s: body differed\n reported=%s\n silent  =%s", reported[i].name, reported[i].body, silent[i].body)
+		}
+		t.Logf("%s: status %d in both arms, body identical", reported[i].name, reported[i].status)
+	}
+}
+
+// TestOwnerConsoleExposesTheRunnerVersionReports is A13.
+func TestOwnerConsoleExposesTheRunnerVersionReports(t *testing.T) {
+	h, _ := runnerVersionHandler(t)
+	w := call(h, http.MethodGet, "/owner/", "", "owner")
+	if w.Code != 200 {
+		t.Fatalf("owner console status=%d", w.Code)
+	}
+	html := w.Body.String()
+	for _, want := range []string{`id="runners-title"`, `id="runners-refresh"`, `id="runners-count"`, `id="runners-silent"`, `id="runners-intersection"`, `id="runners-intersection-reason"`, `id="runners-rows"`, "V2-069 Runner version reports"} {
+		if !strings.Contains(html, want) {
+			t.Fatalf("owner console does not carry %s", want)
+		}
+	}
+	// Additive only: every pre-existing surface, including the three sibling
+	// tasks' sections, is still there.
+	for _, want := range []string{`id="capture"`, `id="control"`, `id="queue"`, `id="repository"`, `id="repository-list"`, "Release evidence", `id="release-conditions"`, `id="backlog-rows"`} {
+		if !strings.Contains(html, want) {
+			t.Fatalf("owner console lost the pre-existing surface %s", want)
+		}
+	}
+	w = call(h, http.MethodGet, "/owner/assets/owner.js", "", "")
+	if w.Code != 200 {
+		t.Fatalf("owner.js status=%d", w.Code)
+	}
+	js := w.Body.String()
+	for _, want := range []string{"/v1/runners", "report_state", "intersection_state", "not-reported", "has never reported a version", "runners-silent", "shared interval"} {
+		if !strings.Contains(js, want) {
+			t.Fatalf("owner.js does not reference %q", want)
+		}
+	}
+	// The sibling blocks must still be present in the same single file.
+	for _, want := range []string{"/v1/release/state", "executability", "requirement_backlog"} {
+		if !strings.Contains(js, want) {
+			t.Fatalf("owner.js lost the pre-existing block reference %q", want)
+		}
+	}
+	// The block renders named rows, not raw JSON.
+	marker := strings.Index(js, "// V2-069 Runner version reports")
+	if marker < 0 {
+		t.Fatal("owner.js does not carry the V2-069 marker comment")
+	}
+	runnerBlock := js[marker:]
+	if strings.Contains(runnerBlock, "JSON.stringify") {
+		t.Fatal("the V2-069 owner.js block renders raw JSON")
+	}
+	// No external asset, script or font is introduced by the block.
+	for _, forbidden := range []string{"http://", "https://", "//cdn", "importScripts", "setInterval", "setTimeout", "@font-face"} {
+		if strings.Contains(runnerBlock, forbidden) {
+			t.Fatalf("the V2-069 owner.js block references %q", forbidden)
+		}
+	}
+	// No credential-shaped and no email-shaped value in the rendered markup.
+	lowered := strings.ToLower(html)
+	for _, forbidden := range []string{"password", "secret", "api_key", "apikey", "bearer ", "authorization:", "private_key", "@example.", "@gmail.", "accounts.google.com"} {
+		if strings.Contains(lowered, forbidden) {
+			t.Fatalf("the rendered owner console carries a credential- or email-shaped value %q", forbidden)
+		}
+	}
+	if strings.Contains(html, "@") {
+		t.Fatalf("the rendered owner console contains an at-sign, which is the email shape this check refuses")
+	}
+	// The console must not claim a measurement it does not have.
+	for _, forbidden := range []string{"every machine reported", "versions are compatible", "capability exercised"} {
+		if strings.Contains(lowered, forbidden) || strings.Contains(strings.ToLower(js), forbidden) {
+			t.Fatalf("owner console claims %q", forbidden)
+		}
+	}
+}

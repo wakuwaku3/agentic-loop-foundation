@@ -237,6 +237,27 @@ func (h *Handler) route(w http.ResponseWriter, r *http.Request) {
 		h.queueSummary(w, r.WithContext(application.ContextWithCaller(r.Context(), caller)))
 		return
 	}
+	// GET /v1/runners is owner-role only and read-only. The method check comes
+	// first, following the /v1/release/state idiom, so a POST to this path is
+	// a method error rather than a 404: there is no reporting endpoint here,
+	// because the report rides on the heartbeat a Runner already sends.
+	if r.URL.Path == runnersPath {
+		if r.Method != http.MethodGet {
+			h.error(w, r, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
+			return
+		}
+		caller, err := h.config.Authenticator.Authenticate(r)
+		if err != nil {
+			h.error(w, r, 401, "unauthorized", "authentication failed")
+			return
+		}
+		if caller.Role != application.RoleOwner {
+			h.error(w, r, 403, "forbidden", "owner role required")
+			return
+		}
+		h.listRunners(w, r.WithContext(application.ContextWithCaller(r.Context(), caller)))
+		return
+	}
 	if r.URL.Path == "/v1/export" && r.Method == http.MethodGet {
 		caller, err := h.config.Authenticator.Authenticate(r)
 		if err != nil {
@@ -491,18 +512,57 @@ type heartbeatBody struct {
 	RequestID string `json:"request_id"`
 }
 
+// runnerVersionBody is the additive optional object on the heartbeat request
+// (V2-069). It carries exactly the four coordinates a running binary actually
+// has -- the binary version and digest, and the closed canonical schema
+// interval -- and deliberately carries no timestamp field, so a Runner clock
+// is structurally unable to reach the stored record. It also carries no
+// contract, bundle or provenance coordinate, not even as an empty
+// placeholder: see docs/operations/runner-version-report.md.
+//
+// A pointer field is what distinguishes "the object was absent" from "the
+// object was present but incomplete": an absent object stores nothing and is
+// a 200, while a present object must carry all four fields and is otherwise a
+// 400 that stores nothing.
+type runnerVersionBody struct {
+	Version      string `json:"version"`
+	BinarySHA256 string `json:"binary_sha256"`
+	SchemaMin    int    `json:"schema_min"`
+	SchemaMax    int    `json:"schema_max"`
+}
+
 func (h *Handler) heartbeat(w http.ResponseWriter, r *http.Request) {
 	var b struct {
 		RequestID       string                      `json:"request_id"`
 		ControlRevision domain.Revision             `json:"control_revision"`
 		Processes       []domain.ProcessObservation `json:"process_observations"`
+		RunnerVersion   *runnerVersionBody          `json:"runner_version"`
 	}
 	if !h.decode(w, r, &b) {
 		return
 	}
-	out, e := h.config.Service.Heartbeat(r.Context(), application.HeartbeatRequest{RequestID: b.RequestID, ControlRevision: b.ControlRevision, Processes: b.Processes})
+	req := application.HeartbeatRequest{RequestID: b.RequestID, ControlRevision: b.ControlRevision, Processes: b.Processes}
+	if b.RunnerVersion != nil {
+		req.RunnerVersion = &application.RunnerVersionInput{Version: b.RunnerVersion.Version, BinarySHA256: b.RunnerVersion.BinarySHA256, SchemaMin: b.RunnerVersion.SchemaMin, SchemaMax: b.RunnerVersion.SchemaMax}
+	}
+	out, e := h.config.Service.Heartbeat(r.Context(), req)
 	if e != nil {
 		h.domainError(w, r, e)
+		return
+	}
+	writeJSON(w, 200, out)
+}
+
+// runnersPath is the owner-role read of what each Runner reports about the
+// version it is running. It is a GET and there is deliberately no mutation
+// verb on it: a Runner reports through its own heartbeat, and nothing here
+// advances a canonical schema or gates a read on a reported interval.
+const runnersPath = "/v1/runners"
+
+func (h *Handler) listRunners(w http.ResponseWriter, r *http.Request) {
+	out, err := h.config.Service.Runners(r.Context())
+	if err != nil {
+		h.domainError(w, r, err)
 		return
 	}
 	writeJSON(w, 200, out)

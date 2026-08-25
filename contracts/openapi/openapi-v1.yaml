@@ -67,6 +67,25 @@ paths:
       operationId: queueSummary
       security: [{iapOwner: []}]
       responses: {'200': {description: bounded queue counts, content: {application/json: {schema: {$ref: '#/components/schemas/QueueSummary'}}}}, '401': {$ref: '#/components/responses/Error'}, '403': {$ref: '#/components/responses/Error'}}
+  /v1/runners:
+    get:
+      operationId: listRunners
+      security: [{iapOwner: []}]
+      description: |
+        Read-only. Reports, per Runner the Control Plane has heard from,
+        whether that Runner has reported the version it is running at all,
+        whether the newest report is older than the declared staleness
+        window, the reported binary coordinates and canonical schema interval
+        when and only when a report exists, and the intersection of every
+        enumerated Runner's interval. The intersection is unknown -- never
+        non-empty -- whenever any enumerated Runner has not reported, whenever
+        no Runner is known, and whenever the bounded enumeration truncated.
+        A Runner's report is never authority over what that Runner may read,
+        and nothing here advances or gates a canonical schema: no canonical
+        schema counter exists in this repository, so the interval is reported
+        and compared against nothing. There is deliberately no POST: a Runner
+        reports through runner_version on POST /v1/runner/heartbeat.
+      responses: {'200': {description: what each Runner reports about the version it is running, content: {application/json: {schema: {$ref: '#/components/schemas/RunnerListResponse'}}}}, '401': {$ref: '#/components/responses/Error'}, '403': {$ref: '#/components/responses/Error'}, '405': {$ref: '#/components/responses/Error'}, '500': {$ref: '#/components/responses/Error'}, '503': {$ref: '#/components/responses/Error'}}
   /v1/export:
     get:
       operationId: exportOwnerMetadata
@@ -420,7 +439,46 @@ components:
       type: object
       additionalProperties: false
       required: [request_id]
-      properties: {request_id: {type: string}, control_revision: {type: integer}, process_observations: {type: array, maxItems: 32, items: {$ref: '#/components/schemas/ProcessObservation'}}}
+      properties: {request_id: {type: string}, control_revision: {type: integer}, process_observations: {type: array, maxItems: 32, items: {$ref: '#/components/schemas/ProcessObservation'}}, runner_version: {$ref: '#/components/schemas/RunnerVersionReport'}}
+    RunnerVersionReport:
+      type: object
+      additionalProperties: false
+      required: [version, binary_sha256, schema_min, schema_max]
+      description: |
+        The version the reporting Runner is actually running: the binary
+        coordinates and the closed canonical schema interval of
+        docs/operations/self-update.md section 5.1 items 1 and 2. All four
+        fields are required: a partial object is refused with 400 and stores
+        nothing, because an interval carrying only its upper endpoint would be
+        stored as one starting at zero, which reads as wider than anything the
+        machine can do. The object carries no timestamp field, so a Runner
+        clock cannot enter the record; reported_at is the transaction's
+        authority time. It carries no contract_release, contract_digest,
+        runner_api range, bundle_digest, candidate_id, key_id or algorithm,
+        not even as an empty placeholder. The Control Plane validates shape
+        only and never treats the claim as authority over what this Runner may
+        read.
+      properties: {version: {type: string, pattern: '^[0-9]+\.[0-9]+\.[0-9]+(?:-[a-z0-9.-]+)?$'}, binary_sha256: {type: string, pattern: '^[0-9a-f]{64}$'}, schema_min: {type: integer, minimum: 1, maximum: 4096}, schema_max: {type: integer, minimum: 1, maximum: 4096}}
+    RunnerVersionRow:
+      type: object
+      additionalProperties: false
+      required: [runner_id, report_state]
+      description: |
+        One Runner's row. report_state is reported, not-reported or stale, and
+        the coordinates are present only when a report was actually read: a
+        Runner that has not reported carries no version, no binary digest and
+        no interval at all rather than a synthesized default.
+      properties: {runner_id: {type: string}, report_state: {type: string, enum: [reported, not-reported, stale]}, version: {type: string}, binary_sha256: {type: string}, schema_min: {type: integer}, schema_max: {type: integer}, reported_at: {type: string, format: date-time, description: server-authoritative report time}}
+    RunnerListResponse:
+      type: object
+      additionalProperties: false
+      required: [runners, runner_count, truncated, intersection_state]
+      description: |
+        intersection_state is unknown whenever any enumerated Runner is not in
+        state reported, whenever no Runner is known, and whenever truncated is
+        true; the endpoints are present only when the state is non-empty,
+        because an empty or unknown intersection is not an interval.
+      properties: {runners: {type: array, maxItems: 32, items: {$ref: '#/components/schemas/RunnerVersionRow'}}, runner_count: {type: integer, minimum: 0}, truncated: {type: boolean, description: 'the bounded enumeration hit its limit, so runner_count is a lower bound and the intersection is unknown'}, intersection_state: {type: string, enum: [non-empty, empty, unknown]}, intersection_schema_min: {type: integer}, intersection_schema_max: {type: integer}}
     ProcessObservation:
       type: object
       additionalProperties: false

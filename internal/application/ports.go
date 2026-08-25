@@ -197,6 +197,33 @@ type RunnerObservationRepository interface {
 	SaveRunnerObservation(ctx context.Context, value domain.RunnerObservation) error
 }
 
+// RunnerVersionReportRepository is the side table of Runner version reports
+// (V2-069), keyed by RunnerID. It follows ControlRequestedByRepository's
+// precedent exactly: the value is not an aggregate, has no state transition
+// and no Version, and no domain rule consults it, so it is tracked here
+// rather than as a new field on domain.RunnerObservation -- which is rebuilt
+// in full on every heartbeat (service.go's SaveRunnerObservation call), so a
+// version stored there would be zeroed by the next heartbeat that omitted the
+// report.
+//
+// RunnerVersionReports is the one bounded enumeration the cross-machine
+// question needs, and RunnerObservationRepository above is deliberately not
+// widened to provide it. It returns one row per Runner the Control Plane has
+// heard from -- joined with that Runner's report when one exists -- in
+// RunnerID-ascending order, at most limit rows, with the bool reporting that
+// the bound truncated the answer. A Runner with no report appears with a zero
+// ReportedAt and zero coordinates: implementations must never synthesize an
+// interval, a version or a digest for it, because "has not reported" and "is
+// compatible" must stay distinguishable. The row count is the machine count
+// (machines are not shared, docs/operations/self-update.md section 5.2) and
+// is not a function of the Requirement count, which is why there is no
+// cursor.
+type RunnerVersionReportRepository interface {
+	SaveRunnerVersionReport(ctx context.Context, value RunnerVersionReport) error
+	RunnerVersionReport(ctx context.Context, runnerID string) (RunnerVersionReport, bool, error)
+	RunnerVersionReports(ctx context.Context, limit int) ([]RunnerVersionReport, bool, error)
+}
+
 // RepositoryRepository is the persistence contract of the Repository
 // aggregate and of its bounded forge Observation. It is one member interface
 // (V2-064 A5): the Observation lives here rather than behind a second port
@@ -266,6 +293,7 @@ type UnitOfWork interface {
 	ControlRequestedByRepository
 	ControlProgressRepository
 	RunnerObservationRepository
+	RunnerVersionReportRepository
 	RepositoryRepository
 	RequirementRepositoryLinkRepository
 	RequirementReadRepository

@@ -1,0 +1,126 @@
+{
+ "schema_version": "v1",
+ "id": "ev-v2-069-api",
+ "kind": "evidence",
+ "created_at": "2026-08-25T14:40:00Z",
+ "correlation_id": "v2-069-runner-version-report",
+ "task_id": "V2-069",
+ "component": "api",
+ "evidence_key": "8aa438055da2161fe9eefc8eb2a74ca6d57279a8644419c8ae61a6d4a5fde4cc",
+ "result": "passed",
+ "observed_at": "2026-08-25T14:40:00Z",
+ "checks": [
+  {
+   "name": "environment-identifier",
+   "status": "passed",
+   "argv": ["uname", "-srm"],
+   "working_directory": ".",
+   "timeout_seconds": 10,
+   "summary": "execution environment: uname -srm = Linux 6.18.33.2-microsoft-standard-WSL2 x86_64; devbox run --pure -- go version = go1.25.0 linux/amd64; devbox 0.17.2 with the environment resolved from this worktree's devbox.json/devbox.lock, both untouched by this task. Worktree /home/takushi/repos/agentic-loop-foundation-worktrees/v2-task-069 on branch v2-task/V2-069, base commit 390df168bd9c3fa1fbbdff3fb7477a06ca1e16af. No real Provider CLI was started and no Google Cloud resource was touched; the Firestore assertions ran against the local emulator scripts/firestore-emulator.sh starts for make component-store-firestore."
+  },
+  {
+   "name": "A3-report-shape-is-closed-at-the-transport",
+   "status": "passed",
+   "argv": ["devbox", "run", "--pure", "--", "go", "test", "-count=1", "-run", "TestRunnerVersionReportShapeIsClosedAtTheTransport", "-v", "./internal/api"],
+   "working_directory": ".",
+   "timeout_seconds": 600,
+   "summary": "PASS. A go/ast scan over the api package's 3 non-test .go files (a zero-file scan is a Fatal) finds runnerVersionBody = [Version json:\"version\" BinarySHA256 json:\"binary_sha256\" SchemaMin json:\"schema_min\" SchemaMax json:\"schema_max\"] and nothing else. The scan asserts the type mentions none of timestamp, hostname, host, ip, path, root, env, message, detail, output, text, contract_release, contract_digest, runner_api, bundle_digest, candidate_id, key_id, algorithm, secret, credential, password, bearer or authorization, and that it does carry all four of version, binary_sha256, schema_min and schema_max. The request DTO is therefore structurally unable to carry a Runner-supplied instant or a machine identifier beyond the RunnerID the session already proved."
+  },
+  {
+   "name": "A4-validation-and-the-partial-object-refusal-through-the-transport",
+   "status": "passed",
+   "argv": ["devbox", "run", "--pure", "--", "go", "test", "-count=1", "-run", "TestHeartbeatRunnerVersionValidationAtTheTransport", "-v", "./internal/api"],
+   "working_directory": ".",
+   "timeout_seconds": 600,
+   "summary": "PASS: 4 accepted literals and 22 refused literals driven as real HTTP requests with a runner session. Accepted with 200 and a reported row: [0.1.0, 64-hex, 1, 1]; [0.1.0-dev, ..., 2, 7]; [1.0.0-rc.1, ..., 3, 9]; [10.20.30, ..., 1, 4096]. Refused with 400: version 1.2 (bare major.minor), v1.2.3 (leading v), 1.2.3-RC1 (uppercase prerelease), \"\" (empty string), 1.2.3.4, 1.2.3- ; digest at 63 characters, at 65 characters, uppercase, non-hex; schema_min 0, schema_max below schema_min, schema_max 4097 above the ceiling, schema_min 4097 above the ceiling; and eight partial objects -- schema_max with no schema_min, schema_min alone, version alone, digest alone, interval with no binary, binary with no interval, everything but schema_min, and the wholly empty object {}. PARTIAL-OBJECT VERDICT AT THE TRANSPORT: every one of those 22 requests returned HTTP 400 and, on the subsequent GET /v1/runners, the runners array was EMPTY and intersection_state was unknown -- so the refused heartbeat stored no report and left no trace at all, and in particular schema_max without schema_min was never stored as an interval starting at zero. Omitting runner_version entirely returned HTTP 200 with the Runner enumerating as report_state not-reported, with the keys version, binary_sha256, schema_min, schema_max and reported_at all absent from the row, and intersection_state unknown. An unknown field inside runner_version (contract_release) returned 400, from DisallowUnknownFields at internal/api/api.go:830 plus additionalProperties:false in the contract. A Runner-supplied reported_at inside runner_version also returned 400, for the same reason: the field does not exist on the request object. Every pre-existing heartbeat assertion still passes unchanged."
+  },
+  {
+   "name": "A10-api-surface",
+   "status": "passed",
+   "argv": ["devbox", "run", "--pure", "--", "go", "test", "-count=1", "-run", "TestRunnersRouteIsOwnerOnlyGetWithAClosedResponse", "-v", "./internal/api"],
+   "working_directory": ".",
+   "timeout_seconds": 600,
+   "summary": "PASS. GET /v1/runners returns 401 unauthenticated, 403 for the runner role and 200 for the owner; POST to the same path returns 405, because there is deliberately no reporting endpoint there. The response document's top-level keys are exactly runners, runner_count, truncated, intersection_state and, when the state is non-empty, intersection_schema_min and intersection_schema_max; a runner row's keys are exactly runner_id, report_state and, when a report was read, version, binary_sha256, schema_min, schema_max, reported_at. Any other key fails the test. The raw response body is also searched for contract_release, contract_digest, runner_api, bundle_digest, candidate_id, key_id, algorithm, TODO, placeholder, unknown-version and 0.0.0, and contains none of them, so there is no synthetic or placeholder value. contracts/openapi/openapi-v1.yaml gained the /v1/runners path (operationId listRunners, security iapOwner) and three schemas: RunnerVersionReport with additionalProperties:false and required [version, binary_sha256, schema_min, schema_max] -- every field of the request object is required, which is what makes a partial object a contract violation as well as a 400 -- plus RunnerVersionRow and RunnerListResponse, both additionalProperties:false. HeartbeatRequest gained runner_version as a $ref and keeps additionalProperties:false. On the two response schemas, required lists only the always-present fields (runner_id and report_state; runners, runner_count, truncated, intersection_state) because a coordinate that was never reported must be absent rather than present-and-empty -- that is the same acceptance item A6(a). The document parses as YAML with 23 paths. Every existing openapi-conformance assertion still passes: internal/contracts is green (including openAPIDeclaredPaths in release_contract_test.go) and so is internal/release."
+  },
+  {
+   "name": "A7-the-report-is-never-authority-mechanical-auth-file",
+   "status": "passed",
+   "argv": ["devbox", "run", "--pure", "--", "go", "test", "-count=1", "-run", "TestAuthFileDoesNotReadTheRunnerVersionReport", "-v", "./internal/api"],
+   "working_directory": ".",
+   "timeout_seconds": 600,
+   "summary": "PASS. A go/ast scan of internal/api/auth.go -- the transport authentication boundary, 4 function declarations found -- asserts that no declaration names RunnerVersionInput, RunnerVersionReport, RunnerVersionReports, runnerVersionBody, RunnerVersionListView, listRunners or runnersPath. A zero-declaration scan is a Fatal, and the test additionally asserts that auth.go really does declare an Authenticate method, so the guard cannot go vacuous if the boundary moves. The matcher is verified first against a known-positive synthetic authenticator that does name RunnerVersionReport. The internal/application half of the same acceptance item is recorded in this task's application evidence."
+  },
+  {
+   "name": "A7-the-report-is-never-authority-behavioural-status-codes",
+   "status": "passed",
+   "argv": ["devbox", "run", "--pure", "--", "go", "test", "-count=1", "-run", "TestAnAbsurdRunnerVersionReportChangesNoStatusCode", "-v", "./internal/api"],
+   "working_directory": ".",
+   "timeout_seconds": 600,
+   "summary": "PASS. A Runner posts a report whose interval is [4096, 4096] -- both endpoints at the declared ceiling, excluding every plausible canonical schema -- and then runs each of the six runner-facing operations as a real HTTP request with a runner session. The identical scripted sequence is run against a second, fresh handler by a Runner that reported nothing, with the same deterministic clock and id generator so identifiers match. STATUS CODES, before and after the absurd report, recorded per the acceptance item: claims:acquire 200 / 200; permits:check 200 / 200; executions:start 200 / 200; checkpoints 200 / 200; heartbeat 200 / 200; executions/result 200 / 200. Every response body was byte-identical between the two arms, and all six succeeded rather than merely failing identically. The Increment the lifecycle needs is prepared through the Service (Capture, Plan, Prepare) because planning is deliberately not a public owner route; every assertion itself goes over HTTP."
+  },
+  {
+   "name": "A8-firestore-read-count-does-not-vary-with-requirement-count",
+   "status": "passed",
+   "argv": ["devbox", "run", "--pure", "--", "scripts/firestore-emulator.sh", "go", "test", "-count=1", "-run", "TestRunnersReadCountDoesNotVaryWithRequirementCount", "-v", "./internal/store/firestore"],
+   "working_directory": ".",
+   "timeout_seconds": 900,
+   "summary": "PASS against the local Firestore emulator. The trued-up quota total is the adapter's own record of the documents a transaction actually read (trueUpQuota accounts actual reads as len(u.cache)), so the delta across one GET /v1/runners is the measured read count. Measured against a fixture exactly at the enumeration bound -- 32 Runners, every one known and every one reporting: 65 reads with 3 Requirements in the store and 65 reads with 11 Requirements in the store. The two figures are equal, so the read count does not vary with the Requirement count, and both are exactly the declared bound 2*MaxRunnerVersionReports+1 = 65: two per-machine collections (runner_observations and runner_version_reports) plus the quota document. Writes for the same read: exactly 1 in both measurements, the per-transaction quota reservation every bounded owner read already writes -- so one GET /v1/runners writes no application record and enqueues no outbox item."
+  },
+  {
+   "name": "A9-the-same-behavioural-table-against-the-firestore-adapter",
+   "status": "passed",
+   "argv": ["devbox", "run", "--pure", "--", "scripts/firestore-emulator.sh", "go", "test", "-count=1", "-run", "TestRunnerVersionReportBehaviouralTableOnFirestore|TestRunnerVersionReportRollbackLeaksNothingOnFirestore", "-v", "./internal/store/firestore"],
+   "working_directory": ".",
+   "timeout_seconds": 900,
+   "summary": "Both PASS against the local Firestore emulator. TestRunnerVersionReportBehaviouralTableOnFirestore: the Firestore adapter satisfied the same 5 shared cases from application.RunnerVersionReportCases() that internal/store/memory runs, so the memory store cannot pass behaviour this adapter does not implement. Last-writer-wins per RunnerID, a Runner known only through a report-less heartbeat enumerating with zero coordinates, RunnerID-ascending order, and truncation at the bound are all asserted here too, and every read happens in a transaction separate from every write. TestRunnerVersionReportRollbackLeaksNothingOnFirestore: a rolled-back Firestore transaction commits no report -- neither the keyed read nor the enumeration sees it -- and a report with an empty runner id is refused. The new collection runner_version_reports needs no composite index: RunnerVersionReports reads two bounded collections with no ordering and no predicate, exactly as Repositories does, so firestore.indexes.json is untouched. No existing operation's quota reservation shape changed. Emulator success is evidence about this adapter's transaction wiring, never about real Firestore contention, IAM or billing."
+  },
+  {
+   "name": "A13-owner-console",
+   "status": "passed",
+   "argv": ["devbox", "run", "--pure", "--", "go", "test", "-count=1", "-run", "TestOwnerConsoleExposesTheRunnerVersionReports", "-v", "./internal/api"],
+   "working_directory": ".",
+   "timeout_seconds": 600,
+   "summary": "PASS. One self-contained block was appended to internal/web/owner.html and one to internal/web/owner.js, each introduced by a comment naming V2-069, at the end of the file, changing no existing byte -- verified independently of the test by a byte-offset comparison against a copy of each file taken before the edit: owner.html differs first at offset 5020 of 5094, the insertion is 1583 bytes and the remaining suffix is identical, and the whole of owner.js's previous 10750 bytes is a byte-identical prefix of the new file (cmp). The html block is the last section of <main>, which is the tail of the rendered page because an HTML document has no valid tail after </html>. The rendered console carries runners-title, runners-refresh, runners-count, runners-silent, runners-intersection, runners-intersection-reason and runners-rows, and still carries every pre-existing surface including the three sibling tasks' sections (capture, control, queue, repository, repository-list, Release evidence, release-conditions, backlog-rows). A reader sees which Runners have not reported without parsing anything: the block renders a dedicated named list, 'Machines that have not reported a version', with one row per Runner reading either 'has never reported a version' or 'reported once, then went quiet', and a separate 'shared interval' line that reads 'shared interval: unknown' with the reason 'At least one machine has not reported a version, so the shared interval cannot be stated.' The block contains no JSON.stringify, so it renders named rows rather than raw JSON, and the assertion is scoped to the V2-069 block so the pre-existing queue block's own raw-JSON rendering cannot satisfy it. The block references no http:// or https:// URL, no CDN, no importScripts, no setInterval, no setTimeout and no @font-face: internal/web is embedded and stays self-contained, and the block starts no timer and no poll loop. The rendered markup contains no credential-shaped value (password, secret, api_key, apikey, 'bearer ', authorization:, private_key) and no email-shaped value: it contains no at-sign at all, which is the strictest form of that check. The console does not claim a measurement it lacks: 'every machine reported', 'versions are compatible' and 'capability exercised' are all absent."
+  },
+  {
+   "name": "A14-documentation",
+   "status": "passed",
+   "argv": ["git", "status", "--short", "docs"],
+   "working_directory": ".",
+   "timeout_seconds": 30,
+   "summary": "docs/operations/runner-version-report.md created; no other document was edited, and docs/operations/self-update.md is byte-unchanged (git status --short docs lists only the new file). It states: which two of section 5.1's five coordinate groups are reported and why the other three are not, naming V2-034 for the manifest fields and V2-074 for the compatibility decision, and recording the measured fact that no code in this repository constructs a Manifest so nothing produces those values; why the carrier is heartbeat rather than enrollment, with the measured reason that enrollment happens once per Runner identity while the binary is switched many times per identity, so a version captured at enrollment is permanently stale after the first self-update, plus the second measured reason the per-Execution requests were rejected; the three report states with a table, and what stale means -- a machine that reported and then went quiet is a different operational fact from one that never reported; that the report is never authority over what a Runner may read, naming the two checks that prove it (the go/ast guards over auth.go and caller.go, and the behavioural test in which an absurd interval changes nothing at six operations); that the intersection is reported and gates nothing because no canonical schema counter exists, citing currentSchema as a parameter at internal/update/update.go:127, :220 and :296; and that no Runner in this repository posts a heartbeat today, so the production report count is zero. It also records the stale prose at internal/application/repository.go:577, which is outside this task's allowed paths and was not edited."
+  },
+  {
+   "name": "canonical-schema-counter-has-no-owner",
+   "status": "passed",
+   "argv": ["grep", "-n", "currentSchema", "internal/update/update.go"],
+   "working_directory": ".",
+   "timeout_seconds": 30,
+   "summary": "Six matching lines, and every one is a parameter or a use of that parameter: the signatures of Verify at internal/update/update.go:127, Install at :220 and VerifyInstalled at :296, and the comparisons at :165 and :221 and :301. No constant, field, record or store anywhere in the repository owns a canonical schema value. Consequence, stated as a fact and not as a limitation to be worked around: the intersection this task computes CAN be reported but GATES NOTHING, because there is nothing to compare it against and no operation whose refusal would consume it. This task therefore introduces no canonical schema counter and no advance operation, and neither this record, the API response, the owner console nor docs/operations/runner-version-report.md claims that the intersection gates, permits or refuses anything. The refusal that consumes it belongs to whoever owns the advance (V2-070's four-stage migration); that split is recorded here with a named owner rather than closed by invention. The Work Order's :41 and :71 line numbers for currentSchema are stale."
+  },
+  {
+   "name": "production-report-count-is-zero",
+   "status": "passed",
+   "argv": ["grep", "-rn", "net/http", "internal/runner"],
+   "working_directory": ".",
+   "timeout_seconds": 30,
+   "summary": "Zero matching lines: there is no HTTP client anywhere in internal/runner, so no heartbeat client exists. cmd/runner/main.go:27-30 refuses to run without --fake, printing 'runner: no external control-plane wiring is enabled; use --fake explicitly for local mode' and exiting 2, and grep for internal/update over cmd/runner and internal/runner returns nothing, so a Runner cannot even read the manifest whose coordinates it would report. THEREFORE THE PRODUCTION REPORT COUNT AT COMPLETION IS ZERO, and this record claims nothing else. Every assertion in this task was driven through the API with a runner session, exactly as internal/api's existing runner tests are, or through the application Service directly; no Runner-side client was written and cmd/** was not edited. Until a heartbeat client exists, GET /v1/runners will report report_state not-reported for every machine that contacts the Control Plane and intersection_state unknown, which is the true answer rather than a defect. This is stated in the same words in docs/operations/runner-version-report.md section 8."
+  },
+  {
+   "name": "A15-determinism-of-the-transport-tests",
+   "status": "passed",
+   "argv": ["devbox", "run", "--pure", "--", "go", "test", "-count=1", "-race", "./internal/application", "./internal/api"],
+   "working_directory": ".",
+   "timeout_seconds": 900,
+   "summary": "Both packages ok under -race (application 1.239s, api 1.117s). The same two packages were also run three times in sequence without -race and, with elapsed times normalised, the output was byte-identical each time; the verdict lines were 'ok .../internal/application' and 'ok .../internal/api' on every run. No new test in internal/api contains a fixed sleep, a wall-clock timer or a goroutine: every instant comes from the existing injected test clock, and the two arms of the behavioural proof are two fresh in-process handlers rather than a race."
+  },
+  {
+   "name": "A19-make-check-and-the-full-verification-set",
+   "status": "passed",
+   "argv": ["devbox", "run", "--pure", "--", "make", "check"],
+   "working_directory": ".",
+   "timeout_seconds": 3600,
+   "summary": "Green before and again after the evidence commit, judged by the verdict lines rather than the shell exit status: zero lines matching ^FAIL, every package ok including internal/store/firestore under the emulator with -race, gitleaks 'no leaks found', the ownership plan emitting {\"changed\":null,\"selected\":null,\"all\":false}, and the closing 'workflow-pins: 3 unique (owner/repo, version) -> sha pins, no disagreement'. Also run individually and green: go test -count=1 over ./internal/domain ./internal/application ./internal/api ./internal/store/memory ./internal/store/firestore ./internal/ci ./internal/contracts; make ownership; make evidence-keys. git status --short lists only files inside this Work Order's allowed_paths."
+  }
+ ]
+}

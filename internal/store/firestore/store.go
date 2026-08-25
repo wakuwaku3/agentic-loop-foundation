@@ -1400,6 +1400,86 @@ func (u *unit) SaveRunnerObservation(ctx context.Context, value domain.RunnerObs
 	}
 	return u.stage(ref, "runner-observation", value, false)
 }
+
+// The Runner version report (V2-069) lives in its own collection, keyed by
+// the RunnerID, last-writer-wins: the record has no state transition and no
+// Version, so there is no optimistic-concurrency check to make. No composite
+// index is required -- RunnerVersionReports reads two bounded collections
+// with no ordering and no predicate, exactly as Repositories does -- so
+// firestore.indexes.json is untouched.
+func (u *unit) SaveRunnerVersionReport(ctx context.Context, value application.RunnerVersionReport) error {
+	if value.RunnerID == "" {
+		return errors.New("runner id is required")
+	}
+	ref, err := u.store.path("runner_version_reports", value.RunnerID)
+	if err != nil {
+		return err
+	}
+	return u.stage(ref, "runner-version-report", value, false)
+}
+func (u *unit) RunnerVersionReport(ctx context.Context, runnerID string) (application.RunnerVersionReport, bool, error) {
+	ref, err := u.store.path("runner_version_reports", runnerID)
+	if err != nil {
+		return application.RunnerVersionReport{}, false, err
+	}
+	var v application.RunnerVersionReport
+	ok, err := u.value(ref, "runner-version-report", &v)
+	return v, ok, err
+}
+
+// RunnerVersionReports enumerates every Runner this Control Plane has heard
+// from and joins each with its report when one exists. Two bounded collection
+// reads, each one document per machine: machines are not shared, so neither
+// grows with the Requirement count. A Runner with no report yields a row
+// carrying only its id -- no interval, no version and no digest is
+// synthesized for it.
+func (u *unit) RunnerVersionReports(ctx context.Context, limit int) ([]application.RunnerVersionReport, bool, error) {
+	if limit <= 0 {
+		return nil, false, nil
+	}
+	reportRows, err := u.query(ctx, "runner_version_reports", "runner-version-report")
+	if err != nil {
+		return nil, false, err
+	}
+	reports := make(map[string]application.RunnerVersionReport, len(reportRows))
+	for _, b := range reportRows {
+		var v application.RunnerVersionReport
+		if json.Unmarshal(b, &v) != nil {
+			return nil, false, ErrInvalidSchema
+		}
+		reports[v.RunnerID] = v
+	}
+	observationRows, err := u.query(ctx, "runner_observations", "runner-observation")
+	if err != nil {
+		return nil, false, err
+	}
+	ids := map[string]bool{}
+	for id := range reports {
+		ids[id] = true
+	}
+	for _, b := range observationRows {
+		var v domain.RunnerObservation
+		if json.Unmarshal(b, &v) != nil {
+			return nil, false, ErrInvalidSchema
+		}
+		if v.RunnerID != "" {
+			ids[v.RunnerID.String()] = true
+		}
+	}
+	out := make([]application.RunnerVersionReport, 0, len(ids))
+	for id := range ids {
+		if report, ok := reports[id]; ok {
+			out = append(out, report)
+			continue
+		}
+		out = append(out, application.RunnerVersionReport{RunnerID: id})
+	}
+	application.SortRunnerVersionReports(out)
+	if len(out) > limit {
+		return out[:limit], true, nil
+	}
+	return out, false, nil
+}
 func (u *unit) Idempotency(ctx context.Context, requestID, operation string) (application.IdempotentResponse, bool, error) {
 	ref, err := u.store.path("idempotency", requestID)
 	if err != nil {

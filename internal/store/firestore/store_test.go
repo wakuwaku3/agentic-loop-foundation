@@ -601,3 +601,198 @@ func TestRequirementRepositoryLinkIsWriteOnceAndBounded(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// ===========================================================================
+// Runner version report (V2-069), Firestore adapter
+// ===========================================================================
+
+// TestRunnerVersionReportBehaviouralTableOnFirestore runs
+// application.RunnerVersionReportCases() -- the very same table
+// internal/store/memory runs -- against the real Firestore transaction, so
+// the memory adapter cannot pass behaviour this adapter does not implement.
+// Every read is a separate transaction from every write.
+func TestRunnerVersionReportBehaviouralTableOnFirestore(t *testing.T) {
+	cases := application.RunnerVersionReportCases()
+	if len(cases) == 0 {
+		t.Fatal("the shared table is empty; the assertion would be vacuous")
+	}
+	ctx := context.Background()
+	for _, c := range cases {
+		store := emulatorStore(t)
+		for _, id := range c.Observations {
+			observation := domain.RunnerObservation{RunnerID: domain.RunnerID(id), Reachable: true, ObservedAt: time.Unix(1700000000, 0).UTC()}
+			if err := store.Transact(ctx, func(u application.UnitOfWork) error {
+				return u.SaveRunnerObservation(ctx, observation)
+			}); err != nil {
+				t.Fatalf("%s: %v", c.Name, err)
+			}
+		}
+		// The bounded case writes more rows than one transaction's write cap
+		// would comfortably hold in a single batch, so each report is written
+		// in its own transaction -- which is also what a real Runner does.
+		for _, report := range c.Reports {
+			value := report
+			if err := store.Transact(ctx, func(u application.UnitOfWork) error {
+				return u.SaveRunnerVersionReport(ctx, value)
+			}); err != nil {
+				t.Fatalf("%s: %v", c.Name, err)
+			}
+		}
+		limit := c.Limit
+		if limit == 0 {
+			limit = application.MaxRunnerVersionReports
+		}
+		var got []application.RunnerVersionReport
+		var truncated bool
+		if err := store.Transact(ctx, func(u application.UnitOfWork) error {
+			v, more, e := u.RunnerVersionReports(ctx, limit)
+			got, truncated = v, more
+			return e
+		}); err != nil {
+			t.Fatalf("%s: %v", c.Name, err)
+		}
+		if truncated != c.WantTruncated {
+			t.Fatalf("%s: truncated=%v want %v", c.Name, truncated, c.WantTruncated)
+		}
+		if len(got) != len(c.Want) {
+			t.Fatalf("%s: enumerated %d rows, want %d", c.Name, len(got), len(c.Want))
+		}
+		for i := range c.Want {
+			if !got[i].ReportedAt.Equal(c.Want[i].ReportedAt) {
+				t.Fatalf("%s: row %d reported_at = %s want %s", c.Name, i, got[i].ReportedAt, c.Want[i].ReportedAt)
+			}
+			a, b := got[i], c.Want[i]
+			a.ReportedAt, b.ReportedAt = time.Time{}, time.Time{}
+			if a != b {
+				t.Fatalf("%s: row %d = %#v want %#v", c.Name, i, got[i], c.Want[i])
+			}
+		}
+		for _, want := range c.Want {
+			if !want.Reported() {
+				continue
+			}
+			if err := store.Transact(ctx, func(u application.UnitOfWork) error {
+				v, ok, e := u.RunnerVersionReport(ctx, want.RunnerID)
+				if e != nil {
+					return e
+				}
+				if !ok || v.Version != want.Version || v.BinarySHA256 != want.BinarySHA256 || v.SchemaMin != want.SchemaMin || v.SchemaMax != want.SchemaMax || !v.ReportedAt.Equal(want.ReportedAt) {
+					t.Fatalf("%s: keyed read of %q = %#v ok=%v, want %#v", c.Name, want.RunnerID, v, ok, want)
+				}
+				return nil
+			}); err != nil {
+				t.Fatalf("%s: %v", c.Name, err)
+			}
+		}
+	}
+	t.Logf("firestore adapter satisfied %d shared cases", len(cases))
+}
+
+// TestRunnerVersionReportRollbackLeaksNothingOnFirestore is the other half of
+// A9: a rolled-back transaction commits no report, in this adapter too.
+func TestRunnerVersionReportRollbackLeaksNothingOnFirestore(t *testing.T) {
+	store := emulatorStore(t)
+	ctx := context.Background()
+	failure := errors.New("rollback")
+	report := application.RunnerVersionReport{RunnerID: "runner-x", Version: "1.0.0", BinarySHA256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", SchemaMin: 1, SchemaMax: 2, ReportedAt: time.Unix(1700000000, 0).UTC()}
+	if err := store.Transact(ctx, func(u application.UnitOfWork) error {
+		if e := u.SaveRunnerVersionReport(ctx, report); e != nil {
+			return e
+		}
+		return failure
+	}); !errors.Is(err, failure) {
+		t.Fatalf("rollback = %v", err)
+	}
+	if err := store.Transact(ctx, func(u application.UnitOfWork) error {
+		if _, ok, e := u.RunnerVersionReport(ctx, "runner-x"); e != nil {
+			return e
+		} else if ok {
+			t.Fatal("a rolled-back Firestore transaction committed a Runner version report")
+		}
+		rows, _, e := u.RunnerVersionReports(ctx, application.MaxRunnerVersionReports)
+		if e != nil {
+			return e
+		}
+		if len(rows) != 0 {
+			t.Fatalf("a rolled-back transaction left %d enumerated rows", len(rows))
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Transact(ctx, func(u application.UnitOfWork) error {
+		return u.SaveRunnerVersionReport(ctx, application.RunnerVersionReport{Version: "1.0.0"})
+	}); err == nil {
+		t.Fatal("a report with no runner id was accepted")
+	}
+}
+
+// TestRunnersReadCountDoesNotVaryWithRequirementCount is A8's measured half.
+// The trued-up quota total is the adapter's own record of the documents a
+// transaction actually read (trueUpQuota uses len(u.cache)), so the delta
+// across one GET /v1/runners is the measured read count. It is measured twice,
+// with two different Requirement counts in the store, and must be the same
+// both times: the enumeration reads two per-machine collections and the quota
+// document, and nothing that grows with the Requirement count.
+func TestRunnersReadCountDoesNotVaryWithRequirementCount(t *testing.T) {
+	at := time.Unix(1700000000, 0).UTC()
+	measure := func(requirements int) (reads, writes int64, count int) {
+		store := emulatorStore(t)
+		svc, err := application.NewServiceWithConfig(store, integrationClock{now: at}, &integrationIDs{}, application.ServiceConfig{InstallationID: "install", LeaseTTL: time.Minute})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ctx := context.Background()
+		// A fixture exactly at the enumeration bound: every machine known and
+		// every machine reporting.
+		for i := 0; i < application.MaxRunnerVersionReports; i++ {
+			id := fmt.Sprintf("runner-%03d", i)
+			if _, err := svc.Heartbeat(integrationRunner(ctx, id), application.HeartbeatRequest{
+				RequestID:     "hb-" + id,
+				RunnerVersion: &application.RunnerVersionInput{Version: "1.2.3", BinarySHA256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", SchemaMin: 2, SchemaMax: 7},
+			}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		for i := 0; i < requirements; i++ {
+			if _, err := svc.Capture(integrationOwner(ctx), application.CaptureRequest{RequestID: fmt.Sprintf("cap-%d", i), Text: "work"}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		before, err := readQuotaRecord(ctx, store, at)
+		if err != nil {
+			t.Fatal(err)
+		}
+		view, err := svc.Runners(integrationOwner(ctx))
+		if err != nil {
+			t.Fatal(err)
+		}
+		after, err := readQuotaRecord(ctx, store, at)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return after.Total.Reads - before.Total.Reads, after.Total.Writes - before.Total.Writes, view.RunnerCount
+	}
+
+	lowReads, lowWrites, lowCount := measure(3)
+	highReads, highWrites, highCount := measure(11)
+	if lowCount != application.MaxRunnerVersionReports || highCount != application.MaxRunnerVersionReports {
+		t.Fatalf("the fixture is not at the bound: %d and %d rows", lowCount, highCount)
+	}
+	if lowReads != highReads {
+		t.Fatalf("one GET /v1/runners read %d documents with 3 Requirements and %d with 11; the read count varies with the Requirement count", lowReads, highReads)
+	}
+	// The bound: two per-machine collections plus the quota document, and the
+	// declared enumeration bound is the only thing that scales it.
+	const bound = int64(2*application.MaxRunnerVersionReports + 1)
+	if lowReads > bound {
+		t.Fatalf("one GET /v1/runners read %d documents, above the declared bound %d", lowReads, bound)
+	}
+	// The only document written is the quota reservation every bounded owner
+	// read already writes; no application record and no outbox item is
+	// touched.
+	if lowWrites != 1 || highWrites != 1 {
+		t.Fatalf("one GET /v1/runners wrote %d and %d documents, want exactly the quota record", lowWrites, highWrites)
+	}
+	t.Logf("measured reads for one GET /v1/runners at the bound: %d with 3 Requirements, %d with 11 Requirements; declared bound %d; writes %d", lowReads, highReads, bound, lowWrites)
+}

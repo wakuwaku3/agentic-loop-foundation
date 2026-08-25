@@ -391,10 +391,25 @@ func (s *Service) Start(ctx context.Context, req StartRequest) (out StartRespons
 	return out, err
 }
 
+// HeartbeatRequest gains RunnerVersion (V2-069): one additive optional
+// object carrying the binary coordinates and the canonical schema interval
+// the Runner is actually running. Heartbeat is the carrier because it is the
+// only recurring Runner-to-Control-Plane request; enrollment happens once per
+// identity while a binary is switched many times per identity, so a version
+// captured at enrollment is permanently stale after the first self-update,
+// and the per-Execution requests fall silent exactly during the idle
+// mixed-version window the invariant is about.
+//
+// Consequence, recorded rather than hidden: requestFingerprint("heartbeat",
+// req) below covers the whole request, so replaying one request_id with a
+// changed report is ErrIdempotencyConflict. That is existing semantics, not
+// new behaviour -- a heartbeat loop already needs a fresh request_id per
+// heartbeat.
 type HeartbeatRequest struct {
 	RequestID       string
 	ControlRevision domain.Revision
 	Processes       []domain.ProcessObservation
+	RunnerVersion   *RunnerVersionInput
 }
 type CheckpointRequest struct {
 	RequestID, ExecutionID, LeaseID string
@@ -450,6 +465,15 @@ func (s *Service) Heartbeat(ctx context.Context, req HeartbeatRequest) (out Life
 			// Runner clocks and caller-provided timestamps are not authoritative.
 			req.Processes[i].At = authorityAt
 		}
+		// The version report is validated on shape before anything is staged,
+		// so a partial or malformed object stores nothing at all rather than
+		// storing the fields that happened to parse. Nothing here checks that
+		// the claim is true: the bytes it describes never reach this process.
+		if req.RunnerVersion != nil {
+			if e := req.RunnerVersion.Validate(); e != nil {
+				return e
+			}
+		}
 		if req.ControlRevision != 0 {
 			{
 				progress, exists, e := u.ControlProgress(ctx, req.ControlRevision)
@@ -492,6 +516,31 @@ func (s *Service) Heartbeat(ctx context.Context, req HeartbeatRequest) (out Life
 		observation := domain.RunnerObservation{RunnerID: runner, Target: target, AppliedRevision: req.ControlRevision, LatestRevision: latest, LatestEffectiveAt: deadline, Reachable: true, Processes: append([]domain.ProcessObservation(nil), req.Processes...), ObservedAt: authorityAt}
 		if e = u.SaveRunnerObservation(ctx, observation); e != nil {
 			return e
+		}
+		// The report goes to its own RunnerID-keyed record, and only when the
+		// heartbeat actually carried one: a heartbeat that omitted the object
+		// leaves any previously reported version exactly as it was, which is
+		// what keeps "has not reported" distinguishable from "reported once
+		// and then stopped saying so". reported_at is the transaction's
+		// authority time, derived exactly as Service.record derives the
+		// event's At, so the two are byte-identical and a Firestore retry of
+		// this callback cannot change either.
+		if req.RunnerVersion != nil {
+			reportedAt, x := transactionAuthorityTime(ctx, u)
+			if x != nil {
+				return x
+			}
+			report := RunnerVersionReport{
+				RunnerID:     runner.String(),
+				Version:      req.RunnerVersion.Version,
+				BinarySHA256: req.RunnerVersion.BinarySHA256,
+				SchemaMin:    req.RunnerVersion.SchemaMin,
+				SchemaMax:    req.RunnerVersion.SchemaMax,
+				ReportedAt:   reportedAt,
+			}
+			if e = u.SaveRunnerVersionReport(ctx, report); e != nil {
+				return e
+			}
 		}
 		out = LifecycleResponse{Accepted: true, AppliedRevision: req.ControlRevision, LatestRevision: latest, LatestEffectiveAt: deadline, ProcessObservations: observation.Processes, LatestMode: effective.Mode}
 		return s.record(ctx, u, eid, oid, fp, req.RequestID, "heartbeat", "runner", runner.String(), 1, "runner.heartbeat", actor.String(), nil, out)

@@ -1,0 +1,174 @@
+{
+ "schema_version": "v1",
+ "id": "ev-v2-069-application",
+ "kind": "evidence",
+ "created_at": "2026-08-25T14:40:00Z",
+ "correlation_id": "v2-069-runner-version-report",
+ "task_id": "V2-069",
+ "component": "application",
+ "evidence_key": "7eeeb86dc2b551245fdc029ff675b21bddbba435031dc690361e9bed4a79e90d",
+ "result": "passed",
+ "observed_at": "2026-08-25T14:40:00Z",
+ "checks": [
+  {
+   "name": "environment-identifier",
+   "status": "passed",
+   "argv": ["uname", "-srm"],
+   "working_directory": ".",
+   "timeout_seconds": 10,
+   "summary": "execution environment: uname -srm = Linux 6.18.33.2-microsoft-standard-WSL2 x86_64; devbox run --pure -- go version = go1.25.0 linux/amd64; devbox 0.17.2 with the environment resolved from this worktree's devbox.json/devbox.lock, both untouched by this task. Worktree /home/takushi/repos/agentic-loop-foundation-worktrees/v2-task-069 on branch v2-task/V2-069, base commit 390df168bd9c3fa1fbbdff3fb7477a06ca1e16af. No real Provider CLI was started and no Google Cloud resource was touched; every Firestore assertion ran against the local emulator started by scripts/firestore-emulator.sh."
+  },
+  {
+   "name": "A1-scope-boundary-coordinate-groups",
+   "status": "passed",
+   "argv": ["grep", "-rn", "Manifest{", "--include=*.go", "."],
+   "working_directory": ".",
+   "timeout_seconds": 60,
+   "summary": "One row per coordinate group of docs/operations/self-update.md section 5.1, written before any code. (1) binary: version is carried by a running binary -- cmd/runner/main.go:13 declares const version = \"0.1.0-dev\" and main.go:16-19 prints it for --version; binary_sha256 is NOT carried by a running Runner today (neither cmd/runner nor internal/runner imports internal/update; only cmd/bootstrap/process.go:10 does). Reported by this task. Remainder owner: none, this is the group this task owns. (2) canonical schema interval: schema_min/schema_max exist as internal/update/update.go:75-76 Manifest fields and as internal/update/state.go:178-179 installed.json fields; no running Runner reads either today. Reported by this task; section 5.1 item 2 states the interval is the coexist mechanism and section 6's invariant is written over intervals alone. (3) contract -- contract_release, contract_digest, runner_api_min, runner_api_max: NOT reported by this task. MEASURED DISCREPANCY with the Work Order and the design packet, recorded rather than papered over: the Work Order says these must be described as values 'no code in the repository produces', on the premise (dp-v2-069 d1) that update.go declares Manifest with exactly seven fields. That premise is stale -- V2-034 has landed and internal/update/update.go:90-95 now declares contract_release, contract_digest, runner_api_min and runner_api_max, internal/update/update.go:78-79 declares key_id and algorithm, and internal/update/state.go:183 copies contract_release into installed.json. The stronger measured statement that is still true: no code in this repository CONSTRUCTS a Manifest at all. grep -rn 'Manifest{' over every non-test .go file returns only zero values in error returns (update.go:129,132,138,142,145,149,152,155,160,163,166,170,174,223,226,231,235,244,248,252 and the same shape at :296ff); every real manifest is decoded from bundle bytes assembled outside this repository, and update.go:88-89 states in the source that these values 'are never computed here'. So no code in the repository produces those values, and no Runner-side code can obtain them. Owners: V2-034 owns the manifest fields (landed) and V2-074 owns the compatibility decision (what may read a reported contract release or Runner API range). (4) bundle -- bundle_digest, candidate_id: NOT reported; same measurement and the same two owners. internal/release/bundle.go:293 and :449 produce a release-candidate ContractDigest, which is a different claim about a source tree, not a module manifest field. (5) provenance -- key_id, algorithm: NOT reported; same measurement and the same two owners. Sixth row, as required: this task introduces NO canonical schema counter and NO advance operation. currentSchema exists only as a parameter -- of update.Verify at internal/update/update.go:127, update.Install at :220 and update.VerifyInstalled at :296 (the Work Order's :41 and :71 are stale line numbers for the same two-then-three functions). Nothing in this record claims that this task satisfies any part of the section 6 invariant beyond supplying its input, and nothing here claims any release gate. os and architecture are real Manifest fields and are deliberately excluded because no rule reads them and adding them would widen the surface past the version-and-compatibility question."
+  },
+  {
+   "name": "A2-baseline-measured-before-changing-anything",
+   "status": "passed",
+   "argv": ["devbox", "run", "--pure", "--", "go", "test", "-count=1", "-list", ".*", "./internal/application", "./internal/api", "./internal/store/memory", "./internal/store/firestore"],
+   "working_directory": ".",
+   "timeout_seconds": 900,
+   "summary": "Top-level test counts measured with go test -list at base commit 390df168bd9c3fa1fbbdff3fb7477a06ca1e16af, all passing: internal/application 66, internal/api 27, internal/store/memory 6, internal/store/firestore 20. MEASURED DISCREPANCY with the Work Order, which states 49 / 20 / 4 / 9-across-two-files; those figures are stale and the measured values are used throughout this record. The firestore figure of 20 covers all four test files in the package (store_test.go 7, quota_integration_test.go 3, envelope_test.go 8, source_guard_test.go 2), which is what go test -list reports and what make check runs. Baseline lists were captured to files and compared name-by-name after the change: zero tests removed and zero renamed in any of the four packages. After: application 86 (+20), api 33 (+6), store/memory 8 (+2), store/firestore 23 (+3). Measured absences this task addresses, each re-verified at the base commit: internal/api/api.go:84 emits the static schema_version \"v1\"; the only other version-shaped fields in internal/api are Expected*Version at api.go:459,466,476,482,748,758,793,805 and repositories.go:53,87; internal/domain/model.go:16 declares type RunnerID string and internal/domain declares no Runner aggregate; the recorded fact that RunnerObservationRepository 'is keyed by a single runner id with no enumeration port' lives at internal/application/repository.go:577 (the Work Order's :548 is a stale line number, same string); cmd/runner/main.go:13 carries const version and cmd/runner/main.go:27-30 refuses to run without --fake with the message 'runner: no external control-plane wiring is enabled'; grep -rn net/http over internal/runner returns 0 lines."
+  },
+  {
+   "name": "A3-report-shape-is-closed-and-minimal",
+   "status": "passed",
+   "argv": ["devbox", "run", "--pure", "--", "go", "test", "-count=1", "-run", "TestRunnerVersionShapeIsClosedAndMinimal|TestRunnerReportFieldMatchersAreVerified", "-v", "./internal/application"],
+   "working_directory": ".",
+   "timeout_seconds": 600,
+   "summary": "TestRunnerVersionShapeIsClosedAndMinimal PASS. A go/ast field-name scan over the four new types in internal/application (9 non-test files scanned; a zero-file scan is a Fatal) reports: RunnerVersionInput = [Version BinarySHA256 SchemaMin SchemaMax] and nothing else -- exactly the four reported scalar coordinates and no timestamp field of any spelling; RunnerVersionReport = [RunnerID Version BinarySHA256 SchemaMin SchemaMax ReportedAt]; RunnerVersionView = [RunnerID/runner_id ReportState/report_state Version/version BinarySHA256/binary_sha256 SchemaMin/schema_min SchemaMax/schema_max ReportedAt/reported_at]; RunnerVersionListView = [Runners/runners RunnerCount/runner_count Truncated/truncated IntersectionState/intersection_state IntersectionSchemaMin/intersection_schema_min IntersectionSchemaMax/intersection_schema_max]. Every Go field name and every json tag name is checked against two deny lists: the 14-entry credential deny list copied by value from internal/domain/source_guard_test.go:87-103 (not imported -- a test file in another package cannot be imported), and the forbidden-field list message/detail/output/text/hostname/host/ip/path/root/env/timestamp. No field matches either. The same scan asserts that none of contract_release, contract_digest, runner_api_min, runner_api_max, bundle_digest, candidate_id, key_id, algorithm or their Go spellings appears on any of the four types, not even as an optional placeholder. TestRunnerReportFieldMatchersAreVerified PASS verifies BOTH matchers before the scan trusts either: known-positives Password, APIKey, ClientSecret, RawPrompt, raw_provider_output, Hostname, Message, InstallPath, RawOutput, reported_timestamp, Env, IP all match; known-negatives FencingToken, BinarySHA256, SchemaMin, SchemaMax, ReportedAt, RunnerID, ReportState, IntersectionState, Truncated, RunnerCount, Version all do not."
+  },
+  {
+   "name": "A4-validation-is-shape-only-and-a-partial-object-stores-nothing",
+   "status": "passed",
+   "argv": ["devbox", "run", "--pure", "--", "go", "test", "-count=1", "-run", "TestRunnerVersionShapesArePinnedToTheUpdatePatterns|TestRunnerVersionIntervalValidationIsShapeOnly|TestPartialRunnerVersionObjectIsRefusedAndStoresNothing|TestHeartbeatWithoutAReportStoresNothingAndErasesNothing", "-v", "./internal/application"],
+   "working_directory": ".",
+   "timeout_seconds": 600,
+   "summary": "Four tests PASS. Version shape: 6 accepted literals (0.1.0, 1.2.3, 10.20.30, 0.1.0-dev, 1.0.0-rc.1, 2.0.0-alpha-3) and 9 rejected (empty string, 1.2 bare major.minor, v1.2.3 leading v, 1.2.3-RC1 uppercase prerelease, 1.2.3.4, 1.2.3- trailing hyphen, leading space, trailing space, 01.2.3-A). Digest shape: 4 accepted (two 64-hex literals plus 64 zeroes and 64 f) and 6 rejected (empty, 63 chars, 65 chars, uppercase, non-hex g*64, sha256: prefix). Interval shape: 3 accepted ([1,1], [1,4096], [4096,4096]) and 5 rejected (schema_min 0, schema_min -1, schema_max below schema_min, schema_max above the 4096 ceiling, schema_min above the ceiling), each refusal errors.Is ErrRunnerVersionReportInvalid. PARTIAL-OBJECT VERDICT: TestPartialRunnerVersionObjectIsRefusedAndStoresNothing refuses 9 strict subsets of the four-field object -- schema_max alone, schema_min alone, version alone, digest alone, interval without binary, binary without interval, everything but schema_min, everything but the digest, and the wholly empty object -- and for each one asserts (a) the call errors with ErrRunnerVersionReportInvalid, (b) the keyed read of the report finds nothing, (c) the bounded enumeration returns zero rows, and (d) zero events and zero outbox items were recorded. schema_max without schema_min is refused rather than stored as an interval starting at zero. TestHeartbeatWithoutAReportStoresNothingAndErasesNothing asserts the other half: a heartbeat that omits runner_version returns success and stores no report at all, the Runner still enumerates with report_state not-reported, and after a real report a later report-less heartbeat leaves the stored record byte-identical (struct equality) rather than zeroing it -- which is the failure dp-v2-069 d3 rejected domain.RunnerObservation for."
+  },
+  {
+   "name": "A5-the-runner-clock-cannot-enter-the-record",
+   "status": "passed",
+   "argv": ["devbox", "run", "--pure", "--", "go", "test", "-count=1", "-run", "TestReportedAtIsTheTransactionAuthorityTime", "-v", "./internal/application"],
+   "working_directory": ".",
+   "timeout_seconds": 600,
+   "summary": "TestReportedAtIsTheTransactionAuthorityTime PASS. The request object has no timestamp field at all -- asserted as part of the A3 scan, where RunnerVersionInput is exactly [Version BinarySHA256 SchemaMin SchemaMax]. The stored reported_at is compared with the At of the event the same heartbeat recorded, not with a fresh clock read: time.Time.Equal plus an RFC3339Nano string comparison, so the two are byte-identical in the wire encoding as well. The clock injected for this test advances one second per call, so a value taken from any other read of the clock would differ; the test also asserts the clock was consulted at least twice, so the advancing control is in force rather than a frozen instant making the equality incidental. reported_at is derived by transactionAuthorityTime, which is the same derivation Service.record uses: the unit of work's AuthorityContext plus the authorityTimeKey value that Service.mutate captured once before the transaction callback."
+  },
+  {
+   "name": "A5-reported-at-is-stable-across-a-transaction-retry",
+   "status": "passed",
+   "argv": ["devbox", "run", "--pure", "--", "go", "test", "-count=1", "-run", "TestReportedAtIsStableAcrossATransactionRetry", "-v", "./internal/application"],
+   "working_directory": ".",
+   "timeout_seconds": 600,
+   "summary": "TestReportedAtIsStableAcrossATransactionRetry PASS, driven deterministically at the application boundary. A replayTransactor re-invokes the transaction callback three times the way Firestore re-invokes it after an aborted attempt -- the first two attempts' staged writes are discarded and the callback runs again on a fresh unit of work with the same context -- with no goroutine, no contention and no sleep. Assertions: the injected advancing clock is consulted exactly twice for one Heartbeat regardless of the attempt count (one read for the request's own instant, one for the transaction's), so no attempt re-read the clock; exactly one event survives, so the discarded attempts leaked nothing; and the surviving report's reported_at equals the surviving event's At."
+  },
+  {
+   "name": "A5-firestore-contention-retry-path",
+   "status": "skipped",
+   "argv": ["devbox", "run", "--pure", "--", "scripts/firestore-emulator.sh", "go", "test", "-count=1", "./internal/store/firestore"],
+   "working_directory": ".",
+   "timeout_seconds": 900,
+   "summary": "SKIPPED, and not counted as a pass (gate rule G7). Reason: cloud.google.com/go/firestore retries a transaction callback only on an ABORTED status, which requires a genuinely concurrent conflicting writer. Forcing that needs a goroutine or a timed race, and the Work Order's determinism constraint (A15) forbids both -- no goroutine, no wall-clock timer, no fixed sleep in any new test. The property the Firestore retry path would demonstrate is asserted deterministically instead by the check above: the authority instant is captured once, in Service.mutate, before s.tx.Transact is called, so the number of times the adapter re-invokes the callback cannot change it. What was actually executed against the emulator is recorded in the store-firestore checks of this task's api record and in the summaries above; no claim is made here about real Firestore contention behaviour."
+  },
+  {
+   "name": "A6-three-states-no-default-interval-explicit-unknown",
+   "status": "passed",
+   "argv": ["devbox", "run", "--pure", "--", "go", "test", "-count=1", "-run", "TestRunnerViewHasThreeStatesAndNoDefaultInterval|TestSchemaIntersectionStates|TestStaleReportMakesTheIntersectionUnknown|TestRunnerViewNeverSpellsCompatibleWithoutUnknown|TestRunnerEnumsAreClosed", "-v", "./internal/application"],
+   "working_directory": ".",
+   "timeout_seconds": 600,
+   "summary": "Five tests PASS, all with an injected clock and no sleep. (a) A Runner with no report reports report_state not-reported and the marshalled JSON carries none of version, binary_sha256, schema_min, schema_max or reported_at -- absence of the keys is asserted on the document, so no interval of [0,0] or any other synthesized value can appear. (b) One valid report reports report_state reported with all four coordinates echoed exactly (1.2.3, the 64-hex digest, 2, 7). (c) Moving the injected clock past the declared staleness window turns the same row into report_state stale with every coordinate byte-identical to the reported row, so nothing is silently refreshed or dropped; the boundary instant itself is still reported, one nanosecond past it is stale. (d) intersection_state is unknown whenever any enumerated Runner is not in state reported: with no Runner known at all, with exactly one of two Runners reporting, and with one Runner whose report has gone stale. (e) Two Runners reporting [2,7] and [4,9] give non-empty with endpoints 4 and 7 -- the maximum of the minima and the minimum of the maxima. (f) Two Runners reporting [1,3] and [5,9] give empty, and the marshalled document then carries no endpoint keys at all. (g) TestRunnerEnumsAreClosed parses runner_version.go with go/ast and requires, for RunnerReportState and SchemaIntersectionState both, that the set of constants declared with that type equals the set of identifiers appearing as case values in that type's Valid() switch -- so a constant added without a case fails, and a case added without a constant fails. The matcher is verified first against a synthetic type whose switch is deliberately missing one case, and a scan that found nothing is a Fatal. The runtime side is asserted too: every declared value is Valid and none of \"\", compatible, ok, healthy, valid is. (h) TestRunnerViewNeverSpellsCompatibleWithoutUnknown walks the marshalled JSON of four different views recursively, collecting 13 distinct keys and 11 distinct string values, and asserts that no key and no value contains compatible, ok, healthy or valid, and that unknown, not-reported and stale all actually appear -- so unknown is a reachable sibling value rather than a constant nothing emits."
+  },
+  {
+   "name": "A7-the-report-is-never-authority-mechanical",
+   "status": "passed",
+   "argv": ["devbox", "run", "--pure", "--", "go", "test", "-count=1", "-run", "TestAdmissionPathDoesNotReadTheReport", "-v", "./internal/application"],
+   "working_directory": ".",
+   "timeout_seconds": 600,
+   "summary": "TestAdmissionPathDoesNotReadTheReport PASS. A go/ast scan of internal/application/caller.go -- the file that declares the whole caller-admission path: CallerFromContext, callerActor, runnerCaller, requestedBy and ContextWithCaller, 5 function declarations found -- asserts that no declaration names any of RunnerVersionReport, RunnerVersionReports, SaveRunnerVersionReport, RunnerVersionReportRepository, RunnerVersionInput, RunnerVersionView, RunnerVersionListView, RunnerReportState or SchemaIntersectionState. A zero-declaration scan is a Fatal, and the test additionally asserts that callerActor, runnerCaller and CallerFromContext are in fact declared in the file that was scanned, so the guard cannot go vacuous if the admission path moves. The matcher is verified first against a known-positive synthetic file whose runnerCaller does name RunnerVersionReport. The internal/api/auth.go half of the same acceptance item is recorded in this task's api evidence."
+  },
+  {
+   "name": "A7-the-report-is-never-authority-behavioural",
+   "status": "passed",
+   "argv": ["devbox", "run", "--pure", "--", "go", "test", "-count=1", "-run", "TestAnAbsurdReportChangesNoRunnerOperation", "-v", "./internal/application"],
+   "working_directory": ".",
+   "timeout_seconds": 600,
+   "summary": "TestAnAbsurdReportChangesNoRunnerOperation PASS. A Runner posts a report whose interval is deliberately absurd -- schema_min and schema_max both at the declared ceiling 4096, which excludes every plausible canonical schema -- and then runs the whole runner-facing lifecycle. Six operations, each compared by value (marshalled response plus error string) against the same scripted lifecycle run by a Runner that reported nothing, with the same deterministic id generator so both arms consume identical identifiers: claims:acquire {\"increment_id\":\"increment-g\",\"execution_id\":\"execution-o\",\"lease_id\":\"lease-p\",\"runner_id\":\"runner-1\",\"version\":3,\"fencing_token\":1}; permits:check {\"allowed\":true,\"revision\":0,\"reason\":\"\"}; executions:start {\"execution_id\":\"execution-o\",\"status\":\"running\",\"version\":2}; checkpoints {\"accepted\":true,...,\"latest_mode\":\"allow\"}; heartbeat {\"accepted\":true,...,\"latest_mode\":\"allow\"}; executions/result {\"execution_id\":\"execution-o\",\"status\":\"succeeded\",\"version\":3}. All six identical in both arms and all six successful. The status-code half of the same proof, at the transport, is recorded in this task's api evidence."
+  },
+  {
+   "name": "A8-enumeration-is-bounded-and-read-only",
+   "status": "passed",
+   "argv": ["devbox", "run", "--pure", "--", "go", "test", "-count=1", "-run", "TestRunnersEnumerationIsBoundedAndPerformsNoWrite|TestRunnerVersionReportCasesAreARealTable", "-v", "./internal/application"],
+   "working_directory": ".",
+   "timeout_seconds": 600,
+   "summary": "TestRunnersEnumerationIsBoundedAndPerformsNoWrite PASS. 37 Runners report (MaxRunnerVersionReports + 5); the read returns runner_count 32 with truncated true, the fixed order is RunnerID ascending starting at runner-000 (asserted pairwise), and intersection_state is unknown because a truncated enumeration did not see every machine. One read records zero new events and enqueues zero outbox items, and two consecutive reads of the same state are deeply equal. The measured Firestore read count for the same read, and the fact that it does not vary with the Requirement count, is recorded in this task's api evidence under the store-firestore checks. TestRunnerVersionReportCasesAreARealTable PASS asserts the shared behavioural table is not degenerate: 5 distinct cases covering truncation and a known-but-unreported Runner."
+  },
+  {
+   "name": "A9-both-store-adapters-one-behavioural-table",
+   "status": "passed",
+   "argv": ["devbox", "run", "--pure", "--", "go", "test", "-count=1", "-run", "TestRunnerVersionReportBehaviouralTable|TestRunnerVersionReportRollbackLeaksNothing", "-v", "./internal/store/memory"],
+   "working_directory": ".",
+   "timeout_seconds": 600,
+   "summary": "TestRunnerVersionReportBehaviouralTable PASS: the memory adapter satisfied 5 shared cases. The table is application.RunnerVersionReportCases(), exported data in internal/application that imports nothing and asserts nothing, so internal/store/memory and internal/store/firestore run the SAME cases by value and only the driver is local; the memory store therefore cannot pass behaviour the Firestore store does not implement. Cases: one report round-trips through a read in a separate transaction; the last writer wins per RunnerID and leaves exactly one row; a Runner known only through a report-less heartbeat enumerates with a zero ReportedAt and zero coordinates; the order is RunnerID ascending rather than insertion order; more reports than the bound are truncated and the truncation is reported. Every reported row is also read back by key in its own transaction. TestRunnerVersionReportRollbackLeaksNothing PASS: a rolled-back transaction commits no report -- neither the keyed read nor the enumeration sees it -- and a report with an empty runner id is refused rather than stored under the empty key. No existing operation's quota reservation shape was changed: quota.ReadTransactionUsage and quota.MutationUsage are untouched and no ReserveQuota call site was modified."
+  },
+  {
+   "name": "A12-shapes-are-pinned-without-an-import",
+   "status": "passed",
+   "argv": ["devbox", "run", "--pure", "--", "go", "test", "-count=1", "-run", "TestApplicationImportsNeitherUpdateNorScheduler", "-v", "./internal/application"],
+   "working_directory": ".",
+   "timeout_seconds": 600,
+   "summary": "TestApplicationImportsNeitherUpdateNorScheduler PASS: a go/ast import scan over all 17 .go files of internal/application, test files included, covering 134 import paths, asserts that none is internal/update or internal/scheduler or a subpackage of either. A zero-path scan is a Fatal. The semver shape at internal/application/runner_version.go and the 64-hex digest shape beside it are literal copies by value of internal/update/update.go:64 and :65. Recorded plainly, as dp-v2-069 d12 requires: the two declarations CAN drift, no compiler or test in internal/update will notice, and the only thing that will catch it is TestRunnerVersionShapesArePinnedToTheUpdatePatterns, whose name says what it pins and which asserts the same verdict for 6 accepted and 9 rejected version literals and 4 accepted and 6 rejected digest literals."
+  },
+  {
+   "name": "A11-idempotency-consequence-asserted-not-assumed",
+   "status": "passed",
+   "argv": ["devbox", "run", "--pure", "--", "go", "test", "-count=1", "-run", "TestHeartbeatReplayWithAChangedReportIsAConflict", "-v", "./internal/application"],
+   "working_directory": ".",
+   "timeout_seconds": 600,
+   "summary": "TestHeartbeatReplayWithAChangedReportIsAConflict PASS. Replaying one heartbeat request_id with an identical runner_version restores the prior response (reflect.DeepEqual on the response value). Replaying the same request_id with a different runner_version returns application.ErrIdempotencyConflict, and so does replaying it with the object dropped entirely. The conflict path stores nothing new: the stored report is byte-identical before and after (struct equality) and no new event was recorded. This follows from requestFingerprint(\"heartbeat\", req) at internal/application/service.go, which hashes the whole request struct, and it is EXISTING semantics rather than new behaviour -- any changed field of a replayed heartbeat has always produced this conflict, and a heartbeat loop already needs a fresh request_id per heartbeat. The status code the transport maps it to is 409, recorded in this task's api evidence. One further consequence is recorded in docs/operations/runner-version-report.md section 3 rather than hidden: adding a field to the request struct changes the fingerprint of an otherwise identical request, so an idempotency record written by an older binary and replayed against a newer one is a conflict."
+  },
+  {
+   "name": "A15-determinism-is-acceptance",
+   "status": "passed",
+   "argv": ["devbox", "run", "--pure", "--", "go", "test", "-count=1", "./internal/application", "./internal/api"],
+   "working_directory": ".",
+   "timeout_seconds": 900,
+   "summary": "Run three times in sequence; with the elapsed-time measurements normalised the output of all three runs is byte-identical (diff of run 1 vs 2 and run 2 vs 3 both empty), and the verdict lines are the same each time: 'ok github.com/takushi/agentic-loop-foundation/v2/internal/application' and 'ok github.com/takushi/agentic-loop-foundation/v2/internal/api'. Also run once with -race: both packages ok (1.239s and 1.117s). No new test contains a fixed sleep, a wall-clock timer or a goroutine: every instant comes from an injected clock (countingClock advances one second per call, fixedClock is a frozen instant the test moves forward itself), the staleness window is crossed by moving the injected clock rather than by waiting, and the transaction 'retry' is a deterministic re-invocation of the callback rather than a race. The only durations recorded anywhere are observations, never thresholds."
+  },
+  {
+   "name": "A16-measured-notes-for-V2-045-recorded-not-acted-on",
+   "status": "passed",
+   "argv": ["devbox", "run", "--pure", "--", "make", "evidence-keys"],
+   "working_directory": ".",
+   "timeout_seconds": 900,
+   "summary": "No new import edge was created: internal/application imports neither internal/update nor internal/scheduler (asserted by the A12 scan over 17 files and 134 import paths), and api, store-memory and store-firestore already declare application as a dependency in ci/components.json. Component keys measured on both trees by running make evidence-keys in this worktree and, for the base, in a throwaway detached worktree at 390df168bd9c3fa1fbbdff3fb7477a06ca1e16af. THIRTEEN keys moved, which is more than the seven the Work Order predicted, because the key is a transitive closure over declared dependencies: api, application, contracts, control-plane, docs, internal-contracts, reconciler, release, runner, store-firestore, store-memory, task-ledger, web. The seven the Work Order named (application, api, store-memory, store-firestore, web, contracts, docs) all moved as predicted. The six further ones move only through declared dependency edges and not through any file this task touched: control-plane declares api, application, reconciler, runner and store-firestore plus contracts/openapi/openapi-v1.yaml as a contract dependency; reconciler and runner declare application; release and internal-contracts declare contracts, and internal-contracts also declares contracts/** as a contract dependency; task-ledger declares contracts. Keys that did NOT move: ci, domain, environment, infra, legacy-import, provider, repository-meta, scheduler, tooling, update -- domain and update in particular confirm that internal/domain and internal/update were not edited. Only the application and api evidence records are issued here; V2-045 owns the remaining eleven under gate rule G6. ci/components.json, the Makefile, go.mod, go.sum and devbox.* were not edited and make check went green with the real import graph, so internal/ci's manifest check found no divergence and no escalation to the tech_lead was needed."
+  },
+  {
+   "name": "A19-make-check-before-the-evidence-commit",
+   "status": "passed",
+   "argv": ["devbox", "run", "--pure", "--", "make", "check"],
+   "working_directory": ".",
+   "timeout_seconds": 3600,
+   "summary": "Green, judged by the verdict lines and not by the shell exit status. Zero lines matching ^FAIL in the whole transcript; every package reported ok, including internal/store/firestore run through scripts/firestore-emulator.sh with -race (8.760s); gitleaks reported 'no leaks found' twice (462 commits scanned, ~9.88 MB); the ownership plan emitted {\"changed\":null,\"selected\":null,\"all\":false}, so every tracked and untracked file belongs to a declared component; and the final line was 'workflow-pins: 3 unique (owner/repo, version) -> sha pins, no disagreement'."
+  },
+  {
+   "name": "A19-make-check-after-the-evidence-commit",
+   "status": "passed",
+   "argv": ["devbox", "run", "--pure", "--", "make", "check"],
+   "working_directory": ".",
+   "timeout_seconds": 3600,
+   "summary": "Re-run after the evidence artifacts were committed, so the secret scan reads committed history rather than an uncommitted tree. Green on the same verdict lines: zero ^FAIL lines, every package ok, 'no leaks found', and 'workflow-pins: 3 unique (owner/repo, version) -> sha pins, no disagreement'. The exact figures are in this task's completion report; both runs were judged by these verdict lines."
+  },
+  {
+   "name": "A10-A13-A14-owned-by-the-api-record",
+   "status": "passed",
+   "argv": ["devbox", "run", "--pure", "--", "go", "test", "-count=1", "./internal/contracts"],
+   "working_directory": ".",
+   "timeout_seconds": 600,
+   "summary": "The transport surface (A10), the owner console (A13) and the documentation (A14) are recorded in .agents/v2/evidence/V2-069-api.json, together with the Firestore adapter's measured read count. internal/contracts is green with both records in place, which is what validates them against contracts/schemas/evidence.json and contracts/schemas/evidence-index.json."
+  }
+ ]
+}

@@ -28,6 +28,7 @@ type state struct {
 	controlProgress    map[domain.Revision]domain.ControlProgress
 	controlRequestedBy map[domain.Revision]domain.RequestedBy
 	runnerObservations map[string]domain.RunnerObservation
+	runnerVersions     map[string]application.RunnerVersionReport
 	repositories       map[string]domain.Repository
 	repositoryObs      map[string]domain.RepositoryObservation
 	requirementRepo    map[string]domain.RequirementRepositoryLink
@@ -40,7 +41,7 @@ type state struct {
 }
 
 func newState() state {
-	return state{requirements: map[string]domain.Requirement{}, increments: map[string]domain.Increment{}, executions: map[string]domain.Execution{}, leases: map[string]domain.Lease{}, requests: map[string]application.IdempotentResponse{}, texts: map[string]string{}, targets: map[string]domain.ControlTarget{}, controlProgress: map[domain.Revision]domain.ControlProgress{}, controlRequestedBy: map[domain.Revision]domain.RequestedBy{}, runnerObservations: map[string]domain.RunnerObservation{}, repositories: map[string]domain.Repository{}, repositoryObs: map[string]domain.RepositoryObservation{}, requirementRepo: map[string]domain.RequirementRepositoryLink{}}
+	return state{requirements: map[string]domain.Requirement{}, increments: map[string]domain.Increment{}, executions: map[string]domain.Execution{}, leases: map[string]domain.Lease{}, requests: map[string]application.IdempotentResponse{}, texts: map[string]string{}, targets: map[string]domain.ControlTarget{}, controlProgress: map[domain.Revision]domain.ControlProgress{}, controlRequestedBy: map[domain.Revision]domain.RequestedBy{}, runnerObservations: map[string]domain.RunnerObservation{}, runnerVersions: map[string]application.RunnerVersionReport{}, repositories: map[string]domain.Repository{}, repositoryObs: map[string]domain.RepositoryObservation{}, requirementRepo: map[string]domain.RequirementRepositoryLink{}}
 }
 func (s state) clone() state {
 	n := newState()
@@ -67,6 +68,11 @@ func (s state) clone() state {
 	for k, v := range s.runnerObservations {
 		v.Processes = append([]domain.ProcessObservation(nil), v.Processes...)
 		n.runnerObservations[k] = v
+	}
+	// The Runner version report is copied on write like every other record,
+	// so a rolled-back transaction cannot leak a report into committed state.
+	for k, v := range s.runnerVersions {
+		n.runnerVersions[k] = v
 	}
 	// Repository and its bounded forge Observation are copied on write like
 	// every other aggregate, so a rolled-back transaction cannot leak a
@@ -569,6 +575,53 @@ func (u *unit) SaveRunnerObservation(_ context.Context, value domain.RunnerObser
 	value.Processes = append([]domain.ProcessObservation(nil), value.Processes...)
 	u.s.runnerObservations[value.RunnerID.String()] = value
 	return nil
+}
+
+// The Runner version report (V2-069) is its own RunnerID-keyed record,
+// last-writer-wins: a Runner that switches binaries reports again and the new
+// coordinates replace the old ones. There is no optimistic-concurrency
+// version because the record has no state transition to protect.
+func (u *unit) SaveRunnerVersionReport(_ context.Context, value application.RunnerVersionReport) error {
+	if value.RunnerID == "" {
+		return errors.New("runner id is required")
+	}
+	u.s.runnerVersions[value.RunnerID] = value
+	return nil
+}
+func (u *unit) RunnerVersionReport(_ context.Context, runnerID string) (application.RunnerVersionReport, bool, error) {
+	v, ok := u.s.runnerVersions[runnerID]
+	return v, ok, nil
+}
+
+// RunnerVersionReports enumerates every Runner this Control Plane has heard
+// from -- the union of the Runners that have an Observation and the Runners
+// that have a report -- and joins each with its report when one exists. A
+// Runner with no report yields a row carrying only its id: no interval, no
+// version and no digest is synthesized for it.
+func (u *unit) RunnerVersionReports(_ context.Context, limit int) ([]application.RunnerVersionReport, bool, error) {
+	if limit <= 0 {
+		return nil, false, nil
+	}
+	ids := map[string]bool{}
+	for id := range u.s.runnerObservations {
+		ids[id] = true
+	}
+	for id := range u.s.runnerVersions {
+		ids[id] = true
+	}
+	out := make([]application.RunnerVersionReport, 0, len(ids))
+	for id := range ids {
+		if report, ok := u.s.runnerVersions[id]; ok {
+			out = append(out, report)
+			continue
+		}
+		out = append(out, application.RunnerVersionReport{RunnerID: id})
+	}
+	application.SortRunnerVersionReports(out)
+	if len(out) > limit {
+		return out[:limit], true, nil
+	}
+	return out, false, nil
 }
 func (u *unit) Idempotency(_ context.Context, id, op string) (application.IdempotentResponse, bool, error) {
 	v, ok := u.s.requests[id]
