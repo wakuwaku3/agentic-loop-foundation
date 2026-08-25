@@ -42,14 +42,27 @@
 
 `--pure`（外部 plugin を読まない）と `--ephemeral`（session file を disk に残さない、claude の `--no-session-persistence` と同型）はいずれも意図的な硬化なので残す。
 
-### `--dir` / `-C` は `Invocation.WorkingDirectory` の二重表現か（実測した）
+### `--dir` / `-C` は `Invocation.WorkingDirectory` の二重表現か（実測した。2026-08-25 に前提が変わった）
 
-**二重表現ではない。** 設計は「`Invocation.WorkingDirectory` が既に workspace を持ち、`ProcessSupervisor` が Dir を設定するので flag は弱い2枚目の写しである」という前提だったが、この tree ではその前提が成り立たない。
+**二重表現ではあるが、有害ではない。** flag は残す。結論は V2-027 当時と同じだが、**根拠が入れ替わった**。旧根拠は削らずに歴史として残す。
 
-- `internal/runner/supervisor.go` の `ProcessSupervisor.Run` は `(ctx, argv)` しか取らず、子 process に working directory を**一切設定しない**（`cmd.Dir` への代入が存在しない）。
-- `internal/runner/provider.go` の `SupervisedInvocationRunner.Run` も `Invocation.WorkingDirectory` を**読まない**（読むのは `Argv`・`Stdin`・`Environment` だけ）。
+**旧実測（2026-08-24、V2-027 時点の tree で真だった）**
 
-したがって production 経路では `Invocation.WorkingDirectory` は現在**何にも消費されていない**。codex と opencode については、`-C` / `--dir` が workspace を子 process に伝える**唯一の表現**である。これを削ると子は runner がたまたま居た directory で動く。これは簡素化ではなく regression なので、削らない。`internal/runner` を編集して `WorkingDirectory` を消費させるのは V2-027 の scope 外である（`internal/runner` は不可触）。
+- `internal/runner/supervisor.go` の `ProcessSupervisor.Run` は `(ctx, argv)` しか取らず、子 process に working directory を**一切設定しなかった**（`cmd.Dir` への代入が存在しなかった）。
+- `internal/runner/provider.go` の `SupervisedInvocationRunner.Run` も `Invocation.WorkingDirectory` を**読まなかった**。
+
+当時は production 経路で `Invocation.WorkingDirectory` が**何にも消費されておらず**、codex と opencode については `-C` / `--dir` が workspace を子に伝える**唯一の表現**だった。だから「削ると子は runner がたまたま居た directory で動く」という理由で残した。
+
+**現行実測（2026-08-25、V2-077）**
+
+旧実測の前半はもう真ではない。`ProcessSupervisor` は additive な `Dir` field を持ち、それを子に代入する。`SupervisedInvocationRunner` は `Invocation.WorkingDirectory` を読み、preflight record の読み込みと ledger reservation より**前に**5条件で fail-closed 検証し、supervisor の `Dir` に入れる。宣言された working directory は今や flag なしで子に届く。
+
+**それでも flag を削らない理由は2つあり、どちらも旧前提に依存しない。**
+
+1. `-C` と `--dir` はいずれもその CLI 自身の help が宣言している flag であり、help が宣言する directory flag を削るのは scope 外（non_goal）。
+2. 実際に現れる値については二重表現が無害であることが**仮定ではなく assertion** になった。`build()` の1回の呼び出しが同じ `req.Workspace` から argv 要素と `WorkingDirectory` の両方を作るので、両者は構造上**同一文字列**である（3 adapter について `TestDirectoryFlagArgumentAndWorkingDirectoryAreTheSameString` が assert する）。working directory と等しい絶対 path に対する directory flag は idempotent なので、相対解決の差が生じる余地がない。そして `SupervisedInvocationRunner` は両者が食い違ったら fail-closed で拒否する（`ErrInvocationWorkingDirectoryUnusable`）。
+
+**未実測として残るもの**: 将来の CLI version が「directory flag と inherited working directory の両方を渡されたら拒否する」ようになるかどうか。これを測るには `run` 系 subcommand の実行が必要で、help は何も宣言していない。**V2-028 の担当**である（codex と opencode を実際に走らせる exercise は V2-028 だけ）。
 
 境界を実際に保持しているのは kernel である: `internal/runner.NamespaceConfinement` が rootless user+mount namespace で書き込み可能 mount を workspace に固定し、namespace を提供できない環境では子を**起動しない**（fail closed）。`ProcessSupervisor` は子を独立した process group で走らせ、group ごと TERM→KILL する。adapter の仕事は「出て行こうと**要求できない**こと」だけであり、それが `build()` の以下の拒否である。
 

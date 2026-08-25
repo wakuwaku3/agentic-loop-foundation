@@ -141,3 +141,26 @@ comm -12 /tmp/v2-075-set.txt /tmp/v2-075-diff.txt
 - ledger: `/home/takushi/.local/state/agentic-loop/v2/V2-075-provider-live-claude-rebind-cost.json`（V2-017・V2-063 の台帳とは別 file。残枠を借りない）
 - 暴走検知しきい値: `max_invocations` 12・`max_total_cost_usd` 8.00 USD（V2-063 と同値）
 - **注意: V2-075 の観測はこの台帳を 12/12 まで使い切った。** provider 側の transient 失敗が3 invocation を消費したためで（`halted` は false、Reserve が拒否した invocation は1件も無い）、この record にはもう残枠が無い。次に live suite を回す者は**しきい値を上げてはならない**。owner の承認のもとで新しい record と新しい ledger path を発行すること
+
+### V2-077 の再観測（**未実行**。owner 承認 record 待ち）
+
+V2-077（宣言した working directory を子 process に実際に届ける）は `internal/runner/supervisor.go`・`internal/runner/provider.go`・`internal/runner/confinement.go`・`internal/provider/adapters.go` を編集する。この4 file はいずれも V2-075 が公開した exercise file 集合（`.agents/v2/evidence/artifacts/V2-075-live-exercise-files.json`）の内側にあるので、G6b のもとで ev-v2-075 の鮮度主張は判定 commit で失効する。加えて意味も変わる: live exercise は `ProcessSupervisor{TermGrace: 3 * time.Second}`（`Confine` は nil）で実 claude を走らせており、これまで子は runner package の directory で動いていたが、この変更後は test 自身の一時 workspace で動く。**つまり再観測は事務手続きではなく scope である。**
+
+**それでも V2-077 は live を1回も実行していない。** 理由は2つあり、どちらも実装者が解消できない。
+
+1. **V2-075 の台帳は 12/12 で枯渇している**（`halted` は false、`max_invocations` 12）。その record 自身の `completion_conditions` が「しきい値を上げること」と「台帳を再初期化して count を戻すこと」を禁じており、`CostLedger.Reserve` は record の `task_id` と run の `task_id` が食い違う台帳を拒否する。したがって新しい record と新しい `limits.ledger_path` を発行するしかなく、**それは owner の行為であって実装者が転記してよいものではない**。
+2. 残る surface task がまだ着地していない。いま観測しても G6b のもとで後続の merge が鮮度主張を無効化するので、**全 code が着地した後に1回だけ払う**のが正しい。
+
+よって V2-077 は code と unit evidence までを着地させ、live 項目は**未実行**として記録し escalate している。`.agents/v2/provider-preflight/V2-077-provider-live-claude-workdir.json` は**発行されていない**。
+
+記録の置き場所についても1つ実測がある。`component` が `provider-live-` で始まる evidence を index に登録するには、`internal/contracts.CheckProviderPreflightLedger`（dp-v2-047 d9）が「同じ `task_id` の preflight record がちょうど1件あり、evidence の `artifact_refs` がその sha256 を pin し、`approval.approved_at` が `observed_at` より厳密に前であること」を要求する。承認 record が無い状態で `ev-v2-077-provider-live-claude-workdir` を登録したら `TestProviderPreflightLedgerPassesOnTheRealTree` が「expected exactly one preflight record, found 0」で落ちた。**これは check が設計どおり働いている**（人の承認が課金される Provider side effect に先行することを強制している）。したがってその record は撤回し、承認を転記して check を通すことはしなかった。未実行の記録・交差の実測・引き継ぎはすべて `ev-v2-077-runner` の `a10`／`a11`／`a12`／`a16` check に入っており、`.agents/v2/evidence/index.json` に V2-077 の provider-live entry は存在しない。
+
+実行する者への引き継ぎ:
+
+- 新しい record を owner 承認のもとで発行する（`task_id` は再観測を行う task、`limits.ledger_path` は専用 path、`approval.subject_path` は `.agents/v2/packets/provider-standing-authorization.json`、`approval.subject_digest` はその実 byte から測る、`approval` は `observed_at` より厳密に前、検証 argv は `--version`）。
+- V2-017・V2-063・V2-075 の record と台帳は**編集も再利用も再初期化もしない**。`halted` を消さない。
+- exercise は V2-075 が覆った9 subtest そのまま（広げない）。observation commit と交差実測の対（G6b）を新しく公開する。
+- 子の実 working directory が Increment の workspace であって runner の directory ではないこと、CLI の観測挙動が ev-v2-075 の記録と違ったかどうか（新しい cwd について何か尋ねたか、自身の state/config 参照が変わったか）を記録する。prompt・指示文・応答文・marker 値は一切残さず、session id・usage・duration・turn 数・projection の sha256・環境識別子だけを残す。
+- 空の workspace で CLI の挙動が違って exercise が落ちたら、**子が到達できる範囲を広げて通すのではなく停止して escalate する**。
+
+なお V2-077 は、子の実 working directory を live に依らず決定的に記録する local test を代わりに持っている（`internal/runner/working_directory_test.go` の `TestSupervisedInvocationRunnerRunsTheChildInTheDeclaredWorkingDirectory`: `t.TempDir()` の workspace に対して実 child を起動し、その child 自身が報告した物理 cwd を宣言値と value-to-value で比較する。実 Provider CLI は使わない）。これは live 再観測の代替ではなく、live が払われるまでの間に「宣言値が実際に子へ届く」ことを保証するものである。

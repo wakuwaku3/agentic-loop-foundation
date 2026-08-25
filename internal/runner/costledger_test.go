@@ -178,8 +178,30 @@ func (fx *runnerFixture) assertNoProcessStarted(t *testing.T) {
 	}
 }
 
+// fixtureWorkingDirectory returns a directory that satisfies all five of
+// V2-077's fail-closed properties (non-empty, absolute, canonical, an
+// existing directory, not a symlink), so that the refusal each test below
+// asserts is still the refusal that test was written to assert. Symlinks are
+// resolved rather than assumed absent, because the process temporary
+// directory is a symlink on some platforms.
+func fixtureWorkingDirectory() string {
+	if resolved, err := filepath.EvalSymlinks(os.TempDir()); err == nil {
+		return filepath.Clean(resolved)
+	}
+	return filepath.Clean(os.TempDir())
+}
+
+// invocationForFixture builds the Invocation every fail-closed negative test
+// below drives Run with. WorkingDirectory is declared (V2-077) because
+// SupervisedInvocationRunner.Run now refuses an unusable one inside step (1),
+// strictly before LoadPreflightRecord and before Ledger.Reserve; without it
+// every test below would refuse for that reason instead of the reason it
+// exists to pin. No test name and no assertion below changed.
 func invocationForFixture() provider.Invocation {
-	return provider.Invocation{Argv: []string{"claude", "--print", "--output-format", "json", "--no-session-persistence"}}
+	return provider.Invocation{
+		Argv:             []string{"claude", "--print", "--output-format", "json", "--no-session-persistence"},
+		WorkingDirectory: fixtureWorkingDirectory(),
+	}
 }
 
 // --- dp-v2-017 d3's nine fail-closed refusal cases. Each has its own test;

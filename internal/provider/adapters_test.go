@@ -116,21 +116,48 @@ func TestAdapterArgvIsExactlyWhatHelpDeclares(t *testing.T) {
 // MEASURED DISCREPANCY, recorded rather than papered over. A4 as written asks
 // for "no argv element is an absolute path other than argv[0]". That is not
 // satisfiable without deleting a flag both CLIs' help output declares, and
-// the premise behind deleting it is false in this tree:
+// the flags stay -- but as of V2-077 they stay for a different reason than
+// the one first recorded here.
 //
-//   - internal/runner/supervisor.go's ProcessSupervisor.Run takes only a
-//     context and an argv. It never assigns a working directory to the child.
-//   - internal/runner/provider.go's SupervisedInvocationRunner never reads
-//     Invocation.WorkingDirectory either; it reads Argv, Stdin and
-//     Environment only.
+// HISTORICAL MEASUREMENT, taken 2026-08-24 for V2-027 and true of the tree as
+// it then stood (kept rather than deleted, because the conclusion below was
+// reached from it):
 //
-// So Invocation.WorkingDirectory is not a second, stronger copy of the flag:
-// on the production path it is currently consumed by nothing at all, and for
-// codex and opencode the flag is the only representation of the workspace
-// that reaches the child process. Deleting it would leave the child running
-// in whatever directory the runner happened to be in -- a regression, not a
-// simplification. Editing internal/runner to consume WorkingDirectory is
-// forbidden to this task.
+//   - internal/runner/supervisor.go's ProcessSupervisor.Run took only a
+//     context and an argv. It never assigned a working directory to the child.
+//   - internal/runner/provider.go's SupervisedInvocationRunner did not read
+//     Invocation.WorkingDirectory either; it read Argv and Stdin, and built
+//     the child's environment itself.
+//
+// CURRENT MEASUREMENT, 2026-08-25 (V2-077): the first half is no longer true.
+// ProcessSupervisor now carries an additive Dir field and assigns it to the
+// child, and SupervisedInvocationRunner reads Invocation.WorkingDirectory,
+// validates it fail-closed on five properties before any preflight load or
+// ledger reservation, and sets it as the supervisor's Dir. So
+// Invocation.WorkingDirectory IS consumed on the production path, and for
+// codex and opencode the flag is no longer the only representation of the
+// workspace that reaches the child.
+//
+// (Both measurements were, and are, silent on Invocation.Environment: the
+// runner has never read it. It is set by internal/runner's Grant.Apply and
+// observed only by FakeInvocationRunner, so a Secret Broker grant does not
+// reach a real child. That is a second, same-shaped defect, recorded by
+// V2-077 and owned by its follow-up, not fixed here.)
+//
+// The flags nevertheless stay, and the conclusion is unchanged -- but it now
+// rests on an equality that is asserted mechanically rather than on the old
+// premise. One call to the shared build helper produces both values from the
+// same req.Workspace, so the flag's argument and WorkingDirectory are the
+// same string by construction; for an absolute path equal to the working
+// directory a directory flag is idempotent, so there is no relative-resolution
+// difference for the double expression to expose. The equality is asserted for
+// all three adapters by
+// TestDirectoryFlagArgumentAndWorkingDirectoryAreTheSameString below, and the
+// runner refuses fail-closed if the two ever disagree. Removing a flag the
+// CLI's own help declares remains out of scope. What stays unmeasured is
+// whether some future CLI version refuses when a directory flag and an
+// inherited working directory are both supplied: measuring that needs the run
+// subcommand executed, which help declares nothing about, and V2-028 owns it.
 //
 // The assertion is therefore made stronger where it can be, rather than
 // weaker: the workspace may appear at most once, it must equal the request
@@ -213,6 +240,61 @@ func TestWorkspacePinningIsNotReExpressedAsAFlagBeyondTheMeasuredException(t *te
 		}
 	}
 	t.Log("what holds the boundary is the kernel: internal/runner.NamespaceConfinement pins the writable mount at the workspace and refuses to run the child at all when the kernel cannot provide the namespace. ProcessSupervisor runs the child in its own process group and terminates the whole group. The adapter's job is only to be unable to ask to leave, which is what the refusals above are")
+}
+
+// TestDirectoryFlagArgumentAndWorkingDirectoryAreTheSameString is V2-077 A7.
+// It replaces the assumption that keeping both the directory flag and
+// Invocation.WorkingDirectory is harmless with a proof, for the values that
+// actually occur: one call to the shared build helper produces both from the
+// same req.Workspace, so they must be the same string, and claude -- which
+// help declares no directory flag for -- must carry no path in argv at all.
+//
+// No flag is removed, renamed or reordered here, and no Provider CLI
+// subcommand is executed: this is a property of the built Invocation, read
+// entirely in process.
+func TestDirectoryFlagArgumentAndWorkingDirectoryAreTheSameString(t *testing.T) {
+	const workspace = "/tmp/agentic-loop/workspace"
+	for _, a := range allAdapters() {
+		inv, err := a.Build(provider.Request{OperationID: "op-1", Workspace: workspace, Packet: packet()})
+		if err != nil {
+			t.Fatalf("%s: build: %v", a.Name(), err)
+		}
+		if inv.WorkingDirectory != workspace {
+			t.Fatalf("%s: WorkingDirectory = %q, want the request workspace %q", a.Name(), inv.WorkingDirectory, workspace)
+		}
+		flag := workspaceFlag[a.Name()]
+		if flag == "" {
+			// claude: no directory flag, and therefore no path in argv.
+			for i, element := range inv.Argv {
+				if strings.HasPrefix(element, "/") {
+					t.Fatalf("%s carries no directory flag, so argv must carry no path at all; argv[%d] = %q", a.Name(), i, element)
+				}
+			}
+			t.Logf("%s: no directory flag, no path in argv, WorkingDirectory=%q is the only representation of the workspace", a.Name(), inv.WorkingDirectory)
+			continue
+		}
+		index := -1
+		for i, element := range inv.Argv {
+			if element != flag {
+				continue
+			}
+			if index != -1 {
+				t.Fatalf("%s: the measured directory flag %q appears more than once in argv", a.Name(), flag)
+			}
+			index = i
+		}
+		if index == -1 {
+			t.Fatalf("%s: the measured directory flag %q is absent from argv; V2-077 must not remove a flag the CLI's own help declares", a.Name(), flag)
+		}
+		if index+1 >= len(inv.Argv) {
+			t.Fatalf("%s: the directory flag %q is the last argv element and carries no argument", a.Name(), flag)
+		}
+		argument := inv.Argv[index+1]
+		if argument != inv.WorkingDirectory {
+			t.Fatalf("%s: %s carries %q while WorkingDirectory is %q; both come from one call to the shared build helper, so they must be the same string", a.Name(), flag, argument, inv.WorkingDirectory)
+		}
+		t.Logf("%s: %s argument and WorkingDirectory are the same string (%q), so the double expression exposes no relative-resolution difference", a.Name(), flag, argument)
+	}
 }
 
 // ---------------------------------------------------------------------------

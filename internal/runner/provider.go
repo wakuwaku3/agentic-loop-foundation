@@ -117,18 +117,108 @@ func (f *FakeInvocationRunner) CallCount() int {
 // before doing anything else.
 var ErrSupervisedInvocationRunnerIncomplete = errors.New("supervised invocation runner dependencies are incomplete")
 
+// ErrInvocationWorkingDirectoryUnusable is returned by
+// SupervisedInvocationRunner.Run -- with no process started, no
+// provider-preflight record loaded and no ledger reservation debited -- when
+// the working directory the Invocation declares cannot be used as-is
+// (V2-077).
+//
+// There is deliberately no fallback: an unusable value is never repaired and
+// never replaced by the Runner's own current directory. Substituting the
+// Runner's directory is precisely the defect V2-077 removes, and making it
+// the documented fallback would make the correct and the broken case
+// indistinguishable from outside.
+//
+// The refusal is fail-closed on five properties of the value itself, each
+// wrapped with its own distinct reason: it must be non-empty, absolute,
+// already canonical (filepath.Clean leaves it unchanged, which rejects a
+// ".." segment, a trailing separator and a doubled separator alike), an
+// existing directory, and not a symlink. When the supervisor is confined it
+// must additionally be the confinement workspace itself or a path beneath
+// it, because with Confine set the kernel makes exactly one path read-write
+// and a cwd outside it would put the child where its own workspace is
+// sealed. Finally, when argv itself carries a Provider CLI's own directory
+// flag, the element that flag carries must be identical to the declared
+// working directory: the two are the same string by construction today (one
+// call to provider's shared build helper produces both from the same
+// request workspace), so a disagreement means something rebuilt one of them
+// and is refused rather than silently preferred one way or the other.
+var ErrInvocationWorkingDirectoryUnusable = errors.New("supervised invocation runner: invocation working directory is unusable")
+
+// validateInvocationWorkingDirectory implements the five fail-closed
+// properties named on ErrInvocationWorkingDirectoryUnusable, plus the
+// confinement containment clause. It touches nothing and starts nothing: it
+// only reads directory metadata, so it is safe to run before a
+// provider-preflight record is loaded and before a ledger reservation is
+// debited.
+func validateInvocationWorkingDirectory(dir string, confine *NamespaceConfinement) error {
+	if dir == "" {
+		return fmt.Errorf("%w: the invocation declares no working directory, and substituting the runner's own current directory is forbidden", ErrInvocationWorkingDirectoryUnusable)
+	}
+	if !filepath.IsAbs(dir) {
+		return fmt.Errorf("%w: %s is not an absolute path", ErrInvocationWorkingDirectoryUnusable, dir)
+	}
+	if filepath.Clean(dir) != dir {
+		return fmt.Errorf("%w: %s is not canonical (a traversal segment, a trailing separator or a doubled separator)", ErrInvocationWorkingDirectoryUnusable, dir)
+	}
+	lstat, err := os.Lstat(dir)
+	if err != nil {
+		return fmt.Errorf("%w: %s cannot be inspected (it does not exist, or its parent is unreadable): %v", ErrInvocationWorkingDirectoryUnusable, dir, err)
+	}
+	if lstat.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("%w: %s is a symlink, so a chdir into it would put the child somewhere no argv guard inspected", ErrInvocationWorkingDirectoryUnusable, dir)
+	}
+	if !lstat.IsDir() {
+		return fmt.Errorf("%w: %s exists but is not a directory", ErrInvocationWorkingDirectoryUnusable, dir)
+	}
+	if confine != nil && !pathWithinWorkspace(confine.Workspace, dir) {
+		return fmt.Errorf("%w: %s is neither the confinement workspace nor a path beneath it, and the confinement is never relaxed to make a directory take effect", ErrInvocationWorkingDirectoryUnusable, dir)
+	}
+	return nil
+}
+
+// providerDirectoryFlags are the directory flags the three Provider CLIs'
+// own help output declares and the adapters therefore emit: codex's -C and
+// opencode's --dir. claude declares none and carries no path in argv at all.
+// They are not removed, renamed or reordered here; this list exists only so
+// the Runner can prove that the flag's argument and the declared working
+// directory are the same string rather than assume it.
+var providerDirectoryFlags = []string{"-C", "--dir"}
+
+// directoryFlagArgument returns the first directory flag present in argv and
+// the element immediately following it. found is false when argv carries no
+// directory flag at all (which is the case for claude).
+func directoryFlagArgument(argv []string) (flag string, value string, found bool) {
+	for i, element := range argv {
+		for _, candidate := range providerDirectoryFlags {
+			if element != candidate {
+				continue
+			}
+			if i+1 < len(argv) {
+				return element, argv[i+1], true
+			}
+			return element, "", true
+		}
+	}
+	return "", "", false
+}
+
 // SupervisedInvocationRunner is the seam a real Provider CLI fills: it runs
 // a real provider.Invocation through ProcessSupervisor (the package's only
 // other reference to that type, dp-v2-017 B4/TestProcessSupervisorReferenced
 // ExactlyOnceInProviderExecutionPath) after first debiting a CostLedger
 // reservation against a freshly-loaded, approved provider-preflight record
 // (dp-v2-017 d1). The order inside Run is strictly: (1) refuse if any
-// dependency is nil/empty; (2) LoadPreflightRecord (schema + repository-wide
+// dependency is nil/empty, and refuse if the Invocation's declared working
+// directory is unusable (V2-077, see ErrInvocationWorkingDirectoryUnusable);
+// (2) LoadPreflightRecord (schema + repository-wide
 // validation, freshly read from disk); (3) Ledger.Reserve, which persists a
 // reservation to disk before anything may execute; (4) resolve argv[0] to
 // the approved record's absolute executable_path and exec through
-// ProcessSupervisor with the invocation's Stdin wired to the child's stdin
-// and its stdout captured in memory; (5) project the real CLI's stdout, in
+// ProcessSupervisor with the invocation's Stdin wired to the child's stdin,
+// its stdout captured in memory and its validated WorkingDirectory set as
+// the supervisor's Dir (V2-077), so the child actually runs in the
+// Increment's workspace rather than wherever the Runner was started; (5) project the real CLI's stdout, in
 // memory, into the minimal fixture shape provider.ClaudeAdapter.Parse
 // accepts (dp-v2-017 d5) -- the raw stdout bytes are never written to any
 // file and are dropped as soon as the projection is built; (6)
@@ -319,6 +409,18 @@ func (r SupervisedInvocationRunner) Run(ctx context.Context, inv provider.Invoca
 	if len(inv.Argv) == 0 || inv.Argv[0] == "" {
 		return nil, errors.New("supervised invocation runner: invocation argv is required")
 	}
+	// V2-077: the declared working directory is validated here, inside step
+	// (1), and therefore strictly before LoadPreflightRecord and before
+	// Ledger.Reserve. The position is load-bearing rather than tidy: a
+	// reservation debited before a refusal stays charged at worst case
+	// forever (dp-v2-017 d9), so a refusal placed after Reserve would spend
+	// a real reservation to report a caller's own malformed request.
+	if err := validateInvocationWorkingDirectory(inv.WorkingDirectory, r.Supervisor.Confine); err != nil {
+		return nil, err
+	}
+	if flag, value, ok := directoryFlagArgument(inv.Argv); ok && value != inv.WorkingDirectory {
+		return nil, fmt.Errorf("%w: argv carries the directory flag %s with %q while the invocation declares %q; the two are one string by construction, so a disagreement is refused rather than resolved", ErrInvocationWorkingDirectoryUnusable, flag, value, inv.WorkingDirectory)
+	}
 
 	record, err := LoadPreflightRecord(r.RepoRoot, r.RecordPath)
 	if err != nil {
@@ -358,6 +460,11 @@ func (r SupervisedInvocationRunner) Run(ctx context.Context, inv provider.Invoca
 	sup.Stdin = inv.Stdin
 	sup.Stdout = &stdout
 	sup.Env = env
+	// V2-077: the validated directory is handed to the one type that can
+	// physically assign it. Assignment and policy are split on purpose:
+	// nothing else in this package sets a child directory, and nothing in
+	// ProcessSupervisor knows what a provider.Invocation is.
+	sup.Dir = inv.WorkingDirectory
 
 	_ = r.Log.Write(fmt.Sprintf("invocation purpose=%s seq=%d argv0_basename=%s starting", r.Purpose, seq, filepath.Base(resolvedArgv[0])))
 	runErr := sup.Run(ctx, resolvedArgv)

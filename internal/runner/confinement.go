@@ -156,14 +156,54 @@ mount -t tmpfs tmpfs %[2]s
 	return nil
 }
 
+// pathWithinWorkspace reports whether dir is workspace itself or a path
+// beneath it. Both are compared as already-canonical absolute paths: a dir
+// that is not absolute, or that filepath.Clean would rewrite, is never
+// "within" anything, so a caller cannot smuggle a traversal segment past this
+// test. The prefix comparison appends a separator on purpose, so that a
+// sibling whose name merely starts with the workspace's name (".../workspace"
+// versus ".../workspace-2") is outside, not inside.
+func pathWithinWorkspace(workspace, dir string) bool {
+	ws := filepath.Clean(workspace)
+	if dir == "" || !filepath.IsAbs(dir) || filepath.Clean(dir) != dir {
+		return false
+	}
+	if !filepath.IsAbs(ws) {
+		return false
+	}
+	return dir == ws || strings.HasPrefix(dir, ws+string(filepath.Separator))
+}
+
 // wrap rewrites argv into a command line that runs it inside a rootless
 // user+mount namespace with the confinement mounts from the type doc
 // comment applied first. It performs no I/O and does not itself check
 // whether namespaces are usable -- callers must call Probe first.
-func (c NamespaceConfinement) wrap(argv []string) ([]string, error) {
+//
+// dir, when non-empty, is the working directory the confined child must run
+// in (V2-077). It is expressed as one shell-quoted "cd" emitted *inside* the
+// namespace, after both mount pairs and immediately before exec, because
+// that is the only ordering whose after-the-read-write-remount property is
+// provable: ProcessSupervisor's cmd.Dir would chdir before unshare runs and
+// therefore before either mount pair exists (see ProcessSupervisor's doc
+// comment). No mount is added, removed or reordered to express it, and no
+// path becomes reachable that was not reachable before -- the cwd is simply
+// stated explicitly instead of being inherited from wherever the runner
+// happened to be started.
+//
+// dir must be the workspace itself or a path beneath it. Anything else --
+// a sibling, an ancestor, a relative or non-canonical path -- is refused
+// here: wrap returns an error and wraps nothing, so ProcessSupervisor starts
+// no child. Refusing is deliberate rather than repairing, because with
+// Confine set the kernel makes exactly one path read-write, and a cwd
+// outside it would put the child where its own workspace is sealed. An
+// empty dir keeps the pre-V2-077 behaviour exactly: no cd is emitted.
+func (c NamespaceConfinement) wrap(argv []string, dir string) ([]string, error) {
 	ws := filepath.Clean(c.Workspace)
 	if ws == "" || !filepath.IsAbs(ws) {
 		return nil, errors.New("runner: confinement workspace must be an absolute path")
+	}
+	if dir != "" && !pathWithinWorkspace(ws, dir) {
+		return nil, fmt.Errorf("runner: confined working directory %s is neither the confinement workspace %s nor a path beneath it", dir, ws)
 	}
 	var script strings.Builder
 	script.WriteString("set -e\n")
@@ -173,6 +213,9 @@ func (c NamespaceConfinement) wrap(argv []string) ([]string, error) {
 	}
 	fmt.Fprintf(&script, "mount --bind %[1]s %[1]s\n", shQuote(ws))
 	fmt.Fprintf(&script, "mount -o remount,bind,rw %[1]s\n", shQuote(ws))
+	if dir != "" {
+		fmt.Fprintf(&script, "cd %s\n", shQuote(dir))
+	}
 	script.WriteString(`exec "$@"` + "\n")
 	wrapped := []string{resolveTool("unshare"), "--user", "--map-root-user", "--mount", "--", resolveTool("sh"), "-c", script.String(), "confine"}
 	return append(wrapped, argv...), nil

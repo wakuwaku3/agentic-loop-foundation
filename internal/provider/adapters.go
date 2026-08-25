@@ -55,19 +55,44 @@ func build(executable string, flags []string, includeWorkspaceArg bool, req Requ
 // declare, and no flag help declares for a property the adapter needs was
 // dropped.
 //
-// The workspace argument is kept as an argv element for codex and opencode
-// after a measurement that contradicts the assumption behind removing it. The
-// assumption was that Invocation.WorkingDirectory already pins the child's
-// directory, so the flag is a weaker second copy of a boundary something else
-// holds. It is not a second copy: the runner's ProcessSupervisor.Run takes
-// only a context and an argv and never assigns a child working directory, and
-// SupervisedInvocationRunner never reads Invocation.WorkingDirectory either.
-// For these two CLIs the flag is therefore the only representation of the
-// workspace that reaches the child process at all, and deleting it would
-// leave the child running in whatever directory the runner happened to be in.
-// What actually holds the boundary is the kernel: NamespaceConfinement pins
-// the writable mount at the workspace. The adapter's job is only to be unable
-// to ask to leave it, which is what the argv guards below enforce.
+// The workspace argument is kept as an argv element for codex and opencode,
+// but the reason has changed and the old reason is kept here rather than
+// deleted, because the conclusion was reached from it.
+//
+// HISTORICAL MEASUREMENT (2026-08-24, V2-027, true of the tree as it then
+// stood): the runner's ProcessSupervisor.Run took only a context and an argv
+// and never assigned a child working directory, and SupervisedInvocationRunner
+// did not read Invocation.WorkingDirectory. For codex and opencode the flag
+// was therefore the ONLY representation of the workspace that reached the
+// child process at all, and deleting it would have left the child running in
+// whatever directory the runner happened to be in.
+//
+// CURRENT MEASUREMENT (2026-08-25, V2-077): that premise no longer holds.
+// ProcessSupervisor carries an additive Dir field and assigns it to the child,
+// and SupervisedInvocationRunner reads Invocation.WorkingDirectory, validates
+// it fail-closed on five properties before it loads a preflight record or
+// debits a ledger reservation, and hands it to the supervisor. The declared
+// working directory now reaches the child on its own, so the flag is no longer
+// the only representation of the workspace.
+//
+// The flags still stay, for two reasons that do not depend on the old
+// premise. First, each is declared by that CLI's own help output, and removing
+// a flag a CLI declares is out of scope. Second, the double expression is
+// harmless for the values that actually occur, and that is asserted rather
+// than assumed: the single build call below produces the argv element and
+// WorkingDirectory from the same req.Workspace, so they are the same string by
+// construction (asserted for all three adapters by
+// TestDirectoryFlagArgumentAndWorkingDirectoryAreTheSameString), and for an
+// absolute path equal to the working directory a directory flag is idempotent.
+// SupervisedInvocationRunner refuses fail-closed if the two ever disagree.
+// What remains unmeasured is whether some future CLI version refuses when both
+// are supplied; measuring that needs the run subcommand, which V2-028 owns.
+//
+// The kernel still holds the write boundary independently: NamespaceConfinement
+// pins the writable mount at the workspace, and under confinement the chdir is
+// expressed inside the namespace after that mount exists rather than through
+// the exec's own directory. The adapter's job is only to be unable to ask to
+// leave the workspace, which is what the argv guards below enforce.
 //
 // claude needs no such flag: it takes the Work Packet on stdin, and its four
 // arguments are the one argv in this file that is live-proven wire-compatible

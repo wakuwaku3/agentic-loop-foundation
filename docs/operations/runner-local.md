@@ -318,6 +318,103 @@ specific mount operations exercised (bind, remount-bind-ro/rw, tmpfs); it
 does not itself replace the path-construction checks described above, which
 still run first and independently.
 
+## The declared working directory reaches the child (V2-077)
+
+Until 2026-08-25 the working directory an `Invocation` declared was set by the
+adapter and read by nobody: `ProcessSupervisor.Run` took only a context and an
+argv and never assigned a child directory, and `SupervisedInvocationRunner`
+never read `Invocation.WorkingDirectory`. A Provider whose command line does
+not carry the workspace -- claude carries no path in argv at all -- therefore
+ran in whatever directory the Runner happened to be started from. That is now
+fixed, in one place, additively.
+
+`ProcessSupervisor` gains exactly one field, `Dir string`, and is the only
+place in the package where a child's directory is assigned: it is the only type
+that constructs an `exec.Cmd`, so no other type physically can. Its zero value
+is byte-identical to the previous behaviour (the child inherits the calling
+process's own directory), which is what lets every pre-existing construction
+site keep compiling and passing unchanged. Deciding *which* directory is not
+that type's job: the policy lives in `SupervisedInvocationRunner`, which reads
+`Invocation.WorkingDirectory`, validates it, and sets `Dir` on its own value
+copy of the supervisor.
+
+**Five fail-closed refusal properties, and one more under confinement.** The
+value must be non-empty, absolute, already canonical (`filepath.Clean` leaves
+it unchanged, which rejects a `..` segment, a trailing separator and a doubled
+separator alike), an existing directory, and not a symlink. When the supervisor
+is confined it must additionally be the confinement workspace itself or a path
+beneath it. Every failure returns
+`runner.ErrInvocationWorkingDirectoryUnusable` with its own wrapped reason and
+starts no process. Nothing is ever repaired, and the Runner's own directory is
+never substituted -- that substitution *is* the defect this removes, and making
+it the documented fallback would make the correct and the broken case
+indistinguishable from outside.
+
+**The refusal happens before `LoadPreflightRecord` and before
+`Ledger.Reserve`.** The position is load-bearing, not tidy: a reservation
+debited before a failure stays charged at worst case forever (dp-v2-017 d9), so
+a refusal placed after `Reserve` would spend a real reservation to report a
+caller's own malformed request. The ordering is asserted two ways -- by driving
+the refusal with a `RecordPath` that names a nonexistent file and getting the
+working-directory reason back, and by asserting that no ledger file exists on
+disk afterwards, since `Reserve` persists a reservation before anything may
+execute.
+
+**Under confinement the chdir is expressed inside the namespace, not through
+`cmd.Dir`.** `Cmd.Dir` is applied by `chdir` in the forked child *before* the
+exec, and the program exec'd under confinement is `unshare`, so a `cmd.Dir`
+can only ever take effect before the namespace exists and therefore before
+either of the confinement's two mount pairs -- it is structurally impossible
+for it to land after the read-write remount of the workspace. So
+`NamespaceConfinement.wrap` emits the directory as a single `shQuote`'d `cd`
+after both mount pairs and immediately before `exec "$@"`, and
+`ProcessSupervisor` assigns `cmd.Dir` only on the unconfined path (asserted
+structurally, by an AST check that the single assignment is guarded by
+`s.Confine == nil`, not by a comment). **No mount is added, removed or
+reordered to express the directory**, and no path becomes reachable that was
+not reachable before: a directory that is not the workspace and not beneath it
+is refused, never accommodated by relaxing the confinement.
+
+**The rejected ordering was measured, and it is worse than merely unprovable.**
+On kernel `6.18.33.2-microsoft-standard-WSL2` (linux/amd64), a cwd inherited
+across namespace creation -- exactly what `cmd.Dir` can do when `Confine` is
+non-nil -- **actually permitted a relative upward write (`../`) that the seal
+was meant to stop, and the file reached the host filesystem**: the write exited
+0 with empty stderr, and the path existed outside the workspace after the
+namespace was gone. The positive control on the same kernel, the chosen
+in-namespace `cd`, refused the identical write with `Read-only file system` and
+left nothing behind. So the in-namespace ordering is not merely the ordering
+whose after-the-remount property is provable; on this kernel it is the only one
+that holds. The measurement is recorded as a measurement: the design was chosen
+from the structural argument above and is not changed on the basis of it.
+
+**The working directory is now the resolution base for every relative path the
+child resolves.** Nothing in this repository passes a relative path to a child
+today -- the adapter guards refuse a traversal segment and V2-027 measured that
+only absolute workspaces appear in argv -- but the change is silent for
+anything that does, including any relative path a Provider CLI writes into its
+own state. That is a deliberate consequence, not a side effect: it is what
+makes an Increment's workspace, rather than the Runner's directory, the place a
+child's own relative work lands.
+
+**The directory flags stay.** codex keeps `-C` and opencode keeps `--dir`,
+because each CLI's own help declares it. The resulting double expression is
+harmless for the values that actually occur, and that is now proven rather than
+assumed: one call to the adapters' shared build helper produces the flag's
+argument and `WorkingDirectory` from the same request workspace, so they are
+the same string by construction, and `SupervisedInvocationRunner` refuses
+fail-closed if they ever disagree. See
+`docs/operations/provider-adapters.md`.
+
+**What this does not change.** `Invocation.Environment` is still read by
+nobody on the production path: `Grant.Apply` writes it and only
+`FakeInvocationRunner` observes it, while `Run` builds the child's environment
+itself from the approved record's base names. That is the same-shaped defect,
+recorded and escalated by V2-077 rather than fixed, because making a Secret
+Broker grant reach a real child widens what the child may reach and needs its
+own credential-isolation acceptance. It is latent rather than active only
+because every live exercise so far ran with `granted_names` empty.
+
 ## Durable store: fsync'd JSONL journal, not SQLite — resolved (V2-044)
 
 The Runner local durable store is the existing fsync-backed JSONL journal
