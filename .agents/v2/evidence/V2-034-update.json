@@ -1,0 +1,299 @@
+{
+  "schema_version": "v1",
+  "id": "ev-v2-034-update",
+  "kind": "evidence",
+  "created_at": "2026-08-25T13:35:00Z",
+  "correlation_id": "v2-034-self-update-local-closure",
+  "task_id": "V2-034",
+  "component": "update",
+  "evidence_key": "49b00dd1d3930e0abc3f03ac8489f5c31830efd3065dfddcc407b704284f66e8",
+  "result": "passed",
+  "observed_at": "2026-08-25T13:35:00Z",
+  "checks": [
+    {
+      "name": "environment-identifiers",
+      "status": "passed",
+      "argv": [
+        "uname",
+        "-srm"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 60,
+      "summary": "Execution environment recorded for every check in this record: machine D18061, kernel Linux 6.18.33.2-microsoft-standard-WSL2 x86_64, go1.25.0 linux/amd64, devbox run --pure, at commit 390cc5c7382e35c4e5f3e6313480d6eb8cc545d3. No fixed sleep, no wall-clock read, no background timer and no goroutine appears in any test of this package; every clock is injected and every deadline is a bounded document or duration bound."
+    },
+    {
+      "name": "baseline-and-final-top-level-test-counts",
+      "status": "passed",
+      "argv": [
+        "devbox",
+        "run",
+        "--pure",
+        "--",
+        "go",
+        "test",
+        "-count=1",
+        "-v",
+        "./internal/update"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 3600,
+      "summary": "internal/update had exactly 2 top-level tests before this task (TestInstallSwitchAndRollbackKeepBothVersions and TestVerifyRejectsTamperAndIncompatibleSchema) and has 17 after. Both original names still exist and both still PASS: '--- PASS: TestInstallSwitchAndRollbackKeepBothVersions' and '--- PASS: TestVerifyRejectsTamperAndIncompatibleSchema'. Skipped checks: 0. Verdict line: 'ok github.com/takushi/agentic-loop-foundation/v2/internal/update'."
+    },
+    {
+      "name": "item-1-trust-anchor-resolved-from-a-fixed-path-with-six-refusals",
+      "status": "passed",
+      "argv": [
+        "devbox",
+        "run",
+        "--pure",
+        "--",
+        "go",
+        "test",
+        "-count=1",
+        "-v",
+        "./internal/update"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 3600,
+      "summary": "TestTrustAnchorRefusalsAreEnumeratedAndFailClosed PASS with 9 sub-cases covering the section 3.2 list in order: (1) absent -> anchor-absent; (2a) a directory at the fixed path and (2b) a symlink at the fixed path -> anchor-not-a-regular-file; (3) owner uid differing from the injected invoking uid -> anchor-not-owned-by-the-invoking-user; (4) mode 0640 and (4b) mode 0500 -> anchor-mode-wider-than-0600; (5) zero-length file -> anchor-empty; (6) comments and blank lines only -> anchor-zero-accepted-entries; (7, added by this task) a line that is not key_id/algorithm/base64 -> anchor-malformed-entry. Every case asserts errors.Is(err, ErrAnchorUnavailable), that no confinement probe ran, that no child was started, and that root/versions does not exist afterwards. Mode 0400 and 0600 are accepted (TestTrustAnchorIsASetAndSelectsByKeyID)."
+    },
+    {
+      "name": "item-1-manifest-side-provenance-refusals",
+      "status": "passed",
+      "argv": [
+        "devbox",
+        "run",
+        "--pure",
+        "--",
+        "go",
+        "test",
+        "-count=1",
+        "-v",
+        "./internal/update"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 3600,
+      "summary": "TestTrustAnchorIsASetAndSelectsByKeyID PASS: a two-entry anchor verifies bundles signed by either identity (rotation is add-then-remove, not a flag day); a key_id absent from the anchor, an empty key_id, an algorithm the named entry does not declare, an empty algorithm, an entry whose algorithm this build cannot verify, and an empty anchor set are each refused. The trust anchor is no longer an argument anywhere: internal/update exposes AnchorPath(root) and AnchorResolver only."
+    },
+    {
+      "name": "item-2-launcher-re-verifies-on-disk-bytes-before-every-exec",
+      "status": "passed",
+      "argv": [
+        "devbox",
+        "run",
+        "--pure",
+        "--",
+        "go",
+        "test",
+        "-count=1",
+        "-v",
+        "./internal/update"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 3600,
+      "summary": "TestLaunchReVerifiesOnDiskBytesBeforeEveryExec PASS. Three launches from root/stable report verifications=3 launches=3, one re-verification per exec, each ChildSpec asking for its own process group and naming versions/<v>/runner. Then, with install-time verification already past, the on-disk binary is overwritten and the next launch is refused; the manifest is overwritten and the launch is refused; the persisted signature is deleted and the launch is refused. Children started from tampered or unverifiable bytes: 0. TestLaunchRefusesRatherThanDegrading PASS over 8 further refusals: an unrouted channel, an unknown channel, a failing confinement probe, no probe at all, no process starter, a canonical schema outside the routed version's interval, a non-positive canonical schema, and a channel symlink pointing outside versions/."
+    },
+    {
+      "name": "item-3-update-package-links-only-the-standard-library",
+      "status": "passed",
+      "argv": [
+        "devbox",
+        "run",
+        "--pure",
+        "--",
+        "go",
+        "test",
+        "-count=1",
+        "-v",
+        "./internal/update"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 3600,
+      "summary": "TestUpdateImportsOnlyTheStandardLibrary PASS: 8 non-test and 17 total .go files scanned with go/ast, all standard-library-only, and the assertion fails outright on a zero-file scan so it cannot pass vacuously. TestUpdateSourceGuardMatcherIsVerified PASS is its positive control: the classifier is checked against stdlib paths and against five module-internal paths, and the scanner is run over a synthetic file that really imports internal/release (detected) and one that does not (clean). The mirror-image half, that no file under cmd/runner or internal/runner imports internal/update, is in the runner evidence record."
+    },
+    {
+      "name": "item-4-manifest-v2-carries-the-three-digest-join-as-values",
+      "status": "passed",
+      "argv": [
+        "devbox",
+        "run",
+        "--pure",
+        "--",
+        "go",
+        "test",
+        "-count=1",
+        "-v",
+        "./internal/update"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 3600,
+      "summary": "TestManifestAcceptedSetAndTheThreeDigestJoin PASS: AcceptedManifestSchemas is the ordered set {module-manifest/v2, module-manifest/v1} with ManifestSchema = v2; a v2 manifest carries bundle_digest, candidate_id, contract_release, contract_digest and a runner API range; a manifest declaring the accepted older id still verifies; 13 refusals fire, including an id outside the accepted set, a missing or malformed bundle_digest, a missing candidate_id, contract_release or contract_digest, a missing or inverted runner API range, an older id smuggling v2 coordinates, and a bundle declaring a bootstrapper role. The two decoder refusals the measured tree already had (unknown field, trailing JSON value) still fire. No import edge was created: internal/update imports nothing outside the standard library, and no bundle digest is computed here."
+    },
+    {
+      "name": "item-5-four-stages-over-an-injected-codec-port",
+      "status": "passed",
+      "argv": [
+        "devbox",
+        "run",
+        "--pure",
+        "--",
+        "go",
+        "test",
+        "-count=1",
+        "-v",
+        "./internal/update"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 3600,
+      "summary": "TestFourStagesAreReversibleUntilContract PASS against an injected Codec port with an in-package fake and nothing else; internal/store/firestore and internal/store/memory were neither read nor changed. Expand writes the new payload field in addition to the old one with the envelope unchanged; coexist resolves new-if-present-else-old; migrate converges in 3 bounded ticks over 250 documents with 250 rewrites, is idempotent (a repeated tick rewrites 0), stops on the duration bound after 10 documents on an injected step clock, and refuses a budget with no document bound, no duration bound or no injected clock; expand and migrate both reverse to a byte-identical store (reflect.DeepEqual on a deep-copied snapshot). Contract is the first and only irreversible stage: Stage.Reversible() is true for the first three and false for contract, Reverse on contract returns ErrIrreversibleStage, and after a contract step even the expand reversal has nothing to fall back to. Contract leaves the envelope alone, which is V2-070's territory."
+    },
+    {
+      "name": "item-5-contract-is-the-gc-predicate-used-a-second-time",
+      "status": "passed",
+      "argv": [
+        "devbox",
+        "run",
+        "--pure",
+        "--",
+        "go",
+        "test",
+        "-count=1",
+        "-v",
+        "./internal/update"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 3600,
+      "summary": "TestContractUsesTheSameRetentionPredicateAsGC PASS over 7 rows. Each row feeds one RetentionInput to both RetentionEligible and ContractAllowed and asserts the contract verdict equals !(!eligible && schema_min < post-contract schema) -- that is, ContractAllowed calls RetentionEligible and refuses exactly when a still-retained version cannot read the post-contract schema. Rows cover the current stable target, the previous stable target, a retained version at or above the floor, a GC-eligible version with a low floor (which constrains nothing), a version inside its rollback window, a Requirement-referenced version, and a live preview target. The whole set together refuses, a non-positive post-contract schema refuses, and a refused Contract call leaves the store byte-identical."
+    },
+    {
+      "name": "item-6-gc-predicate-reproduces-release-retentioneligible-by-value",
+      "status": "passed",
+      "argv": [
+        "devbox",
+        "run",
+        "--pure",
+        "--",
+        "go",
+        "test",
+        "-count=1",
+        "-v",
+        "./internal/update"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 3600,
+      "summary": "TestRetentionReproducesTheReleasePredicateByValue PASS over 5 cases: the four refusals of internal/release/pipeline.go's RetentionEligible in its order, with its exact reason strings, plus the eligible case, on identical inputs and with every field this layer adds left zero so the added refusals are inert. The four reason strings are additionally pinned against literals. internal/release is not imported, and TestUpdateImportsOnlyTheStandardLibrary is the reverse-direction guard that keeps it that way. TestRetentionAddsTheRefusalsThatOnlyExistWithRealBinaries PASS over 6 cases: a preview symlink target is refused while a channel set that does not name the version is not; the last retained version whose interval contains the canonical schema is refused while one of several covering versions is not; a window that opened without a recorded closure is refused while one with a recorded closure is not."
+    },
+    {
+      "name": "item-6-collection-order-is-crash-safe",
+      "status": "passed",
+      "argv": [
+        "devbox",
+        "run",
+        "--pure",
+        "--",
+        "go",
+        "test",
+        "-count=1",
+        "-v",
+        "./internal/update"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 3600,
+      "summary": "TestCollectRefusesRoutableVersionsAndDeletesCrashSafely PASS on a real filesystem. A previous stable target is refused; a version whose window closure was never recorded is refused; a channel symlink created after the predicate's snapshot was taken still refuses the deletion, which is the re-read of every channel immediately before deleting; residue from an interrupted deletion is swept on the next pass; and the version's directory disappears, the record stops naming it, and the two retained versions and their records survive. The order is sweep, predicate, symlink re-read, rename aside, remove, then update installed.json -- the record is written only after the operation it describes."
+    },
+    {
+      "name": "item-7-rollback-window-is-the-conjunction-of-four-conditions",
+      "status": "passed",
+      "argv": [
+        "devbox",
+        "run",
+        "--pure",
+        "--",
+        "go",
+        "test",
+        "-count=1",
+        "-v",
+        "./internal/update"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 3600,
+      "summary": "TestRollbackWindowIsTheConjunctionOfFourClauses PASS enumerating the whole truth table: 16 of 16 clause assignments, each clause driven by an input the other three do not share, with the window open in 15 and closable in exactly 1. Generation is the previous-stable pointer, schema stage is the canonical schema inside the version's interval, time is a contract-declared dwell measured on an injected clock, and evidence is the successor's Preview capability exercise. TestWindowClosureIsRecordedAndNeverRecomputed PASS: closure writes window_closed_at plus the criterion; a later evaluation with every clause holding again and the clock moved 600 minutes backwards returns the same recorded closure; a contract-caused closure records schema-contract and a bare advance records schema-advance; and assembling a window input for an unrecorded version is refused."
+    },
+    {
+      "name": "item-8-switch-is-recorded-monotonic-and-gated",
+      "status": "passed",
+      "argv": [
+        "devbox",
+        "run",
+        "--pure",
+        "--",
+        "go",
+        "test",
+        "-count=1",
+        "-v",
+        "./internal/update"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 3600,
+      "summary": "TestSwitchIsRecordedMonotonicAndGated PASS over 10 sub-cases. Refused: a switch with no reason; a forward move with no candidate digest or the wrong one; a forward move onto a version whose manifest carries no candidate at all; an unknown direction; a rollback on the preview channel; a stable forward move onto a version preview does not route; a re-route to the current target; a second consecutive rollback (ErrRollbackExhausted, because the first rollback consumes the previous-stable pointer); and a route onto a version whose schema interval excludes the canonical schema. Accepted: 7 switches, every one carrying a sequence, a timestamp, a channel, a from, a to, a direction and a reason, and a rollback after an intervening forward move -- so the refusal is of consecutive rollbacks, not of rollback. No switch, accepted or refused, deleted a version directory."
+    },
+    {
+      "name": "boundary-no-m8-completion-condition-is-reported-as-met",
+      "status": "passed",
+      "argv": [
+        "grep",
+        "-rn",
+        "M8",
+        "docs/operations/self-update.md",
+        "internal/update",
+        "cmd/bootstrap"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 120,
+      "summary": "M8 completion conditions 1, 2 and 3 are not claimed anywhere in this task's code, tests, documentation or evidence. docs/operations/self-update.md section 15.1 states so explicitly and states that 'the launcher re-execs a re-verified binary after the child exits' is NOT M8 condition 2. Condition 4 (do not delete a rollback target's binary or documents while the window is open) is the single predicate in internal/update/retention.go, exercised by the retention and collection checks above; it is reported as implemented at local-closure grade, not as a preview-local exercise. Nothing was deployed, no Provider CLI was started, no GCP project, Cloud KMS key or credential was touched, and no signing key intended for any machine was generated: every key in these tests is generated inside the test that uses it."
+    },
+    {
+      "name": "boundary-cross-machine-half-escalated-not-invented",
+      "status": "passed",
+      "argv": [
+        "grep",
+        "-n",
+        "E5",
+        "docs/operations/self-update.md"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 120,
+      "summary": "The cross-machine half of the section 6 invariant is recorded as escalation E5 in docs/operations/self-update.md section 13 and section 15.7: it needs the Runner version reporting V2-069 prepares, and no part of it was attempted. What this task implemented is the single-machine half only -- Switch refuses to route a version whose interval excludes the canonical schema the machine reads, and installed.json records the interval of every installed version."
+    },
+    {
+      "name": "make-check-on-the-committed-tree",
+      "status": "passed",
+      "argv": [
+        "devbox",
+        "run",
+        "--pure",
+        "--",
+        "make",
+        "check"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 3600,
+      "summary": "make check green on the implementation commit: 0 FAILS, gitleaks 'no leaks found' over 457 commits, and 'workflow-pins: 3 unique (owner/repo, version) -> sha pins, no disagreement'. ci/components.json, the Makefile, go.mod, go.sum and devbox.* were not edited, and internal/ci's manifest-dependency checks pass, so no undeclared component import edge was introduced."
+    },
+    {
+      "name": "component-update",
+      "status": "passed",
+      "argv": [
+        "devbox",
+        "run",
+        "--pure",
+        "--",
+        "make",
+        "component-update"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 3600,
+      "summary": "make component-update runs go test ./internal/update: ok, 17 top-level tests, 0 skipped."
+    }
+  ]
+}

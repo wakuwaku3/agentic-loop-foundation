@@ -819,6 +819,7 @@ counted as a pass (`docs/operations/v2-task-dag.md` G7).
 | E2 | `internal/store/firestore`'s readers accept exactly one `record_schema` (`store.go:79`, `store.go:173`), so envelope coexist is impossible | carved out as **V2-070**, which owns the envelope expand stage | dependency of V2-034 and V2-035; blocks M8 condition 3 |
 | E3 | Whether Cloud KMS offers Ed25519 asymmetric-sign in the target project is a D1-time fact | approved with no additional work: the anchor set admits a second `algorithm` (section 3.1) | none |
 | E4 | The launcher lives in `cmd/bootstrap`, a `runner` component root | approved: V2-034 emits both an `update` and a `runner` evidence record | none; the DAG row is updated by the coordinator, not by this task |
+| E5 | The cross-machine half of the section 6 invariant is not implementable inside V2-034: the Control Plane cannot learn which binary version and interval each Runner is running until V2-069 lands | **escalated by V2-034, no work attempted.** V2-034 implemented only the single-machine half (section 15.7): the launcher refuses to route a version whose interval excludes the canonical schema it reads. The cross-machine half stays unimplemented and unclaimed | not blocking the local closure; blocking any claim about two machines at once |
 
 ## 14. How this document is verified
 
@@ -831,3 +832,102 @@ the `update` component evidence key is unmoved by design; the claim of the
 accompanying evidence record is "the design document exists, agrees with
 the measured tree, and the `update` component check is green", not that any
 new behaviour was proven.
+
+## 15. Implementation notes from V2-034 (the local closure as built)
+
+Sections 1 to 14 are V2-033's design. This section records where the built
+local closure is narrower, stricter or more explicit than the design text,
+so a reader of the code is not left inferring which is authoritative. Every
+statement below is about `internal/update/**` and `cmd/bootstrap/**` on this
+tree, and about nothing else.
+
+**15.1 What V2-034 does NOT claim.** M8 completion conditions 1, 2 and 3 are
+**not** met and are not reported as met anywhere in this task's code, tests
+or evidence. They are preview-local and belong to V2-035. In particular:
+"the launcher re-execs a re-verified binary after the child exits" **is not
+M8 completion condition 2**, which names breaking a real Preview Control
+Plane and Runner and recovering from the Stable launcher. A launcher
+restarting a child in a unit test is not a recovery of a Preview
+environment. Nothing here was deployed, no Provider CLI was started, no GCP
+project, Cloud KMS key, credential or real signing key was used, and no key
+pair intended for any machine was generated: every key in a test is
+generated inside that test and dies with it.
+
+**15.2 The anchor is stricter than the six-item list.** Section 3.2 item 2
+names "symlink to a non-regular target"; the implementation uses `Lstat` and
+refuses **any** symlink at the fixed path, because the anchor's identity must
+be the fixed path itself and not something a link can retarget. A seventh
+refusal is added: a line that is not exactly `key_id algorithm
+base64(pubkey)`, or that repeats a `key_id`, is a refusal rather than a line
+to skip. The mode bound is expressed as "no permission bit outside `0600`",
+so the canonical `0400` and a plain `0600` are accepted and any group bit,
+other bit or execute bit is refused. The invoking uid is an injected field
+rather than a call to `os.Getuid` inside the resolver, which is what makes
+the ownership refusal reachable in a test without a second real uid; the
+production constructor supplies `os.Getuid()`.
+
+**15.3 Provenance is required by every accepted manifest id.** Section 3.4
+keeps the older id in the accepted set. The implementation requires `key_id`
+and `algorithm` under **both** accepted ids, because selecting an entry out
+of a set is a launch-time requirement rather than a v2 feature, and refuses
+a manifest declaring the older id that carries any v2 coordinate. A
+consequence worth stating: a version whose manifest carries no
+`candidate_id` — which is every manifest declaring the older id — can never
+be moved forward on any channel, because a forward move must name the
+candidate the signed manifest carries. The licence to require this is the
+one section 3.4 already names: no Stable release exists and no Bootstrapper
+is installed on any machine.
+
+**15.4 The detached signature is persisted, and the launcher re-checks it.**
+Section 4.2 lists the anchor set among the launcher's reads, which is only
+meaningful if the launcher can re-run a signature check. `Install`
+therefore writes `versions/<v>/signature` (mode `0400`) beside `runner` and
+`manifest.json`, and the launcher's per-launch re-verification is **the same
+`Verify`** the install ran, over freshly read bytes: there is no weaker
+on-disk check. A missing signature file is a refusal, not a fallback to a
+digest-only comparison. The manifest also gains a `roles` field so section
+4.3's rule is executable: a bundle declaring a `bootstrapper` role is
+refused.
+
+**15.5 `bootstrap run` is bounded, and the restart count is an argument.**
+The launcher performs up to `--launches N` verified launches, re-resolving
+the anchor set, re-reading the channel pointer and re-verifying the bytes on
+disk before each one. There is no timer, no backoff and no unbounded loop.
+The child is started through an injected process port; the production port
+sets `Setpgid`, and a test executes a real child and reads its process group
+from the kernel to show the launcher is not in it.
+
+**15.6 The window's criterion is always a schema movement.** Section 9.1's
+closure is the conjunction of all four clauses having ceased, and clause 2
+holds while the canonical schema is inside the version's interval.
+Therefore a closure always requires the canonical schema to have left that
+interval: the generation, dwell and evidence clauses can **delay** a
+closure but can never cause one. The recorded criterion accordingly
+distinguishes `schema-contract` (a contract step moved it, which is the one
+one-way transition in M8) from `schema-advance` (an expand-stage bump moved
+it, after which the shape is still in the store and the refusal is the
+declared interval). Closure is recorded once, is idempotent, and is never
+recomputed: a later evaluation with every clause holding again and the clock
+moved backwards returns the same recorded closure.
+
+**15.7 The single-machine half of the section 6 invariant, and only that.**
+`Switch` refuses to route a version whose `[schema_min, schema_max]`
+excludes the canonical schema the machine reads, and records the interval of
+every installed version. The cross-machine half is escalation E5 above: it
+needs V2-069's Runner version reporting, and no part of it was invented
+here.
+
+**15.8 A third GC refusal.** Section 8 lists six. The implementation adds a
+seventh, which section 9.2 already required as a violation rather than as a
+refusal: a version whose rollback window opened and whose closure was never
+recorded is not deletable. Refusals 5 to 7 are all inert on the inputs the
+release-parity table uses, so the case-by-case agreement with
+`release.RetentionEligible`'s four outcomes is exact and not approximate.
+
+**15.9 The stage machinery's port, and what it proves.** The four stages run
+against an injected codec port with an in-package fake. Nothing under
+`internal/store/firestore/**` or `internal/store/memory/**` was read or
+changed. `Contract` deliberately does not touch the envelope: bumping
+`record_schema` is the store's expand step and belongs to V2-070. The claim
+is exactly the one section 7.3 allows — the four stages are proven against
+that port, and not yet against the emulator.
