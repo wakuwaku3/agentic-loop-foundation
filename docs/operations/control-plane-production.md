@@ -41,3 +41,16 @@ Neither variable creates, reads, or mutates any Google Cloud resource. See
 on `AGENTIC_LOOP_LIVE_LOCAL=1`, never run by `make check`) for the exact
 composition this exercises end to end as a real process against a real
 Firestore emulator.
+## Recording who requested a Requirement intake or Control Intent
+
+Every Requirement intake (`POST /v1/requirements`) and Control Intent
+(`POST /v1/controls`) response carries `requested_by: {actor_type, subject}`.
+`actor_type` is `owner` when the authenticated caller is the human owner and
+`loop` when the Loop decided on its own; `subject` is an identity reference
+only (never a credential, and never written to logs or evidence). The
+production authentication path already provides everything this needs: the
+owner's IAP subject above is exactly the subject recorded for an owner
+request, so no additional wiring is required here for that side. A
+Loop-originated request (`actor_type: loop`) is reached only through an
+internal Go caller, never through IAP or the runner session header; today no
+in-repo caller exercises that path yet, so it is provisioned but unused.

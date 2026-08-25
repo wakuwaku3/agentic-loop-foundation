@@ -77,6 +77,7 @@ type RequirementDetailView struct {
 	NextAction    string                     `json:"next_action"`
 	PageSize      int                        `json:"page_size"`
 	Truncated     bool                       `json:"truncated"`
+	RequestedBy   *domain.RequestedBy        `json:"requested_by,omitempty"`
 }
 
 // RequirementView remains compatible with the original v1 response. Text is
@@ -87,6 +88,7 @@ type RequirementView struct {
 	Version       domain.Version           `json:"version"`
 	IncrementIDs  []string                 `json:"increment_ids"`
 	Text          string                   `json:"text,omitempty"`
+	RequestedBy   *domain.RequestedBy      `json:"requested_by,omitempty"`
 }
 
 func boundPageSize(size int) (int, error) {
@@ -99,6 +101,19 @@ func boundPageSize(size int) (int, error) {
 	return size, nil
 }
 
+// requestedByView returns nil for a value that was never recorded (a legacy
+// Requirement, or a Control Intent revision with no side-table row), so the
+// JSON response omits requested_by entirely rather than emitting an empty
+// object. A copy is returned so callers cannot mutate the stored value
+// through the pointer.
+func requestedByView(rb domain.RequestedBy) *domain.RequestedBy {
+	if !rb.Recorded() {
+		return nil
+	}
+	v := rb
+	return &v
+}
+
 func requirementViews(rows []domain.Requirement, texts map[string]string) []RequirementView {
 	out := make([]RequirementView, 0, len(rows))
 	for _, r := range rows {
@@ -106,7 +121,7 @@ func requirementViews(rows []domain.Requirement, texts map[string]string) []Requ
 		for i, id := range r.Increments {
 			ids[i] = id.String()
 		}
-		out = append(out, RequirementView{RequirementID: r.ID.String(), Status: r.Status, Version: r.Version, IncrementIDs: ids, Text: texts[r.ID.String()]})
+		out = append(out, RequirementView{RequirementID: r.ID.String(), Status: r.Status, Version: r.Version, IncrementIDs: ids, Text: texts[r.ID.String()], RequestedBy: requestedByView(r.RequestedBy)})
 	}
 	return out
 }
@@ -167,7 +182,7 @@ func (s *Service) GetRequirementDetail(ctx context.Context, id string) (Requirem
 		if err != nil {
 			return err
 		}
-		out = RequirementDetailView{RequirementID: id, OriginalText: text, Status: r.Status, Version: r.Version, Increments: []RequirementIncrementView{}, PageSize: MaxPageSize}
+		out = RequirementDetailView{RequirementID: id, OriginalText: text, Status: r.Status, Version: r.Version, Increments: []RequirementIncrementView{}, PageSize: MaxPageSize, RequestedBy: requestedByView(r.RequestedBy)}
 		incs := make([]domain.Increment, 0, len(r.Increments))
 		incrementIDs := r.Increments
 		if len(incrementIDs) > MaxPageSize {
@@ -245,6 +260,7 @@ type ControlReadModel struct {
 	VerifiedAt     string                   `json:"verified_at,omitempty"`
 	EvidenceRef    string                   `json:"evidence_ref,omitempty"`
 	Verification   domain.VerificationState `json:"verification"`
+	RequestedBy    *domain.RequestedBy      `json:"requested_by,omitempty"`
 }
 
 func (s *Service) ListControls(ctx context.Context, limit int) ([]ControlReadModel, error) {
@@ -274,13 +290,19 @@ func (s *Service) ListControls(ctx context.Context, limit int) ([]ControlReadMod
 			} else if found {
 				progress = v
 			}
-			out = append(out, controlRead(c, progress))
+			var reqBy domain.RequestedBy
+			if v, found, e := u.ControlRequestedBy(ctx, c.Revision); e != nil {
+				return e
+			} else if found {
+				reqBy = v
+			}
+			out = append(out, controlRead(c, progress, reqBy))
 		}
 		return nil
 	})
 	return out, err
 }
-func controlRead(c domain.ControlIntent, p domain.ControlProgress) ControlReadModel {
+func controlRead(c domain.ControlIntent, p domain.ControlProgress, reqBy domain.RequestedBy) ControlReadModel {
 	f := func(t time.Time) string {
 		if t.IsZero() {
 			return ""
@@ -291,7 +313,7 @@ func controlRead(c domain.ControlIntent, p domain.ControlProgress) ControlReadMo
 	if effectiveAt.IsZero() {
 		effectiveAt = c.EffectiveAt
 	}
-	return ControlReadModel{Scope: c.Scope, Mode: c.Mode, Revision: c.Revision, Requested: p.State != "", Acknowledged: p.State == domain.ControlAcknowledged || p.State == domain.ControlEffective || p.State == domain.ControlVerified, Effective: p.State == domain.ControlEffective || p.State == domain.ControlVerified, Verified: p.State == domain.ControlVerified, At: f(c.At), RequestedAt: f(p.RequestedAt), AcknowledgedAt: f(p.AcknowledgedAt), EffectiveAt: f(effectiveAt), VerifiedAt: f(p.VerifiedAt), EvidenceRef: p.EvidenceRef, Verification: p.Verification, Reason: c.Reason}
+	return ControlReadModel{Scope: c.Scope, Mode: c.Mode, Revision: c.Revision, Requested: p.State != "", Acknowledged: p.State == domain.ControlAcknowledged || p.State == domain.ControlEffective || p.State == domain.ControlVerified, Effective: p.State == domain.ControlEffective || p.State == domain.ControlVerified, Verified: p.State == domain.ControlVerified, At: f(c.At), RequestedAt: f(p.RequestedAt), AcknowledgedAt: f(p.AcknowledgedAt), EffectiveAt: f(effectiveAt), VerifiedAt: f(p.VerifiedAt), EvidenceRef: p.EvidenceRef, Verification: p.Verification, Reason: c.Reason, RequestedBy: requestedByView(reqBy)}
 }
 
 type QueueSummary struct {
@@ -328,6 +350,7 @@ type ExportRequirement struct {
 	Status        domain.RequirementStatus `json:"status"`
 	Version       domain.Version           `json:"version"`
 	IncrementIDs  []string                 `json:"increment_ids"`
+	RequestedBy   *domain.RequestedBy      `json:"requested_by,omitempty"`
 }
 
 func makeExportRecord(kind string, value any) (ExportRecord, error) {
@@ -360,8 +383,8 @@ func (s *Service) Export(ctx context.Context, limit int) ([]ExportRecord, error)
 			for i := range r.Increments {
 				ids[i] = r.Increments[i].String()
 			}
-			v := RequirementView{RequirementID: r.ID.String(), Status: r.Status, Version: r.Version, IncrementIDs: ids}
-			rec, e := makeExportRecord("requirement", ExportRequirement{RequirementID: v.RequirementID, Status: v.Status, Version: v.Version, IncrementIDs: v.IncrementIDs})
+			v := RequirementView{RequirementID: r.ID.String(), Status: r.Status, Version: r.Version, IncrementIDs: ids, RequestedBy: requestedByView(r.RequestedBy)}
+			rec, e := makeExportRecord("requirement", ExportRequirement{RequirementID: v.RequirementID, Status: v.Status, Version: v.Version, IncrementIDs: v.IncrementIDs, RequestedBy: v.RequestedBy})
 			if e != nil {
 				return e
 			}
@@ -382,7 +405,13 @@ func (s *Service) Export(ctx context.Context, limit int) ([]ExportRecord, error)
 			} else if found {
 				progress = x
 			}
-			rec, e := makeExportRecord("control", controlRead(v, progress))
+			var reqBy domain.RequestedBy
+			if x, found, e := u.ControlRequestedBy(ctx, v.Revision); e != nil {
+				return e
+			} else if found {
+				reqBy = x
+			}
+			rec, e := makeExportRecord("control", controlRead(v, progress, reqBy))
 			if e != nil {
 				return e
 			}

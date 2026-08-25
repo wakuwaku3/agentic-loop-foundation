@@ -1039,6 +1039,27 @@ func (u *unit) SaveControlProgress(ctx context.Context, value domain.ControlProg
 	}
 	return u.stage(ref, "control-progress", value, !ok)
 }
+func (u *unit) ControlRequestedBy(ctx context.Context, revision domain.Revision) (domain.RequestedBy, bool, error) {
+	ref, err := u.store.path("control_requested_by", fmt.Sprintf("%d", revision))
+	if err != nil {
+		return domain.RequestedBy{}, false, err
+	}
+	var v domain.RequestedBy
+	ok, err := u.value(ref, "control-requested-by", &v)
+	return v, ok, err
+}
+func (u *unit) SaveControlRequestedBy(ctx context.Context, revision domain.Revision, value domain.RequestedBy) error {
+	ref, err := u.store.path("control_requested_by", fmt.Sprintf("%d", revision))
+	if err != nil {
+		return err
+	}
+	var old domain.RequestedBy
+	ok, err := u.value(ref, "control-requested-by", &old)
+	if err != nil {
+		return err
+	}
+	return u.stage(ref, "control-requested-by", value, !ok)
+}
 func (u *unit) RunnerObservation(ctx context.Context, runnerID string) (domain.RunnerObservation, bool, error) {
 	ref, err := u.store.path("runner_observations", runnerID)
 	if err != nil {

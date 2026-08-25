@@ -177,6 +177,16 @@ type ControlRepository interface {
 	SaveControl(ctx context.Context, value domain.ControlIntent, expected domain.Revision) error
 	ControlRevision(ctx context.Context) (domain.Revision, error)
 }
+
+// ControlRequestedByRepository is a side table keyed by Control Intent
+// revision. domain.ControlIntent itself is immutable, proven-closed M1
+// surface (internal/domain/control.go), so who requested a given revision is
+// tracked here rather than as a new field on that struct. Each revision is
+// written at most once, at the same time as the Control Intent it describes.
+type ControlRequestedByRepository interface {
+	SaveControlRequestedBy(ctx context.Context, revision domain.Revision, value domain.RequestedBy) error
+	ControlRequestedBy(ctx context.Context, revision domain.Revision) (domain.RequestedBy, bool, error)
+}
 type ControlProgressRepository interface {
 	ControlProgress(ctx context.Context, revision domain.Revision) (domain.ControlProgress, bool, error)
 	SaveControlProgress(ctx context.Context, value domain.ControlProgress, expected domain.ControlState) error
@@ -210,6 +220,7 @@ type UnitOfWork interface {
 	VerificationRepository
 	TargetRepository
 	ControlRepository
+	ControlRequestedByRepository
 	ControlProgressRepository
 	RunnerObservationRepository
 	RequirementReadRepository

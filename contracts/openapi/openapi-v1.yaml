@@ -179,16 +179,26 @@ components:
       additionalProperties: false
       required: [request_id, execution_id, lease_id, expected_execution_version, fencing_token, control_revision, succeeded]
       properties: {request_id: {type: string}, execution_id: {type: string}, lease_id: {type: string}, expected_execution_version: {type: integer}, fencing_token: {type: integer}, control_revision: {type: integer}, succeeded: {type: boolean}, target: {$ref: '#/components/schemas/Target'}}
+    RequestedBy:
+      type: object
+      description: >-
+        Who caused this Requirement intake or Control Intent: an owner acting
+        through an authenticated session (local dev session subject, or IAP
+        subject in production), or the Loop deciding on its own. subject is
+        an identity reference for attribution only, never a credential.
+      additionalProperties: false
+      required: [actor_type, subject]
+      properties: {actor_type: {type: string, enum: [owner, loop]}, subject: {type: string}}
     CaptureResponse:
       type: object
       additionalProperties: false
-      required: [requirement_id, version]
-      properties: {requirement_id: {type: string}, version: {type: integer}}
+      required: [requirement_id, version, requested_by]
+      properties: {requirement_id: {type: string}, version: {type: integer}, requested_by: {$ref: '#/components/schemas/RequestedBy'}}
     RequirementResponse:
       type: object
       additionalProperties: false
       required: [requirement_id, status, version, increment_ids]
-      properties: {requirement_id: {type: string}, status: {type: string}, version: {type: integer}, increment_ids: {type: array, items: {type: string}}, text: {type: string}}
+      properties: {requirement_id: {type: string}, status: {type: string}, version: {type: integer}, increment_ids: {type: array, items: {type: string}}, text: {type: string}, requested_by: {$ref: '#/components/schemas/RequestedBy'}}
     RequirementListResponse:
       type: object
       additionalProperties: false
@@ -203,12 +213,12 @@ components:
       type: object
       additionalProperties: false
       required: [requirement_id, status, version, increments, next_action, page_size, truncated]
-      properties: {requirement_id: {type: string}, original_text: {type: string}, status: {type: string}, version: {type: integer}, increments: {type: array, items: {type: object}}, next_action: {type: string}, page_size: {type: integer, maximum: 100}, truncated: {type: boolean}}
+      properties: {requirement_id: {type: string}, original_text: {type: string}, status: {type: string}, version: {type: integer}, increments: {type: array, items: {type: object}}, next_action: {type: string}, page_size: {type: integer, maximum: 100}, truncated: {type: boolean}, requested_by: {$ref: '#/components/schemas/RequestedBy'}}
     ControlRead:
       type: object
       additionalProperties: false
       required: [scope, mode, revision, requested, acknowledged, effective, verified]
-      properties: {scope: {type: object}, mode: {type: string}, revision: {type: integer}, requested: {type: boolean}, acknowledged: {type: boolean}, effective: {type: boolean}, verified: {type: boolean}}
+      properties: {scope: {type: object}, mode: {type: string}, revision: {type: integer}, requested: {type: boolean}, acknowledged: {type: boolean}, effective: {type: boolean}, verified: {type: boolean}, requested_by: {$ref: '#/components/schemas/RequestedBy'}}
     ControlReadListResponse:
       type: object
       additionalProperties: false
@@ -232,8 +242,8 @@ components:
     ControlResponse:
       type: object
       additionalProperties: false
-      required: [revision, mode]
-      properties: {revision: {type: integer}, mode: {type: string}, state: {type: string, enum: [requested, acknowledged, effective, verified]}}
+      required: [revision, mode, requested_by]
+      properties: {revision: {type: integer}, mode: {type: string}, state: {type: string, enum: [requested, acknowledged, effective, verified]}, requested_by: {$ref: '#/components/schemas/RequestedBy'}}
     ClaimResponse:
       type: object
       additionalProperties: false

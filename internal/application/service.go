@@ -151,8 +151,9 @@ func NewServiceWithConfig(tx Transactor, clock Clock, ids IDGenerator, config Se
 
 type CaptureRequest struct{ RequestID, RequirementID, Text string }
 type CaptureResponse struct {
-	RequirementID string         `json:"requirement_id"`
-	Version       domain.Version `json:"version"`
+	RequirementID string             `json:"requirement_id"`
+	Version       domain.Version     `json:"version"`
+	RequestedBy   domain.RequestedBy `json:"requested_by"`
 }
 type LifecycleResponse struct {
 	Accepted            bool                        `json:"accepted"`
@@ -578,7 +579,11 @@ func (s *Service) GetRequirement(ctx context.Context, id string) (RequirementVie
 }
 
 func (s *Service) Capture(ctx context.Context, req CaptureRequest) (out CaptureResponse, err error) {
-	_, actor, err := callerActor(ctx, RoleOwner)
+	caller, actor, err := callerActor(ctx, RoleOwner, RoleScheduler)
+	if err != nil {
+		return out, err
+	}
+	reqBy, err := requestedBy(caller)
 	if err != nil {
 		return out, err
 	}
@@ -630,7 +635,7 @@ func (s *Service) Capture(ctx context.Context, req CaptureRequest) (out CaptureR
 		if _, e = domain.Permit(effective, domain.PermitRequest{Kind: domain.PermitIntake, Target: target, ControlRevision: revision, Resource: id}); e != nil {
 			return e
 		}
-		r := domain.Requirement{ID: rid, Status: domain.RequirementCaptured, Version: 1}
+		r := domain.Requirement{ID: rid, Status: domain.RequirementCaptured, Version: 1, RequestedBy: reqBy}
 		if e = domain.Validate(r); e != nil {
 			return e
 		}
@@ -640,7 +645,7 @@ func (s *Service) Capture(ctx context.Context, req CaptureRequest) (out CaptureR
 		if e = u.SaveRequirementText(ctx, id, req.Text); e != nil {
 			return e
 		}
-		out = CaptureResponse{RequirementID: id, Version: r.Version}
+		out = CaptureResponse{RequirementID: id, Version: r.Version, RequestedBy: reqBy}
 		return s.record(ctx, u, eventID, operationID, fingerprint, req.RequestID, "capture", "requirement", id, r.Version, "requirement.captured", actor.String(), nil, out)
 	})
 	return out, err
@@ -1001,13 +1006,18 @@ type ControlRequest struct {
 	At        time.Time
 }
 type ControlResponse struct {
-	Revision domain.Revision     `json:"revision"`
-	Mode     domain.ControlMode  `json:"mode"`
-	State    domain.ControlState `json:"state"`
+	Revision    domain.Revision     `json:"revision"`
+	Mode        domain.ControlMode  `json:"mode"`
+	State       domain.ControlState `json:"state"`
+	RequestedBy domain.RequestedBy  `json:"requested_by"`
 }
 
 func (s *Service) Control(ctx context.Context, req ControlRequest) (out ControlResponse, err error) {
-	_, actor, err := callerActor(ctx, RoleOwner)
+	caller, actor, err := callerActor(ctx, RoleOwner, RoleScheduler)
+	if err != nil {
+		return out, err
+	}
+	reqBy, err := requestedBy(caller)
 	if err != nil {
 		return out, err
 	}
@@ -1058,6 +1068,9 @@ func (s *Service) Control(ctx context.Context, req ControlRequest) (out ControlR
 		if e = u.SaveControl(ctx, intent, revision-1); e != nil {
 			return e
 		}
+		if e = u.SaveControlRequestedBy(ctx, revision, reqBy); e != nil {
+			return e
+		}
 		leases, e := u.ActiveLeases(ctx, 101)
 		if e != nil {
 			return e
@@ -1094,7 +1107,7 @@ func (s *Service) Control(ctx context.Context, req ControlRequest) (out ControlR
 		if e = u.SaveControlProgress(ctx, domain.ControlProgress{Revision: revision, State: domain.ControlRequested, RequestedAt: at, EffectiveAt: at, Verification: domain.VerificationPending, Targets: snapshots}, ""); e != nil {
 			return e
 		}
-		out = ControlResponse{Revision: revision, Mode: req.Mode, State: domain.ControlRequested}
+		out = ControlResponse{Revision: revision, Mode: req.Mode, State: domain.ControlRequested, RequestedBy: reqBy}
 		return s.record(ctx, u, eventID, operationID, fingerprint, req.RequestID, "control", "control", req.Scope.Value, domain.Version(revision), "control.changed", actor.String(), &OutboxItem{ID: outboxID, Kind: "control-changed", Target: req.Scope.Value, ControlScope: req.Scope, ExpectedVersion: domain.Version(revision), ControlRevision: revision}, out)
 	})
 	return out, err

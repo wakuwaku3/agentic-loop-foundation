@@ -52,6 +52,26 @@ func callerActor(ctx context.Context, roles ...Role) (Caller, domain.ActorID, er
 	a, err := domain.NewActorID(c.Subject)
 	return c, a, err
 }
+
+// requestedBy maps an already-authenticated Caller to the domain's
+// RequestedBy value. It adds no authorization semantics of its own: the
+// caller's role must already have been accepted by callerActor for the
+// operation in question. RoleOwner is the human owner (a local dev session
+// subject, or the IAP subject in production); RoleScheduler is the Loop
+// deciding on its own, identified by whatever component subject the
+// internal caller set. Any other role is rejected defensively even though
+// today's call sites never reach this branch with one.
+func requestedBy(c Caller) (domain.RequestedBy, error) {
+	switch c.Role {
+	case RoleOwner:
+		return domain.RequestedBy{ActorType: domain.ActorTypeOwner, Subject: c.Subject}, nil
+	case RoleScheduler:
+		return domain.RequestedBy{ActorType: domain.ActorTypeLoop, Subject: c.Subject}, nil
+	default:
+		return domain.RequestedBy{}, ErrForbidden
+	}
+}
+
 func runnerCaller(ctx context.Context) (Caller, domain.ActorID, domain.RunnerID, error) {
 	c, actor, err := callerActor(ctx, RoleRunner)
 	if err != nil {

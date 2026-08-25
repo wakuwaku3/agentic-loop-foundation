@@ -181,7 +181,48 @@ type Requirement struct {
 	Version        Version
 	Increments     []IncrementID
 	StableSnapshot StableReleaseSnapshot
+	// RequestedBy records who caused this Requirement to be captured: an
+	// owner acting through an authenticated session, or the Loop acting on
+	// its own. It is a value addition only; every RequirementCommand still
+	// carries state forward with `next := current`, so no transition
+	// function inspects or rewrites it. A record captured before this field
+	// existed simply carries the zero value (ActorType == ""), which
+	// Validate treats as legitimate and unknown rather than invalid: past
+	// records are never retrofitted.
+	RequestedBy RequestedBy
 }
+
+// ActorType distinguishes an owner-originated request from a decision the
+// Loop made on its own. It carries no permission semantics: it does not
+// grant or restrict what an actor may do, only records which of the two
+// originated a given Requirement intake or Control Intent.
+type ActorType string
+
+const (
+	ActorTypeOwner ActorType = "owner"
+	ActorTypeLoop  ActorType = "loop"
+)
+
+func validActorType(t ActorType) bool {
+	switch t {
+	case ActorTypeOwner, ActorTypeLoop:
+		return true
+	}
+	return false
+}
+
+// RequestedBy is an identity reference, never a credential: Subject is an
+// opaque label (an owner session subject, an IAP subject, or a Loop
+// component identifier) carried for attribution only. It is never
+// interpreted, authenticated, or authorized by the domain package.
+type RequestedBy struct {
+	ActorType ActorType `json:"actor_type,omitempty"`
+	Subject   string    `json:"subject,omitempty"`
+}
+
+// Recorded reports whether this value was actually populated at capture
+// time, distinguishing it from a legacy record that predates this field.
+func (r RequestedBy) Recorded() bool { return r.ActorType != "" || r.Subject != "" }
 
 type StableReleaseSnapshot struct {
 	ReleaseID      ReleaseID
@@ -257,6 +298,12 @@ func Validate(v any) error {
 			if value.StableSnapshot.ReleaseID == "" || value.StableSnapshot.BundleDigest == "" || value.StableSnapshot.EvidenceDigest == "" {
 				return ErrEvidenceIncomplete
 			}
+		}
+		// A zero RequestedBy (ActorType == "") is a legacy record that
+		// predates this field and remains valid; any non-empty ActorType
+		// must be one of the closed enum values.
+		if value.RequestedBy.ActorType != "" && !validActorType(value.RequestedBy.ActorType) {
+			return fmt.Errorf("unknown requested_by actor_type %q", value.RequestedBy.ActorType)
 		}
 	case Increment:
 		if _, err := NewIncrementID(value.ID.String()); err != nil {

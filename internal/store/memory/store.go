@@ -25,6 +25,7 @@ type state struct {
 	leases             map[string]domain.Lease
 	controls           []domain.ControlIntent
 	controlProgress    map[domain.Revision]domain.ControlProgress
+	controlRequestedBy map[domain.Revision]domain.RequestedBy
 	runnerObservations map[string]domain.RunnerObservation
 	requests           map[string]application.IdempotentResponse
 	texts              map[string]string
@@ -35,7 +36,7 @@ type state struct {
 }
 
 func newState() state {
-	return state{requirements: map[string]domain.Requirement{}, increments: map[string]domain.Increment{}, executions: map[string]domain.Execution{}, leases: map[string]domain.Lease{}, requests: map[string]application.IdempotentResponse{}, texts: map[string]string{}, targets: map[string]domain.ControlTarget{}, controlProgress: map[domain.Revision]domain.ControlProgress{}, runnerObservations: map[string]domain.RunnerObservation{}}
+	return state{requirements: map[string]domain.Requirement{}, increments: map[string]domain.Increment{}, executions: map[string]domain.Execution{}, leases: map[string]domain.Lease{}, requests: map[string]application.IdempotentResponse{}, texts: map[string]string{}, targets: map[string]domain.ControlTarget{}, controlProgress: map[domain.Revision]domain.ControlProgress{}, controlRequestedBy: map[domain.Revision]domain.RequestedBy{}, runnerObservations: map[string]domain.RunnerObservation{}}
 }
 func (s state) clone() state {
 	n := newState()
@@ -55,6 +56,9 @@ func (s state) clone() state {
 	n.controls = append([]domain.ControlIntent(nil), s.controls...)
 	for k, v := range s.controlProgress {
 		n.controlProgress[k] = v
+	}
+	for k, v := range s.controlRequestedBy {
+		n.controlRequestedBy[k] = v
 	}
 	for k, v := range s.runnerObservations {
 		v.Processes = append([]domain.ProcessObservation(nil), v.Processes...)
@@ -443,6 +447,14 @@ func (u *unit) SaveControlProgress(_ context.Context, value domain.ControlProgre
 	}
 	u.s.controlProgress[value.Revision] = value
 	return nil
+}
+func (u *unit) SaveControlRequestedBy(_ context.Context, revision domain.Revision, value domain.RequestedBy) error {
+	u.s.controlRequestedBy[revision] = value
+	return nil
+}
+func (u *unit) ControlRequestedBy(_ context.Context, revision domain.Revision) (domain.RequestedBy, bool, error) {
+	v, ok := u.s.controlRequestedBy[revision]
+	return v, ok, nil
 }
 func (u *unit) RunnerObservation(_ context.Context, runnerID string) (domain.RunnerObservation, bool, error) {
 	v, ok := u.s.runnerObservations[runnerID]

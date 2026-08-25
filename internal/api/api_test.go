@@ -110,7 +110,7 @@ func TestStrictJSONAuthRoleAndSpoof(t *testing.T) {
 		t.Fatal(v)
 	}
 	for key := range v {
-		if key != "requirement_id" && key != "version" {
+		if key != "requirement_id" && key != "version" && key != "requested_by" {
 			t.Fatalf("unexpected capture response field %q", key)
 		}
 	}
@@ -129,6 +129,48 @@ func TestGoldenCaptureIdempotencyAndHeaders(t *testing.T) {
 	w := call(h, http.MethodPost, "/v1/requirements", body, "runner")
 	if w.Code != http.StatusForbidden {
 		t.Fatal(w.Code)
+	}
+}
+
+// TestCaptureAndControlRecordOwnerRequestedBy proves the authenticated
+// caller's identity (the same Bearer subject used for authentication, and
+// the production analogue of an IAP subject) flows through to the
+// requested_by owners see on both a Requirement intake and a Control Intent,
+// end to end through the transport boundary.
+func TestCaptureAndControlRecordOwnerRequestedBy(t *testing.T) {
+	h := testHandler(t)
+	w := call(h, http.MethodPost, "/v1/requirements", `{"request_id":"cap-rb","text":"hello"}`, "owner")
+	if w.Code != http.StatusCreated {
+		t.Fatalf("capture status=%d body=%s", w.Code, w.Body.String())
+	}
+	var capOut map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &capOut); err != nil {
+		t.Fatal(err)
+	}
+	rb, ok := capOut["requested_by"].(map[string]any)
+	if !ok || rb["actor_type"] != "owner" || rb["subject"] != "owner" {
+		t.Fatalf("capture requested_by = %#v", capOut["requested_by"])
+	}
+
+	w = call(h, http.MethodPost, "/v1/controls", `{"request_id":"ctl-rb","scope_kind":"installation","scope_value":"install","mode":"allow"}`, "owner")
+	if w.Code != http.StatusOK {
+		t.Fatalf("control status=%d body=%s", w.Code, w.Body.String())
+	}
+	var ctlOut map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &ctlOut); err != nil {
+		t.Fatal(err)
+	}
+	rb, ok = ctlOut["requested_by"].(map[string]any)
+	if !ok || rb["actor_type"] != "owner" || rb["subject"] != "owner" {
+		t.Fatalf("control requested_by = %#v", ctlOut["requested_by"])
+	}
+
+	w = call(h, http.MethodGet, "/v1/controls", "", "owner")
+	if w.Code != http.StatusOK {
+		t.Fatalf("list controls status=%d body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"requested_by"`) {
+		t.Fatalf("listed controls should carry requested_by: %s", w.Body.String())
 	}
 }
 func TestOwnerRequirementReads(t *testing.T) {
