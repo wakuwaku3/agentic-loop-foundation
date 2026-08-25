@@ -1,1 +1,2 @@
 body{font-family:system-ui,sans-serif;max-width:60rem;margin:auto;padding:1rem}textarea{width:100%;min-height:8rem}button{padding:.5rem 1rem}section{border:1px solid #ccc;padding:1rem;margin:1rem 0}.muted{color:#555}
+ul.repositories{list-style:none;padding:0;margin:.5rem 0}ul.repositories li{border:1px solid #ddd;padding:.5rem;margin:.5rem 0}.repo-id{font-family:ui-monospace,monospace}.repo-state{font-weight:600}.state-executable{color:#0a6}.state-blocked{color:#a30}.state-unobserved,.state-retired{color:#555}.repo-reason{color:#555;margin:.25rem 0 0}

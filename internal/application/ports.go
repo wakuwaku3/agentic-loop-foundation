@@ -195,6 +195,24 @@ type RunnerObservationRepository interface {
 	RunnerObservation(ctx context.Context, runnerID string) (domain.RunnerObservation, bool, error)
 	SaveRunnerObservation(ctx context.Context, value domain.RunnerObservation) error
 }
+
+// RepositoryRepository is the persistence contract of the Repository
+// aggregate and of its bounded forge Observation. It is one member interface
+// (V2-064 A5): the Observation lives here rather than behind a second port
+// because it is keyed by, and only meaningful for, a Repository, exactly as
+// RunnerObservationRepository is keyed by a Runner.
+//
+// The Observation is bounded evidence, never canonical state: it is written
+// only by a Runner submitting a measurement and is never treated as the
+// Repository's own status.
+type RepositoryRepository interface {
+	Repository(ctx context.Context, id string) (domain.Repository, bool, error)
+	Repositories(ctx context.Context) ([]domain.Repository, error)
+	SaveRepository(ctx context.Context, value domain.Repository, expected domain.Version) error
+	RepositoryObservation(ctx context.Context, repositoryID string) (domain.RepositoryObservation, bool, error)
+	SaveRepositoryObservation(ctx context.Context, value domain.RepositoryObservation) error
+}
+
 type IdempotencyRepository interface {
 	Idempotency(ctx context.Context, requestID string, operation string) (IdempotentResponse, bool, error)
 	SaveIdempotency(ctx context.Context, value IdempotentResponse) error
@@ -223,6 +241,7 @@ type UnitOfWork interface {
 	ControlRequestedByRepository
 	ControlProgressRepository
 	RunnerObservationRepository
+	RepositoryRepository
 	RequirementReadRepository
 	EventReadRepository
 	QueueSummaryRepository

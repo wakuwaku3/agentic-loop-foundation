@@ -187,6 +187,43 @@ func (h *Handler) route(w http.ResponseWriter, r *http.Request) {
 		h.getRequirement(w, r.WithContext(application.ContextWithCaller(r.Context(), caller)), id)
 		return
 	}
+	if r.URL.Path == repositoriesPath && r.Method == http.MethodGet {
+		caller, err := h.config.Authenticator.Authenticate(r)
+		if err != nil {
+			h.error(w, r, 401, "unauthorized", "authentication failed")
+			return
+		}
+		if caller.Role != application.RoleOwner {
+			h.error(w, r, 403, "forbidden", "owner role required")
+			return
+		}
+		h.listRepositories(w, r.WithContext(application.ContextWithCaller(r.Context(), caller)))
+		return
+	}
+	if strings.HasPrefix(r.URL.Path, repositoriesPrefix) && r.Method == http.MethodGet {
+		caller, err := h.config.Authenticator.Authenticate(r)
+		if err != nil {
+			h.error(w, r, 401, "unauthorized", "authentication failed")
+			return
+		}
+		if caller.Role != application.RoleOwner {
+			h.error(w, r, 403, "forbidden", "owner role required")
+			return
+		}
+		id, verb := repositoryVerb(r.URL.Path)
+		// :retire and :observe are POST-only verbs; reading them is a method
+		// error rather than a missing repository.
+		if verb != "" {
+			h.error(w, r, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
+			return
+		}
+		if id == "" {
+			h.error(w, r, http.StatusNotFound, "not_found", "route not found")
+			return
+		}
+		h.getRepository(w, r.WithContext(application.ContextWithCaller(r.Context(), caller)), id)
+		return
+	}
 	if r.URL.Path == "/v1/queue/summary" && r.Method == http.MethodGet {
 		caller, err := h.config.Authenticator.Authenticate(r)
 		if err != nil {
@@ -244,6 +281,12 @@ func (h *Handler) route(w http.ResponseWriter, r *http.Request) {
 	switch r.URL.Path {
 	case "/v1/requirements":
 		h.capture(w, r.WithContext(ctx))
+	case repositoriesPath:
+		if caller.Role != application.RoleOwner {
+			h.error(w, r, 403, "forbidden", "owner role required")
+			return
+		}
+		h.registerRepository(w, r.WithContext(ctx))
 	case "/v1/controls":
 		h.control(w, r.WithContext(ctx))
 	case "/v1/runner/claims:acquire":
@@ -261,6 +304,34 @@ func (h *Handler) route(w http.ResponseWriter, r *http.Request) {
 	case "/v1/runner/checkpoints":
 		h.checkpoint(w, r.WithContext(ctx))
 	default:
+		if strings.HasPrefix(r.URL.Path, repositoriesPrefix) {
+			id, verb := repositoryVerb(r.URL.Path)
+			if id == "" {
+				h.error(w, r, http.StatusNotFound, "not_found", "route not found")
+				return
+			}
+			switch verb {
+			case "retire":
+				if caller.Role != application.RoleOwner {
+					h.error(w, r, 403, "forbidden", "owner role required")
+					return
+				}
+				h.retireRepository(w, r.WithContext(ctx), id)
+				return
+			case "observe":
+				// Gated exactly the way /v1/runner/permits:check gates
+				// RoleRunner: the forge probe runs on the Runner, so only a
+				// Runner session may submit its Observation.
+				if caller.Role != application.RoleRunner {
+					h.error(w, r, 403, "forbidden", "runner role required")
+					return
+				}
+				h.observeRepository(w, r.WithContext(ctx), id)
+				return
+			}
+			h.error(w, r, http.StatusNotFound, "not_found", "route not found")
+			return
+		}
 		if strings.HasPrefix(r.URL.Path, "/v1/leases/") && strings.HasSuffix(r.URL.Path, ":renew") {
 			id := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/v1/leases/"), ":renew")
 			h.renew(w, r.WithContext(ctx), id)
@@ -750,6 +821,13 @@ func (h *Handler) domainError(w http.ResponseWriter, r *http.Request, err error)
 	}
 	if errors.Is(err, domain.ErrStaleVersion) {
 		status = 409
+		code = "conflict"
+	}
+	if errors.Is(err, application.ErrRepositoryAlreadyRegistered) {
+		// A duplicate source locator is a conflict with existing state, not a
+		// malformed request: the same normalised (forge, owner, name) triple
+		// is already registered for this Installation.
+		status = http.StatusConflict
 		code = "conflict"
 	}
 	if errors.Is(err, domain.ErrStaleFence) || errors.Is(err, domain.ErrLeaseExpired) || errors.Is(err, application.ErrIdempotencyConflict) {

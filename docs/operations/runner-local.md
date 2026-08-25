@@ -70,6 +70,49 @@ mismatched fencing token; and a second use of an already-consumed or revoked
 grant (`Lease` is single-use per execution id; `Revoke` makes every future
 `Lease` for an execution id fail closed).
 
+## Forge adapter: gh subprocess, absolute path, credential as an absence (V2-064)
+
+Measured facts about the read-only forge adapter (`internal/runner/forge.go`),
+recorded alongside the V2-016/V2-017 measurements above because they are the
+same class of environment-dependent fact:
+
+- `gh` is **not** on the `PATH` inside `devbox run --pure`, while `git` **is**
+  (devbox provides git from `.devbox/nix/profile/default/bin`). A bare
+  `exec.Command("gh", ...)` therefore works on the host and fails in the
+  validated environment. The adapter resolves the executable with the same
+  `resolveTool` helper `confinement.go` uses: the caller's `PATH` first, then
+  `/usr/bin`, `/bin`, `/usr/sbin`, `/sbin`. The measured resolution is
+  `/usr/bin/gh`, `gh version 2.92.0 (2026-04-28)`.
+- The resolved path must be absolute **and** `filepath.Base(path)` must equal
+  `gh`, asserted before any process starts, mirroring the V2-017 argv[0]
+  assertion. A basename mismatch is refused before the existence check, so a
+  substituted binary is rejected whether or not it exists.
+- Credential isolation is proven as an **absence**, not as a grant: the
+  granted set is the empty slice and the Secret Broker is never consulted,
+  because the CLI reads its own configuration store and takes no credential
+  from argv or from the environment. The child receives the guarded base
+  environment only, whose measured contents are `HOME` and `PATH`. Nothing in
+  `internal/runner`'s non-test sources names that configuration store's path,
+  which `source_guard_test.go` proves from the AST.
+- The adapter is read-only. Its only argv forms are
+  `gh api --method GET repos/{owner}/{name}` and `gh --version`; neither names
+  a mutating method, a request field, an auth subcommand or a git operation.
+  No stdout or stderr is returned, journaled or logged verbatim: only the
+  parsed bounded fields (existence, default branch, viewer push permission,
+  forge node id) leave the package, and every parse failure returns an error
+  that carries none of the input.
+- The Control Plane never invokes `gh` or `git`. That is asserted from the AST
+  over `internal/api`, `internal/application`, `internal/domain`,
+  `internal/store` and `cmd/control-plane`, with planted positive controls, so
+  reachability can only enter as a Runner-submitted Observation.
+- Recorded for the later push leg, not acted on here: no
+  `git credential.helper` is configured at repository, global or system scope
+  on this machine, so a bare `git push` over HTTPS could not authenticate.
+  `gh auth git-credential` exists in gh 2.92.0 and implements the git
+  credential helper protocol, so a per-invocation
+  `git -c credential.helper=...` is the form to use. `gh auth setup-git` must
+  not be run and git configuration must not be mutated at any scope.
+
 ## Bounded diagnostic log
 
 `BoundedLog` is a per-execution `0600` file under the data root's `logs/`

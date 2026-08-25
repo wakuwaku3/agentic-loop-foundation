@@ -336,3 +336,135 @@ func TestFirestoreExpiredLeaseAndExecutionIndexes(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// --- V2-064: Repository aggregate on a real Firestore transaction. ---
+
+func repositoryFixture(t *testing.T, id, owner, name string, status domain.RepositoryStatus, version domain.Version) domain.Repository {
+	t.Helper()
+	locator, err := domain.NormalizeSourceLocator(domain.SourceLocator{Owner: owner, Name: name, DefaultBranch: "main"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return domain.Repository{ID: domain.RepositoryID(id), Locator: locator, Status: status, Version: version}
+}
+
+// TestRepositoryOptimisticConcurrencyOnFirestore mirrors SaveRequirement's
+// contract on the real adapter: a create must declare expected version 0, a
+// conflicting concurrent save is refused, and the normalised locator key of
+// every stored row is visible so the application can enforce the duplicate
+// constraint.
+func TestRepositoryOptimisticConcurrencyOnFirestore(t *testing.T) {
+	store := emulatorStore(t)
+	ctx := context.Background()
+
+	if err := store.Transact(ctx, func(u application.UnitOfWork) error {
+		return u.SaveRepository(ctx, repositoryFixture(t, "repository-1", "o", "n", domain.RepositoryRegistered, 1), 3)
+	}); !errors.Is(err, domain.ErrStaleVersion) {
+		t.Fatalf("create at a non-zero expected version = %v, want ErrStaleVersion", err)
+	}
+	if err := store.Transact(ctx, func(u application.UnitOfWork) error {
+		return u.SaveRepository(ctx, repositoryFixture(t, "repository-1", "o", "n", domain.RepositoryRegistered, 1), 0)
+	}); err != nil {
+		t.Fatalf("create at expected version 0: %v", err)
+	}
+	if err := store.Transact(ctx, func(u application.UnitOfWork) error {
+		return u.SaveRepository(ctx, repositoryFixture(t, "repository-1", "o", "n", domain.RepositoryRetired, 2), 0)
+	}); !errors.Is(err, domain.ErrStaleVersion) {
+		t.Fatalf("conflicting concurrent save = %v, want ErrStaleVersion", err)
+	}
+	if err := store.Transact(ctx, func(u application.UnitOfWork) error {
+		return u.SaveRepository(ctx, repositoryFixture(t, "repository-2", "o", "other", domain.RepositoryRegistered, 1), 0)
+	}); err != nil {
+		t.Fatalf("second create: %v", err)
+	}
+	if err := store.Transact(ctx, func(u application.UnitOfWork) error {
+		stored, ok, e := u.Repository(ctx, "repository-1")
+		if e != nil || !ok {
+			t.Fatalf("stored repository missing: %v", e)
+		}
+		if stored.Status != domain.RepositoryRegistered || stored.Version != 1 || stored.Locator.Key() != "github/o/n" {
+			t.Fatalf("stored = %+v", stored)
+		}
+		rows, e := u.Repositories(ctx)
+		if e != nil {
+			return e
+		}
+		if len(rows) != 2 || rows[0].ID != "repository-1" || rows[1].ID != "repository-2" {
+			t.Fatalf("rows = %+v", rows)
+		}
+		keys := map[string]int{}
+		for _, row := range rows {
+			keys[row.Locator.Key()]++
+		}
+		if keys["github/o/n"] != 1 || keys["github/o/other"] != 1 {
+			t.Fatalf("normalised keys = %v", keys)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestRepositoryRegistrationThroughTheServiceOnFirestore drives the same
+// duplicate-locator refusal and the same rollback the memory adapter proves,
+// but through the real Firestore transaction, so the constraint is not an
+// artefact of the in-memory map.
+func TestRepositoryRegistrationThroughTheServiceOnFirestore(t *testing.T) {
+	store := emulatorStore(t)
+	svc, err := application.NewServiceWithConfig(store, integrationClock{now: time.Unix(1700000000, 0).UTC()}, &integrationIDs{}, application.ServiceConfig{InstallationID: "install", LeaseTTL: time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := integrationOwner(context.Background())
+
+	first, err := svc.RegisterRepository(ctx, application.RegisterRepositoryRequest{RequestID: "req-1", SourceURL: "https://github.com/O/N", DefaultBranch: "main"})
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	if first.Status != domain.RepositoryRegistered || first.Version != 1 || first.Locator.Key() != "github/o/n" {
+		t.Fatalf("register = %+v", first)
+	}
+	if _, err = svc.RegisterRepository(ctx, application.RegisterRepositoryRequest{RequestID: "req-2", SourceURL: "git@github.com:O/N.git", DefaultBranch: "main"}); !errors.Is(err, application.ErrRepositoryAlreadyRegistered) {
+		t.Fatalf("duplicate locator on firestore = %v, want ErrRepositoryAlreadyRegistered", err)
+	}
+	second, err := svc.RegisterRepository(ctx, application.RegisterRepositoryRequest{RequestID: "req-3", SourceURL: "https://github.com/O/second", DefaultBranch: "main"})
+	if err != nil {
+		t.Fatalf("second register: %v", err)
+	}
+
+	observed, err := svc.ObserveRepository(integrationRunner(context.Background(), "runner-1"), application.ObserveRepositoryRequest{RequestID: "obs-1", RepositoryID: first.RepositoryID, Reachable: true, CanPush: true, DefaultBranch: "main", AdapterVersion: "integration"})
+	if err != nil {
+		t.Fatalf("observe: %v", err)
+	}
+	if !observed.Executability.Executable {
+		t.Fatalf("observe = %+v", observed)
+	}
+
+	retired, err := svc.RetireRepository(ctx, application.RetireRepositoryRequest{RequestID: "retire-1", RepositoryID: first.RepositoryID, ExpectedVersion: first.Version})
+	if err != nil {
+		t.Fatalf("retire: %v", err)
+	}
+	if retired.Status != domain.RepositoryRetired {
+		t.Fatalf("retire = %+v", retired)
+	}
+	// The other Repository is untouched, version included.
+	if err = store.Transact(context.Background(), func(u application.UnitOfWork) error {
+		other, ok, e := u.Repository(context.Background(), second.RepositoryID)
+		if e != nil || !ok {
+			t.Fatalf("second repository missing: %v", e)
+		}
+		if other.Version != second.Version || other.Status != domain.RepositoryRegistered || other.Locator != second.Locator {
+			t.Fatalf("retiring one repository altered another: %+v vs %+v", other, second)
+		}
+		obs, ok, e := u.RepositoryObservation(context.Background(), first.RepositoryID)
+		if e != nil || !ok {
+			t.Fatalf("observation missing: %v", e)
+		}
+		if !obs.Reachable || obs.DefaultBranch != "main" || obs.ObservedAt.IsZero() {
+			t.Fatalf("observation = %+v", obs)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}

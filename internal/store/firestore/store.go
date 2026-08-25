@@ -1060,6 +1060,72 @@ func (u *unit) SaveControlRequestedBy(ctx context.Context, revision domain.Revis
 	}
 	return u.stage(ref, "control-requested-by", value, !ok)
 }
+
+// Repository and its bounded forge Observation live in their own
+// collections. SaveRepository uses saveVersion, so the optimistic-concurrency
+// contract is byte-for-byte the one SaveRequirement uses: a create is staged
+// with Create (expected 0 and current 0) and any other save must declare the
+// stored version exactly. No composite index is required: Repositories reads
+// the bounded collection with no ordering or predicate, exactly as Controls
+// does, so firestore.indexes.json is untouched.
+func (u *unit) Repository(ctx context.Context, id string) (domain.Repository, bool, error) {
+	ref, err := u.store.path("repositories", id)
+	if err != nil {
+		return domain.Repository{}, false, err
+	}
+	var v domain.Repository
+	ok, err := u.value(ref, "repository", &v)
+	return v, ok, err
+}
+func (u *unit) Repositories(ctx context.Context) ([]domain.Repository, error) {
+	rows, err := u.query(ctx, "repositories", "repository")
+	if err != nil {
+		return nil, err
+	}
+	out := make([]domain.Repository, 0, len(rows))
+	for _, b := range rows {
+		var v domain.Repository
+		if json.Unmarshal(b, &v) != nil {
+			return nil, ErrInvalidSchema
+		}
+		out = append(out, v)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID.String() < out[j].ID.String() })
+	return out, nil
+}
+func (u *unit) SaveRepository(ctx context.Context, value domain.Repository, expected domain.Version) error {
+	ref, err := u.store.path("repositories", value.ID.String())
+	if err != nil {
+		return err
+	}
+	var old domain.Repository
+	got, err := u.value(ref, "repository", &old)
+	if err != nil {
+		return err
+	}
+	var current domain.Version
+	if got {
+		current = old.Version
+	}
+	return u.saveVersion(ref, "repository", value, expected, current)
+}
+func (u *unit) RepositoryObservation(ctx context.Context, repositoryID string) (domain.RepositoryObservation, bool, error) {
+	ref, err := u.store.path("repository_observations", repositoryID)
+	if err != nil {
+		return domain.RepositoryObservation{}, false, err
+	}
+	var v domain.RepositoryObservation
+	ok, err := u.value(ref, "repository-observation", &v)
+	return v, ok, err
+}
+func (u *unit) SaveRepositoryObservation(ctx context.Context, value domain.RepositoryObservation) error {
+	ref, err := u.store.path("repository_observations", value.RepositoryID.String())
+	if err != nil {
+		return err
+	}
+	return u.stage(ref, "repository-observation", value, false)
+}
+
 func (u *unit) RunnerObservation(ctx context.Context, runnerID string) (domain.RunnerObservation, bool, error) {
 	ref, err := u.store.path("runner_observations", runnerID)
 	if err != nil {

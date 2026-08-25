@@ -117,6 +117,36 @@ paths:
       parameters: [{name: execution_id, in: path, required: true, schema: {type: string}}]
       requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/StartRequest'}}}}
       responses: {'200': {description: started, content: {application/json: {schema: {$ref: '#/components/schemas/StartResponse'}}}}, '400': {$ref: '#/components/responses/Error'}, '401': {$ref: '#/components/responses/Error'}, '403': {$ref: '#/components/responses/Error'}, '409': {$ref: '#/components/responses/Error'}, '500': {$ref: '#/components/responses/Error'}, '503': {$ref: '#/components/responses/Error'}}
+  /v1/repositories:
+    get:
+      operationId: listRepositories
+      security: [{iapOwner: []}]
+      responses: {'200': {description: registered repositories with their measured or explicitly unobserved executability, content: {application/json: {schema: {$ref: '#/components/schemas/RepositoryListResponse'}}}}, '401': {$ref: '#/components/responses/Error'}, '403': {$ref: '#/components/responses/Error'}, '405': {$ref: '#/components/responses/Error'}, '500': {$ref: '#/components/responses/Error'}, '503': {$ref: '#/components/responses/Error'}}
+    post:
+      operationId: registerRepository
+      security: [{iapOwner: []}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/RegisterRepositoryRequest'}}}}
+      responses: {'201': {description: registered, content: {application/json: {schema: {$ref: '#/components/schemas/RepositoryResponse'}}}}, '400': {$ref: '#/components/responses/Error'}, '401': {$ref: '#/components/responses/Error'}, '403': {$ref: '#/components/responses/Error'}, '405': {$ref: '#/components/responses/Error'}, '409': {$ref: '#/components/responses/Error'}, '413': {$ref: '#/components/responses/Error'}, '415': {$ref: '#/components/responses/Error'}, '500': {$ref: '#/components/responses/Error'}, '503': {$ref: '#/components/responses/Error'}}
+  /v1/repositories/{repository_id}:
+    get:
+      operationId: getRepository
+      security: [{iapOwner: []}]
+      parameters: [{name: repository_id, in: path, required: true, schema: {type: string}}]
+      responses: {'200': {description: repository detail; every declared observable is either measured or carries an explicit unobserved state with its reason, content: {application/json: {schema: {$ref: '#/components/schemas/RepositoryDetailResponse'}}}}, '400': {$ref: '#/components/responses/Error'}, '401': {$ref: '#/components/responses/Error'}, '403': {$ref: '#/components/responses/Error'}, '404': {$ref: '#/components/responses/Error'}, '405': {$ref: '#/components/responses/Error'}, '500': {$ref: '#/components/responses/Error'}, '503': {$ref: '#/components/responses/Error'}}
+  /v1/repositories/{repository_id}:retire:
+    post:
+      operationId: retireRepository
+      security: [{iapOwner: []}]
+      parameters: [{name: repository_id, in: path, required: true, schema: {type: string}}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/RetireRepositoryRequest'}}}}
+      responses: {'200': {description: retired; the registration is rolled back as a transition and the aggregate is never deleted, content: {application/json: {schema: {$ref: '#/components/schemas/RepositoryResponse'}}}}, '400': {$ref: '#/components/responses/Error'}, '401': {$ref: '#/components/responses/Error'}, '403': {$ref: '#/components/responses/Error'}, '404': {$ref: '#/components/responses/Error'}, '409': {$ref: '#/components/responses/Error'}, '415': {$ref: '#/components/responses/Error'}, '500': {$ref: '#/components/responses/Error'}, '503': {$ref: '#/components/responses/Error'}}
+  /v1/repositories/{repository_id}:observe:
+    post:
+      operationId: observeRepository
+      security: [{runnerSession: []}]
+      parameters: [{name: repository_id, in: path, required: true, schema: {type: string}}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/ObserveRepositoryRequest'}}}}
+      responses: {'200': {description: bounded forge reachability observation accepted, content: {application/json: {schema: {$ref: '#/components/schemas/ObserveRepositoryResponse'}}}}, '400': {$ref: '#/components/responses/Error'}, '401': {$ref: '#/components/responses/Error'}, '403': {$ref: '#/components/responses/Error'}, '404': {$ref: '#/components/responses/Error'}, '409': {$ref: '#/components/responses/Error'}, '415': {$ref: '#/components/responses/Error'}, '500': {$ref: '#/components/responses/Error'}, '503': {$ref: '#/components/responses/Error'}}
 components:
   securitySchemes:
     iapOwner: {type: apiKey, in: header, name: X-Goog-Authenticated-User-Email}
@@ -299,6 +329,71 @@ components:
       additionalProperties: false
       required: [request_id, execution_id, lease_id, fencing_token, control_revision]
       properties: {request_id: {type: string}, execution_id: {type: string}, lease_id: {type: string}, fencing_token: {type: integer}, control_revision: {type: integer}}
+    RegisterRepositoryRequest:
+      type: object
+      additionalProperties: false
+      required: [request_id, source_url]
+      properties: {request_id: {type: string}, repository_id: {type: string}, source_url: {type: string, description: 'raw source locator in any accepted form (https, ssh, scp-style, owner/name); parsed and normalised, never stored as the identity'}, default_branch: {type: string}}
+    RetireRepositoryRequest:
+      type: object
+      additionalProperties: false
+      required: [request_id]
+      properties: {request_id: {type: string}, expected_version: {type: integer}}
+    ObserveRepositoryRequest:
+      type: object
+      additionalProperties: false
+      required: [request_id, reachable]
+      properties: {request_id: {type: string}, reachable: {type: boolean}, default_branch: {type: string}, can_push: {type: boolean}, forge_node_id: {type: string}, adapter_version: {type: string}, reason: {type: string, description: bounded parsed reason; never raw process output}}
+    SourceLocator:
+      type: object
+      additionalProperties: false
+      required: [forge, host, owner, name]
+      properties: {forge: {const: github}, host: {type: string}, owner: {type: string}, name: {type: string}, default_branch: {type: string}}
+    RepositoryExecutability:
+      type: object
+      additionalProperties: false
+      required: [state, executable, reason]
+      properties: {state: {type: string, enum: [executable, blocked, unobserved, retired]}, executable: {type: boolean}, reason: {type: string}, observed_at: {type: string, format: date-time}, stale: {type: boolean}}
+    RepositoryObservation:
+      type: object
+      additionalProperties: false
+      required: [repository_id, locator, reachable, can_push, observed_at]
+      properties: {repository_id: {type: string}, locator: {$ref: '#/components/schemas/SourceLocator'}, reachable: {type: boolean}, default_branch: {type: string}, can_push: {type: boolean}, forge_node_id: {type: string}, adapter_version: {type: string}, reason: {type: string}, observed_at: {type: string, format: date-time}}
+    RepositoryResponse:
+      type: object
+      additionalProperties: false
+      required: [repository_id, locator, status, version, requested_by]
+      properties: {repository_id: {type: string}, locator: {$ref: '#/components/schemas/SourceLocator'}, status: {type: string, enum: [registered, retired]}, version: {type: integer}, requested_by: {$ref: '#/components/schemas/RequestedBy'}}
+    RepositoryView:
+      type: object
+      additionalProperties: false
+      required: [repository_id, locator, status, version, requested_by, executability]
+      properties: {repository_id: {type: string}, locator: {$ref: '#/components/schemas/SourceLocator'}, status: {type: string, enum: [registered, retired]}, version: {type: integer}, requested_by: {$ref: '#/components/schemas/RequestedBy'}, executability: {$ref: '#/components/schemas/RepositoryExecutability'}}
+    RepositoryListResponse:
+      type: object
+      additionalProperties: false
+      required: [repositories]
+      properties: {repositories: {type: array, items: {$ref: '#/components/schemas/RepositoryView'}}}
+    ObservedState:
+      type: object
+      additionalProperties: false
+      required: [state, reason]
+      properties: {state: {type: string, enum: [measured, unobserved, not-implemented]}, reason: {type: string, description: why this declared observable has no measured value at this revision}}
+    RepositoryBacklogView:
+      type: object
+      additionalProperties: false
+      required: [state, reason]
+      properties: {state: {type: string, enum: [measured, unobserved, not-implemented]}, reason: {type: string}, installation_scope: {$ref: '#/components/schemas/QueueSummary'}}
+    RepositoryDetailResponse:
+      type: object
+      additionalProperties: false
+      required: [repository_id, locator, status, version, requested_by, application_release, policy, requirement_backlog, runners_and_ai_resources, executability, effective_control_mode, effective_control_revision]
+      properties: {repository_id: {type: string}, locator: {$ref: '#/components/schemas/SourceLocator'}, status: {type: string, enum: [registered, retired]}, version: {type: integer}, requested_by: {$ref: '#/components/schemas/RequestedBy'}, application_release: {$ref: '#/components/schemas/ObservedState'}, policy: {$ref: '#/components/schemas/ObservedState'}, requirement_backlog: {$ref: '#/components/schemas/RepositoryBacklogView'}, runners_and_ai_resources: {$ref: '#/components/schemas/ObservedState'}, executability: {$ref: '#/components/schemas/RepositoryExecutability'}, observation: {$ref: '#/components/schemas/RepositoryObservation'}, effective_control_mode: {type: string}, effective_control_revision: {type: integer}}
+    ObserveRepositoryResponse:
+      type: object
+      additionalProperties: false
+      required: [repository_id, accepted, observed_at, executability]
+      properties: {repository_id: {type: string}, accepted: {type: boolean}, observed_at: {type: string, format: date-time}, executability: {$ref: '#/components/schemas/RepositoryExecutability'}}
     RenewRequest:
       type: object
       additionalProperties: false

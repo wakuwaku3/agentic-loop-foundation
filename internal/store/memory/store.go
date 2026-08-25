@@ -27,6 +27,8 @@ type state struct {
 	controlProgress    map[domain.Revision]domain.ControlProgress
 	controlRequestedBy map[domain.Revision]domain.RequestedBy
 	runnerObservations map[string]domain.RunnerObservation
+	repositories       map[string]domain.Repository
+	repositoryObs      map[string]domain.RepositoryObservation
 	requests           map[string]application.IdempotentResponse
 	texts              map[string]string
 	targets            map[string]domain.ControlTarget
@@ -36,7 +38,7 @@ type state struct {
 }
 
 func newState() state {
-	return state{requirements: map[string]domain.Requirement{}, increments: map[string]domain.Increment{}, executions: map[string]domain.Execution{}, leases: map[string]domain.Lease{}, requests: map[string]application.IdempotentResponse{}, texts: map[string]string{}, targets: map[string]domain.ControlTarget{}, controlProgress: map[domain.Revision]domain.ControlProgress{}, controlRequestedBy: map[domain.Revision]domain.RequestedBy{}, runnerObservations: map[string]domain.RunnerObservation{}}
+	return state{requirements: map[string]domain.Requirement{}, increments: map[string]domain.Increment{}, executions: map[string]domain.Execution{}, leases: map[string]domain.Lease{}, requests: map[string]application.IdempotentResponse{}, texts: map[string]string{}, targets: map[string]domain.ControlTarget{}, controlProgress: map[domain.Revision]domain.ControlProgress{}, controlRequestedBy: map[domain.Revision]domain.RequestedBy{}, runnerObservations: map[string]domain.RunnerObservation{}, repositories: map[string]domain.Repository{}, repositoryObs: map[string]domain.RepositoryObservation{}}
 }
 func (s state) clone() state {
 	n := newState()
@@ -63,6 +65,15 @@ func (s state) clone() state {
 	for k, v := range s.runnerObservations {
 		v.Processes = append([]domain.ProcessObservation(nil), v.Processes...)
 		n.runnerObservations[k] = v
+	}
+	// Repository and its bounded forge Observation are copied on write like
+	// every other aggregate, so a rolled-back transaction cannot leak a
+	// registration or an observation into the committed state.
+	for k, v := range s.repositories {
+		n.repositories[k] = v
+	}
+	for k, v := range s.repositoryObs {
+		n.repositoryObs[k] = v
 	}
 	for k, v := range s.requests {
 		n.requests[k] = v
@@ -456,6 +467,40 @@ func (u *unit) ControlRequestedBy(_ context.Context, revision domain.Revision) (
 	v, ok := u.s.controlRequestedBy[revision]
 	return v, ok, nil
 }
+
+// Repository and its Observation use the same optimistic-concurrency shape
+// as SaveRequirement above: a create must declare expected version 0 and a
+// save must declare the stored version exactly.
+func (u *unit) Repository(_ context.Context, id string) (domain.Repository, bool, error) {
+	v, ok := u.s.repositories[id]
+	return v, ok, nil
+}
+func (u *unit) Repositories(_ context.Context) ([]domain.Repository, error) {
+	out := make([]domain.Repository, 0, len(u.s.repositories))
+	for _, v := range u.s.repositories {
+		out = append(out, v)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID.String() < out[j].ID.String() })
+	return out, nil
+}
+func (u *unit) SaveRepository(_ context.Context, v domain.Repository, expected domain.Version) error {
+	key := v.ID.String()
+	old, ok := u.s.repositories[key]
+	if (!ok && expected != 0) || (ok && old.Version != expected) {
+		return ErrOptimisticConflict
+	}
+	u.s.repositories[key] = v
+	return nil
+}
+func (u *unit) RepositoryObservation(_ context.Context, repositoryID string) (domain.RepositoryObservation, bool, error) {
+	v, ok := u.s.repositoryObs[repositoryID]
+	return v, ok, nil
+}
+func (u *unit) SaveRepositoryObservation(_ context.Context, value domain.RepositoryObservation) error {
+	u.s.repositoryObs[value.RepositoryID.String()] = value
+	return nil
+}
+
 func (u *unit) RunnerObservation(_ context.Context, runnerID string) (domain.RunnerObservation, bool, error) {
 	v, ok := u.s.runnerObservations[runnerID]
 	v.Processes = append([]domain.ProcessObservation(nil), v.Processes...)

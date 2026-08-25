@@ -33,8 +33,13 @@ Applicationと変更境界。Backlogは所有しない。
 
 主な属性:
 
-- `repository_id`
-- source locatorとdefault branch
+- `repository_id`（loopが発行するopaque識別子。clone URLは識別子ではない）
+- source locatorとdefault branch: `forge`（現在は`github`のみ）、`host`、`owner`、`name`、`default_branch`の値objectとして持つ。
+  一意性は正規化した`(forge, owner, name)`の三つ組で判定し、clone URLをkeyにはしない。
+  正規化はhost／owner／nameのlowercase化と末尾`.git`の除去を含み、https形式・ssh形式・scp形式は同一locatorとして扱う。
+  URLのuserinfo部は解析時に捨てるため、認証情報を含むURL形式からでも正規record側へ値が渡らない。
+  renameやtransferでowner／nameが変わってもRepositoryは同一objectなので、識別子はopaqueな`repository_id`のままである。
+- optimistic concurrency用`version`（Requirementと同じ扱い。registered→retiredの遷移も`version`を進める）
 - Stable／PreviewのApplication Release
 - Stable／PreviewのLoop Version routing
 - Repository Contract version
