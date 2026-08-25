@@ -25,7 +25,7 @@
   "output_hash": "5ae7f34491c7a7808014855e52c5a6662245cc05da22b5f46e2fb87706a00e75",
   "owner": "luna",
   "next_owner": "luna",
-  "block_reason": "V2-033,V2-070",
+  "block_reason": "V2-070",
   "retry_budget": {
     "max_attempts": 2,
     "attempts_used": 0,

@@ -28,7 +28,7 @@
   "output_hash": "1b77544041891a6082c0e01654ae730a53fe1b63517d1526b3eb163137cb0090",
   "owner": "sol",
   "next_owner": "sol",
-  "block_reason": "V2-045,V2-063",
+  "block_reason": "V2-063",
   "retry_budget": {
     "max_attempts": 1,
     "attempts_used": 0,
