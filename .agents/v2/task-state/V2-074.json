@@ -3,9 +3,9 @@
   "id": "ts-v2-074",
   "kind": "canonical-task-state",
   "task_id": "V2-074",
-  "status": "queued",
+  "status": "blocked",
   "dependencies": [
-    "V2-067"
+    "V2-068"
   ],
   "outcome": "Decide and wire the two parts of Provider operation that no task owns: which Loop and Provider versions are compatible, and when work is handed to a different Provider.",
   "non_goals": [
@@ -103,6 +103,31 @@
         "remaining": 2
       },
       "reason": "every task this one depends on is complete, so the block has cleared"
+    },
+    {
+      "sequence": 4,
+      "at": "2026-08-25T12:10:02Z",
+      "from_status": "queued",
+      "to_status": "blocked",
+      "actor": "sol",
+      "input_refs": [
+        "V2-067",
+        "V2-074"
+      ],
+      "input_hash": "129f59cc695ea807c418e4a6ae168fbc73c9220616d1d278fa54fd48ebf73a54",
+      "output_refs": [
+        "V2-074"
+      ],
+      "output_hash": "4b540ef3a3a66008bd8d90e05989b8fa19cd3c099731f3a1c972b7c532f70937",
+      "owner": "terra",
+      "next_owner": "terra",
+      "retry_budget": {
+        "max_attempts": 2,
+        "attempts_used": 0,
+        "remaining": 2
+      },
+      "reason": "the two remaining live observations are placed at the tail: each is invalidated under G6b by any later change inside the exercised closure, and each re-observation costs a real invocation budget or a real branch on a real forge"
     }
-  ]
+  ],
+  "block_reason": "V2-068"
 }
