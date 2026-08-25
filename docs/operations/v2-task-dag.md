@@ -425,6 +425,31 @@ coordinatorがworktreeで`git reset --hard`を打って他agentの未commit編�
 なく次の形で伝える: 「commitしていない内容を失う操作をしてはならない。
 history を作り直す必要が生じたら、失うものが無いことを示して報告せよ」。
 
+## 9.2 発行済みWork Orderへの追記（dispatch時に必ず読む）
+
+Work Orderは発行時点の測定に基づく。後続taskが着地するとその測定が偽になることが
+あるので、**packetを書き換えるのではなくここに追記し、dispatchする者がpacketと
+併せて渡す**。packetを書き換えると、実装者が読んだ指示書と記録された指示書が
+食い違い、evidenceの`design_packet_ref`が指す内容が動いてしまう。
+
+### wo-v2-068（scheduler配線）への追記2件
+
+**追記1: A14の前提はV2-073の着地で偽になる。** A14は「`domain.Requirement`が
+capture timestampを持たないこと、よって全候補が一律zeroの`CreatedAt`でSnapshotに
+入り、aging項が一律になってproductionの実効順序はID tie-breakであること」を
+測定事実として記録せよと書いている。V2-073が`CapturedAt`を追加するので、着地後は
+この前提が偽になる。**実装者は記録を写さず自分で測り、食い違ったら実測を採ること。**
+記録すべき限界は「timestampが無い」ことではなく、**V2-073がescalateした
+「productionにはDを縛るものが何も無い」**の方である（Dはfloodのcaptureがwaiterより
+何秒古いかで、V2-030の飢餓boundが真なのは実測でD in [-6500, +3499]秒）。
+
+**追記2: Snapshot builderへの配線はV2-068の仕事である。** V2-073は
+「欠損時のmapping規則をここで宣言し、適用はV2-068」と定めた。規則は
+**capture時刻を持たない候補をsnapshotの`Now`にcapturedされたものとしてage 0で
+並べる**こと。zero instantを渡すと約2000年分の秒がscoreを圧倒して欠損値が絶対優先に
+なるので、これはbugの回避ではなく規則である。`internal/scheduler`はproduction codeに
+`Snapshot`を組む場所を持たないので、builderの所有者はV2-068である。
+
 ## 10. checkpoint pushの手順と既知のdeploy workflow defect
 
 ### checkpointは1本ずつpushする
