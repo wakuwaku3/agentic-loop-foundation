@@ -3,7 +3,7 @@
   "id": "ts-v2-072",
   "kind": "canonical-task-state",
   "task_id": "V2-072",
-  "status": "blocked",
+  "status": "queued",
   "dependencies": [
     "V2-071"
   ],
@@ -31,7 +31,6 @@
     "remaining": 2
   },
   "release_eligible": false,
-  "block_reason": "V2-071",
   "transitions": [
     {
       "sequence": 1,
@@ -80,6 +79,30 @@
         "remaining": 2
       },
       "reason": "the three stages reach nine components and the character of the verification changes at each boundary, from a deterministic local closure to a real kernel Git integration to a live forge record, so they are separate tasks rather than one"
+    },
+    {
+      "sequence": 3,
+      "at": "2026-08-25T09:30:00Z",
+      "from_status": "blocked",
+      "to_status": "queued",
+      "actor": "sol",
+      "input_refs": [
+        "V2-071",
+        "V2-072"
+      ],
+      "input_hash": "fd9366d783c9d35158f1b2bf9179f41743ec2c65d127e5f2fd6c9af0ad012237",
+      "output_refs": [
+        "V2-072"
+      ],
+      "output_hash": "90d18aaf5f7f9f0a931b20ef34b2a6e56e948f19b8d45c8e9da8124a81529010",
+      "owner": "terra",
+      "next_owner": "terra",
+      "retry_budget": {
+        "max_attempts": 2,
+        "attempts_used": 0,
+        "remaining": 2
+      },
+      "reason": "every task this one depends on is complete, so the block has cleared"
     }
   ]
 }

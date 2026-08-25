@@ -3,7 +3,7 @@
   "id": "ts-v2-027",
   "kind": "canonical-task-state",
   "task_id": "V2-027",
-  "status": "blocked",
+  "status": "queued",
   "dependencies": [
     "V2-076"
   ],
@@ -24,7 +24,6 @@
   "output_hash": "f6c153f27d5473368c2287fcc0401e46b215c7c430d2fc4bfa06ffd1a9fefa09",
   "owner": "luna",
   "next_owner": "luna",
-  "block_reason": "V2-076",
   "retry_budget": {
     "max_attempts": 2,
     "attempts_used": 0,
@@ -103,6 +102,30 @@
         "remaining": 2
       },
       "reason": "the successor gate has not judged yet"
+    },
+    {
+      "sequence": 4,
+      "at": "2026-08-25T09:30:00Z",
+      "from_status": "blocked",
+      "to_status": "queued",
+      "actor": "sol",
+      "input_refs": [
+        "V2-027",
+        "V2-018"
+      ],
+      "input_hash": "d7c32ac702133966ecdd42b46cf708138b5b3347bf973d97b89da079b020d871",
+      "output_refs": [
+        "V2-027"
+      ],
+      "output_hash": "f6c153f27d5473368c2287fcc0401e46b215c7c430d2fc4bfa06ffd1a9fefa09",
+      "owner": "luna",
+      "next_owner": "luna",
+      "retry_budget": {
+        "max_attempts": 2,
+        "attempts_used": 0,
+        "remaining": 2
+      },
+      "reason": "every task this one depends on is complete, so the block has cleared"
     }
   ]
 }

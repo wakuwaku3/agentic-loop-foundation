@@ -3,7 +3,7 @@
   "id": "ts-v2-069",
   "kind": "canonical-task-state",
   "task_id": "V2-069",
-  "status": "blocked",
+  "status": "queued",
   "dependencies": [
     "V2-016",
     "V2-071"
@@ -80,7 +80,30 @@
         "remaining": 2
       },
       "reason": "the surface tasks all widen the same six files, so they run one at a time, each branching from the tip the previous one landed on; the order was revised so that the version report lands right after the release surface and the capture time lands right before the scheduler wiring that consumes it, which avoids shipping a snapshot builder whose every candidate carries a zero capture time"
+    },
+    {
+      "sequence": 3,
+      "at": "2026-08-25T09:30:00Z",
+      "from_status": "blocked",
+      "to_status": "queued",
+      "actor": "sol",
+      "input_refs": [
+        "V2-016",
+        "V2-069"
+      ],
+      "input_hash": "50df250088dc6f67ecc94f53b88a58aa42efd6a490c64cbb6450644003853868",
+      "output_refs": [
+        "V2-069"
+      ],
+      "output_hash": "768a3368da3d081f660cbca09213526004f467322d79cd89e90a6cc64c6be323",
+      "owner": "luna",
+      "next_owner": "luna",
+      "retry_budget": {
+        "max_attempts": 2,
+        "attempts_used": 0,
+        "remaining": 2
+      },
+      "reason": "every task this one depends on is complete, so the block has cleared"
     }
-  ],
-  "block_reason": "V2-071"
+  ]
 }
