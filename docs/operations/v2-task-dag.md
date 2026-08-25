@@ -397,6 +397,27 @@ test改修が不要**であり、これがV2-010〜V2-039の27件追加をtest�
 `blocked`＋`block_reason: external-unavailable:...`へ遷移させる。本文書は
 先回りしてtask-stateを書き換えない。
 
+## 9.1 台帳artifactをcommitする前の手順と、禁止git操作の実体
+
+**`gitleaks dir` で作業treeを走査してからcommitすること。** `gitleaks git` は
+commit済み履歴しか読まないので、commit してから気付くと、後続commitで直しても
+当該blobを持つcommitがrefから到達可能な限り`make check`は永久に赤になる。
+この罠でこれまで6つのtaskが止まっている。捕まった形はいずれも secretではなく、
+generic-api-keyのkeyword隣接だった: 64桁digestの直後の句読点、40桁のcommit sha、
+そして`"I3_credential_isolation"`という subtest名の直後に来た`"I4_lease_continuity"`
+という別のsubtest名。allowlistを識別子の形まで広げることはしない（それは実際の
+token を通す穴になる）。**commit前にworking treeを走査するのが正しい手当てである。**
+
+**禁止git操作の意図を明文化する。** これまでtaskへは
+`git reset` / `git checkout --` / `git stash` / `--amend` を禁止と伝えてきたが、
+**禁じている実体は「commitしていない作業内容を失う操作」**である。過去に
+coordinatorがworktreeで`git reset --hard`を打って他agentの未commit編集を破壊した
+ことが理由である。V2-075は上記のgitleaks罠に当たり、**作業treeの内容を1 byteも
+失わない`git update-ref`**でbranch tipを観測commitへ戻して作り直し、そのことを
+自ら報告した。これは禁止の意図に反しないので受理する。今後はcommand名の列挙では
+なく次の形で伝える: 「commitしていない内容を失う操作をしてはならない。
+history を作り直す必要が生じたら、失うものが無いことを示して報告せよ」。
+
 ## 10. checkpoint pushの手順と既知のdeploy workflow defect
 
 ### checkpointは1本ずつpushする

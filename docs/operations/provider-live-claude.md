@@ -81,3 +81,63 @@ record を新しく発行するときの注意（V2-063 で実測した順序）
 2. `-run 'TestProviderLiveVerticalSlice/<存在しない subtest 名>'` で gate だけを踏む。gate が通れば skip log が出ず `--- PASS` になり、台帳ファイルはまだ生成されない。ここで gate の誤りを invocation 0 で検出できる
 3. phase ごとに別 process で走らせる。`caseB_reuses_I1_journal_zero_invocations` は I1 の in-process の journal を再利用するので、単独で走らせると `t.Skip` になる（skip は pass に数えない）。I1 と同じ process で走らせること
 4. 失敗した試行の台帳 entry も消さない。V2-063 では I1..I4 と同一 process で走らせた I5/I6 の第1試行が I6 で失敗し（`actual_usd` 0.00・`session_id` 無し＝API 未到達の transport 失敗）、seq 5/6 を消費した。source を変えずに単独 process で再実行して PASS したが、失敗試行の2 entry は台帳に残したままである
+
+## 鮮度を交差の実測で判定する（V2-075、G6b）
+
+V2-063 は同じ9 subtest を再実行したが、鮮度の主張を `evidence_key`（runner component key）の一致に置いていた。V2-045 が key を推移閉包へ変えた結果 runner の閉包は11 component に広がっており、この主張は「観測の後にリポジトリのどこにも何も着地しない」場合しか満たせない。実際 M3 gate は、観測後に runner roots 内の doc comment が1つ直っただけで落ちた。`docs/operations/v2-task-dag.md` §4 の G6b はこれを受けて鮮度の判定を置き換えた。live evidence の鮮度は次の2つの**実測**で満たす。
+
+1. evidence が**観測 commit** を記録していること
+2. 観測 commit から判定 commit までの diff と、**その exercise が実際に compile し実行する file 集合**との**交差が空**であること
+
+「comment だけだから無害」という論証は G6b を満たさない。許すのは測定だけである。交差が空でなければ理由に関係なく再観測、交差が空なら key がどれだけ動いていても鮮度は満たされる。
+
+### file 集合はどこにあるか
+
+`.agents/v2/evidence/artifacts/V2-075-live-exercise-files.json` が tracked file として集合そのものを持つ。判定側が再計算できなければ G6b は判定できないため、この file は集合の全 path（`paths`、V2-075 の観測時点で76件）と、それを機械的に取り直す argv、交差を測る argv、除外した runtime 入力とその理由を全部含む。
+
+集合の内訳（`path_groups`）:
+
+- **compiled（67件）**: `go list -deps -test ./internal/runner` が返す自 module の package から `GoFiles`・`CgoFiles`・`EmbedFiles` のみを集める。**package ごとに `TestGoFiles` を足してはならない。** go list は test 込みの variant `internal/runner [internal/runner.test]` を別 entry として返し、その variant の `GoFiles` に in-package test file 18件が既に畳み込まれている。したがって `GoFiles` だけを取れば「test binary が実際に compile するもの」と完全に一致し、依存 package 自身の test file（binary は compile しない）を誤って含めることもない。go list が返す唯一の非リポジトリ path（go build cache 内の生成 `_testmain.go`）は `git ls-files` との交差で落ちる。git diff は tracked path しか名指せないので、この交差で失うものはない
+- **runtime_read（5件）**: compile はされないが実行中に開かれる file。`LoadPreflightRecord` が読む `contracts/schemas/provider-preflight.json`、record 自身、`approval.subject_path` が指す packet、そして `CheckProviderPreflightLedger` が読む `.agents/v2/provider-preflight/` 配下の全 record
+- **toolchain_pins（4件）**: `go.mod`・`go.sum`（module graph と Go version。`go.mod` は suite の `mustRepoRoot` が実行時に stat もする）、`devbox.json`・`devbox.lock`（toolchain 実体と shell）。`Makefile` は集合に入らない——この exercise は `go test` を直接叩き、make target は一切関与しない
+
+集合に入れられない外部実体は `out_of_tree_executables` に別枠で記録する。provider CLI（`/home/takushi/.local/bin/claude`）はリポジトリ外なので git diff には原理的に現れず、交差では守れない。代わりに record の `provider.executable_path`／`provider.version` が identity を固定し、`CostLedger.Reserve` が invocation ごとに argv[0] の解決先の一致を確認する。
+
+### 除外した runtime 入力（G6a に落ちるもの）
+
+`LoadPreflightRecord` は毎回 `CheckProviderPreflightLedger` を呼び、これが `.agents/v2/evidence/index.json` と、index が `provider-live-` component として名指す evidence file を読む。これらは **judged set から除外している**。理由は自己参照である: この observation が書く record と index entry は観測より後に着地するので、含めれば G6b の条件はこの record に限らず**あらゆる** live record にとって原理的に充足不能になる。
+
+除外は穴ではない。evidence 台帳の整合性は判定 commit で**再実行**される: `make check` の `go test ./internal/contracts` が `TestProviderPreflightLedgerPassesOnTheRealTree`（`CheckProviderPreflightLedger` を実 tree に対して再実行）と `TestActiveEvidenceIndex`（index と file の全単射、および全 `evidence_hash` の再計算）を回す。これは再実行による鮮度＝**G6a** であり、だからこそこの入力群に G6b の交差は不要である。
+
+### 交差の測り方
+
+```sh
+# 1) 公開された集合を読み出す
+python3 -c "import json;print(chr(10).join(json.load(open('.agents/v2/evidence/artifacts/V2-075-live-exercise-files.json'))['paths']))" \
+  | LC_ALL=C sort -u > /tmp/v2-075-set.txt
+
+# 2) 観測 commit から判定 commit までの diff を取る（2つの rev は別引数で渡す）
+git diff --name-only <observed_commit> <judging_commit> | LC_ALL=C sort -u > /tmp/v2-075-diff.txt
+
+# 3) 交差
+comm -12 /tmp/v2-075-set.txt /tmp/v2-075-diff.txt
+```
+
+出力が1行も無ければ鮮度を満たす。1行でも出れば、その変更が何であれ再観測を要する。完全な argv は集合 file の `reproduction.measure_the_intersection` にあり、そのまま実行できる。
+
+2つの rev を `A..B` ではなく別引数で渡しているのは意図的である。`.gitleaks.toml` の allowlist は `.agents/v2/` 配下の 40桁／64桁 hex に**末尾の句読点1文字まで**しか許さないので、`<sha>..<sha>` と書くと点が2つ続き secret 検出で赤くなる。
+
+### 交差が機能していることの確認（positive control）
+
+集合と架空の diff list で計算するだけでよく、tracked file を編集する必要はない（編集は完結規約違反になる）。V2-075 で実測した3件はいずれも交差1件を返した: exercise 自身の test file（`internal/runner/provider_live_test.go`）、依存 package の source（`internal/domain/model.go`）、toolchain pin（`devbox.lock`）。対照として docs と evidence 台帳と task-state だけの diff list は交差0件を返した。
+
+### live task の完結規約
+
+**exercise の key と交差を測った後に、その exercise が compile する file を同一 task で1つも編集しないこと。** V2-063 はこれを守ったが、coordinator が統合時に破って M3 gate を落とした。`liveRecordRelPath`／`liveTaskID` の切り替えは runner の key 閉包の内側なので、再観測 task が触ってよい唯一の箱であり、**観測より前に**着地させる。以後の commit は `.agents/**` と `docs/**` だけに限る。
+
+### いま有効な record（V2-075）
+
+- 承認済み record: `.agents/v2/provider-preflight/V2-075-provider-live-claude-rebind.json`
+- ledger: `/home/takushi/.local/state/agentic-loop/v2/V2-075-provider-live-claude-rebind-cost.json`（V2-017・V2-063 の台帳とは別 file。残枠を借りない）
+- 暴走検知しきい値: `max_invocations` 12・`max_total_cost_usd` 8.00 USD（V2-063 と同値）
+- **注意: V2-075 の観測はこの台帳を 12/12 まで使い切った。** provider 側の transient 失敗が3 invocation を消費したためで（`halted` は false、Reserve が拒否した invocation は1件も無い）、この record にはもう残枠が無い。次に live suite を回す者は**しきい値を上げてはならない**。owner の承認のもとで新しい record と新しい ledger path を発行すること
