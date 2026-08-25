@@ -3,7 +3,7 @@
   "id": "ts-v2-074",
   "kind": "canonical-task-state",
   "task_id": "V2-074",
-  "status": "blocked",
+  "status": "queued",
   "dependencies": [
     "V2-067"
   ],
@@ -31,7 +31,6 @@
     "remaining": 2
   },
   "release_eligible": false,
-  "block_reason": "V2-067",
   "transitions": [
     {
       "sequence": 1,
@@ -80,6 +79,30 @@
         "remaining": 2
       },
       "reason": "the input this task needs is produced by the task it depends on"
+    },
+    {
+      "sequence": 3,
+      "at": "2026-08-25T11:10:00Z",
+      "from_status": "blocked",
+      "to_status": "queued",
+      "actor": "sol",
+      "input_refs": [
+        "V2-067",
+        "V2-074"
+      ],
+      "input_hash": "129f59cc695ea807c418e4a6ae168fbc73c9220616d1d278fa54fd48ebf73a54",
+      "output_refs": [
+        "V2-074"
+      ],
+      "output_hash": "4b540ef3a3a66008bd8d90e05989b8fa19cd3c099731f3a1c972b7c532f70937",
+      "owner": "terra",
+      "next_owner": "terra",
+      "retry_budget": {
+        "max_attempts": 2,
+        "attempts_used": 0,
+        "remaining": 2
+      },
+      "reason": "every task this one depends on is complete, so the block has cleared"
     }
   ]
 }

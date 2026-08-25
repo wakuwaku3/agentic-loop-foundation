@@ -130,5 +130,5 @@
       "reason": "the dogfood must not be run against a tree where nine of the twelve capabilities are known to be unexercisable and five have no implementation; running it first would produce a knowingly partial record and force the exercise harness to be rewritten, so the five missing surfaces land first"
     }
   ],
-  "block_reason": "V2-065,V2-067,V2-068"
+  "block_reason": "V2-065,V2-068"
 }
