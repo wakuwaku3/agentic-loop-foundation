@@ -22,6 +22,24 @@ func NewClient(ctx context.Context, projectID, installation string) (*Store, err
 	}
 	return NewStore(c, installation)
 }
+
+// NewEmulatorClient is the preview-local counterpart of NewClient: it wires
+// the same cloudfirestore.Client construction (which honours
+// FIRESTORE_EMULATOR_HOST automatically) but calls NewEmulatorStore instead
+// of NewStore, so the resulting Store does not refuse an emulator host.
+// cmd/control-plane only calls this behind an explicit local-only opt-in
+// environment variable; it must never be reachable from the production
+// startup path.
+func NewEmulatorClient(ctx context.Context, projectID, installation string) (*Store, error) {
+	if projectID == "" || installation == "" {
+		return nil, errors.New("project and installation are required")
+	}
+	c, err := cloudfirestore.NewClient(ctx, projectID)
+	if err != nil {
+		return nil, err
+	}
+	return NewEmulatorStore(c, installation)
+}
 func (s *Store) Close() error { return s.client.Close() }
 func (s *Store) RunTransaction(ctx context.Context, fn func(context.Context, *cloudfirestore.Transaction) error) error {
 	return s.client.RunTransaction(ctx, fn)

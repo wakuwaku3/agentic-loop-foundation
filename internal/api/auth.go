@@ -59,6 +59,46 @@ func (a CombinedAuthenticator) Authenticate(r *http.Request) (application.Caller
 	return application.Caller{Role: application.RoleOwner, Subject: email}, nil
 }
 
+// LocalOwnerBearerAuthenticator is the preview-local owner authentication
+// boundary (roadmap M2: "owner認証はローカルではsession/token境界。IAP境界は
+// D1"). On the owner's machine, without a Cloud Run/IAP layer in front, owner
+// identity is established by a bearer token instead of an upstream identity
+// assertion header. Runner identity still goes through the existing runner
+// session header/verifier, unchanged from CombinedAuthenticator. This type
+// must never be selected for a real Cloud Run deployment; IAP remains the
+// only owner boundary there. cmd/control-plane only selects it behind an
+// explicit local-only opt-in environment variable.
+type LocalOwnerBearerAuthenticator struct {
+	Runner      *runner.Service
+	OwnerTokens map[string]string // bearer token -> owner email
+}
+
+func (a LocalOwnerBearerAuthenticator) Authenticate(r *http.Request) (application.Caller, error) {
+	if value := strings.TrimSpace(r.Header.Get(RunnerSessionHeader)); value != "" {
+		if a.Runner == nil {
+			return application.Caller{}, errors.New("runner session verifier is not configured")
+		}
+		runnerID, err := a.Runner.VerifySession(r.Context(), value)
+		if err != nil || runnerID == "" {
+			return application.Caller{}, errors.New("invalid runner session")
+		}
+		return application.Caller{Role: application.RoleRunner, Subject: runnerID, RunnerID: runnerID}, nil
+	}
+	value := strings.TrimSpace(r.Header.Get("Authorization"))
+	if !strings.HasPrefix(value, "Bearer ") {
+		return application.Caller{}, errors.New("bearer token required")
+	}
+	token := strings.TrimSpace(strings.TrimPrefix(value, "Bearer "))
+	if token == "" {
+		return application.Caller{}, errors.New("bearer token required")
+	}
+	email, ok := a.OwnerTokens[token]
+	if !ok || email == "" {
+		return application.Caller{}, errors.New("unknown owner bearer token")
+	}
+	return application.Caller{Role: application.RoleOwner, Subject: email}, nil
+}
+
 func parseIAPEmail(value string) (string, error) {
 	value = strings.TrimSpace(value)
 	const prefix = "accounts.google.com:"
