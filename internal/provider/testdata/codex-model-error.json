@@ -1,0 +1,5 @@
+{
+  "status": "error",
+  "code": "model_refused",
+  "error": "the model declined the request for this increment"
+}

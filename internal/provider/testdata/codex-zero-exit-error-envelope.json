@@ -1,0 +1,6 @@
+{
+  "status": "error",
+  "exit_code": 0,
+  "code": "envelope_error",
+  "error": "the provider reported failure inside a well formed envelope"
+}

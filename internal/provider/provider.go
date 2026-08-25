@@ -132,13 +132,21 @@ type Failure struct {
 	Usage     Usage        `json:"usage,omitempty"`
 }
 type Result struct {
-	Provider     string   `json:"provider"`
-	Model        string   `json:"model,omitempty"`
-	Succeeded    bool     `json:"succeeded"`
-	Checkpoint   string   `json:"checkpoint,omitempty"`
-	OutputDigest string   `json:"output_digest,omitempty"`
-	Usage        Usage    `json:"usage,omitempty"`
-	Failure      *Failure `json:"failure,omitempty"`
+	Provider     string `json:"provider"`
+	Model        string `json:"model,omitempty"`
+	Succeeded    bool   `json:"succeeded"`
+	Checkpoint   string `json:"checkpoint,omitempty"`
+	OutputDigest string `json:"output_digest,omitempty"`
+	Usage        Usage  `json:"usage,omitempty"`
+	// UsageReported is what makes "the Provider reported no usage" a
+	// different fact from "the Provider reported zero" (V2-027 A6). Usage's
+	// zero value cannot tell the two apart, and the usage window must not
+	// treat an unreported invocation as zero consumption -- an unreported
+	// usage makes the token side of a window unknown, not empty. This field
+	// is additive: no existing assertion about Result.Usage changes meaning,
+	// because Usage still carries exactly the counts a fixture declared.
+	UsageReported bool     `json:"usage_reported"`
+	Failure       *Failure `json:"failure,omitempty"`
 }
 
 type Adapter interface {
@@ -207,6 +215,37 @@ func (r Result) Validate() error {
 // ClassifyError is exported for process supervisors and keeps cancellation
 // and timeout semantics identical across all adapters.
 func ClassifyError(err error) Failure { return classify(err) }
+
+// FailureClasses is the closed set of classes this package declares, in
+// declaration order. A source guard compares it against the FailureClass
+// constants it reads from this package's own AST, so a class added without
+// being listed here -- or listed here without a row in the circuit breaker's
+// opening table -- fails the build's tests rather than silently defaulting.
+func FailureClasses() []FailureClass {
+	return []FailureClass{
+		FailureInvalidInput,
+		FailureTransport,
+		FailureModel,
+		FailureQuota,
+		FailureTimeout,
+		FailureCancelled,
+		FailureContract,
+		FailureUnknown,
+		FailureUnauthenticated,
+	}
+}
+
+// ForbiddenPatternMatches reports whether b matches this package's forbidden
+// vocabulary pattern -- the same pattern WorkPacket.Validate enforces. It is
+// exported so a fixture scan asserts against the pattern the package
+// actually applies rather than against a second copy of it that could drift.
+func ForbiddenPatternMatches(b []byte) bool {
+	return forbidden.MatchString(strings.ToLower(string(b)))
+}
+
+// SecretPatternMatches reports whether b matches this package's secret-shape
+// pattern, for the same reason.
+func SecretPatternMatches(b []byte) bool { return secret.Match(b) }
 
 // DigestOutput is the only permitted way to retain provider output metadata.
 func DigestOutput(output string) string { return digest(output) }

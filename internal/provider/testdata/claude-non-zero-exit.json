@@ -1,0 +1,6 @@
+{
+  "status": "error",
+  "exit_code": 9,
+  "code": "exit_9",
+  "error": "the provider process terminated with a non-zero status"
+}

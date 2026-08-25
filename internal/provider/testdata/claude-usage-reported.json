@@ -1,0 +1,10 @@
+{
+  "status": "success",
+  "checkpoint": "claude:cp-usage-reported",
+  "output": "sha256:045c695d9098b3bd59522ee2652b8bcba4c4891a451cf8929c8c4185c8e88fcb",
+  "usage": {
+    "input_tokens": 0,
+    "output_tokens": 0,
+    "total_tokens": 0
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "status": "success",
+  "checkpoint": "codex:cp-usage-reported",
+  "output": "sha256:5a63912867203ad581d8201c3d19b79a805fb3a4aec57677a79ebc347bb6e0a9",
+  "usage": {
+    "input_tokens": 0,
+    "output_tokens": 0,
+    "total_tokens": 0
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "status": "success",
+  "checkpoint": "codex:cp-1",
+  "output": "sha256:a12bd30d6bf14f7119c47a23d161f477ed6190a82ddebd2de6d5db7b138665a8",
+  "usage": {
+    "input_tokens": 12,
+    "output_tokens": 5,
+    "total_tokens": 17
+  }
+}

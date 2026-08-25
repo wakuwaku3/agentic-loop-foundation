@@ -27,6 +27,11 @@ func build(executable string, flags []string, includeWorkspaceArg bool, req Requ
 	if err != nil || len(b) > MaxPacketBytes {
 		return Invocation{}, ErrInvalidRequest
 	}
+	// A4: Build refuses a workspace it could use to ask to leave the
+	// workspace, before any argv exists to carry it.
+	if hasTraversalSegment(req.Workspace) {
+		return Invocation{}, ErrInvalidRequest
+	}
 	argv := append([]string{executable}, flags...)
 	if includeWorkspaceArg {
 		argv = append(argv, req.Workspace)
@@ -35,9 +40,38 @@ func build(executable string, flags []string, includeWorkspaceArg bool, req Requ
 		if strings.ContainsAny(v, "\x00\r\n") || secret.MatchString(v) {
 			return Invocation{}, ErrInvalidRequest
 		}
+		if hasTraversalSegment(v) {
+			return Invocation{}, ErrInvalidRequest
+		}
 	}
 	return Invocation{Argv: argv, Stdin: b, WorkingDirectory: req.Workspace}, nil
 }
+
+// The three argv surfaces below are measured, not assumed. Every flag was read
+// out of the CLI's own help output (V2-027 A3, help only: no subcommand of any
+// Provider CLI was executed, which consumes no Provider usage and needs no
+// authentication). The measurement is quoted verbatim in
+// docs/operations/provider-adapters.md. No flag is present that help does not
+// declare, and no flag help declares for a property the adapter needs was
+// dropped.
+//
+// The workspace argument is kept as an argv element for codex and opencode
+// after a measurement that contradicts the assumption behind removing it. The
+// assumption was that Invocation.WorkingDirectory already pins the child's
+// directory, so the flag is a weaker second copy of a boundary something else
+// holds. It is not a second copy: the runner's ProcessSupervisor.Run takes
+// only a context and an argv and never assigns a child working directory, and
+// SupervisedInvocationRunner never reads Invocation.WorkingDirectory either.
+// For these two CLIs the flag is therefore the only representation of the
+// workspace that reaches the child process at all, and deleting it would
+// leave the child running in whatever directory the runner happened to be in.
+// What actually holds the boundary is the kernel: NamespaceConfinement pins
+// the writable mount at the workspace. The adapter's job is only to be unable
+// to ask to leave it, which is what the argv guards below enforce.
+//
+// claude needs no such flag: it takes the Work Packet on stdin, and its four
+// arguments are the one argv in this file that is live-proven wire-compatible
+// against a real CLI, so not one of them is changed here.
 func (CodexAdapter) Build(req Request) (Invocation, error) {
 	return build("codex", []string{"exec", "--json", "--ephemeral", "-C"}, true, req)
 }
@@ -63,6 +97,21 @@ func (a OpenCodeAdapter) Run(ctx context.Context, req Request) (Result, error) {
 	return NoExec(ctx, req)
 }
 
+// hasTraversalSegment reports whether value contains a ".." path segment,
+// under either separator, including as the whole value. It is a segment test
+// and not a substring test on purpose: a directory legitimately named
+// "..config" is not a traversal, and refusing it would be a false positive
+// that pushes callers toward disabling the check.
+func hasTraversalSegment(value string) bool {
+	normalized := strings.ReplaceAll(value, "\\", "/")
+	for _, segment := range strings.Split(normalized, "/") {
+		if segment == ".." {
+			return true
+		}
+	}
+	return false
+}
+
 type fixture struct {
 	Status     string `json:"status"`
 	Type       string `json:"type"`
@@ -76,7 +125,9 @@ type fixture struct {
 	Error      string `json:"error"`
 	Code       string `json:"code"`
 	ExitCode   *int   `json:"exit_code"`
-	Usage      Usage  `json:"usage"`
+	// Usage is a pointer so that an absent usage object is a different fact
+	// from a usage object whose counts are all zero (V2-027 A6).
+	Usage *Usage `json:"usage"`
 }
 
 func parseFixture(name string, b []byte) (Result, error) {
@@ -96,7 +147,11 @@ func parseFixture(name string, b []byte) (Result, error) {
 	if err := decoder.Decode(&trailing); err != io.EOF {
 		return Result{}, ErrInvalidFixture
 	}
-	r := Result{Provider: name, Checkpoint: f.Checkpoint, Usage: f.Usage}
+	r := Result{Provider: name, Checkpoint: f.Checkpoint}
+	if f.Usage != nil {
+		r.Usage = *f.Usage
+		r.UsageReported = true
+	}
 	success := f.Success
 	if success == nil {
 		success = f.Succeeded
@@ -149,6 +204,18 @@ func normalize(_ string, err error) Failure {
 	if err == nil {
 		return Failure{}
 	}
+	// These two come first and return early. An output the adapter cannot
+	// parse is a contract disagreement, not a transport fault: reporting it as
+	// transport would send a reader looking for a network problem and would
+	// make it retryable, when a retry cannot change either side's output
+	// shape. An invalid request is about our own request and is not an
+	// observation about the Provider at all.
+	if errors.Is(err, ErrInvalidFixture) {
+		return Failure{Class: FailureContract, Retryable: false, Message: "provider output is not a shape this adapter can parse"}
+	}
+	if errors.Is(err, ErrInvalidRequest) || errors.Is(err, ErrInvalidPacket) {
+		return Failure{Class: FailureInvalidInput, Retryable: false, Message: "provider request is not valid for this adapter"}
+	}
 	f := classify(err)
 	s := strings.ToLower(err.Error())
 	if strings.Contains(s, "quota") || strings.Contains(s, "rate limit") || strings.Contains(s, "429") {
@@ -183,6 +250,24 @@ func normalize(_ string, err error) Failure {
 // the lowercased error text only; nothing it matches is ever copied into the
 // Failure.
 var unauthenticated = regexp.MustCompile(`(not (logged in|authenticated|signed in)|unauthenticated|unauthori[sz]ed|authentication (required|failed)|(please |must )?(log ?in|sign ?in) (required|first|to continue)|no (active )?(session|credentials) found|\bhttp 401\b|\b401\b)`)
+
+// ParseOrClassify is the single entry point the nine-case contract-fixture
+// table uses for all three adapters. It runs Adapter.Parse and, when the bytes
+// are not the projected shape, returns the Failure the same adapter's own
+// NormalizeError produces for that error, so a cell whose bytes cannot parse
+// still has a FailureClass, a Retryable and an Ambiguous value to assert.
+// Routing every cell through one function is what makes a change to build,
+// parseFixture or normalize visibly reach all three adapters.
+func ParseOrClassify(a Adapter, raw []byte) (Result, Failure) {
+	r, err := a.Parse(raw)
+	if err != nil {
+		return Result{Provider: a.Name()}, a.NormalizeError(err)
+	}
+	if r.Failure != nil {
+		return r, *r.Failure
+	}
+	return r, Failure{}
+}
 
 // Run is intentionally unavailable in this package: the local process
 // supervisor owns execution. Adapters only build argv and parse fixtures.

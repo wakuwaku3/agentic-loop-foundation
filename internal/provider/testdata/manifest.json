@@ -1,0 +1,278 @@
+{
+  "schema_version": "v1",
+  "kind": "provider-fixture-manifest",
+  "task_id": "V2-027",
+  "note": "Every entry below is hand authored to the shape Adapter.Parse accepts. Not one byte of any file in this directory came from a real Provider CLI response: two of the three CLIs have no authenticated session on this machine and could not produce one, and writing captured bytes for the third would have made that adapter's row structurally different from the other two in the one table whose purpose is that the three rows are the same. shape_source states that per entry. cli_version_declared is the version the shape is authored AGAINST, re-measured with --version by the implementer; it is not the version a response was captured from, because no response was captured. corresponding_live_exercise names the exercise that owns the real-CLI confirmation these shapes still lack.",
+  "entries": [
+    {
+      "file": "codex-success.json",
+      "provider": "codex",
+      "cli_version_declared": "0.149.1",
+      "shape_source": "projected-shape-hand-authored",
+      "observed_at": "2026-08-25T00:00:00Z",
+      "reason": "V2-027 authored this entry by hand to the projected shape for the success case: the shape a completed invocation projects to. No real provider response was read, captured or derived from.",
+      "corresponding_live_exercise": "provider-live-multi"
+    },
+    {
+      "file": "codex-model-error.json",
+      "provider": "codex",
+      "cli_version_declared": "0.149.1",
+      "shape_source": "projected-shape-hand-authored",
+      "observed_at": "2026-08-25T00:00:00Z",
+      "reason": "V2-027 authored this entry by hand to the projected shape for the model-error case: explicit model error: the provider answered and declined. No real provider response was read, captured or derived from.",
+      "corresponding_live_exercise": "provider-live-multi"
+    },
+    {
+      "file": "codex-usage-exhaustion.json",
+      "provider": "codex",
+      "cli_version_declared": "0.149.1",
+      "shape_source": "projected-shape-hand-authored",
+      "observed_at": "2026-08-25T00:00:00Z",
+      "reason": "V2-027 authored this entry by hand to the projected shape for the usage-exhaustion case: quota or usage exhaustion signalled explicitly by the provider. No real provider response was read, captured or derived from.",
+      "corresponding_live_exercise": "provider-live-multi"
+    },
+    {
+      "file": "codex-non-zero-exit.json",
+      "provider": "codex",
+      "cli_version_declared": "0.149.1",
+      "shape_source": "projected-shape-hand-authored",
+      "observed_at": "2026-08-25T00:00:00Z",
+      "reason": "V2-027 authored this entry by hand to the projected shape for the non-zero-exit case: non-zero process exit reported inside the envelope. No real provider response was read, captured or derived from.",
+      "corresponding_live_exercise": "provider-live-multi"
+    },
+    {
+      "file": "codex-zero-exit-error-envelope.json",
+      "provider": "codex",
+      "cli_version_declared": "0.149.1",
+      "shape_source": "projected-shape-hand-authored",
+      "observed_at": "2026-08-25T00:00:00Z",
+      "reason": "V2-027 authored this entry by hand to the projected shape for the zero-exit-error-envelope case: zero exit status carrying an error envelope. No real provider response was read, captured or derived from.",
+      "corresponding_live_exercise": "provider-live-multi"
+    },
+    {
+      "file": "codex-empty-structured-output.json",
+      "provider": "codex",
+      "cli_version_declared": "0.149.1",
+      "shape_source": "projected-shape-hand-authored",
+      "observed_at": "2026-08-25T00:00:00Z",
+      "reason": "V2-027 authored this entry by hand to the projected shape for the empty-structured-output case: structured output present but declaring no outcome. No real provider response was read, captured or derived from.",
+      "corresponding_live_exercise": "provider-live-multi"
+    },
+    {
+      "file": "codex-malformed-structured-output.json",
+      "provider": "codex",
+      "cli_version_declared": "0.149.1",
+      "shape_source": "projected-shape-hand-authored",
+      "observed_at": "2026-08-25T00:00:00Z",
+      "reason": "V2-027 authored this entry by hand to the projected shape for the malformed-structured-output case: structured output that is not parseable at all. No real provider response was read, captured or derived from.",
+      "corresponding_live_exercise": "provider-live-multi"
+    },
+    {
+      "file": "codex-usage-reported.json",
+      "provider": "codex",
+      "cli_version_declared": "0.149.1",
+      "shape_source": "projected-shape-hand-authored",
+      "observed_at": "2026-08-25T00:00:00Z",
+      "reason": "V2-027 authored this entry by hand to the projected shape for the usage-reported case: usage object present with all counts zero, to be told apart from an absent one. No real provider response was read, captured or derived from.",
+      "corresponding_live_exercise": "provider-live-multi"
+    },
+    {
+      "file": "codex-usage-not-reported.json",
+      "provider": "codex",
+      "cli_version_declared": "0.149.1",
+      "shape_source": "projected-shape-hand-authored",
+      "observed_at": "2026-08-25T00:00:00Z",
+      "reason": "V2-027 authored this entry by hand to the projected shape for the usage-not-reported case: usage object absent, which is unknown consumption and never zero. No real provider response was read, captured or derived from.",
+      "corresponding_live_exercise": "provider-live-multi"
+    },
+    {
+      "file": "codex-cli-version-incompatible.json",
+      "provider": "codex",
+      "cli_version_declared": "0.149.1",
+      "shape_source": "projected-shape-hand-authored",
+      "observed_at": "2026-08-25T00:00:00Z",
+      "reason": "V2-027 authored this entry by hand to the projected shape for the cli-version-incompatible case: an envelope field this adapter's shape does not declare, as a declared CLI version would emit after an incompatible change. No real provider response was read, captured or derived from.",
+      "corresponding_live_exercise": "provider-live-multi"
+    },
+    {
+      "file": "claude-success.json",
+      "provider": "claude",
+      "cli_version_declared": "2.1.241",
+      "shape_source": "projected-shape-hand-authored",
+      "observed_at": "2026-08-25T00:00:00Z",
+      "reason": "V2-027 authored this entry by hand to the projected shape for the success case: the shape a completed invocation projects to. No real provider response was read, captured or derived from.",
+      "corresponding_live_exercise": "provider-live-multi"
+    },
+    {
+      "file": "claude-model-error.json",
+      "provider": "claude",
+      "cli_version_declared": "2.1.241",
+      "shape_source": "projected-shape-hand-authored",
+      "observed_at": "2026-08-25T00:00:00Z",
+      "reason": "V2-027 authored this entry by hand to the projected shape for the model-error case: explicit model error: the provider answered and declined. No real provider response was read, captured or derived from.",
+      "corresponding_live_exercise": "provider-live-multi"
+    },
+    {
+      "file": "claude-usage-exhaustion.json",
+      "provider": "claude",
+      "cli_version_declared": "2.1.241",
+      "shape_source": "projected-shape-hand-authored",
+      "observed_at": "2026-08-25T00:00:00Z",
+      "reason": "V2-027 authored this entry by hand to the projected shape for the usage-exhaustion case: quota or usage exhaustion signalled explicitly by the provider. No real provider response was read, captured or derived from.",
+      "corresponding_live_exercise": "provider-live-multi"
+    },
+    {
+      "file": "claude-non-zero-exit.json",
+      "provider": "claude",
+      "cli_version_declared": "2.1.241",
+      "shape_source": "projected-shape-hand-authored",
+      "observed_at": "2026-08-25T00:00:00Z",
+      "reason": "V2-027 authored this entry by hand to the projected shape for the non-zero-exit case: non-zero process exit reported inside the envelope. No real provider response was read, captured or derived from.",
+      "corresponding_live_exercise": "provider-live-multi"
+    },
+    {
+      "file": "claude-zero-exit-error-envelope.json",
+      "provider": "claude",
+      "cli_version_declared": "2.1.241",
+      "shape_source": "projected-shape-hand-authored",
+      "observed_at": "2026-08-25T00:00:00Z",
+      "reason": "V2-027 authored this entry by hand to the projected shape for the zero-exit-error-envelope case: zero exit status carrying an error envelope. No real provider response was read, captured or derived from.",
+      "corresponding_live_exercise": "provider-live-multi"
+    },
+    {
+      "file": "claude-empty-structured-output.json",
+      "provider": "claude",
+      "cli_version_declared": "2.1.241",
+      "shape_source": "projected-shape-hand-authored",
+      "observed_at": "2026-08-25T00:00:00Z",
+      "reason": "V2-027 authored this entry by hand to the projected shape for the empty-structured-output case: structured output present but declaring no outcome. No real provider response was read, captured or derived from.",
+      "corresponding_live_exercise": "provider-live-multi"
+    },
+    {
+      "file": "claude-malformed-structured-output.json",
+      "provider": "claude",
+      "cli_version_declared": "2.1.241",
+      "shape_source": "projected-shape-hand-authored",
+      "observed_at": "2026-08-25T00:00:00Z",
+      "reason": "V2-027 authored this entry by hand to the projected shape for the malformed-structured-output case: structured output that is not parseable at all. No real provider response was read, captured or derived from.",
+      "corresponding_live_exercise": "provider-live-multi"
+    },
+    {
+      "file": "claude-usage-reported.json",
+      "provider": "claude",
+      "cli_version_declared": "2.1.241",
+      "shape_source": "projected-shape-hand-authored",
+      "observed_at": "2026-08-25T00:00:00Z",
+      "reason": "V2-027 authored this entry by hand to the projected shape for the usage-reported case: usage object present with all counts zero, to be told apart from an absent one. No real provider response was read, captured or derived from.",
+      "corresponding_live_exercise": "provider-live-multi"
+    },
+    {
+      "file": "claude-usage-not-reported.json",
+      "provider": "claude",
+      "cli_version_declared": "2.1.241",
+      "shape_source": "projected-shape-hand-authored",
+      "observed_at": "2026-08-25T00:00:00Z",
+      "reason": "V2-027 authored this entry by hand to the projected shape for the usage-not-reported case: usage object absent, which is unknown consumption and never zero. No real provider response was read, captured or derived from.",
+      "corresponding_live_exercise": "provider-live-multi"
+    },
+    {
+      "file": "claude-cli-version-incompatible.json",
+      "provider": "claude",
+      "cli_version_declared": "2.1.241",
+      "shape_source": "projected-shape-hand-authored",
+      "observed_at": "2026-08-25T00:00:00Z",
+      "reason": "V2-027 authored this entry by hand to the projected shape for the cli-version-incompatible case: an envelope field this adapter's shape does not declare, as a declared CLI version would emit after an incompatible change. No real provider response was read, captured or derived from.",
+      "corresponding_live_exercise": "provider-live-multi"
+    },
+    {
+      "file": "opencode-success.json",
+      "provider": "opencode",
+      "cli_version_declared": "1.18.22",
+      "shape_source": "projected-shape-hand-authored",
+      "observed_at": "2026-08-25T00:00:00Z",
+      "reason": "V2-027 authored this entry by hand to the projected shape for the success case: the shape a completed invocation projects to. No real provider response was read, captured or derived from.",
+      "corresponding_live_exercise": "provider-live-multi"
+    },
+    {
+      "file": "opencode-model-error.json",
+      "provider": "opencode",
+      "cli_version_declared": "1.18.22",
+      "shape_source": "projected-shape-hand-authored",
+      "observed_at": "2026-08-25T00:00:00Z",
+      "reason": "V2-027 authored this entry by hand to the projected shape for the model-error case: explicit model error: the provider answered and declined. No real provider response was read, captured or derived from.",
+      "corresponding_live_exercise": "provider-live-multi"
+    },
+    {
+      "file": "opencode-usage-exhaustion.json",
+      "provider": "opencode",
+      "cli_version_declared": "1.18.22",
+      "shape_source": "projected-shape-hand-authored",
+      "observed_at": "2026-08-25T00:00:00Z",
+      "reason": "V2-027 authored this entry by hand to the projected shape for the usage-exhaustion case: quota or usage exhaustion signalled explicitly by the provider. No real provider response was read, captured or derived from.",
+      "corresponding_live_exercise": "provider-live-multi"
+    },
+    {
+      "file": "opencode-non-zero-exit.json",
+      "provider": "opencode",
+      "cli_version_declared": "1.18.22",
+      "shape_source": "projected-shape-hand-authored",
+      "observed_at": "2026-08-25T00:00:00Z",
+      "reason": "V2-027 authored this entry by hand to the projected shape for the non-zero-exit case: non-zero process exit reported inside the envelope. No real provider response was read, captured or derived from.",
+      "corresponding_live_exercise": "provider-live-multi"
+    },
+    {
+      "file": "opencode-zero-exit-error-envelope.json",
+      "provider": "opencode",
+      "cli_version_declared": "1.18.22",
+      "shape_source": "projected-shape-hand-authored",
+      "observed_at": "2026-08-25T00:00:00Z",
+      "reason": "V2-027 authored this entry by hand to the projected shape for the zero-exit-error-envelope case: zero exit status carrying an error envelope. No real provider response was read, captured or derived from.",
+      "corresponding_live_exercise": "provider-live-multi"
+    },
+    {
+      "file": "opencode-empty-structured-output.json",
+      "provider": "opencode",
+      "cli_version_declared": "1.18.22",
+      "shape_source": "projected-shape-hand-authored",
+      "observed_at": "2026-08-25T00:00:00Z",
+      "reason": "V2-027 authored this entry by hand to the projected shape for the empty-structured-output case: structured output present but declaring no outcome. No real provider response was read, captured or derived from.",
+      "corresponding_live_exercise": "provider-live-multi"
+    },
+    {
+      "file": "opencode-malformed-structured-output.json",
+      "provider": "opencode",
+      "cli_version_declared": "1.18.22",
+      "shape_source": "projected-shape-hand-authored",
+      "observed_at": "2026-08-25T00:00:00Z",
+      "reason": "V2-027 authored this entry by hand to the projected shape for the malformed-structured-output case: structured output that is not parseable at all. No real provider response was read, captured or derived from.",
+      "corresponding_live_exercise": "provider-live-multi"
+    },
+    {
+      "file": "opencode-usage-reported.json",
+      "provider": "opencode",
+      "cli_version_declared": "1.18.22",
+      "shape_source": "projected-shape-hand-authored",
+      "observed_at": "2026-08-25T00:00:00Z",
+      "reason": "V2-027 authored this entry by hand to the projected shape for the usage-reported case: usage object present with all counts zero, to be told apart from an absent one. No real provider response was read, captured or derived from.",
+      "corresponding_live_exercise": "provider-live-multi"
+    },
+    {
+      "file": "opencode-usage-not-reported.json",
+      "provider": "opencode",
+      "cli_version_declared": "1.18.22",
+      "shape_source": "projected-shape-hand-authored",
+      "observed_at": "2026-08-25T00:00:00Z",
+      "reason": "V2-027 authored this entry by hand to the projected shape for the usage-not-reported case: usage object absent, which is unknown consumption and never zero. No real provider response was read, captured or derived from.",
+      "corresponding_live_exercise": "provider-live-multi"
+    },
+    {
+      "file": "opencode-cli-version-incompatible.json",
+      "provider": "opencode",
+      "cli_version_declared": "1.18.22",
+      "shape_source": "projected-shape-hand-authored",
+      "observed_at": "2026-08-25T00:00:00Z",
+      "reason": "V2-027 authored this entry by hand to the projected shape for the cli-version-incompatible case: an envelope field this adapter's shape does not declare, as a declared CLI version would emit after an incompatible change. No real provider response was read, captured or derived from.",
+      "corresponding_live_exercise": "provider-live-multi"
+    }
+  ]
+}

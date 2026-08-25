@@ -1,0 +1,5 @@
+{
+  "status": "error",
+  "code": "usage_exhausted",
+  "error": "quota exhausted for the current usage window"
+}

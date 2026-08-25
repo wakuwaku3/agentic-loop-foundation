@@ -1,0 +1,10 @@
+{
+  "status": "success",
+  "checkpoint": "opencode:cp-usage-reported",
+  "output": "sha256:82d095de81db4af6128cba29712068e7ebaedd2d22bcf36bf6683e4b1993962f",
+  "usage": {
+    "input_tokens": 0,
+    "output_tokens": 0,
+    "total_tokens": 0
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "status": "success",
+  "checkpoint": "opencode:cp-1",
+  "output": "sha256:acda8457f7ae9d9589e5e07dac00a320deb2b24b6432adbbdf79bf0df6c80483",
+  "usage": {
+    "input_tokens": 12,
+    "output_tokens": 5,
+    "total_tokens": 17
+  }
+}

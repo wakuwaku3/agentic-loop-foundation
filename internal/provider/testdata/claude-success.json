@@ -1,0 +1,10 @@
+{
+  "status": "success",
+  "checkpoint": "claude:cp-1",
+  "output": "sha256:3c723e57f868e49afeacd2225569129ae64a2970715d644771279cfce92dc79d",
+  "usage": {
+    "input_tokens": 12,
+    "output_tokens": 5,
+    "total_tokens": 17
+  }
+}
