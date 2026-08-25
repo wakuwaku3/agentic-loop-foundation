@@ -310,7 +310,7 @@ test改修が不要**であり、これがV2-010〜V2-039の27件追加をtest�
 `release_eligible`をtrueにできるようにする）は明示的にtestを変更しない限り
 できない。これは意図した抵抗である。
 
-## 9. 既知の外部制約（2026-08-24時点で実測済み）
+## 9. 既知の外部制約（2026-08-25時点で実測済み）
 
 このsession（v2-task/dag-registration worktree）で実際に確認した事実。実行時には
 再観測し、変化していればこの記述を盲信しない。
@@ -325,23 +325,38 @@ test改修が不要**であり、これがV2-010〜V2-039の27件追加をtest�
   system promptのcache作成が毎回乗るため、入力2 tokenの最小probeでも$0.077〜0.105）。
   → V2-017はexternal-unavailableではない。着手前にV2-047が用意するprovider
   preflight（16 invocation／累計$10.00、fail-closed）へownerの承認を記録する。
-- `codex` CLIと`opencode` CLIが不在。`npm`／`npx`／`node`は使えるのでopencodeは
-  npm導入の可能性があるが、codexはOpenAIアカウントという人間の費用・identity判断を
-  要する。**capability宣言のprovidersからcodex／opencodeを削って昇格を通してはならない**
-  （契約の実質的弱体化になる）。→ V2-028は着手時に
-  `external-unavailable: codex CLI and OpenAI account; needs: ...`へ遷移させる。
-  opencodeの導入はV2-028のscopeとし、`devbox.json`には入れない（Provider CLIは
+- **`codex` CLIと`opencode` CLIは導入済みで、非対話実行モードを持つ**（2026-08-25に
+  coordinatorが実測）。`npm install -g @openai/codex@0.149.1` と
+  `npm install -g opencode-ai@1.18.22` で
+  `~/.nvm/versions/node/v24.18.0/bin/{codex,opencode}` に入り、
+  `codex --version` → `codex-cli 0.149.1`、`opencode --version` → `1.18.22` が返る。
+  非対話経路はそれぞれ `codex exec [PROMPT]`（stdinからprompt可）と
+  `opencode run --format json`であり、Work Packetをstdinで渡してJSONを受ける
+  `internal/provider`のadapter形と噛み合う。
+  **残る壁は認証だけである**。`codex login status` → `Not logged in`、
+  `opencode auth list` → `0 credentials`、`OPENAI_API_KEY`／`ANTHROPIC_API_KEY`は未設定。
+  codexは`codex login`（browser OAuth）か`--with-api-key`／`--with-access-token`
+  （stdinから秘密を読む）、opencodeは`opencode auth login`（対話選択＋OAuth）を要する。
+  いずれもownerのsubscription identityそのものであり、**agentが代行できる作業ではない**
+  （手作業の押し付けではなく、identityの境界である）。
+  → V2-027（fixture相手のadapter完成）は認証不要で着手可能。V2-028（実3 provider）は
+  着手時に`external-unavailable: codex and opencode provider credentials; needs: owner
+  subscription login`へ遷移させる。`devbox.json`には入れない（Provider CLIは
   `devbox run --pure check`の実行pathに乗らず、lock変更は23 componentのevidence keyを
   全滅させるだけである）。再現性はenrollment時のCLI path／version観測、
   `docs/operations/`のprovider runbook、evidenceへのversion記録で担保する。
+  **capability宣言のprovidersからcodex／opencodeを削って昇格を通してはならない**
+  （契約の実質的弱体化になる）。
 - 開発機に`gcloud`が無く、`devbox.json`にも含まれない。`~/.config/gcloud`には
   旧credential（`credentials.db`／`access_tokens.db`／`legacy_credentials`）と
   account・projectを持つ`config_default`が残っているが、**ADCもbinaryも無いため
   観測経路にならない**。既存の既定projectは空である保証がなく、
   「clean projectへapply」というM2完了条件を崩すため**M2 liveの既定候補にしない**。
   → V2-014は`external-unavailable`のまま。観測とapplyはGitHub Actions＋WIF経由とする。
-- **2台目の実機が無い**（`java`も不在）。→ V2-031（M7 live）は着手時に
-  `external-unavailable`見込み。
+- **2台目の実機が無い**（`java`も不在）。ただしM7の完了条件は「独立した2つの
+  Runner実行実体」へ改定済みであり、V2-046がrootless user+mount namespaceの
+  利用可能性を実測している。→ V2-031はcontainerではなくnamespaceで満たす経路を
+  第一候補とし、それが不能と実測できた場合にのみ`external-unavailable`とする。
 
 これらはブロック要因の事前記録であり、担当taskが着手時に自ら再確認して
 `blocked`＋`block_reason: external-unavailable:...`へ遷移させる。本文書は
@@ -382,11 +397,46 @@ revisionはupstream repositoryに存在しない。`.github/workflows/ci.yml`が
 記録するのみで、この文書の担当taskでは修正しない。修正はM2の設計・実装を担う
 V2-012（設計）とV2-013（実装）の責務である。
 
-## 11. 次の安全な1アクション
+## 11. 現在地と残作業の切り分け（2026-08-25）
 
-M0 gate（V2-006）はpassedで記録済みである。次はV2-010（M1、luna）とV2-012（M2設計、
-terra）の並列着手であり、両者はV2-006だけに依存する。critical path上はV2-010が先で、
-V2-010のcompleteが枯渇したV2-007をsupersededに転じさせてM1 gate（V2-011）のG4を解く。
+passed済みgate: **M0・M1・M2・M4**。M3はliveの実行が着地しており、gate（V2-018）は
+V2-045待ちである。
+
+残作業を「人の介在が要るか」で切ると次の3群になる。
+
+**群A: 介在不要（agentだけで完遂できる）**
+
+| task | 内容 | 直前依存 |
+|---|---|---|
+| V2-045 | component依存DAGの実態是正と`evidenceKey`の依存面被覆 | 済 |
+| V2-018 | M3 gate判定 | V2-045 |
+| V2-022 | M5 dogfood（`preview-local`で12 capabilityを実行） | 済 |
+| V2-026 | M5 gate判定 | V2-022 |
+| V2-027 | Claude／opencode adapter・account pool・quota・breakerをfixture相手に完成 | V2-018 |
+| V2-030 | M7 local（multi-Runner／multi-Repository scheduling） | 済 |
+| V2-033 | M8設計（署名bundle・Bootstrapper・schema 4段移行・GC・rollback窓） | V2-026 |
+| V2-034 | M8実装（local closure） | V2-033 |
+| V2-058 | orphanの発生源を封じる（reclaim transaction内でterminal化） | 済 |
+| V2-059 | pause modeの製品定義を実測へ合わせる | 済 |
+| V2-062 | 使用量台帳が守る範囲の境界を明記 | 済 |
+
+**群B: ownerのidentityが要る（作業の押し付けではなく境界）**
+
+- **V2-028**（M6 live）。codexとopencodeのCLIは§9のとおり導入済みで非対話実行できるが、
+  未認証である。`codex login` と `opencode auth login` はownerのsubscription identityを
+  使う操作であり、agentは代行できない。認証が済めばV2-028は介在不要に転じる。
+- **V2-029**（M6 gate）はV2-028待ち。**V2-031／V2-032**（M7 live／gate）はV2-029待ち。
+  **V2-035／V2-036**（M8 live／gate）はV2-032待ち。つまり1回の認証がM6〜M8のliveを解く。
+
+**群C: GCP projectが要る**
+
+- **V2-014**（M2 live apply）と**V2-054**（D1初回deploy gate）。ownerが後回しと決めている。
+- **V2-038／V2-039**（M9）はV2-054に依存するため、GCPが入るまで到達しない。
+
+したがって「人の介在が不要なv2作業の完遂」の到達点は、**群Aの11 taskを全て完了させ、
+M3とM5のgateをpassedにし、M6のfixture半分（V2-027）とM7のlocal半分（V2-030）と
+M8のlocal実装（V2-034）まで積む**ことである。群B・群Cは待ちであることを台帳の
+`block_reason`で明示する。
 
 gate対象taskのWork Orderには、次を必ずacceptanceとして書く。「testが通った」ではなく
 「evidenceがindexに登録され台帳testが緑」を完了の定義とすること、evidenceの`task_id`を

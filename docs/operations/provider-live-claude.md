@@ -54,3 +54,12 @@ ledger は承認済み record の `limits.ledger_path` にあり、本タスク�
 
 - 対応: **`subject_digest` を新しい値に書き換えて辻褄を合わせてはならない。**
 - 正しい対応: owner に新しい work order の sha256 に対する承認を依頼し、新しい `approval` block を持つ record を（必要なら新しい `id` で）発行する。
+
+## 台帳が守る範囲の境界（記録されるのは Loop 自身の実行経路だけ）
+
+台帳（`internal/runner.CostLedger`）が entries を残せるのは、invocation が `SupervisedInvocationRunner`（＝ Loop 自身の実行経路）を通り、`CostLedger.Reserve` を経由した場合に限る。この境界の外で何が起きても、台帳はそれを一切観測しない。
+
+- **operator や agent が shell から直接 `claude` を手で実行した分は、台帳には一切現れない。** 台帳の `entries[]` の合計が表しているのは「Loop がこの ledger を通じて使った量」であり、「この machine で `claude` を使った総量」ではない。両者を同一視してはならない。
+- したがって、subscription の枠の実際の残量を知りたい場合、この台帳を見ても分からない。台帳はそのための代替にはならず、Provider 側の使用量表示を直接確認する必要がある。
+- `halted` フラグや `max_invocations` / `max_total_cost_usd` といった暴走検知のしきい値も、同じ境界の内側でしか機能しない。Loop の実行経路を通らずに動くループ（人や別プロセスが `claude` を直接繰り返し呼ぶ場合など）を、この台帳は検知することも止めることもできない。
+- 具体例: V2-017 の実装時、ハーネス配線前の検証として bash 経由で `claude` CLI に対し2回（HOME/PATH 最小構成の確認、各 約$0.08相当）、加えて到達不能 URL への挙動確認を4回（いずれも API 到達前に hang したため $0）、計6回の invocation が実行されたことが実装者本人により開示されている。これらは `CostLedger.Reserve` を経由していないため、**台帳には一切記録されていない**。台帳に残っているのは、ハーネス配線後に `CostLedger` 経由で実行された8 invocation・11 entry のみである。
