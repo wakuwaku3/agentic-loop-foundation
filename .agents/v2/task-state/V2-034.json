@@ -3,7 +3,7 @@
   "id": "ts-v2-034",
   "kind": "canonical-task-state",
   "task_id": "V2-034",
-  "status": "blocked",
+  "status": "queued",
   "dependencies": [
     "V2-033",
     "V2-070"
@@ -25,7 +25,6 @@
   "output_hash": "5ae7f34491c7a7808014855e52c5a6662245cc05da22b5f46e2fb87706a00e75",
   "owner": "luna",
   "next_owner": "luna",
-  "block_reason": "V2-070",
   "retry_budget": {
     "max_attempts": 2,
     "attempts_used": 0,
@@ -56,6 +55,30 @@
         "remaining": 2
       },
       "reason": "enqueued by Sol for the M8 local closure"
+    },
+    {
+      "sequence": 2,
+      "at": "2026-08-25T07:50:00Z",
+      "from_status": "blocked",
+      "to_status": "queued",
+      "actor": "sol",
+      "input_refs": [
+        "V2-034",
+        "V2-033"
+      ],
+      "input_hash": "25f3370783cad402f14b1fd38b5c368cb9575e83d7f6c5a809c638e661c009e7",
+      "output_refs": [
+        "V2-034"
+      ],
+      "output_hash": "5ae7f34491c7a7808014855e52c5a6662245cc05da22b5f46e2fb87706a00e75",
+      "owner": "luna",
+      "next_owner": "luna",
+      "retry_budget": {
+        "max_attempts": 2,
+        "attempts_used": 0,
+        "remaining": 2
+      },
+      "reason": "every task this one depends on is complete, so the block has cleared"
     }
   ]
 }
