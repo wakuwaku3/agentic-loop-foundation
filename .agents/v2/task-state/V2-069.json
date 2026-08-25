@@ -6,7 +6,7 @@
   "status": "blocked",
   "dependencies": [
     "V2-016",
-    "V2-066"
+    "V2-071"
   ],
   "outcome": "Let the Control Plane know which version each Runner is actually running, so the rule that keeps two machines on compatible schemas has something real to read.",
   "non_goals": [
@@ -82,5 +82,5 @@
       "reason": "the surface tasks all widen the same six files, so they run one at a time, each branching from the tip the previous one landed on; the order was revised so that the version report lands right after the release surface and the capture time lands right before the scheduler wiring that consumes it, which avoids shipping a snapshot builder whose every candidate carries a zero capture time"
     }
   ],
-  "block_reason": "V2-066"
+  "block_reason": "V2-071"
 }
