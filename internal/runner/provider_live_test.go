@@ -22,15 +22,21 @@ import (
 )
 
 // liveRecordRelPath is the approved provider-preflight record's path
-// relative to the repository root (dp-v2-017 B1). It names V2-063's
+// relative to the repository root (dp-v2-017 B1). It names V2-075's
 // re-observation record, which carries its own limits.ledger_path: the gate
 // therefore admits this suite against a ledger of its own and never spends,
-// or exhausts, the headroom of the record V2-017 was first exercised under
-// (whose bytes are unchanged). liveTaskID must stay equal to that record's
-// task_id, because CostLedger.Reserve refuses a ledger whose recorded
-// task_id disagrees with the run's.
-const liveRecordRelPath = ".agents/v2/provider-preflight/V2-063-provider-live-claude-refresh.json"
-const liveTaskID = "V2-063"
+// or exhausts, the headroom of either record this suite was exercised under
+// before (V2-017's and V2-063's bytes are both unchanged, and V2-063's
+// ledger stands at 11 of its 12 invocations). liveTaskID must stay equal to
+// that record's task_id, because CostLedger.Reserve refuses a ledger whose
+// recorded task_id disagrees with the run's.
+//
+// These two constants are inside the runner component's key closure and are
+// therefore the only part of the exercised file set a re-observation task
+// may touch; the edit must land before the exercise is observed and nothing
+// in that set may be edited afterwards (v2-task-dag.md section 4, G6b).
+const liveRecordRelPath = ".agents/v2/provider-preflight/V2-075-provider-live-claude-rebind.json"
+const liveTaskID = "V2-075"
 const liveRepositoryID = "agentic-loop-foundation"
 
 // requireLiveProvider is dp-v2-017 d11's three-condition gate. Every live
