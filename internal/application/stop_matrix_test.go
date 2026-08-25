@@ -42,6 +42,26 @@ const (
 
 var stopMatrixKinds = []string{kindCapture, kindClaim, kindCheckpoint, kindAcceptResult, kindIntegration, kindPromotion, kindPreview, kindExternal}
 
+// wantStopModeAllowedCounts is acceptance A2's named table: the number of
+// stopMatrixKinds cells this test measures as allowed under each control
+// mode, and their total. These are not copied from any prior evidence
+// prose (V2-019's a12 summary records pause-intake=2/8 and a total of
+// 13/56, which is wrong -- see dp-v2-059 d3): they are the values
+// TestStopModeByKindMatrix itself computes and asserts below, and
+// docs/product/definition.md section 7 cites this test by name for
+// exactly these counts.
+var wantStopModeAllowedCounts = map[domain.ControlMode]int{
+	domain.ControlAllow:         8,
+	domain.ControlPauseIntake:   1,
+	domain.ControlPauseClaim:    2,
+	domain.ControlGracefulStop:  1,
+	domain.ControlImmediateStop: 0,
+	domain.ControlEmergencyStop: 0,
+	domain.ControlCancel:        0,
+}
+
+const wantStopModeAllowedTotal = 12
+
 // stopMatrixFixture builds one fresh Service+store per mode under test.
 // incA is always claimed and started under ControlAllow, before any Control
 // Intent is ever set: Claim and AcceptResult both internally construct a
@@ -259,10 +279,12 @@ func permitAllowedTable(mode domain.ControlMode, kind domain.PermitKind) bool {
 // this task, so it is reported here rather than changed.
 func TestStopModeByKindMatrix(t *testing.T) {
 	total := 0
+	sumAllowed := 0
 	gracefulStopAllowedKinds := map[string]bool{}
 	for _, mode := range stopMatrixModes {
 		fx := buildStopMatrixFixture(t, mode)
 		effectEmittingAllowed := mode == domain.ControlAllow
+		modeAllowed := 0
 
 		for _, kind := range stopMatrixKinds {
 			total++
@@ -328,12 +350,24 @@ func TestStopModeByKindMatrix(t *testing.T) {
 			if mode == domain.ControlGracefulStop && allowed {
 				gracefulStopAllowedKinds[kind] = true
 			}
+
+			if allowed {
+				modeAllowed++
+			}
 		}
+
+		if want := wantStopModeAllowedCounts[mode]; modeAllowed != want {
+			t.Fatalf("mode=%s allowed cells=%d, want %d", mode, modeAllowed, want)
+		}
+		sumAllowed += modeAllowed
 	}
 	if total != wantStopMatrixCells {
 		t.Fatalf("total cells=%d, want %d", total, wantStopMatrixCells)
 	}
 	if len(gracefulStopAllowedKinds) != 1 || !gracefulStopAllowedKinds[kindCheckpoint] {
 		t.Fatalf("graceful-stop allowed kinds=%#v, want exactly {checkpoint}", gracefulStopAllowedKinds)
+	}
+	if sumAllowed != wantStopModeAllowedTotal {
+		t.Fatalf("total allowed cells=%d, want %d", sumAllowed, wantStopModeAllowedTotal)
 	}
 }

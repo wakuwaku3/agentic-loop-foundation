@@ -139,13 +139,27 @@ RequirementとPRは1対1である必要がない。ループは大きなRequirem
 
 最低限、次の制御を提供する。
 
-- **pause intake**: 新しいRequirementの受付またはqueue投入を止める
-- **pause claim**: 新しい仕事のclaimを止め、実行中の仕事は定義済みの境界まで進める
+- **pause intake**: 新しいRequirementの受付またはqueue投入を止める。allow以外のmodeであるため、実行中の仕事に残る操作はcheckpointの保存だけになる
+- **pause claim**: 新しい仕事のclaimを止める。実行中の仕事が進める「定義済みの境界」はcheckpointであり、結果の受理や外部副作用の確定はできない
 - **graceful stop**: 新しい副作用を開始せず、checkpointを保存して安全に停止する
 - **immediate stop**: 実行中processを終了し、leaseを失効させ、外部副作用が残っていないかを確認する
 - **resume**: 保存したcheckpointと観測済みの外部状態から安全に再開する
 - **cancel requirement**: 指定したRequirementの以後の処理を止める
 - **emergency stop**: 全repository、全worker、全versionの新規実行を一括停止する
+
+pauseはmode名が示す入口だけを閉じる制御ではない。allow以外のどのmodeでも、
+durableな副作用を伴うauthoritative effectは一切構成されない
+（effectの唯一の構成経路が、current effective modeがallowであることを要求する）。
+したがってpause intake／pause claimの下でも、claim、実行結果の受理、
+outboxのintegration／promotion／preview-deploy／external-effectはすべて拒否される。
+実測は7 mode×8 kind＝56 cellのmatrixで確認しており、許可されるcellはallow=8、
+pause-claim=2（Requirement受付とcheckpoint）、
+pause-intake=1（checkpointのみ）、
+graceful-stop=1（checkpointのみ）、
+immediate stop／emergency stop／cancel=0、合計12である。
+この閉包はM1 gateがinvariant 2として証明した設計であり、
+pauseを「新規受付だけを止める弱い制御」と読むことはできない。
+このcell数はinternal/applicationのTestStopModeByKindMatrixが検証している。
 
 停止commandの受付だけを成功とみなさない。対象workerのack、process終了、lease解放または失効、
 新規副作用の不在まで観測して初めて停止完了とする。到達不能なrunnerがある場合も、期限切れleaseと
