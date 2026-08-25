@@ -1,0 +1,199 @@
+{
+ "schema_version": "v1",
+ "id": "ev-v2-076-m3-gate",
+ "kind": "evidence",
+ "created_at": "2026-08-25T04:45:00Z",
+ "correlation_id": "v2-076-m3-gate",
+ "task_id": "V2-076",
+ "component": "m3-gate",
+ "evidence_key": "56fbc4ac01842eb347bffb378f883189d6b799bf",
+ "result": "passed",
+ "checks": [
+  {
+   "name": "evidence-key-declaration",
+   "status": "passed",
+   "argv": [
+    "git",
+    "rev-parse",
+    "HEAD"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 600,
+   "summary": "This is a gate judgment record, not a component record; m3-gate appears in no component list. Its declared evidence_key derivation is the judgment commit itself: 56fbc4ac01842eb347bffb378f883189d6b799bf. Every measurement below was taken at that commit on a clean tracked tree, in the v2-task-076 worktree. This judgment is V2-076, the repair of the failed V2-018 judgment, made under the G6 revision of 2026-08-25 in docs/operations/v2-task-dag.md section 4, which was read in full together with sections 5, 6, 9.1, roadmap.md M3 and release-contract.md section 3 before any measurement. This gate started no Provider CLI and made zero live invocations; nothing in this judgment consumes the exhausted V2-075 ledger."
+  },
+  {
+   "name": "g1-milestone-tasks-complete",
+   "status": "passed",
+   "argv": [
+    "sh",
+    "-c",
+    "python3 -c \"import json,glob; [print(json.load(open(p))['task_id'], json.load(open(p))['status']) for p in sorted(glob.glob('.agents/v2/task-state/*.json'))]\""
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 600,
+   "summary": "Every task the DAG document assigns to M3 is status complete, re-read from the ledger at the judgment commit: V2-016, V2-017, the remediation set V2-044, V2-045, V2-047, V2-048, V2-050, V2-055, V2-056, the live re-observation V2-063, and the live re-binding V2-075. No M3-scoped implementation or design task is queued, running, blocked or failed. The failed V2-018 is the previous gate judgment this task repairs, not an implementation task of the milestone; its settlement is addressed under G4 below. The other non-complete tasks in the ledger (V2-014, V2-022 chain, V2-027 chain, V2-034, V2-054, V2-065 through V2-074, V2-076 itself) are M5-and-later or externally blocked work outside M3 scope."
+  },
+  {
+   "name": "g2-record-integrity-and-ground-selection",
+   "status": "passed",
+   "argv": [
+    "sh",
+    "-c",
+    "python3 - <<'EOF'\nimport json, hashlib\nidx=json.load(open('.agents/v2/evidence/index.json'))\nmis=[e['id'] for e in idx['entries'] if hashlib.sha256(open(e['path'],'rb').read()).hexdigest()!=e['evidence_hash']]\nprint('mismatches:', mis, 'entries:', len(idx['entries']))\nEOF"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 600,
+   "summary": "Output: mismatches: [] entries: 100. All 100 index entries verified at the judgment commit: each file's sha256 equals its entry's evidence_hash, no exception, and the set of *.json files directly under .agents/v2/evidence/ equals exactly the set of paths the index names. The grounds this gate selects all carry result passed: ev-v2-016-runner, ev-v2-075-provider-live-claude-rebind, ev-v2-047-provider-preflight-contract, ev-v2-048-execution-identifier, ev-v2-050-runaway-guard, and the 23 ev-v2-018 component re-issues. ev-v2-017-provider-live-claude carries result partial and cannot be a gate ground under G2. Between the two passed live records, this gate grounds M3live on ev-v2-075-provider-live-claude-rebind and not on ev-v2-063-provider-live-claude-refresh, for a reason of rule rather than of taste: under the revised G6b a live record satisfies freshness only through a recorded observation commit plus a measured intersection against a published exercised file set, and ev-v2-063 publishes no file set, records no measurable observation commit on the judged history (V2-018 established that its declared key corresponds to no commit on the branch, because the exercised file was edited after its final measurement), and so cannot satisfy G6b without the very argument-instead-of-measurement the rule forbids. ev-v2-075 is also the later observation of the identical nine-subtest scope, so no coverage is lost by the choice."
+  },
+  {
+   "name": "g3-environment-grade",
+   "status": "passed",
+   "argv": [
+    "sh",
+    "-c",
+    "grep -n 'preview-local' docs/architecture/release-contract.md docs/operations/v2-task-dag.md | head"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 600,
+   "summary": "M3's live completion conditions concern the Loop's own observable behaviour driven through the real representative Provider CLI, so environment class preview-local is the correct grade under release-contract.md section 3 and rule G3 item 2, and is not a substitute. ev-v2-075 records the class (preview-local), machine identifier D18061, kernel identifier Linux 6.18.33.2-microsoft-standard-WSL2, the CLI's absolute path and resolved version 2.1.241 (Claude Code), the Go toolchain go1.25.0, and a Provider-issued session identifier for every invocation that reached the API. The fake-Provider journey in ev-v2-016-runner is counted only toward local-closure conditions, never as live. Error-taxonomy breadth across three Providers remains M6 scope per section 5; V2-075's I7 transport failure is the only real error proof M3 accepts and it executed for real."
+  },
+  {
+   "name": "g4-no-unsettled-failed-dependency",
+   "status": "passed",
+   "argv": [
+    "sh",
+    "-c",
+    "python3 -c \"import json; d=json.load(open('.agents/v2/task-state/V2-076.json')); print(d['dependencies'], d['repair_of'])\""
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 600,
+   "summary": "V2-076's sole dependency V2-075 is complete. The ledger's four failed tasks are settled or settling under the section 6 rule: V2-023 and V2-024 through complete V2-025 whose repair_of names V2-024, itself carrying the chain to V2-007 and V2-023; V2-007 because complete V2-010's input_refs name V2-007 (re-read at the judgment commit: input_refs V2-010, V2-006, V2-007, wo-v2-010); and V2-018 becomes superseded by this very task, whose repair_of and input_refs both name V2-018, at the moment V2-076 completes, the same self-settling shape every repair gate necessarily has. No queued or running task depends on any failed task."
+  },
+  {
+   "name": "g5-transient-failures-disclosed-not-overwritten",
+   "status": "passed",
+   "argv": [
+    "sh",
+    "-c",
+    "python3 -c \"import json; d=json.load(open('/home/takushi/.local/state/agentic-loop/v2/V2-075-provider-live-claude-rebind-cost.json')); e=d['entries'] if 'entries' in d else d; print(len(e))\""
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 600,
+   "summary": "V2-075 disclosed that three of its twelve invocations were consumed by provider-side transient failures: the first attempt at I1 (ledger sequence 1) and the two entries of the first attempt at the I5/I6 phase (sequences 6 and 7), one more such phase than V2-063 saw. This gate re-read the ledger file on disk and confirmed the disclosure against the physical record: all twelve entries are present, sequence 1 settled with no session id, sequences 6 and 9 are the reserved never-settled sigkill entries, sequence 7 settled with no session id, and no entry was erased or rewritten. Ruling under G5: these are not flaky results overwritten by retry. In each failed attempt the CLI returned a parsed non-success with zero usage counts and no session id, the same shape the deliberately unreachable I7 probe produces, so the behaviour under verification was never observed to vary; the probe failed to take place, the re-run changed not one byte of source, both attempts stand disclosed in the record and in the ledger, and every one of the nine PASS verdicts comes from an attempt that succeeded. The exhaustion itself (invocation_count 12 of max 12, halted false, settled 0.4441 USD of 8.00) is a fact about future headroom, not a defect in this evidence: Reserve's guard admitted the twelfth reservation lawfully, thresholds were never raised, and the runbook now instructs the next operator to obtain a new approved record. The rising transient rate (one phase in V2-063, two in V2-075) is noted for the coordinator as an observation, not a gate condition."
+  },
+  {
+   "name": "g7-no-skip-counted",
+   "status": "passed",
+   "argv": [
+    "sh",
+    "-c",
+    "grep -c 'skip' .agents/v2/evidence/V2-075-provider-live-claude-rebind.json"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 600,
+   "summary": "No skipped check is counted as a pass anywhere in the grounds. ev-v2-075's gate probe is counted only as proof the gate admits the record at zero cost ('no tests to run' is not treated as a test result); caseB runs in the same process as I1 precisely because alone it would skip, and its PASS came from execution; the ungated unit-test run, in which the whole live suite skips by design, is counted only as the re-run of the structural scans it actually executed. Every live phase carries execution identifiers and, where the API was reached, a Provider-issued session id, so the suite demonstrably ran. V2-058's two historical A8 skips remain closed by real execution in the V2-063 and V2-075 observations of the identical assertions."
+  },
+  {
+   "name": "g6a-classification-and-re-execution-at-the-judgment-commit",
+   "status": "passed",
+   "argv": [
+    "sh",
+    "-c",
+    "devbox run --pure -- make check; devbox run --pure -- make component-docs; devbox run --pure -- make component-infra; devbox run --pure -- make component-tooling"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 600,
+   "summary": "Classification of every ground by what re-executes its checks, as instruction and rule G6a require. G6a (re-executed by make check at the judgment commit): ev-v2-016-runner (go test over runner, provider, contracts, race runs, all inside the test target), ev-v2-047-provider-preflight-contract, ev-v2-048-execution-identifier and ev-v2-050-runaway-guard (contracts, release and docs-guard tests, gofmt via the format target), and 20 of the 23 ev-v2-018 component re-issues, whose component targets are go test invocations strictly contained in make check's test target, plus store-firestore which make check runs explicitly under the emulator. Their freshness basis is the measured green: make check at judgment commit 56fbc4ac01842eb347bffb378f883189d6b799bf on a clean tree exited 0 with verdicts 'ok' for all 17 tested packages and no FAIL line, gitleaks '460 commits scanned' then 'no leaks found', and 'workflow-pins: 3 unique (owner/repo, version) -> sha pins, no disagreement'. Three component targets are not inside make check, so this gate re-executed each directly at the judgment commit rather than trusting any stored record: make component-docs exited 0 silently (its check is a negative rg scan), make component-infra printed 'Success! The configuration is valid.' from tofu validate after the policy script, and make component-tooling is the vacuous @true, recorded as vacuous by design rather than as a verification. These re-runs add no evidence entry, per the witness re-run provision of G6. The previous judgment's 23 ev-v2-018 component re-issues are NOT reused as freshness claims: under the revised G6a per-component key equality is no longer a pass condition, because the claims those records carry are re-proven at this commit by the runs just described; the records remain G2 grounds of record integrity only. No re-issue of the 23 components is performed, because a re-issue would add provenance, not freshness, and the rule places freshness in the re-execution this gate paid for itself. Checks inside ground records that captured one-off historical facts (diff scopes, directory listings) are records of past observations, not re-executable freshness claims, and are not counted as such."
+  },
+  {
+   "name": "g6b-observation-commit-recorded-and-inspectable",
+   "status": "passed",
+   "argv": [
+    "sh",
+    "-c",
+    "git cat-file -t d9f98ae573e617aafd82d87fa1c35f9bd6e26ffb; git show --stat d9f98ae573e617aafd82d87fa1c35f9bd6e26ffb | tail -5"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 600,
+   "summary": "G6b requirement one: ev-v2-075 records observation commit d9f98ae573e617aafd82d87fa1c35f9bd6e26ffb and the published set artifact repeats it as observed_commit. The commit object exists in the repository and was inspected: it contains exactly the new preflight record and the two-constant repoint of internal/runner/provider_live_test.go, matching the record's account, and it predates every file this gate's diff measurement sees. One fact found by this gate and weighed rather than hidden: that commit, and the two later commits the record names, are reachable from no ref, because V2-075's branch was rebuilt with git update-ref and landed on main as a squashed commit. Section 9.1 explicitly accepts that rewrite, and this gate's own measurements confirm no content was lost: the tree diff from the observation commit to the judgment commit names no exercised file, and the runner component key at the judgment commit is byte-identical to the key measured at the observation commit, so the exercised bytes on the judged branch are exactly the observed bytes. The residual risk is durability, not integrity: an unreachable object can be pruned by a future gc, after which the G6b diff would become unmeasurable and re-observation would be forced. That is recorded as a remediation proposal, not as a defect of this evidence, because the measurement was performed now, against the existing object, and is transcribed below."
+  },
+  {
+   "name": "g6b-set-recomputed-and-matches-the-published-artifact",
+   "status": "passed",
+   "argv": [
+    "sh",
+    "-c",
+    "set -eu; S=$(git rev-parse --show-toplevel); devbox run --pure -- go list -deps -test -f '{{if .Module}}{{if eq .Module.Path \"github.com/takushi/agentic-loop-foundation/v2\"}}{{range .GoFiles}}{{$.Dir}}/{{.}}{{\"\\n\"}}{{end}}{{range .CgoFiles}}{{$.Dir}}/{{.}}{{\"\\n\"}}{{end}}{{range .EmbedFiles}}{{$.Dir}}/{{.}}{{\"\\n\"}}{{end}}{{end}}{{end}}' ./internal/runner | sed \"s|^$S/||\" | LC_ALL=C sort -u > /tmp/v2-076-closure.raw; git ls-files | LC_ALL=C sort -u > /tmp/v2-076-tracked.txt; comm -12 /tmp/v2-076-closure.raw /tmp/v2-076-tracked.txt"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 600,
+   "summary": "The mechanism itself was inspected, not trusted. The published artifact .agents/v2/evidence/artifacts/V2-075-live-exercise-files.json has sha256 d540fc5d05986f4d833123900d2a318931fdaa436fce93ebbf454f456e978f1b matching the record's artifact_refs entry, reads back as 76 repository-relative paths in three groups (compiled 67, runtime_read 5, toolchain_pins 4), and carries the acquisition argv. This gate re-ran that argv verbatim at the judgment commit: the recomputed compiled group is 67 paths and is identical, path for path, to the published compiled group (comparison printed 'identical: True'). Re-running at the judgment commit is the stronger form of the artifact's own claim, since the tree diff below shows no compiled file changed between observation and judgment, and it confirms the acquisition is reproducible by a judge who did not produce it. The preflight record the exercise read at runtime also verifies: sha256 762cb86de36216f4e39b8085ca60bc518dfbbe19ec976f6ab3c2270f1ea778d8 as declared."
+  },
+  {
+   "name": "g6b-intersection-measured-empty-by-this-gate",
+   "status": "passed",
+   "argv": [
+    "sh",
+    "-c",
+    "set -eu; OBS=d9f98ae573e617aafd82d87fa1c35f9bd6e26ffb; JUDGE=\"$1\"; python3 -c \"import json;print(chr(10).join(json.load(open('.agents/v2/evidence/artifacts/V2-075-live-exercise-files.json'))['paths']))\" | LC_ALL=C sort -u > /tmp/v2-075-set.txt; git diff --name-only \"$OBS\" \"$JUDGE\" | LC_ALL=C sort -u > /tmp/v2-075-diff.txt; comm -12 /tmp/v2-075-set.txt /tmp/v2-075-diff.txt; printf \"intersection_lines=%s\\n\" \"$(comm -12 /tmp/v2-075-set.txt /tmp/v2-075-diff.txt | wc -l)\"",
+    "sh",
+    "56fbc4ac01842eb347bffb378f883189d6b799bf"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 600,
+   "summary": "G6b requirement two, measured by this gate with the artifact's published argv run verbatim, passing the judgment commit as the positional argument, and not by reusing any number V2-075 reported. Output: no path lines, then 'intersection_lines=0'. The diff from the observation commit to the judgment commit names exactly seven files, all under .agents/v2/ and docs/operations/ (this record's predecessor set: the V2-075 evidence record, the published set artifact, the evidence index, the V2-075 and V2-076 task states, the provider runbook, and the DAG document), and none of the seven is among the 76 exercised paths. internal/runner/provider_live_test.go does not appear in the tree diff, which is the direct proof that the exercised bytes at the judgment commit are the observed bytes, squash landing notwithstanding. The intersection being empty, the live observation is fresh under G6b at this judgment commit; had even one line printed, this gate would have failed regardless of the nature of the change."
+  },
+  {
+   "name": "g6b-positive-controls-run-by-this-gate",
+   "status": "passed",
+   "argv": [
+    "sh",
+    "-c",
+    "printf 'internal/runner/provider_live_test.go\\ndocs/operations/v2-task-dag.md\\n.agents/v2/evidence/index.json\\n' | LC_ALL=C sort -u > /tmp/v2-076-fict.txt; comm -12 /tmp/v2-075-set.txt /tmp/v2-076-fict.txt | wc -l; printf 'devbox.lock\\nREADME.md\\n' | LC_ALL=C sort -u > /tmp/v2-076-fict2.txt; comm -12 /tmp/v2-075-set.txt /tmp/v2-076-fict2.txt | wc -l"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 600,
+   "summary": "The measurement discriminates, shown by this gate's own controls against fictional diff lists, no tracked file edited. A fictional diff naming internal/runner/provider_live_test.go alongside two non-exercised files produced exactly one intersection line, naming that file; a second fictional diff naming devbox.lock from the toolchain-pins group alongside README.md produced exactly one intersection line, naming devbox.lock. So a change to the exercise's own test file or to a toolchain pin would have been caught, and the empty result above is not vacuous."
+  },
+  {
+   "name": "g6-runner-key-identity-as-corroboration",
+   "status": "passed",
+   "argv": [
+    "devbox",
+    "run",
+    "--pure",
+    "--",
+    "make",
+    "evidence-keys"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 600,
+   "summary": "Recorded as corroboration, not as the freshness basis. make evidence-keys at the judgment commit prints runner 476d66b6d7db66b39a61ddb25c8b423e60c4bc693bb33ccc79a815a824fbabfe which is byte-identical to the evidence_key ev-v2-075 declares from the observation commit. So in this instance even the old per-component key rule would have been satisfied, because everything landed since the observation lives in .agents and docs, outside runner's key closure; the judgment nevertheless rests on the measured intersection, as the revised G6b directs, and the key identity serves as the independent confirmation the V2-075 record predicted a judge would find."
+  },
+  {
+   "name": "m3-completion-condition-mapping",
+   "status": "passed",
+   "argv": [
+    "sh",
+    "-c",
+    "sed -n '108,127p' docs/architecture/roadmap.md"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 600,
+   "summary": "All four roadmap M3 completion conditions map to passed checks in passed, fresh grounds. Condition 1, intake to Increment Artifact: ev-v2-016-runner a4-and-a12-journey-one and the full suite on the local closure, and ev-v2-075 i1-happy-journey against the real CLI ending in terminal domain.ExecutionSucceeded with a non-empty artifact digest. Condition 2, resume on a different Execution after a Runner crash: ev-v2-016-runner a5-crash-resume-digest-binding and a6-real-sigkill-durability locally, and ev-v2-075 i5-i6-crash-resume (real SIGKILL of the real claude child's process group, fresh Claim under a strictly greater fencing token, resumed to terminal success) plus caseb-reuses-i1-journal-zero-invocations (crash after journaling re-adopts the journaled result at zero cost). Condition 3, the representative Provider's real Preview capability: ev-v2-075 i1-happy-journey and i2-wire-and-identity with real usage counts, costs and session ids, with ev-v2-047 holding the representative_provider declaration of claude in the versioned capability declaration set. Condition 4, no credential in Control Plane, Work Packet or logs: ev-v2-075 i3-credential-isolation with its five executed sub-proofs and the delegated source scan re-run ungated, plus ev-v2-016 a10 and a11, plus the secrets target green inside this gate's own make check run. Every condition is thus backed by verification that was re-executed at this commit (G6a side) or re-observed and freshness-measured (G6b side); nothing is passed on an un-re-executed, un-re-observed claim."
+  },
+  {
+   "name": "gate-verdict",
+   "status": "passed",
+   "argv": [
+    "sh",
+    "-c",
+    "true"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 600,
+   "summary": "Verdict: the M3 gate passes at judgment commit 56fbc4ac01842eb347bffb378f883189d6b799bf. G1 through G5 and G7 are satisfied as measured above; G6a is satisfied by make check green at the judgment commit plus direct re-execution of the three component targets make check does not contain; G6b is satisfied for the single live ground ev-v2-075-provider-live-claude-rebind by the recorded observation commit and this gate's own empty-intersection measurement against the recomputed published set, with two positive controls proving the measurement non-vacuous. The revision of G6 was applied as a replacement, not a relaxation: the intersection was measured, not argued. Two disclosures from V2-075 were weighed and accepted: the three transient-failure invocations are preserved in the ledger and are not flaky overwrites, and the git update-ref rewrite lost no content, as proven by the tree diff and the key identity, leaving only an object-durability risk recorded as remediation. Remediation proposals for the coordinator, neither blocking this gate: first, anchor live observation commits under a durable ref (for example a local keep ref or tag created at observation time and named by the evidence record) so the G6b diff stays measurable against future gc, and anchor d9f98ae573e617aafd82d87fa1c35f9bd6e26ffb retroactively; second, track the provider-side transient failure rate across live exercises (one phase in V2-063, two in V2-075, identical zero-usage shape) and decide whether the suite should distinguish that shape from I7's induced transport failure in the ledger's purpose strings before the M6 multi-provider live work relies on the same machinery. This gate started no Provider CLI and made zero live invocations."
+  }
+ ],
+ "observed_at": "2026-08-25T04:45:00Z"
+}
