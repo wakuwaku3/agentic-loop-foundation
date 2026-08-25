@@ -7,11 +7,29 @@ import (
 	"fmt"
 	"sort"
 	"time"
+
+	"github.com/takushi/agentic-loop-foundation/v2/internal/domain"
 )
 
 const (
 	MaxCandidates         = 100
 	FailureStormThreshold = 3
+
+	// StarvationBoundTicks is the maximum number of Decide/Apply ticks a
+	// waiting, high-value Requirement in one Repository may go unassigned
+	// while a second Repository's failure-and-retry flood keeps consuming
+	// all runner capacity, once the waiting Requirement's
+	// domain.PriorityAssessment.StarvationRisk is being raised on each
+	// re-assessment (V2-030 / A5). It is derived from priority.go's
+	// documented weight table, not tuned to whatever the implementation
+	// happens to do: weightStarvationRisk (500) is the largest weight of
+	// all, so a handful of StarvationRisk increments is guaranteed to
+	// eventually close any single fixed competing factor; 5 gives
+	// starvation_test.go's specific scenario a one-tick margin over the
+	// tick on which it actually converges. See starvation_test.go for the
+	// worked numbers and the negative control that must NOT converge
+	// inside this same bound once the term is neutralised.
+	StarvationBoundTicks = 5
 )
 
 type RequirementStatus string
@@ -42,6 +60,14 @@ type Requirement struct {
 	Dependencies  []string
 	Status        RequirementStatus
 	Resources     []ResourceRequest
+
+	// Assessment is optional. When nil, Decide scores this candidate with
+	// the legacy scalar Priority/age formula, byte-identical to the
+	// pre-V2-030 scheduler. When set, Decide scores it with the
+	// multi-factor formula in priority.go instead, and
+	// Assessment.Executable == false excludes it from assignment
+	// altogether regardless of score.
+	Assessment *domain.PriorityAssessment
 }
 type Repository struct {
 	ID            string
@@ -72,6 +98,14 @@ type Snapshot struct {
 type Plan struct {
 	Assignments []Assignment
 	Claims      []Claim
+
+	// Decisions carries one auditable Decision record per candidate Decide
+	// considered, in the same order the sorted candidate ranking visited
+	// them (V2-030 / A4). Existing tests that compare Plan values by field
+	// (Assignments, Claims) are unaffected; nothing compares whole Plan
+	// values, which would turn this into a formatting assertion instead of
+	// a behavioural one.
+	Decisions []Decision
 }
 
 var (
@@ -118,59 +152,60 @@ func Decide(s Snapshot) (Plan, error) {
 	}
 	items := append([]Requirement(nil), s.Requirements...)
 	sort.SliceStable(items, func(i, j int) bool {
-		a, b := score(items[i], s.Now), score(items[j], s.Now)
+		a, b := scoreFn(items[i], s.Now), scoreFn(items[j], s.Now)
 		return a > b || (a == b && items[i].ID < items[j].ID)
 	})
 	plan := Plan{}
-	for _, q := range items {
-		if !eligible(q, done) || !repositoriesAvailable(q, repos, s.Now) || owned(q, s.Claims, plan.Claims) || resourceConflict(q, s.Claims, plan.Claims) {
-			continue
-		}
-		ri := chooseRunner(runners, providerActive, s.ProviderCapacity)
-		if ri < 0 {
-			continue
-		}
-		r := runners[ri]
-		for _, repo := range unique(q.RepositoryIDs) {
-			plan.Assignments = append(plan.Assignments, Assignment{q.ID, repo, r.ID, r.Provider, append([]ResourceRequest(nil), q.Resources...)})
-			for _, resource := range q.Resources {
-				claimRepository := repo
-				if resource.Global {
-					claimRepository = ""
+	for rank, q := range items {
+		reason, ready := decideReason(q, done, repos, s.Now, s.Claims, plan.Claims)
+		assigned := false
+		if ready {
+			if ri := chooseRunner(runners, providerActive, s.ProviderCapacity); ri < 0 {
+				reason = ReasonNoRunnerCapacity
+			} else {
+				r := runners[ri]
+				for _, repo := range unique(q.RepositoryIDs) {
+					plan.Assignments = append(plan.Assignments, Assignment{q.ID, repo, r.ID, r.Provider, append([]ResourceRequest(nil), q.Resources...)})
+					for _, resource := range q.Resources {
+						claimRepository := repo
+						if resource.Global {
+							claimRepository = ""
+						}
+						plan.Claims = append(plan.Claims, Claim{resource.Name, q.ID, claimRepository, resource.Mode})
+					}
 				}
-				plan.Claims = append(plan.Claims, Claim{resource.Name, q.ID, claimRepository, resource.Mode})
+				runners[ri].Active++
+				providerActive[r.Provider]++
+				assigned = true
 			}
 		}
-		runners[ri].Active++
-		providerActive[r.Provider]++
+		plan.Decisions = append(plan.Decisions, newDecision(q, s.Now, rank, assigned, reason))
 	}
 	return plan, nil
 }
-func score(q Requirement, now time.Time) int64 {
-	age := int64(now.Sub(q.CreatedAt).Seconds())
-	if age < 0 {
-		age = 0
-	}
-	p := q.Priority
-	if p < 0 {
-		p = 0
-	}
-	if p > 100 {
-		p = 100
-	}
-	return p*300 + age
-}
-func eligible(q Requirement, done map[string]bool) bool {
+
+// structurallyReady reports whether q is well-formed and in a schedulable
+// status on its own terms, independent of its dependencies, its
+// Repositories' health, existing Claims, or runner capacity: a non-empty ID,
+// Status == StatusReady, at least one RepositoryID, and every ResourceRequest
+// well-formed (non-empty name, Mode is Read or Write).
+func structurallyReady(q Requirement) bool {
 	if q.ID == "" || q.Status != StatusReady || len(unique(q.RepositoryIDs)) == 0 {
 		return false
 	}
-	for _, d := range q.Dependencies {
-		if !done[d] {
+	for _, r := range q.Resources {
+		if r.Name == "" || (r.Mode != Read && r.Mode != Write) {
 			return false
 		}
 	}
-	for _, r := range q.Resources {
-		if r.Name == "" || (r.Mode != Read && r.Mode != Write) {
+	return true
+}
+
+// dependenciesMet reports whether every one of q's Dependencies is
+// StatusCompleted.
+func dependenciesMet(q Requirement, done map[string]bool) bool {
+	for _, d := range q.Dependencies {
+		if !done[d] {
 			return false
 		}
 	}
