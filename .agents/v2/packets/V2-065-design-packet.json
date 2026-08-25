@@ -1,0 +1,106 @@
+{
+ "schema_version": "v1",
+ "id": "dp-v2-065",
+ "kind": "design-packet",
+ "created_at": "2026-08-25T02:10:00Z",
+ "correlation_id": "v2-065-human-input-surface",
+ "problem_brief_id": "pb-v2-065",
+ "decisions": [
+  {
+   "id": "d1",
+   "decision": "Two application commands, not one: RequestHumanInput (the Loop asks) and AnswerHumanInput (the owner answers). The task outcome names 'an application command', but cap-human-input-request declares '回答後は新しいRequirementを作らず元のRequirementが継続する' and its success condition requires '回答後に同じRequirementが再開する'. A single ask-only command leaves that half of the declaration unobservable, so the declaration, not the outcome sentence, sets the minimum.",
+   "rationale": "The declaration may not be weakened. Its observable_result has four question fields plus one resume claim; the resume claim is only observable if an answer path exists and is exercised. Measured: no application code calls domain.DecideRequirement at all (grep over internal/application returns zero hits), so these are the first two Requirement-transition commands in the application layer, and both exits already exist in the domain: RequirementNeedInput is allowed from framing/active/evaluating (internal/domain/model.go:468) and RequirementReadyCommand is allowed from framing/waiting/needs-input (model.go:453). Neither transition is changed."
+  },
+  {
+   "id": "d2",
+   "decision": "The question is stored in an application-owned side table keyed by Requirement id, written in the same transaction as the Requirement transition, through a new port RequirementNeedsInputRepository added to UnitOfWork. Nothing is added to domain.Requirement and internal/domain is not edited at all.",
+   "rationale": "Direct in-repo precedent: internal/application/ports.go's ControlRequestedByRepository exists for exactly this reason and says so in its comment -- domain.ControlIntent is immutable, proven-closed M1 surface, so who requested a revision is a side table rather than a new field. domain.Requirement carries the M1 closure proof (invariant 3's breadth-first fixpoint over DecideRequirement), so the question record must not ride on it. The record type is an application struct (application.HumanInputRequest), following OutboxItem/Event/QueueSummary, which are application types already crossing this port; that keeps the closed enums and the size bounds in the layer that owns the read model."
+  },
+  {
+   "id": "d3",
+   "decision": "The Requirement detail field is an optional pointer omitted entirely when no record exists, following V2-052's requestedByView precedent exactly: a Requirement with no side-table row (a legacy record, or one that was never asked) reads with the field absent, and the read model never synthesises a placeholder question from the status alone.",
+   "rationale": "Measured precedent: internal/application/readmodels.go's requestedByView returns nil for a value that was never recorded so the JSON omits requested_by rather than emitting an empty object, and TestLegacyRequirementWithoutRequestedByStillReads (internal/application/requested_by_test.go:116) holds that behaviour. The same shape is correct here for a stronger reason: a Requirement whose status is needs-input but whose question row is missing is a real, reportable inconsistency, and inventing a question text to fill the field would be a fabricated observation. Absent means absent."
+  },
+  {
+   "id": "d4",
+   "decision": "Every field the declaration names is carried explicitly, and the enumerable ones are closed vocabularies with asserted closure: reason_class in {destructive-irreversible, limit-change, ambiguous-requirement} (mechanically derived from the declaration's user_action: 破壊的・不可逆な判断 / 費用・権限上限の変更 / 要求の本質的な曖昧さ), options as a non-empty bounded list of {option_id, summary, impact} where impact is mandatory, and stopped_scope/continuing_scope as non-empty lists over a closed scope vocabulary.",
+   "rationale": "The declaration's four question fields map one-to-one: 'なぜ自律判断できないか' -> reason_class + reason; '何を決める必要があるか' -> question; '選択肢と影響' -> options[].summary + options[].impact, so an option without a stated impact is rejected rather than accepted with an empty string; '回答まで何が停止し何が継続できるか' -> stopped_scope + continuing_scope. Free text would let an asker satisfy the schema while saying nothing, and an open vocabulary would make d5's agreement assertion impossible. TestRequestedByActorTypeIsAClosedEnum is the precedent for proving a closed enum instead of documenting one."
+  },
+  {
+   "id": "d5",
+   "decision": "The declared stopped_scope is verified against the enforcement, not trusted as prose. The scope vocabulary entry that says new claims for this Requirement stop is only accepted if the same commit makes Service.Claim and Service.Renew refuse while the parent Requirement is in needs-input, and a test asserts the displayed scope value and the measured refusal agree.",
+   "rationale": "outcome_conditions.failure for this capability is '質問内容が表示されない' and the whole point of the field is that the owner can trust what it says. A stop scope that the system does not actually enforce is the same defect this task exists to repair, one level up: a declared observation with no implementation behind it."
+  },
+  {
+   "id": "d6",
+   "decision": "The claim guarantee is closed on the issuing side, and stated honestly: Claim refuses to issue a lease for an Increment whose parent Requirement is in needs-input, and Renew refuses to extend a lease for such an Increment, so no new claim is granted and no held claim is extended; a lease already held when the question is asked lapses at its existing ExpiresAt and is then handled by the existing expired-lease path. The ask does not revoke it.",
+   "rationale": "Measured: no domain transition can revoke or release an active lease early. ExpireLease (internal/domain/lease.go:85) refuses when at.Before(current.ExpiresAt) ('lease has not expired'), RotateLease only revokes the previous lease as a side effect of issuing a successor, and LeaseReleased/LeaseRevoked are constants no transition produces from the outside -- the same unreachable-constant drift release-local.md records as E3 for ReleaseStatus. internal/domain is prohibited here, so an early revoke is not available, and claiming 'a waiting Requirement holds no claim' as an instantaneous property would be an unimplementable claim. Claim already reads Increment.RequirementID (internal/domain/model.go Increment struct), and Renew resolves lease -> IncrementID -> Increment.RequirementID, so both guards are reachable with existing repositories."
+  },
+  {
+   "id": "d7",
+   "decision": "API routes follow the existing verb-suffix precedent: POST /v1/requirements/{requirement_id}:request-input (runner or scheduler caller) and POST /v1/requirements/{requirement_id}:answer-input (owner caller only). The read surface is the existing GET /v1/requirements/{requirement_id}, which is exactly the owner_surfaces entry the capability already declares, so contracts/release-contract/foundation-capabilities.json is not edited.",
+   "rationale": "internal/api/api.go already routes /v1/leases/{lease_id}:renew and /v1/executions/{execution_id}:start by prefix plus suffix in the POST switch's default branch, and contracts/openapi/openapi-v1.yaml declares both as literal path keys. Measured constraint on the declaration: TestFoundationReleaseContractBaseline (internal/contracts/release_contract_test.go:235) requires every owner_surfaces entry to be either /owner/ or a declared OpenAPI path, and cap-human-input-request declares /v1/requirements/{requirement_id}, which already exists. Adding the two new paths to openapi-v1.yaml is required because they are new literal path keys; changing the capability declaration is not required and is therefore not done."
+  },
+  {
+   "id": "d8",
+   "decision": "The ask evaluates no Permit and stages no outbox item; the answer evaluates domain.Permit with Kind PermitIntake against the installation target, exactly as Capture does. The seven-mode outcome of both commands is measured and recorded rather than assumed.",
+   "rationale": "Measured: domain.Permit is called from only six places in internal/application (service.go:337 process, 517 checkpoint, 635 capture/intake, 955 claim, 1145 the permit endpoint, 1300 effectOutbox, plus outbox.go:438), so Plan (service.go:670) and Prepare (service.go:762) already mutate canonical state with no Permit -- a permit-free canonical-state-only command has precedent. Asking a question only removes capability: it stops work and stages no external effect, so gating it behind a side-effect permit would make the system unable to record why it stopped precisely when a stop is in force. Resuming work is the opposite, and reusing PermitIntake means a pause-intake or any stop mode denies the answer for the same reason it denies Capture. Inventing a new PermitKind would require editing internal/domain and is refused."
+  },
+  {
+   "id": "d9",
+   "decision": "Nothing in this task answers on the owner's behalf and no field makes that possible: there is no default_option, no expiry-triggered auto-selection and no timeout that picks an option. The answer requires an authenticated owner caller, an option_id drawn from the recorded option set, and the Requirement's expected version; a rejected answer leaves the Requirement status and the stored question byte-identical.",
+   "rationale": "non_goals item 2 and outcome_conditions.rollback ('未回答のまま処理を安全に待機させ、Requirementの状態を変更しない'). The absence of a default option is a design property that must be asserted, not just documented: a test drives every rejection path (non-owner caller, unknown option_id, stale expected version, already-answered) and asserts the stored record and the Requirement version are unchanged."
+  },
+  {
+   "id": "d10",
+   "decision": "Answering creates no Requirement. The answer transitions the same Requirement id through domain.RequirementReadyCommand (needs-input -> ready) and a test asserts the total Requirement count is unchanged and the id is identical before and after; a second answer to the same question is refused by the domain transition itself (ready is not an allowed source for RequirementReadyCommand), not by an application-level flag.",
+   "rationale": "outcome_conditions.failure names '回答後に新しいRequirementが誤って作られる' as a failure of this capability, so the negative must be asserted, and the refusal of a double answer is stronger when it falls out of the closed transition table than when it depends on a boolean the application maintains."
+  },
+  {
+   "id": "d11",
+   "decision": "The question appears on the Requirement detail only. RequirementView (the list page) and Export are unchanged, and the question text never enters the export surface.",
+   "rationale": "The declaration's owner_surfaces is /v1/requirements/{requirement_id}, and cap-backlog-visibility's '人間対応待ちの区別' is already served by the status field the list view carries. Export is documented in readmodels.go as bounded, metadata-only, deliberately not a dump of storage documents; widening it with free text would work against that boundary for no declared gain."
+  },
+  {
+   "id": "d12",
+   "decision": "The owner console gains an additive needs-input block on the existing page: the question, reason, options with their impacts, and both scope lists, plus an explicit submit for a selected option. No control submits an answer without an explicit owner action, and no provider output or credential is rendered.",
+   "rationale": "The capability's observable_result is what the owner can see, and internal/web/owner.html already carries the section idiom (its 'Release evidence' section is a placeholder with no data). owner.js is 1209 bytes of hand-written, dependency-free JavaScript; an additive block matches it. internal/web is also being edited by V2-066 in parallel, so the block must be strictly additive."
+  },
+  {
+   "id": "d13",
+   "decision": "Record, do not claim: the automatic decision to ask -- the failure-model classes in docs/architecture/failure-model.md that route policy-denied, budget-exceeded and unclassifiable failures to needs-input -- is not wired by this task. This task delivers the command, the route and the field; nothing here makes cap-human-input-request exercised, and the evidence must say so.",
+   "rationale": "The escalation this task owns (E22-2) is about an unobservable surface, not about the trigger. Writing 'capability exercised' into the evidence because a route now exists would recreate the exact defect the M5 dogfood measurement found: a declared observable result with nothing behind it."
+  }
+ ],
+ "components": [
+  "application",
+  "api",
+  "web",
+  "store-memory",
+  "store-firestore",
+  "contracts",
+  "docs"
+ ],
+ "verification": [
+  "devbox run --pure -- go test -count=1 ./internal/application",
+  "devbox run --pure -- go test -count=1 ./internal/api",
+  "devbox run --pure -- go test -count=1 ./internal/domain",
+  "devbox run --pure -- make component-application",
+  "devbox run --pure -- make component-api",
+  "devbox run --pure -- make component-web",
+  "devbox run --pure -- make component-store-memory",
+  "devbox run --pure -- make component-store-firestore",
+  "devbox run --pure -- make component-contracts",
+  "devbox run --pure -- make component-docs",
+  "devbox run --pure -- go test -count=1 ./internal/contracts",
+  "devbox run --pure -- make check",
+  "devbox run --pure -- make evidence-keys"
+ ],
+ "risks": [
+  "The lease guarantee is the weakest point. d6 closes it on the issuing side only, because no domain transition revokes an active lease early. If the worker reads the domain differently and finds an early-revoke path, that is a measurement that changes the design and must be escalated, not implemented as a domain edit.",
+  "internal/web/owner.js and owner.html are edited by V2-066 in parallel. Both edits must be additive; whichever lands second invalidates the other's web component evidence key, which is the known G6 staleness V2-045 resolves.",
+  "contracts/openapi/openapi-v1.yaml is a bundle api-contract role member and the contracts component root, so editing it moves both the contracts component key and the release BundleDigest. That is expected; what must not happen is writing any digest value into a document.",
+  "Adding a port to UnitOfWork forces both store adapters to implement it. component-store-firestore runs under scripts/firestore-emulator.sh, so the worker must actually run the emulator rather than reporting a skip as a pass.",
+  "Adding two commands to service.go touches a file several other tasks' evidence keys cover. The additions must be additive and every pre-existing test must keep its name and its assertions."
+ ]
+}

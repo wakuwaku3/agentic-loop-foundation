@@ -1,0 +1,100 @@
+{
+ "schema_version": "v1",
+ "id": "dp-v2-066",
+ "kind": "design-packet",
+ "created_at": "2026-08-25T02:10:00Z",
+ "correlation_id": "v2-066-release-surface",
+ "problem_brief_id": "pb-v2-066",
+ "decisions": [
+  {
+   "id": "d1",
+   "decision": "The import direction is: internal/application imports internal/release, internal/api imports neither release nor update. internal/release stays a leaf that imports only the standard library and internal/domain. internal/api gains a route and a serialisation of an application read model and nothing else.",
+   "rationale": "Measured: internal/release/source_guard_test.go constrains what internal/release imports (TestSourceGuardNonTestFilesImportOnlyStdlibAndDomain requires stdlib plus internal/domain only, and TestSourceGuardNoFileImportsCIOrUpdate forbids internal/ci and internal/update in test files too). It says nothing about who imports internal/release, so the consumer side is unconstrained and the reverse direction (release importing application or api) is prohibited outright -- the direction is forced. Between api and application, application wins for three reasons: every owner read in this codebase goes through Service with callerActor(ctx, RoleOwner), so putting the read in api would bypass the one authorisation idiom; the rollback/retention part of the read needs canonical Requirement state (whether any Requirement's StableSnapshot references a digest), which only application can read inside a transaction; and non_goals item 2 forbids duplicating the release contract's rules in the API layer, which is guaranteed most simply by api never importing release at all. There is direct precedent for an application-layer import of a non-domain internal package: internal/application already imports internal/quota (service.go and ports.go)."
+  },
+  {
+   "id": "d2",
+   "decision": "The ci/components.json edge that this import needs (application -> release) is not added, because that file is prohibited. It is escalated as a named gap with the exact edge, and the consequence is written into the evidence: a change confined to internal/release will not select the application or api component in selective CI, so those components' stored evidence can be stale with respect to release behaviour.",
+   "rationale": "Measured: components.json records application's dependencies as [domain] and api's as [application, domain, web], yet internal/application already imports internal/quota and internal/api already imports internal/quota and internal/runner, and cmd/control-plane imports reconciler, runner and store/firestore while its component declares only [api]. No test reconciles the declared dependency lists with the actual Go import graph (internal/ci/planner.go uses Dependencies only to propagate affected components; there is no go list -deps conformance check). So the gap this decision leaves open is pre-existing and pervasive rather than novel -- but it is still a real selective-CI staleness hole, and the honest move is to name it and hand it to whoever owns the file, not to silently widen it or to edit a prohibited file."
+  },
+  {
+   "id": "d3",
+   "decision": "internal/update is not joined to this surface. The running Preview version is the release identity of the process's own source manifest plus the recorded route, never a read of an update channel symlink.",
+   "rationale": "Measured: docs/operations/release-local.md states that internal/release deliberately does not couple route rollback to internal/update.Switch's atomic channel symlink rollback, that internal/release must not import internal/update even in test files, and that the relation is documented and not wired in code -- and source_guard_test.go enforces exactly that. Measured further: internal/update exposes only Verify, Install and Switch; there is no function that reads a channel pointer, so reading one would mean adding a filesystem read of the Runner machine's install root to the control plane, which is a different machine's fact. Conflating the two would produce a single 'version' field whose provenance nobody could state."
+  },
+  {
+   "id": "d4",
+   "decision": "The surface is read-only: one GET route, no POST. No promotion, no rollback, no SetPreview is exposed.",
+   "rationale": "non_goals item 1 forbids promoting a capability to stable to make the surface look complete, and a promote or rollback route would need a control permit, a fencing token and a deploy path that is D1 work. The outcome asks for an observable surface, and observation is the whole deliverable."
+  },
+  {
+   "id": "d5",
+   "decision": "The release facts are injected, not discovered per request: an observer is constructed at startup from an explicitly configured release source root, assembles the bundle once via release.AssembleFromRoot, and caches the snapshot with the time it was assembled. When no root is configured the route answers 503 with an explicit code and reason and reports no version at all.",
+   "rationale": "release.AssembleFromRoot reads the whole 33-member source tree; doing that per request would make an owner read non-deterministic in cost and would let the answer change under a running process without any record of when it changed. Reporting a fabricated or defaulted version when the root is absent is exactly the failure this task exists to repair, so absence is reported as absence. The snapshot carries assembled_at so a stale answer is visibly stale rather than silently wrong."
+  },
+  {
+   "id": "d6",
+   "decision": "domain.ReleaseCandidate.CanPromote()'s measured signature is `func (r ReleaseCandidate) CanPromote() error` (internal/domain/release.go:72): one first-failure error, formatted as \"release is not ready for promotion: <status>\", ErrEvidenceIncomplete, \"%w: capability target %q\" or \"%w: capability %q\". It cannot enumerate what is unmet, so a structured enumerator is required -- and it is built in internal/release by calling CanPromote on single-capability projections of the candidate rather than by re-implementing any of its checks.",
+   "rationale": "The outcome requires 'the promotion conditions still unmet' in the plural, and a first-failure error can only ever name one. Re-implementing the per-capability rule in the enumerator would violate non_goals item 2 in spirit even inside internal/release, and would let the two copies drift; projecting the candidate down to one capability and asking the existing authority keeps a single rule. internal/domain is prohibited here, so CanPromote itself is not changed."
+  },
+  {
+   "id": "d7",
+   "decision": "The report is the eight conditions of docs/architecture/release-contract.md section 4, each with a tri-state -- met, unmet, or not-observable-here -- plus a reason and the source that decided it. Conditions 1 (deterministic tests and static verification) and 5 (no unresolved severe failure, secret leak or unpermitted cost) are not-observable-here, because no in-process source provides them. The aggregate promotable flag is true only when all eight are met, so a not-observable-here condition can never inflate the verdict.",
+   "rationale": "cap-stable-promotion's preview_exercise asks for the fulfilment state of conditions 1 through 8 to be displayed, so all eight must appear, and dropping the two that cannot be measured in process would weaken the declaration. A tri-state that cannot raise the verdict is the only shape that both displays all eight and refuses to overclaim. Mapping measured from the code: condition 2 and 3 come from per-capability evidence and its Target/Provider agreement with CapabilityTargets; condition 4 from RollbackEvidence and ResumeEvidence; condition 8 from the seven bundle roles plus VerifySource, VerifyCandidateDigests and VerifyCandidateAgainstContract; conditions 6 and 7 from the docs.go verifiers (VerifyPreviewReleaseMarker, VerifyRequiredSections over RequiredPreviewSections, VerifyLinksResolve, VerifyCapabilityAnchorBijection, VerifyNoStableToPreviewLinks)."
+  },
+  {
+   "id": "d8",
+   "decision": "The rollback target is Route.PreviousStableDigest, reported together with the recorded RollbackHistory entries (from, to, reason, at) and a bounded retention read: whether any Requirement's StableSnapshot still references the target, stated with the number of Requirements actually examined and a flag saying the scan was bounded.",
+   "rationale": "Measured: Router.Rollback is monotonic -- RollbackWithReason clears PreviousStableDigest as it moves, so a second consecutive rollback is refused and 'rollback available' is false until a new SetPreview plus a gate pass. RetentionEligible's fourth refusal is exactly 'a Requirement's StableSnapshot still references this version', so the read is meaningful; but the application can only page Requirements up to MaxPageSize, so the answer is bounded and must say so. This surface only displays; deletion (GC) remains V2-034's, so a bounded negative is safe as long as it is labelled."
+  },
+  {
+   "id": "d9",
+   "decision": "Digests appear in the API response and in evidence records only. No digest value is written into any document, and docs/preview/index.md's `Release:` marker and docs/stable/index.md's `Stable release:` marker are not touched.",
+   "rationale": "release-local.md states the constraint directly: a document that contains its own digest is a fixed point no assembly can satisfy, which is why the doc set carries a fixed-format release marker and never a digest value. non_goals item 3 repeats it. An API response is not a bundle member, so reporting digests there creates no fixed point; a documentation member would."
+  },
+  {
+   "id": "d10",
+   "decision": "The D1 attribution is carried in the payload, not only in prose: the response states its environment class and an explicit not-observed list naming the Cloud Run running revision, the deployed image digest, the deploy path, the IAP boundary and scale-to-zero.",
+   "rationale": "cap-preview-operation and cap-stable-promotion both declare Google Cloud Run as an external dependency, and release-contract.md section 3 lists exactly four things preview-local cannot prove and assigns them to D1, adding that while D1 is unpassed Stable declares itself self-hosted on the owner's machine and does not claim GCP operation as a capability. A surface that silently reported a version without saying which environment it observed would be read as a claim about Cloud Run. Naming the exclusion inside the response makes the boundary unforgeable."
+  },
+  {
+   "id": "d11",
+   "decision": "The response states that the route it reports is this process's own in-memory route. release.Router and release.MemoryStore are process-local with no persistence adapter, so a freshly started control plane reports 'no route recorded' rather than an inferred or defaulted route.",
+   "rationale": "Measured: Router holds routes in a map behind a mutex and Store's only implementation is MemoryStore; release-local.md says production storage and deploy adapters stay outside this package's persistence port. Presenting process-local state as installation-wide routing would be a fabricated observation, and 'no route recorded' is a true and useful answer."
+  },
+  {
+   "id": "d12",
+   "decision": "Record, do not claim. The real-tree candidate is not promotable because every one of the twelve baseline capabilities has empty evidence_ids, and the surface must reproduce that honestly rather than special-casing it. Two declared behaviours are explicitly not wired by this task and are recorded as named residual gaps: the automatic failure response in cap-preview-operation (new claims stop and routing returns to Stable on a Preview failure) and the automatic promotion execution in cap-stable-promotion.",
+   "rationale": "TestRealTreeFoundationCandidateIsNotPromotable already measures the twelve-capability negative result, and V2-021's evidence records it. This task makes that negative result visible through the API, which is progress; writing 'capability exercised' because a route exists would recreate the defect the M5 dogfood measurement found. The two residual behaviours belong to a deploy-gate task and to a promoter, not to a read surface."
+  }
+ ],
+ "components": [
+  "release",
+  "application",
+  "api",
+  "web",
+  "contracts",
+  "docs"
+ ],
+ "verification": [
+  "devbox run --pure -- go test -count=1 ./internal/release",
+  "devbox run --pure -- go test -count=1 -run 'TestSourceGuard' -v ./internal/release",
+  "devbox run --pure -- go test -count=1 ./internal/application",
+  "devbox run --pure -- go test -count=1 ./internal/api",
+  "devbox run --pure -- make component-release",
+  "devbox run --pure -- make component-application",
+  "devbox run --pure -- make component-api",
+  "devbox run --pure -- make component-web",
+  "devbox run --pure -- make component-contracts",
+  "devbox run --pure -- make component-docs",
+  "devbox run --pure -- go test -count=1 ./internal/contracts",
+  "devbox run --pure -- make check",
+  "devbox run --pure -- make evidence-keys"
+ ],
+ "risks": [
+  "The enumerator is the risk. If the single-capability projection cannot isolate one of CanPromote's refusal classes, the temptation is to inline a copy of the rule; that is prohibited, and the correct response is to escalate with the class that could not be isolated.",
+  "Adding an application -> release import creates a component edge ci/components.json does not record. It is pre-existing in kind (application -> quota, api -> quota, api -> runner, control-plane -> reconciler/runner/store-firestore are all unrecorded today) but it is still a selective-CI staleness hole and must be escalated rather than papered over.",
+  "internal/release is a leaf guarded by source_guard_test.go. Any new file added to internal/release must import only the standard library and internal/domain, and the guard tests must be run explicitly and reported, not assumed.",
+  "internal/web/owner.js and owner.html are shared with V2-065, which runs in parallel; whichever lands second invalidates the other's web component key, which is the known G6 staleness V2-045 resolves.",
+  "Reporting digests is safe in an API response and fatal in a document. A single digest pasted into docs/preview/** would create the fixed point release-local.md forbids and would move DocsDigest at the same time."
+ ]
+}

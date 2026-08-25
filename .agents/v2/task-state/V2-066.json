@@ -3,7 +3,7 @@
   "id": "ts-v2-066",
   "kind": "canonical-task-state",
   "task_id": "V2-066",
-  "status": "queued",
+  "status": "running",
   "dependencies": [
     "V2-021"
   ],
@@ -13,22 +13,24 @@
     "Do not duplicate the release contract's rules in the API layer",
     "Do not place a digest inside a document that reports that digest"
   ],
-  "actor": "sol",
+  "actor": "luna",
   "input_refs": [
+    "V2-066",
     "V2-021",
-    "V2-066"
+    "wo-v2-066",
+    "dp-v2-066"
   ],
-  "input_hash": "903351ef59cc12dd85570bbcc937996f5abe73ee7366d6a77de58ab42dfdf619",
+  "input_hash": "bae6943ee85b4de04b83d1a62b4de361ccb64aa9de11fcc456244be4a5335b3e",
   "output_refs": [
     "V2-066"
   ],
   "output_hash": "28cdf21cb8deff8911e5871fb05fe81fd7133beaffa1ba40a1ca40b0b7336ee8",
-  "owner": "terra",
-  "next_owner": "terra",
+  "owner": "luna",
+  "next_owner": "luna",
   "retry_budget": {
     "max_attempts": 2,
-    "attempts_used": 0,
-    "remaining": 2
+    "attempts_used": 1,
+    "remaining": 1
   },
   "release_eligible": false,
   "transitions": [
@@ -55,6 +57,32 @@
         "remaining": 2
       },
       "reason": "the M5 dogfood design measured that nine of the twelve declared capabilities cannot be exercised and that five of them have no implementation at all; this task owns escalation E22-3, where internal/release is imported by no package outside itself and its own tests, so no Preview version, no unmet promotion condition and no rollback target is observable through any surface, which makes two declared capabilities unexercisable"
+    },
+    {
+      "sequence": 2,
+      "at": "2026-08-25T03:25:01Z",
+      "from_status": "queued",
+      "to_status": "running",
+      "actor": "luna",
+      "input_refs": [
+        "V2-066",
+        "V2-021",
+        "wo-v2-066",
+        "dp-v2-066"
+      ],
+      "input_hash": "bae6943ee85b4de04b83d1a62b4de361ccb64aa9de11fcc456244be4a5335b3e",
+      "output_refs": [
+        "V2-066"
+      ],
+      "output_hash": "28cdf21cb8deff8911e5871fb05fe81fd7133beaffa1ba40a1ca40b0b7336ee8",
+      "owner": "luna",
+      "next_owner": "luna",
+      "retry_budget": {
+        "max_attempts": 2,
+        "attempts_used": 1,
+        "remaining": 1
+      },
+      "reason": "wo-v2-066に基づき着手。applicationがreleaseをimportする方向で、稼働Preview version・未充足の昇格条件（tri-state）・rollback先をread-onlyのGETで観測可能にする"
     }
   ]
 }

@@ -3,9 +3,10 @@
   "id": "ts-v2-065",
   "kind": "canonical-task-state",
   "task_id": "V2-065",
-  "status": "queued",
+  "status": "blocked",
   "dependencies": [
-    "V2-016"
+    "V2-016",
+    "V2-064"
   ],
   "outcome": "Expose the human-input request the domain already models: an application command, an API route and a Requirement detail field that carry the question, its options, its impact and the scope that stops while it waits.",
   "non_goals": [
@@ -23,8 +24,8 @@
     "V2-065"
   ],
   "output_hash": "ed78fcc215191dc115ad410783e43c917491cc73f742368d02bac71080667560",
-  "owner": "terra",
-  "next_owner": "terra",
+  "owner": "luna",
+  "next_owner": "luna",
   "retry_budget": {
     "max_attempts": 2,
     "attempts_used": 0,
@@ -55,6 +56,31 @@
         "remaining": 2
       },
       "reason": "the M5 dogfood design measured that nine of the twelve declared capabilities cannot be exercised and that five of them have no implementation at all; this task owns escalation E22-2, where domain.RequirementNeedsInput and its command exist, but the measurement at this commit is that no application command, no API route and no detail field expose the question, so the declared capability cannot be observed"
+    },
+    {
+      "sequence": 2,
+      "at": "2026-08-25T03:25:00Z",
+      "from_status": "queued",
+      "to_status": "blocked",
+      "actor": "sol",
+      "input_refs": [
+        "V2-016",
+        "V2-065"
+      ],
+      "input_hash": "5f2a523ee30b19df4163f024183e29e5297f6d64f1949d63fcb246a2437f96f7",
+      "output_refs": [
+        "V2-065"
+      ],
+      "output_hash": "ed78fcc215191dc115ad410783e43c917491cc73f742368d02bac71080667560",
+      "owner": "luna",
+      "next_owner": "luna",
+      "retry_budget": {
+        "max_attempts": 2,
+        "attempts_used": 0,
+        "remaining": 2
+      },
+      "reason": "three tasks were designed to append a section to the same owner console files, and three concurrent writers to one file produce a textual conflict the coordinator would have to resolve by hand at integration, so the console work is serialised behind the task already running"
     }
-  ]
+  ],
+  "block_reason": "V2-064"
 }
