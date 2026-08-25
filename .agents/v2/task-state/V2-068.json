@@ -82,5 +82,5 @@
       "reason": "the five surface tasks were each designed to widen the same six files (the api handler, the application ports, service and read models, the openapi document, the owner console and both stores), so they cannot run at once: three concurrent writers to one file leave the coordinator resolving a textual conflict by hand, and an evidence key measured on a tree that never becomes a commit is the defect that ev-v2-013-infra-plan already recorded. They are serialised, each branching from the tip the previous one landed on"
     }
   ],
-  "block_reason": "V2-030,V2-067"
+  "block_reason": "V2-067"
 }
