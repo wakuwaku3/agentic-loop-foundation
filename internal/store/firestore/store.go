@@ -38,6 +38,148 @@ var (
 	ErrQueryLimit    = errors.New("firestore query result exceeds bounded limit")
 )
 
+// ---------------------------------------------------------------------------
+// The record envelope: one accepted set, one predicate, one payload gate.
+//
+// RecordSchema above is the single value this binary WRITES. The set below is
+// what this binary will READ. The two are deliberately separate declarations:
+// widening what a reader accepts is the expand stage of
+// docs/operations/self-update.md section 7.1, and bumping what a writer emits
+// is a separate Increment. See docs/operations/record-envelope.md.
+// ---------------------------------------------------------------------------
+
+// AcceptedRecordSchemas is the ordered, closed, duplicate-free set of record
+// schema (envelope) ids this binary will read. It ships with exactly one
+// member -- the value the encode paths already write -- because accepting an
+// id no writer in this repository can produce would admit a document whose
+// payload the running code cannot interpret. The member that admits a second
+// envelope id belongs to the Increment that introduces the second writer.
+//
+// It is a package-level variable rather than a constant expression solely so
+// a test can substitute a wider set and restore it with defer, the technique
+// internal/scheduler/priority.go already uses for scoreFn. Nothing outside a
+// test may reassign it.
+var AcceptedRecordSchemas = []string{RecordSchema}
+
+// RecordSchemaAccepted is the one read-side envelope decision in this
+// package: all five read-side refusal sites call it and none compares an
+// envelope value itself. Membership is exact string equality. No trimming,
+// case folding, prefix matching or normalisation of any kind is applied,
+// because every such normalisation widens the accepted set invisibly.
+func RecordSchemaAccepted(id string) bool {
+	for _, accepted := range AcceptedRecordSchemas {
+		if id == accepted {
+			return true
+		}
+	}
+	return false
+}
+
+// recordSchemaIsNative reports whether id is the value this binary writes. It
+// is the only read-side predicate that names RecordSchema, and it exists so
+// the payload-interpretability gate below can leave today's read path
+// untouched.
+func recordSchemaIsNative(id string) bool { return id == RecordSchema }
+
+// validateRecordPayload is a package-level variable rather than a direct call
+// to domain.Validate solely so a test can count invocations and prove that
+// the native read path invokes it zero times. Nothing outside a test may
+// reassign it.
+var validateRecordPayload = domain.Validate
+
+// domainValidatable returns the value the domain's validity predicate should
+// be applied to, and whether the repository declares one for out's type at
+// all. domain.Validate describes Requirement, Increment, Execution and Lease
+// and refuses every other type with "unsupported domain value", so it must
+// only be handed values it describes; for every other record kind this
+// package stores (outbox, event, queue counter, quota, idempotency, text) the
+// repository declares no validity predicate and the gate is a no-op.
+func domainValidatable(out any) (any, bool) {
+	switch v := out.(type) {
+	case *requirementRecord:
+		if v == nil {
+			return nil, false
+		}
+		return &v.Requirement, true
+	case *domain.Requirement, *domain.Increment, *domain.Execution, *domain.Lease:
+		return v, true
+	}
+	return nil, false
+}
+
+// requireInterpretablePayload refuses a decoded payload that carries a
+// NON-NATIVE envelope id and does not satisfy the domain's validity predicate
+// for its type. Unknown-field tolerance is what makes an expand stage
+// reversible and is also what makes silent acceptance possible: a payload
+// written under a later envelope that renamed a field decodes into a
+// zero-valued struct and looks like a legitimate record rather than an error.
+//
+// The gate is deliberately NOT applied to the native id. Today's read path is
+// therefore unchanged, which is the only form in which every pre-existing
+// store test keeps passing under its own name with its own assertions.
+func requireInterpretablePayload(envelope string, out any) error {
+	if recordSchemaIsNative(envelope) {
+		return nil
+	}
+	value, ok := domainValidatable(out)
+	if !ok {
+		return nil
+	}
+	if err := validateRecordPayload(value); err != nil {
+		return ErrInvalidSchema
+	}
+	return nil
+}
+
+// decodePayload is the single read-side seam that turns a stored payload into
+// a typed value: it decodes, then applies the interpretability gate.
+func decodePayload(envelope string, payload []byte, out any) error {
+	if err := json.Unmarshal(payload, out); err != nil {
+		return ErrInvalidSchema
+	}
+	return requireInterpretablePayload(envelope, out)
+}
+
+// requireInterpretableScannedPayload is decodePayload for a bounded scan site
+// that knows the record kind but not the caller's concrete type. A document
+// that fails the gate fails the WHOLE scan, exactly as an envelope failure or
+// a JSON failure does today; no partial-scan or skip-the-bad-document
+// semantics is introduced.
+func requireInterpretableScannedPayload(envelope, kind string, payload []byte) error {
+	if recordSchemaIsNative(envelope) {
+		return nil
+	}
+	out := scannedPayloadPrototype(kind)
+	if out == nil {
+		return nil
+	}
+	return decodePayload(envelope, payload, out)
+}
+
+// scannedPayloadPrototype returns a fresh typed value for the record kinds the
+// domain declares a validity predicate for, and nil for every other kind.
+func scannedPayloadPrototype(kind string) any {
+	switch kind {
+	case "requirement":
+		return &requirementRecord{}
+	case "increment":
+		return &domain.Increment{}
+	case "execution":
+		return &domain.Execution{}
+	case "lease":
+		return &domain.Lease{}
+	}
+	return nil
+}
+
+// scannedRow is one document a bounded scan accepted: its envelope id and its
+// payload, carried together so the typed decode below can apply the
+// interpretability gate for the envelope the document actually declared.
+type scannedRow struct {
+	envelope string
+	payload  []byte
+}
+
 func PathKey(value string) (string, error) {
 	if strings.TrimSpace(value) == "" || !utf8.ValidString(value) {
 		return "", errors.New("empty path key")
@@ -76,11 +218,11 @@ func DecodeRecord(data []byte, expectedKind string, out any) error {
 	if expectedKind == "" {
 		return ErrInvalidSchema
 	}
-	if err := json.Unmarshal(data, &e); err != nil || e.Schema != RecordSchema || e.Kind != expectedKind || len(e.Value) == 0 {
+	if err := json.Unmarshal(data, &e); err != nil || !RecordSchemaAccepted(e.Schema) || e.Kind != expectedKind || len(e.Value) == 0 {
 		return ErrInvalidSchema
 	}
-	if err := json.Unmarshal(e.Value, out); err != nil {
-		return ErrInvalidSchema
+	if err := decodePayload(e.Schema, e.Value, out); err != nil {
+		return err
 	}
 	return nil
 }
@@ -170,11 +312,11 @@ func decodeDocument(snap *cloudfirestore.DocumentSnapshot, expectedKind string, 
 		return nil
 	}
 	var d document
-	if err := snap.DataTo(&d); err != nil || d.RecordSchema != RecordSchema || d.Kind != expectedKind || d.Payload == "" {
+	if err := snap.DataTo(&d); err != nil || !RecordSchemaAccepted(d.RecordSchema) || d.Kind != expectedKind || d.Payload == "" {
 		return ErrInvalidSchema
 	}
-	if err := json.Unmarshal([]byte(d.Payload), out); err != nil {
-		return ErrInvalidSchema
+	if err := decodePayload(d.RecordSchema, []byte(d.Payload), out); err != nil {
+		return err
 	}
 	return nil
 }
@@ -1223,25 +1365,25 @@ func (u *unit) Outboxes(ctx context.Context, now time.Time, limit int) ([]applic
 		return nil, ErrQueryLimit
 	}
 	seen := map[string]bool{}
-	rows := make([][]byte, 0, len(snaps))
+	rows := make([]scannedRow, 0, len(snaps))
 	for _, snap := range snaps {
 		seen[snap.Ref.Path] = true
 		var d document
-		if snap.DataTo(&d) != nil || d.RecordSchema != RecordSchema || d.Kind != "outbox" {
+		if snap.DataTo(&d) != nil || !RecordSchemaAccepted(d.RecordSchema) || d.Kind != "outbox" {
 			return nil, ErrInvalidSchema
 		}
-		rows = append(rows, []byte(d.Payload))
+		rows = append(rows, scannedRow{envelope: d.RecordSchema, payload: []byte(d.Payload)})
 	}
 	// Preserve read-your-writes for an outbox staged in this transaction.
 	for p, v := range u.values {
 		if v.doc.Kind == "outbox" && !seen[p] {
-			rows = append(rows, []byte(v.doc.Payload))
+			rows = append(rows, scannedRow{envelope: v.doc.RecordSchema, payload: []byte(v.doc.Payload)})
 		}
 	}
 	out := make([]application.OutboxItem, 0, len(rows))
-	for _, b := range rows {
+	for _, row := range rows {
 		var v application.OutboxItem
-		if json.Unmarshal(b, &v) != nil {
+		if decodePayload(row.envelope, row.payload, &v) != nil {
 			return nil, ErrInvalidSchema
 		}
 		if !v.Status.Valid() {
@@ -1345,8 +1487,11 @@ func (u *unit) query(ctx context.Context, collection, kind string) ([][]byte, er
 	for _, snap := range snaps {
 		seen[snap.Ref.Path] = true
 		var d document
-		if snap.DataTo(&d) != nil || d.RecordSchema != RecordSchema || d.Kind != kind {
+		if snap.DataTo(&d) != nil || !RecordSchemaAccepted(d.RecordSchema) || d.Kind != kind {
 			return nil, ErrInvalidSchema
+		}
+		if err := requireInterpretableScannedPayload(d.RecordSchema, kind, []byte(d.Payload)); err != nil {
+			return nil, err
 		}
 		out = append(out, []byte(d.Payload))
 	}
@@ -1481,12 +1626,12 @@ func readCollection[T any](ctx context.Context, s *Store, collection, kind strin
 			return nil, ErrQueryLimit
 		}
 		var d document
-		if e = snap.DataTo(&d); e != nil || d.RecordSchema != RecordSchema || d.Kind != kind {
+		if e = snap.DataTo(&d); e != nil || !RecordSchemaAccepted(d.RecordSchema) || d.Kind != kind {
 			return nil, ErrInvalidSchema
 		}
 		var v T
-		if e = json.Unmarshal([]byte(d.Payload), &v); e != nil {
-			return nil, ErrInvalidSchema
+		if e = decodePayload(d.RecordSchema, []byte(d.Payload), &v); e != nil {
+			return nil, e
 		}
 		out = append(out, v)
 	}
