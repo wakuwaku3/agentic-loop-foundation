@@ -399,9 +399,16 @@ test改修が不要**であり、これがV2-010〜V2-039の27件追加をtest�
 
 ## 9.1 台帳artifactをcommitする前の手順と、禁止git操作の実体
 
-**`gitleaks dir` で作業treeを走査してからcommitすること。** `gitleaks git` は
-commit済み履歴しか読まないので、commit してから気付くと、後続commitで直しても
-当該blobを持つcommitがrefから到達可能な限り`make check`は永久に赤になる。
+**commitする前に、これからcommitするpathだけをgitleaksで走査すること。**
+`gitleaks git` はcommit済み履歴しか読まないので、commit してから気付くと、
+後続commitで直しても当該blobを持つcommitがrefから到達可能な限り`make check`は
+永久に赤になる。
+
+走査対象を絞ること。`devbox run --pure -- gitleaks dir . --config .gitleaks.toml`
+は**使えない**。`make evidence-all` が吐く`build/evidence/**`（gitignore済み・
+未追跡）を走査して26件を報告するため、追跡fileの状態が読めなくなる。台帳artifactを
+書くときは `devbox run --pure -- gitleaks dir .agents --config .gitleaks.toml` の
+ように、これから commit する subtree を名指しする。
 この罠でこれまで6つのtaskが止まっている。捕まった形はいずれも secretではなく、
 generic-api-keyのkeyword隣接だった: 64桁digestの直後の句読点、40桁のcommit sha、
 そして`"I3_credential_isolation"`という subtest名の直後に来た`"I4_lease_continuity"`
