@@ -379,6 +379,7 @@ type UnitOfWork interface {
 	ProviderAssignmentRepository
 	RepositoryRepository
 	RequirementRepositoryLinkRepository
+	RequirementNeedsInputRepository
 	RequirementReadRepository
 	EventReadRepository
 	QueueSummaryRepository
@@ -419,4 +420,38 @@ type ReleaseObserver interface {
 	// RollbackHistory returns every rollback this process recorded for the
 	// observed repository, in the order they were recorded.
 	RollbackHistory() []release.RollbackRecord
+}
+
+// RequirementNeedsInputRepository is the side table of needs-input questions
+// (V2-065), keyed by Requirement id. It follows
+// ControlRequestedByRepository's precedent: domain.Requirement lives in
+// internal/domain/model.go, the proven-closed M1 surface that carries M1's
+// closure proof, so the question the Loop asked -- its closed reason class,
+// its bounded option list with each option's impact, and what stops and what
+// continues while it waits -- is tracked here as its own keyed record rather
+// than as new fields on that struct.
+//
+// One row per Requirement, written at most once as a question. The single
+// documented difference from ControlRequestedByRepository's
+// write-once-per-key behaviour is the answer: answered_at,
+// answered_option_id and answered_by are written by a second, later
+// transaction on the same row. An implementation must therefore
+//
+//   - refuse, with domain.ErrStaleVersion, any save that would change the
+//     recorded question half of an existing row (SameQuestion reports
+//     false), so the second write can never erase or rewrite the question,
+//   - refuse, with domain.ErrStaleVersion, any save that would clear an
+//     answer already recorded, and
+//   - treat an identical re-write as an idempotent replay rather than a
+//     second record.
+//
+// HumanInputRequest returns false for a Requirement with no row, and an
+// implementation must never synthesize a question for one -- not even for a
+// Requirement whose status is needs-input. "No question was recorded" and
+// "the question is empty" must stay distinguishable: a needs-input
+// Requirement with no row is a real, reportable inconsistency, and inventing
+// question text to fill the field would be a fabricated observation.
+type RequirementNeedsInputRepository interface {
+	SaveHumanInputRequest(ctx context.Context, value HumanInputRequest) error
+	HumanInputRequest(ctx context.Context, requirementID string) (HumanInputRequest, bool, error)
 }

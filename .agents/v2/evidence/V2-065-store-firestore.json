@@ -1,0 +1,108 @@
+{
+ "schema_version": "v1",
+ "id": "ev-v2-065-store-firestore",
+ "kind": "evidence",
+ "created_at": "2026-08-25T19:40:00Z",
+ "correlation_id": "v2-065-human-input-surface",
+ "task_id": "V2-065",
+ "component": "store-firestore",
+ "evidence_key": "c82a46cc8d22783852b6694b06dfd28ea988e4e239f45c4cebba72330b554040",
+ "result": "passed",
+ "observed_at": "2026-08-25T19:40:00Z",
+ "checks": [
+  {
+   "name": "environment-identifier",
+   "status": "passed",
+   "argv": [
+    "uname",
+    "-srm"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 10,
+   "summary": "execution environment: uname -srm = Linux 6.18.33.2-microsoft-standard-WSL2 x86_64; devbox run --pure -- go version = go1.25.0 linux/amd64; devbox 0.17.2, environment resolved from this worktree's devbox.json/devbox.lock, both untouched by this task; devbox run --pure -- git --version = git version 2.55.0; worktree /home/takushi/repos/agentic-loop-foundation-worktrees/v2-task-065 on branch v2-task/V2-065, base commit e01b771. No real Provider CLI was started, no gh was started and no Google Cloud resource was touched: the only store dependency exercised is the local Firestore emulator that scripts/firestore-emulator.sh starts for make component-store-firestore."
+  },
+  {
+   "name": "component-store-firestore",
+   "status": "passed",
+   "argv": [
+    "devbox",
+    "run",
+    "--pure",
+    "--",
+    "make",
+    "component-store-firestore"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 900,
+   "summary": "Verdict line under the emulator scripts/firestore-emulator.sh starts: ok github.com/takushi/agentic-loop-foundation/v2/internal/store/firestore 10.037s (go test -race). The emulator was actually run; nothing here is a skip reported as a pass. Measured test counts: 28 before, 29 after (+1, the appended behavioural table). internal/store/firestore/store.go +48, store_test.go +172."
+  },
+  {
+   "name": "needs-input-row-behavioural-table",
+   "status": "passed",
+   "argv": [
+    "devbox",
+    "run",
+    "--pure",
+    "--",
+    "scripts/firestore-emulator.sh",
+    "go",
+    "test",
+    "-count=1",
+    "-v",
+    "-run",
+    "TestNeedsInputQuestionRowBehaviouralTableOnFirestore",
+    "./internal/store/firestore"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 900,
+   "summary": "A2 on the Firestore adapter, ALL FIVE CASES PASSED against the local emulator. Verdict lines: --- PASS: TestNeedsInputQuestionRowBehaviouralTableOnFirestore (0.61s) with subtests 'a Requirement with no row reads as an absence' (0.41s), 'the question round-trips unchanged and an identical re-write is a replay' (0.09s), 'a later save can add the answer but can never change the question' (0.05s), 'a rolled-back transaction leaks no question' (0.02s) and 'a document written before the field existed reads as an absence' (0.03s); package line ok .../internal/store/firestore 0.611s. The row lives in its own collection requirement_needs_input keyed by the Requirement id, read and written by key alone, so no Firestore index is needed and firestore.indexes.json is untouched. asked_at round-trips equal on Equal AND on UnixNano. A malformed record (an option with an empty impact) is refused by the adapter itself with ErrInvalidHumanInputRequest and is asserted not to be committed, so the same validation rule guards both write paths. The last case is the legacy and the reportable-inconsistency case at once: a Requirement stored in needs-input with no row at all reads back as an ABSENCE, never as a synthesised question."
+  },
+  {
+   "name": "skips",
+   "status": "skipped",
+   "argv": [
+    "devbox",
+    "run",
+    "--pure",
+    "--",
+    "go",
+    "test",
+    "-count=1",
+    "./internal/store/firestore"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 600,
+   "summary": "Gate rule G7: recorded as a skip and NOT counted as a pass. internal/store/firestore's integration tests, including this task's new TestNeedsInputQuestionRowBehaviouralTableOnFirestore, call t.Skip when FIRESTORE_EMULATOR_HOST is unset -- the verdict line without the emulator is 'ok .../internal/store/firestore 0.014s' with the cases SKIPPED, which is why every Firestore claim in these records is backed by the separate emulator run recorded in the store-firestore record (scripts/firestore-emulator.sh, all five cases PASS). No other test in any package was skipped by this task, and no test was skipped in internal/application, internal/api, internal/store/memory, internal/contracts or internal/ci."
+  },
+  {
+   "name": "make-check-before-the-evidence-commit",
+   "status": "passed",
+   "argv": [
+    "devbox",
+    "run",
+    "--pure",
+    "--",
+    "make",
+    "check"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 3600,
+   "summary": "A19, first run, judged by the verdict lines rather than by the shell exit status. Zero FAIL lines; every package reports ok. Secret scan: '475 commits scanned. / scanned ~11379842 bytes (11.38 MB) in 924ms / no leaks found'. Ownership: {\"changed\":null,\"selected\":null,\"all\":false}. Firestore component under the emulator: ok .../internal/store/firestore 9.977s. Final line: 'workflow-pins: 3 unique (owner/repo, version) -> sha pins, no disagreement'."
+  },
+  {
+   "name": "evidence-key",
+   "status": "passed",
+   "argv": [
+    "devbox",
+    "run",
+    "--pure",
+    "--",
+    "make",
+    "evidence-keys"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 600,
+   "summary": "A18: the store-firestore component key read with make evidence-keys on the tree where make check is green and every touched file is already git-added is c82a46cc8d22783852b6694b06dfd28ea988e4e239f45c4cebba72330b554040. Measured on the same tree, the key at base commit e01b771 was 221fe7f638ec2b0d2cbf8537334e9bd9f5ba7875ca2f2bc0b9895c81c9fd1897, so this task moved it. 13 of the 23 component keys moved in total (api, application, contracts, control-plane, docs, internal-contracts, reconciler, release, runner, store-firestore, store-memory, task-ledger, web): the dependency closure carries the two edited application files into every component that depends on application, and contracts/openapi/openapi-v1.yaml into the api contract dependency and the release bundle. task-ledger moves once more when these evidence artifacts are committed, so A18's re-verification was run on the final committed tree 58868bc: this component's key above is UNCHANGED there, and task-ledger read 15cfd0d3508c6f3c77888c7764dfe12decea802aec56d76ca7eba34d3ec5c859. Both observations are kept."
+  }
+ ]
+}

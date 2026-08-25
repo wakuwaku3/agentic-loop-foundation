@@ -268,6 +268,20 @@ func (s *Service) Renew(ctx context.Context, req RenewRequest) (out RenewRespons
 		if lease.Version != req.ExpectedLeaseVersion || lease.RunnerID != runner {
 			return domain.ErrStaleVersion
 		}
+		// V2-065 A6: a lease held for an Increment whose parent Requirement is
+		// waiting for human input is not extended. It is not revoked either --
+		// no domain transition can do that early -- so it lapses at its
+		// existing ExpiresAt and is then handled by the existing expired-lease
+		// path.
+		if inc, ok, x := u.Increment(ctx, lease.IncrementID.String()); x != nil {
+			return x
+		} else if ok {
+			if waiting, x := requirementAwaitsHumanInput(ctx, u, inc); x != nil {
+				return x
+			} else if waiting {
+				return fmt.Errorf("%w: lease %q", ErrAwaitingHumanInput, req.LeaseID)
+			}
+		}
 		target, found, x := u.CanonicalTarget(ctx, lease.IncrementID.String(), runner.String())
 		if x != nil {
 			return x
@@ -1107,6 +1121,20 @@ func (s *Service) Claim(ctx context.Context, req ClaimRequest) (out ClaimRespons
 		}
 		if req.ExpectedIncrementVersion != inc.Version {
 			return domain.ErrStaleVersion
+		}
+		// V2-065 A6: no new claim is issued for an Increment whose parent
+		// Requirement is waiting for the owner to answer a question. This is
+		// the enforcement behind the stopped scope the recorded question
+		// displays, and it is closed on the ISSUING side on purpose: measured,
+		// no domain transition can revoke or release an active lease early
+		// (domain.ExpireLease refuses while at is before ExpiresAt), and
+		// internal/domain is not edited here. So this refusal is exactly as
+		// strong as it says -- no new claim -- and never "the Requirement
+		// instantly holds no claim".
+		if waiting, e := requirementAwaitsHumanInput(ctx, u, inc); e != nil {
+			return e
+		} else if waiting {
+			return fmt.Errorf("%w: increment %q", ErrAwaitingHumanInput, req.IncrementID)
 		}
 		if lease, exists, e := u.ActiveLeaseForIncrementAt(ctx, req.IncrementID, issuedAt); e != nil {
 			return e

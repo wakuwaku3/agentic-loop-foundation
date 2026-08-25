@@ -2275,3 +2275,324 @@ func TestBothControlFormsStillSubmitWithTheLimitFieldEmpty(t *testing.T) {
 		t.Fatal("the V2-068 owner.js block does not guard the allocation_limit key on a non-empty field")
 	}
 }
+
+// ===========================================================================
+// V2-065: the needs-input verbs at the transport boundary
+// ===========================================================================
+//
+// Additive block appended at the end of this file. Nothing above it was
+// rewritten.
+
+// needsInputHandler builds a handler plus the store behind it, so a
+// Requirement can be seeded into a status the needs-input transition is legal
+// from. No application command can reach framing, active or evaluating (see
+// internal/application/human_input_test.go), and there is deliberately no
+// route that does either, so the seed goes through the store.
+func needsInputHandler(t *testing.T) (http.Handler, *memory.Store, *application.Service) {
+	t.Helper()
+	st := memory.New()
+	svc, err := application.NewServiceWithConfig(st, clock{}, &ids{}, application.ServiceConfig{InstallationID: "install", LeaseTTL: time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	auth := api.BearerAuthenticator{
+		"owner":     {Role: application.RoleOwner, Subject: "owner"},
+		"runner":    {Role: application.RoleRunner, Subject: "runner", RunnerID: "runner-1"},
+		"scheduler": {Role: application.RoleScheduler, Subject: "scheduler.self"},
+	}
+	return api.New(api.Config{Authenticator: auth, Service: svc, AllowedOrigins: []string{"https://console.example"}}), st, svc
+}
+
+// seedActiveRequirement captures a Requirement through the service and moves
+// it to active through the store, returning its id and current version.
+func seedActiveRequirement(t *testing.T, st *memory.Store, svc *application.Service, tag string) (string, domain.Version) {
+	t.Helper()
+	ctx := application.ContextWithCaller(context.Background(), application.Caller{Role: application.RoleOwner, Subject: "owner"})
+	out, err := svc.Capture(ctx, application.CaptureRequest{RequestID: tag + ":capture", Text: "needs a decision"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var version domain.Version
+	if err = st.Transact(context.Background(), func(u application.UnitOfWork) error {
+		r, ok, e := u.Requirement(context.Background(), out.RequirementID)
+		if e != nil || !ok {
+			t.Fatalf("seed: ok=%v err=%v", ok, e)
+		}
+		next := r
+		next.Status = domain.RequirementActive
+		next.Version++
+		version = next.Version
+		return u.SaveRequirement(context.Background(), next, r.Version)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return out.RequirementID, version
+}
+
+const needsInputAskBody = `{"request_id":"REQUEST_ID","expected_requirement_version":VERSION,"question":"Delete the branch or keep it?","reason_class":"destructive-irreversible","reason":"Both choices lose something the Loop may not lose.","options":[{"option_id":"delete","summary":"Delete","impact":"The commits stop being reachable."},{"option_id":"keep","summary":"Keep","impact":"The Increment stays blocked."}],"stopped_scope":["new-claims-for-this-requirement","lease-renewal-for-this-requirement"],"continuing_scope":["other-requirements","owner-reads"]}`
+
+// askBody fills the ask template. strconv and strings are already imported by
+// this file; fmt deliberately is not, so this block adds no import and cannot
+// conflict with a sibling task editing the same import block.
+func askBody(requestID string, version domain.Version) string {
+	body := strings.Replace(needsInputAskBody, "REQUEST_ID", requestID, 1)
+	return strings.Replace(body, "VERSION", strconv.FormatInt(int64(version), 10), 1)
+}
+
+func answerBodyJSON(requestID string, version domain.Version, optionID string) string {
+	return `{"request_id":"` + requestID + `","expected_requirement_version":` + strconv.FormatInt(int64(version), 10) + `,"option_id":"` + optionID + `"}`
+}
+
+// TestNeedsInputRoutesAreRoleGated is V2-065 A9.
+func TestNeedsInputRoutesAreRoleGated(t *testing.T) {
+	h, st, svc := needsInputHandler(t)
+	id, version := seedActiveRequirement(t, st, svc, "route")
+	askPath := "/v1/requirements/" + id + ":request-input"
+	answerPath := "/v1/requirements/" + id + ":answer-input"
+	ask := func(requestID, token string, v domain.Version) *httptest.ResponseRecorder {
+		return call(h, http.MethodPost, askPath, askBody(requestID, v), token)
+	}
+
+	// The ask: 401 unauthenticated, 403 as the owner, accepted for a Runner.
+	if w := ask("r-unauth", "", version); w.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated ask status=%d body=%s", w.Code, w.Body.String())
+	}
+	if w := ask("r-owner", "owner", version); w.Code != http.StatusForbidden {
+		t.Fatalf("owner ask status=%d body=%s; the owner answers questions rather than asking them", w.Code, w.Body.String())
+	}
+	// The answer: 401 unauthenticated, 403 as a Runner and as the scheduler.
+	answerBody := `{"request_id":"a-1","expected_requirement_version":1,"option_id":"keep"}`
+	if w := call(h, http.MethodPost, answerPath, answerBody, ""); w.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated answer status=%d", w.Code)
+	}
+	for _, token := range []string{"runner", "scheduler"} {
+		if w := call(h, http.MethodPost, answerPath, answerBody, token); w.Code != http.StatusForbidden {
+			t.Fatalf("%s answer status=%d body=%s", token, w.Code, w.Body.String())
+		}
+	}
+	// Nothing above changed the Requirement.
+	if r, _ := st.Requirement(id); r.Status != domain.RequirementActive || r.Version != version {
+		t.Fatalf("a refused request changed the Requirement: %+v", r)
+	}
+
+	// The scheduler may ask, on its own Requirement.
+	other, otherVersion := seedActiveRequirement(t, st, svc, "route-scheduler")
+	if w := call(h, http.MethodPost, "/v1/requirements/"+other+":request-input", askBody("r-sched", otherVersion), "scheduler"); w.Code != http.StatusOK {
+		t.Fatalf("scheduler ask status=%d body=%s", w.Code, w.Body.String())
+	}
+
+	// The Runner may ask, and the response carries no key this task did not
+	// name.
+	w := ask("r-runner", "runner", version)
+	if w.Code != http.StatusOK {
+		t.Fatalf("runner ask status=%d body=%s", w.Code, w.Body.String())
+	}
+	askDoc := decodeBody(t, w.Body.Bytes())
+	askKeys := map[string]bool{"requirement_id": true, "status": true, "version": true, "asked_at": true, "asked_by": true}
+	for key := range askDoc {
+		if !askKeys[key] {
+			t.Fatalf("the ask response carries an unnamed field %q", key)
+		}
+	}
+	if askDoc["status"] != "needs-input" {
+		t.Fatalf("ask response status = %v", askDoc["status"])
+	}
+
+	// The recorded question is on the existing owner detail route, and only
+	// the owner may read it.
+	if w = call(h, http.MethodGet, "/v1/requirements/"+id, "", ""); w.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated detail status=%d", w.Code)
+	}
+	if w = call(h, http.MethodGet, "/v1/requirements/"+id, "", "runner"); w.Code != http.StatusForbidden {
+		t.Fatalf("runner detail status=%d", w.Code)
+	}
+	w = call(h, http.MethodGet, "/v1/requirements/"+id, "", "owner")
+	if w.Code != http.StatusOK {
+		t.Fatalf("owner detail status=%d body=%s", w.Code, w.Body.String())
+	}
+	detail := decodeBody(t, w.Body.Bytes())
+	question, ok := detail["needs_input"].(map[string]any)
+	if !ok {
+		t.Fatalf("the detail carries no needs_input object: %s", w.Body.String())
+	}
+	for _, want := range []string{"question", "reason_class", "reason", "options", "stopped_scope", "continuing_scope", "asked_at", "asked_by"} {
+		if question[want] == nil {
+			t.Fatalf("needs_input is missing %q: %s", want, w.Body.String())
+		}
+	}
+	for _, absent := range []string{"answered_at", "answered_option_id", "answered_by"} {
+		if _, present := question[absent]; present {
+			t.Fatalf("an unanswered question reports %q: %s", absent, w.Body.String())
+		}
+	}
+	// No field name in the response carries a credential-shaped or
+	// provider-output-shaped name.
+	raw := strings.ToLower(w.Body.String())
+	for _, forbidden := range []string{"password", "credential", "raw_prompt", "raw_provider_output"} {
+		if strings.Contains(raw, forbidden) {
+			t.Fatalf("the detail response carries %q", forbidden)
+		}
+	}
+
+	// The owner answers, and the SAME Requirement resumes.
+	askDocVersion := domain.Version(askDoc["version"].(float64))
+	w = call(h, http.MethodPost, answerPath, answerBodyJSON("a-2", askDocVersion, "keep"), "owner")
+	if w.Code != http.StatusOK {
+		t.Fatalf("owner answer status=%d body=%s", w.Code, w.Body.String())
+	}
+	answerDoc := decodeBody(t, w.Body.Bytes())
+	answerKeys := map[string]bool{"requirement_id": true, "status": true, "version": true, "answered_option_id": true, "answered_at": true, "answered_by": true}
+	for key := range answerDoc {
+		if !answerKeys[key] {
+			t.Fatalf("the answer response carries an unnamed field %q", key)
+		}
+	}
+	if answerDoc["requirement_id"] != id || answerDoc["status"] != "ready" {
+		t.Fatalf("the answer did not resume the same Requirement: %s", w.Body.String())
+	}
+	// An unknown option is a refusal, not a fallback, and there is no field
+	// that could carry a default.
+	w = call(h, http.MethodPost, answerPath, `{"request_id":"a-3","expected_requirement_version":9,"option_id":"whatever"}`, "owner")
+	if w.Code != http.StatusBadRequest && w.Code != http.StatusConflict {
+		t.Fatalf("an unknown option status=%d body=%s", w.Code, w.Body.String())
+	}
+	w = call(h, http.MethodPost, answerPath, `{"request_id":"a-4","expected_requirement_version":1,"option_id":"keep","default_option":"keep"}`, "owner")
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("a default_option field status=%d body=%s; the decoder must refuse it", w.Code, w.Body.String())
+	}
+}
+
+// TestNeedsInputPrefixesAreNotSwallowedByTheRequirementGetBranch is A9's
+// routing clause. The GET /v1/requirements/ prefix branch is gated on the GET
+// method, so a POST to either verb reaches its own handler; a POST to the bare
+// detail path is a 404 rather than being routed to one of the verbs.
+func TestNeedsInputPrefixesAreNotSwallowedByTheRequirementGetBranch(t *testing.T) {
+	h, st, svc := needsInputHandler(t)
+	id, version := seedActiveRequirement(t, st, svc, "swallow")
+	if w := call(h, http.MethodPost, "/v1/requirements/"+id, `{"request_id":"x"}`, "runner"); w.Code != http.StatusNotFound {
+		t.Fatalf("POST on the bare detail path status=%d body=%s", w.Code, w.Body.String())
+	}
+	if w := call(h, http.MethodPost, "/v1/requirements/:request-input", askBody("empty-id", version), "runner"); w.Code != http.StatusNotFound {
+		t.Fatalf("an empty requirement id status=%d body=%s", w.Code, w.Body.String())
+	}
+	// The POST verb reaches the command rather than the GET branch: the proof
+	// is that it changes state.
+	if w := call(h, http.MethodPost, "/v1/requirements/"+id+":request-input", askBody("reaches", version), "runner"); w.Code != http.StatusOK {
+		t.Fatalf("the ask did not reach its handler: status=%d body=%s", w.Code, w.Body.String())
+	}
+	if r, _ := st.Requirement(id); r.Status != domain.RequirementNeedsInput {
+		t.Fatalf("the POST did not reach the command; requirement is %q", r.Status)
+	}
+	// Both new paths are declared in the OpenAPI document, and the read
+	// surface the capability declares was already there.
+	data, err := os.ReadFile(filepath.Join("..", "..", "contracts", "openapi", "openapi-v1.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"  /v1/requirements/{requirement_id}:request-input:",
+		"  /v1/requirements/{requirement_id}:answer-input:",
+		"  /v1/requirements/{requirement_id}:",
+		"NeedsInputQuestion:",
+	} {
+		if !strings.Contains(string(data), want) {
+			t.Fatalf("openapi-v1.yaml does not declare %q", want)
+		}
+	}
+}
+
+// TestOwnerConsoleExposesTheNeedsInputQuestion is A11.
+func TestOwnerConsoleExposesTheNeedsInputQuestion(t *testing.T) {
+	h, _, _ := needsInputHandler(t)
+	w := call(h, http.MethodGet, "/owner/", "", "owner")
+	if w.Code != 200 {
+		t.Fatalf("owner console status=%d", w.Code)
+	}
+	html := w.Body.String()
+	for _, want := range []string{`id="needs-input-title"`, `id="needs-input"`, `id="needs-input-requirement"`, `id="needs-input-question"`, `id="needs-input-reason"`, `id="needs-input-options"`, `id="needs-input-stopped"`, `id="needs-input-continuing"`, `id="needs-input-submit"`, `id="needs-input-answer-state"`, "V2-065 needs-input question"} {
+		if !strings.Contains(html, want) {
+			t.Fatalf("owner console does not carry %s", want)
+		}
+	}
+	// Additive only: every sibling task's section is still there.
+	for _, want := range []string{`id="capture"`, `id="control"`, `id="queue"`, `id="repository"`, "Release evidence", `id="release-conditions"`, `id="backlog-rows"`, `id="runners-rows"`, `id="providers-waiting"`, `id="captured-rows"`} {
+		if !strings.Contains(html, want) {
+			t.Fatalf("owner console lost the pre-existing surface %s", want)
+		}
+	}
+	w = call(h, http.MethodGet, "/owner/assets/owner.js", "", "")
+	if w.Code != 200 {
+		t.Fatalf("owner.js status=%d", w.Code)
+	}
+	js := w.Body.String()
+	marker := strings.Index(js, "// V2-065 needs-input question")
+	if marker < 0 {
+		t.Fatal("owner.js does not carry the V2-065 marker comment")
+	}
+	block := js[marker:]
+	for _, want := range []string{":answer-input", "needs_input", "reason_class", "stopped_scope", "continuing_scope", "impact", "no question is recorded", "Nothing is submitted until"} {
+		if !strings.Contains(block, want) && !strings.Contains(html, want) {
+			t.Fatalf("the V2-065 block does not reference %q", want)
+		}
+	}
+	// The sibling blocks must still be present in the same single file.
+	for _, want := range []string{"/v1/release/state", "executability", "requirement_backlog", "/v1/runners", "/v1/providers", "captured-rows"} {
+		if !strings.Contains(js, want) {
+			t.Fatalf("owner.js lost the pre-existing block reference %q", want)
+		}
+	}
+	// The block renders named rows, not raw JSON, and adds no timer and no
+	// external asset.
+	if strings.Contains(block, "JSON.stringify") {
+		t.Fatal("the V2-065 owner.js block renders raw JSON")
+	}
+	for _, forbidden := range []string{"http://", "https://", "//cdn", "importScripts", "setInterval", "setTimeout", "@font-face"} {
+		if strings.Contains(block, forbidden) {
+			t.Fatalf("the V2-065 owner.js block references %q", forbidden)
+		}
+	}
+	// Nothing submits an answer without an explicit owner action: the only
+	// call to the answer route is inside the function bound to the submit
+	// button's onclick, and the button starts disabled.
+	if !strings.Contains(html, `id="needs-input-submit" type="button" disabled`) {
+		t.Fatal("the submit button is not disabled until an option is selected")
+	}
+	if !strings.Contains(block, "submit.onclick=answer") {
+		t.Fatal("the answer is not bound to an explicit owner action")
+	}
+	// No credential-shaped and no email-shaped value in the rendered markup.
+	// The whole-document list is the one the sibling tasks' checks already
+	// hold; "credential" is checked against this task's own section instead,
+	// because the pre-existing page header says in prose that credentials are
+	// never rendered, and that sentence must not be deleted to satisfy a
+	// substring check.
+	lowered := strings.ToLower(html)
+	for _, forbidden := range []string{"password", "secret", "api_key", "apikey", "bearer ", "authorization:", "private_key"} {
+		if strings.Contains(lowered, forbidden) {
+			t.Fatalf("the rendered owner console carries %q", forbidden)
+		}
+	}
+	sectionStart := strings.Index(html, "V2-065 needs-input question")
+	sectionEnd := strings.Index(html, "/V2-065 needs-input question")
+	if sectionStart < 0 || sectionEnd <= sectionStart {
+		t.Fatal("the V2-065 section markers are not both present in owner.html")
+	}
+	section := strings.ToLower(html[sectionStart:sectionEnd])
+	for _, forbidden := range []string{"credential", "raw_prompt", "raw_provider_output", "password", "secret"} {
+		if strings.Contains(section, forbidden) {
+			t.Fatalf("the V2-065 owner-console section carries %q", forbidden)
+		}
+	}
+	if strings.Contains(strings.ToLower(block), "credential") || strings.Contains(strings.ToLower(block), "raw_provider_output") {
+		t.Fatal("the V2-065 owner.js block references a credential or raw provider output")
+	}
+	if strings.Contains(html, "@") {
+		t.Fatalf("the rendered owner console contains an at-sign, which is the email shape this check refuses")
+	}
+	// The console must not claim a measurement it does not have.
+	for _, forbidden := range []string{"capability exercised", "preview journey passed"} {
+		if strings.Contains(lowered, forbidden) || strings.Contains(strings.ToLower(js), forbidden) {
+			t.Fatalf("owner console claims %q", forbidden)
+		}
+	}
+}

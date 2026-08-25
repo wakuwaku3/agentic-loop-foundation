@@ -1,0 +1,85 @@
+{
+ "schema_version": "v1",
+ "id": "ev-v2-065-web",
+ "kind": "evidence",
+ "created_at": "2026-08-25T19:40:00Z",
+ "correlation_id": "v2-065-human-input-surface",
+ "task_id": "V2-065",
+ "component": "web",
+ "evidence_key": "6b6bc5ca0561f822da913f9ab4349b1a535b6512b3bee4d1ded731a0ac76e712",
+ "result": "passed",
+ "observed_at": "2026-08-25T19:40:00Z",
+ "checks": [
+  {
+   "name": "environment-identifier",
+   "status": "passed",
+   "argv": [
+    "uname",
+    "-srm"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 10,
+   "summary": "execution environment: uname -srm = Linux 6.18.33.2-microsoft-standard-WSL2 x86_64; devbox run --pure -- go version = go1.25.0 linux/amd64; devbox 0.17.2, environment resolved from this worktree's devbox.json/devbox.lock, both untouched by this task; devbox run --pure -- git --version = git version 2.55.0; worktree /home/takushi/repos/agentic-loop-foundation-worktrees/v2-task-065 on branch v2-task/V2-065, base commit e01b771. No real Provider CLI was started, no gh was started and no Google Cloud resource was touched: the only store dependency exercised is the local Firestore emulator that scripts/firestore-emulator.sh starts for make component-store-firestore."
+  },
+  {
+   "name": "component-web",
+   "status": "passed",
+   "argv": [
+    "devbox",
+    "run",
+    "--pure",
+    "--",
+    "make",
+    "component-web"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 600,
+   "summary": "Verdict line: ?   github.com/takushi/agentic-loop-foundation/v2/internal/web  [no test files]. internal/web carries no Go test file and this task added none: internal/web/*_test.go is not in this task's allowed_paths, so the console is asserted from internal/api, where TestOwnerConsoleExposesTheNeedsInputQuestion serves the embedded assets over the real handler. That is recorded here rather than reported as a passing suite."
+  },
+  {
+   "name": "additive-only",
+   "status": "passed",
+   "argv": [
+    "git",
+    "diff",
+    "--cached",
+    "--numstat",
+    "--",
+    "internal/web"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 60,
+   "summary": "A11, PASSED. internal/web/owner.html +3/-0 and internal/web/owner.js +101/-0: purely additive, with zero deleted lines on both files, which is the measurement that the sibling tasks' sections were not rewritten or removed. The HTML block is the last section inside <main> (an HTML document has no valid tail after </html>) and the JS block is appended at the end of the file, each opened by a comment naming V2-065 and the HTML one closed by a matching end marker. The V2-064, V2-066, V2-067, V2-069, V2-071 and V2-073 blocks are asserted still present in both files by TestOwnerConsoleExposesTheNeedsInputQuestion and by the sibling tasks' own tests, which all still pass unmodified. No merge conflict appeared in either file, so no escalation was needed. internal/web/owner.css is untouched. The block renders the question, the reason with its closed class, each option with its impact, and both scope lists, and it says in plain words that a Requirement with no recorded question has none rather than inventing one."
+  },
+  {
+   "name": "make-check-before-the-evidence-commit",
+   "status": "passed",
+   "argv": [
+    "devbox",
+    "run",
+    "--pure",
+    "--",
+    "make",
+    "check"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 3600,
+   "summary": "A19, first run, judged by the verdict lines rather than by the shell exit status. Zero FAIL lines; every package reports ok. Secret scan: '475 commits scanned. / scanned ~11379842 bytes (11.38 MB) in 924ms / no leaks found'. Ownership: {\"changed\":null,\"selected\":null,\"all\":false}. Firestore component under the emulator: ok .../internal/store/firestore 9.977s. Final line: 'workflow-pins: 3 unique (owner/repo, version) -> sha pins, no disagreement'."
+  },
+  {
+   "name": "evidence-key",
+   "status": "passed",
+   "argv": [
+    "devbox",
+    "run",
+    "--pure",
+    "--",
+    "make",
+    "evidence-keys"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 600,
+   "summary": "A18: the web component key read with make evidence-keys on the tree where make check is green and every touched file is already git-added is 6b6bc5ca0561f822da913f9ab4349b1a535b6512b3bee4d1ded731a0ac76e712. Measured on the same tree, the key at base commit e01b771 was 3bb05eb0d17a2a9738712de6f5f75f48313acd9b940f85070d260b7a3a4f3858, so this task moved it. 13 of the 23 component keys moved in total (api, application, contracts, control-plane, docs, internal-contracts, reconciler, release, runner, store-firestore, store-memory, task-ledger, web): the dependency closure carries the two edited application files into every component that depends on application, and contracts/openapi/openapi-v1.yaml into the api contract dependency and the release bundle. task-ledger moves once more when these evidence artifacts are committed, so A18's re-verification was run on the final committed tree 58868bc: this component's key above is UNCHANGED there, and task-ledger read 15cfd0d3508c6f3c77888c7764dfe12decea802aec56d76ca7eba34d3ec5c859. Both observations are kept."
+  }
+ ]
+}

@@ -1503,4 +1503,175 @@ func TestQueueSummaryReadCostAtTenFiftyAndOneHundredCandidates(t *testing.T) {
 	}
 	t.Logf("observation: %d and %d candidates both read %d documents -- one more than the %d read at exactly the bound, which is the single more-rows probe -- so the cost is bounded by a constant beyond the scheduler's own candidate bound",
 		application.MaxPageSize+50, application.MaxPageSize+200, first, observations[100])
+// V2-065 A2: the needs-input question row, one behavioural table.
+// ===========================================================================
+//
+// The rules are the port's: the question half of a row can never be changed
+// by a later save, the answer is written by a second transaction and never
+// erases the question, an answer already recorded can never be cleared, and a
+// Requirement with no row reads as an absence rather than as an empty
+// question. internal/store/memory applies the identical rules through the
+// identical port, and the application-level table
+// TestTheQuestionRowIsWriteOnceAndTheAnswerNeverErasesIt in
+// internal/application drives them there.
+//
+// Every instant is a literal. No sleep, no timer, no goroutine. These cases
+// run against the local emulator scripts/firestore-emulator.sh provides for
+// make component-store-firestore and are SKIPPED -- never counted as a pass --
+}
+
+// when FIRESTORE_EMULATOR_HOST is unset.
+
+func needsInputRecord(requirementID string, askedAt time.Time) application.HumanInputRequest {
+	return application.HumanInputRequest{
+		RequirementID: requirementID,
+		Question:      "Raise the ceiling, or stop here?",
+		ReasonClass:   application.ReasonLimitChange,
+		Reason:        "Either choice changes something the Loop is not authorised to change on its own.",
+		Options: []application.HumanInputOption{
+			{OptionID: "raise", Summary: "Raise the ceiling", Impact: "Spend rises for the rest of the day."},
+			{OptionID: "stop", Summary: "Stop here", Impact: "The Increment stays blocked."},
+		},
+		StoppedScope:    []application.HumanInputScope{application.ScopeNewClaimsForThisRequirement, application.ScopeLeaseRenewalForThisRequirement},
+		ContinuingScope: []application.HumanInputScope{application.ScopeOtherRequirements, application.ScopeOwnerReads},
+		AskedAt:         askedAt,
+		AskedBy:         domain.RequestedBy{ActorType: domain.ActorTypeLoop, Subject: "runner-1"},
+	}
+}
+
+func readNeedsInput(t *testing.T, s *Store, requirementID string) (application.HumanInputRequest, bool) {
+	t.Helper()
+	ctx := context.Background()
+	var out application.HumanInputRequest
+	var found bool
+	if err := s.Transact(ctx, func(u application.UnitOfWork) error {
+		v, ok, e := u.HumanInputRequest(ctx, requirementID)
+		out, found = v, ok
+		return e
+	}); err != nil {
+		t.Fatalf("read the question row for %q: %v", requirementID, err)
+	}
+	return out, found
+}
+
+func TestNeedsInputQuestionRowBehaviouralTableOnFirestore(t *testing.T) {
+	askedAt := time.Unix(1_650_000_000, 123_456_789).UTC()
+	answeredAt := time.Unix(1_650_000_600, 0).UTC()
+	answeredBy := domain.RequestedBy{ActorType: domain.ActorTypeOwner, Subject: "owner-1"}
+
+	t.Run("a Requirement with no row reads as an absence", func(t *testing.T) {
+		s := emulatorStore(t)
+		if got, ok := readNeedsInput(t, s, "never-asked"); ok {
+			t.Fatalf("an unasked Requirement reported a question: %+v", got)
+		}
+	})
+
+	t.Run("the question round-trips unchanged and an identical re-write is a replay", func(t *testing.T) {
+		s := emulatorStore(t)
+		ctx := context.Background()
+		row := needsInputRecord("round-trip", askedAt)
+		if err := s.Transact(ctx, func(u application.UnitOfWork) error { return u.SaveHumanInputRequest(ctx, row) }); err != nil {
+			t.Fatal(err)
+		}
+		got, ok := readNeedsInput(t, s, "round-trip")
+		if !ok {
+			t.Fatal("the row was not committed")
+		}
+		if !got.SameQuestion(row) {
+			t.Fatalf("the round-tripped question differs:\n want %+v\n got  %+v", row, got)
+		}
+		if !got.AskedAt.Equal(askedAt) || got.AskedAt.UnixNano() != askedAt.UnixNano() {
+			t.Fatalf("asked_at = %v, want %v", got.AskedAt, askedAt)
+		}
+		if got.Answered() {
+			t.Fatal("a fresh row reports itself answered")
+		}
+		if err := s.Transact(ctx, func(u application.UnitOfWork) error { return u.SaveHumanInputRequest(ctx, row) }); err != nil {
+			t.Fatalf("an identical re-write must be an idempotent replay: %v", err)
+		}
+	})
+
+	t.Run("a later save can add the answer but can never change the question", func(t *testing.T) {
+		s := emulatorStore(t)
+		ctx := context.Background()
+		row := needsInputRecord("answered", askedAt)
+		if err := s.Transact(ctx, func(u application.UnitOfWork) error { return u.SaveHumanInputRequest(ctx, row) }); err != nil {
+			t.Fatal(err)
+		}
+		rewritten := row.Clone()
+		rewritten.Question = "a different question entirely"
+		if err := s.Transact(ctx, func(u application.UnitOfWork) error { return u.SaveHumanInputRequest(ctx, rewritten) }); !errors.Is(err, domain.ErrStaleVersion) {
+			t.Fatalf("rewriting the question = %v, want domain.ErrStaleVersion", err)
+		}
+		answered := row.Clone()
+		at := answeredAt
+		by := answeredBy
+		answered.AnsweredAt = &at
+		answered.AnsweredOptionID = "raise"
+		answered.AnsweredBy = &by
+		if err := s.Transact(ctx, func(u application.UnitOfWork) error { return u.SaveHumanInputRequest(ctx, answered) }); err != nil {
+			t.Fatalf("the answer must be writable by a second transaction: %v", err)
+		}
+		got, ok := readNeedsInput(t, s, "answered")
+		if !ok {
+			t.Fatal("the row disappeared")
+		}
+		if !got.SameQuestion(row) {
+			t.Fatalf("the answer erased part of the question:\n want %+v\n got  %+v", row, got)
+		}
+		if !got.Answered() || got.AnsweredOptionID != "raise" || !got.AnsweredAt.Equal(answeredAt) || *got.AnsweredBy != answeredBy {
+			t.Fatalf("the stored answer = %+v", got)
+		}
+		// The answer can never be cleared by a later save.
+		if err := s.Transact(ctx, func(u application.UnitOfWork) error { return u.SaveHumanInputRequest(ctx, row) }); !errors.Is(err, domain.ErrStaleVersion) {
+			t.Fatalf("clearing a recorded answer = %v, want domain.ErrStaleVersion", err)
+		}
+		// A malformed record never reaches storage: the same validation the
+		// application layer applies runs in the adapter too.
+		bad := needsInputRecord("malformed", askedAt)
+		bad.Options[0].Impact = ""
+		if err := s.Transact(ctx, func(u application.UnitOfWork) error { return u.SaveHumanInputRequest(ctx, bad) }); !errors.Is(err, application.ErrInvalidHumanInputRequest) {
+			t.Fatalf("an option with no impact = %v, want ErrInvalidHumanInputRequest", err)
+		}
+		if _, ok := readNeedsInput(t, s, "malformed"); ok {
+			t.Fatal("a refused record was committed")
+		}
+	})
+
+	t.Run("a rolled-back transaction leaks no question", func(t *testing.T) {
+		s := emulatorStore(t)
+		ctx := context.Background()
+		sentinel := errors.New("rollback")
+		if err := s.Transact(ctx, func(u application.UnitOfWork) error {
+			if e := u.SaveHumanInputRequest(ctx, needsInputRecord("rolled-back", askedAt)); e != nil {
+				return e
+			}
+			return sentinel
+		}); !errors.Is(err, sentinel) {
+			t.Fatalf("rollback = %v", err)
+		}
+		if got, ok := readNeedsInput(t, s, "rolled-back"); ok {
+			t.Fatalf("a rolled-back transaction committed a question row: %+v", got)
+		}
+	})
+
+	t.Run("a document written before the field existed reads as an absence", func(t *testing.T) {
+		s := emulatorStore(t)
+		// The Requirement exists, in needs-input, with no question row at all:
+		// the legacy and the reportable-inconsistency case are the same shape
+		// on this adapter.
+		ctx := context.Background()
+		rid, err := domain.NewRequirementID("predates-the-question-row")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err = s.Transact(ctx, func(u application.UnitOfWork) error {
+			return u.SaveRequirement(ctx, domain.Requirement{ID: rid, Status: domain.RequirementNeedsInput, Version: 1}, 0)
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if got, ok := readNeedsInput(t, s, "predates-the-question-row"); ok {
+			t.Fatalf("a needs-input Requirement with no row synthesised a question: %+v", got)
+		}
+	})
 }

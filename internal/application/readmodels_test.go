@@ -748,7 +748,16 @@ func TestTheServiceWritesARequirementOnlyFromCaptureAndPlan(t *testing.T) {
 			})
 		}
 	}
-	want := map[string]bool{"Capture": true, "Plan": true}
+	// V2-065 widened this closed set from two to four, and the widening is
+	// the measurement rather than a weakening: RequestHumanInput and
+	// AnswerHumanInput are the first two application commands that move a
+	// Requirement through domain.DecideRequirement, so they necessarily
+	// persist a Requirement. The property this test exists to make
+	// exhaustive is unaffected -- domain.DecideRequirement opens with
+	// `next := current`, so neither command touches CapturedAt, and the
+	// store-adapter tables still drive Capture and Plan. The set stays
+	// closed: a fifth writer still fails here.
+	want := map[string]bool{"Capture": true, "Plan": true, "RequestHumanInput": true, "AnswerHumanInput": true}
 	if len(writers) != len(want) {
 		t.Fatalf("the service writes a Requirement from %v, want exactly %v", keysSorted(writers), keysSorted(want))
 	}

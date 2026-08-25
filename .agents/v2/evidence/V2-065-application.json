@@ -1,0 +1,288 @@
+{
+ "schema_version": "v1",
+ "id": "ev-v2-065-application",
+ "kind": "evidence",
+ "created_at": "2026-08-25T19:40:00Z",
+ "correlation_id": "v2-065-human-input-surface",
+ "task_id": "V2-065",
+ "component": "application",
+ "evidence_key": "8cf6f2a41db93838bb49adedef0921e50f165bee5122fb976512cb6efabd1ed9",
+ "result": "passed",
+ "observed_at": "2026-08-25T19:40:00Z",
+ "checks": [
+  {
+   "name": "environment-identifier",
+   "status": "passed",
+   "argv": [
+    "uname",
+    "-srm"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 10,
+   "summary": "execution environment: uname -srm = Linux 6.18.33.2-microsoft-standard-WSL2 x86_64; devbox run --pure -- go version = go1.25.0 linux/amd64; devbox 0.17.2, environment resolved from this worktree's devbox.json/devbox.lock, both untouched by this task; devbox run --pure -- git --version = git version 2.55.0; worktree /home/takushi/repos/agentic-loop-foundation-worktrees/v2-task-065 on branch v2-task/V2-065, base commit e01b771. No real Provider CLI was started, no gh was started and no Google Cloud resource was touched: the only store dependency exercised is the local Firestore emulator that scripts/firestore-emulator.sh starts for make component-store-firestore."
+  },
+  {
+   "name": "component-application",
+   "status": "passed",
+   "argv": [
+    "devbox",
+    "run",
+    "--pure",
+    "--",
+    "go",
+    "test",
+    "-count=1",
+    "./internal/application"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 600,
+   "summary": "Verdict line: ok github.com/takushi/agentic-loop-foundation/v2/internal/application 0.123s. Measured test counts with go test -list on this worktree: 119 before, 134 after (+15, all new and all in internal/application/human_input_test.go). NOTE ON THE WORK ORDER's OWN NUMBERS: the coordinator's reference baselines were re-measured here and all eight agreed exactly (domain 48 / scheduler 26 / application 119 / api 39 / store-memory 10 / store-firestore 28 / ci 11 / contracts 30); the LINE NUMBERS in A1 and A2 are stale (see the a1-measurements check). Production diff: internal/application/human_input.go +696 (new), ports.go +35, readmodels.go +29, service.go +28."
+  },
+  {
+   "name": "a1-measurements",
+   "status": "passed",
+   "argv": [
+    "devbox",
+    "run",
+    "--pure",
+    "--",
+    "go",
+    "test",
+    "-count=1",
+    "-run",
+    "TestRequirementTransitionsInTheApplicationLayerAreExactlyTheTwoNewCommands",
+    "./internal/application"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 600,
+   "summary": "A1, all three measurements taken before any design was written into code, and all three AGREE with what A1 states, with two stale line numbers reported rather than adjusted. (i) grep -rn DecideRequirement internal/application returned a hit count of 0. That measurement is now pinned as an assertion rather than left in prose: an AST scan over every non-test file in internal/application reports the set of functions calling domain.DecideRequirement, and asserts it is EXACTLY {RequestHumanInput, AnswerHumanInput}. Before this task the set was empty, so these two commands are the first Requirement transitions in the application layer. (ii) The transition table quoted from internal/domain/model.go: 'case RequirementNeedInput:' at line 495 with 'if !allowed(RequirementFraming, RequirementActive, RequirementEvaluating)', and 'case RequirementReadyCommand:' at line 480 with 'if !allowed(RequirementFraming, RequirementWaiting, RequirementNeedsInput)'. A1 cites 'around lines 453 and 468'; the CONTENT matches exactly, the line numbers are stale by 27 and 12 lines because V2-073 added CapturedAt above them. Measured values used. (iii) No domain transition revokes or releases an active lease early: internal/domain/lease.go:85 ExpireLease refuses with 'lease has not expired' when at.IsZero() || at.Before(current.ExpiresAt); lease.go:46 RotateLease sets previous.Status = LeaseRevoked only as a side effect of issuing a successor; LeaseRevoked and LeaseReleased are declared at model.go:174-175 and appear elsewhere only in Validate's accepted-status switch (model.go:428) and in a domain test's status list, so no exported transition produces either from the outside. This is asserted too: the lease test calls domain.ExpireLease with an instant one second BEFORE ExpiresAt and requires a non-nil error, and says in its message that a change here invalidates dp-v2-065 d6 and must be escalated. Nothing disagreed, so nothing was escalated."
+  },
+  {
+   "name": "two-commands-ask-and-answer",
+   "status": "passed",
+   "argv": [
+    "devbox",
+    "run",
+    "--pure",
+    "--",
+    "go",
+    "test",
+    "-count=1",
+    "-v",
+    "-run",
+    "TestRequestHumanInputRecordsTheQuestionAndStagesNoOutbox|TestRequestHumanInputRefusesTheOwnerAndTheUnauthenticated|TestAnswerHumanInputResumesTheSameRequirementAndCreatesNothing",
+    "./internal/application"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 600,
+   "summary": "A3 and A4, PASSED. The ask (Service.RequestHumanInput) accepts RoleRunner and RoleScheduler and refuses RoleOwner with ErrForbidden and an unauthenticated caller with ErrUnauthenticated; it is driven from all three legal source statuses (framing, active, evaluating) and in each case the Requirement ends in needs-input with the question row written in the SAME transaction. asked_at is transactionAuthorityTime(ctx, u) -- the same accessor Service.record uses for every Event's At -- and equals the injected clock instant exactly; RequestHumanInputRequest carries no timestamp field, so no caller and no Runner clock can supply it. Idempotency goes through the existing s.mutate + u.Idempotency path with requestFingerprint('request-human-input', req): a replay of the same request_id returns a byte-identical response and records no second event. MEASURED: the ask stages ZERO outbox items and evaluates ZERO domain.Permit calls (see the seven-mode matrix check). The answer (Service.AnswerHumanInput) accepts RoleOwner only, requires an option_id drawn from the recorded option set and the Requirement's expected version, evaluates domain.Permit with Kind PermitIntake against the installation target exactly as Capture does, transitions the SAME Requirement through RequirementReadyCommand, and records answered_at / answered_option_id / answered_by on the existing row: SameQuestion(before, after) is true, so the question half is byte-identical after the answer."
+  },
+  {
+   "name": "nothing-created-nothing-lost",
+   "status": "passed",
+   "argv": [
+    "devbox",
+    "run",
+    "--pure",
+    "--",
+    "go",
+    "test",
+    "-count=1",
+    "-v",
+    "-run",
+    "TestAnswerHumanInputResumesTheSameRequirementAndCreatesNothing|TestEveryHumanInputRejectionPathLeavesEverythingUnchanged|TestNothingCanAnswerOnTheOwnersBehalf",
+    "./internal/application"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 600,
+   "summary": "A5 and A9's refusal half, PASSED. After a successful answer the Requirement id is identical, the total Requirement count is unchanged (counted through u.Requirements before and after) and the status is ready. A second answer to the same question is refused by domain.ErrInvalidTransition -- the transition table itself, because ready is not an allowed source for RequirementReadyCommand -- and NOT by any application-level flag: no such flag exists, which is why the refusal error is a domain error rather than an application one. All four rejection paths were driven and each was asserted to leave the Requirement status, the Requirement version and the stored question row unchanged (reflect.DeepEqual on the whole row): a non-owner caller (unauthenticated, runner and scheduler, all three), an unknown option_id (ErrUnknownHumanInputOption), a stale expected version (domain.ErrStaleVersion), and an already-answered question (domain.ErrInvalidTransition). Structural half of the same prohibition: AnswerHumanInputRequest's field list is pinned by reflection to exactly {ExpectedRequirementVersion, OptionID, RequestID, RequirementID} and RequestHumanInputRequest's to exactly the nine question fields, and no field name on any of the four types contains default, expire, expiry, timeout, deadline or auto. There is no default option, no expiry-based selection and no timeout that answers anything."
+  },
+  {
+   "name": "claim-and-renew-refuse-while-waiting",
+   "status": "passed",
+   "argv": [
+    "devbox",
+    "run",
+    "--pure",
+    "--",
+    "go",
+    "test",
+    "-count=1",
+    "-v",
+    "-run",
+    "TestClaimAndRenewRefuseWhileTheRequirementWaitsForHumanInput",
+    "./internal/application"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 600,
+   "summary": "A6, PASSED, and stated at exactly the strength it was measured at. Service.Claim refuses with ErrAwaitingHumanInput when the requested Increment's parent Requirement (resolved through domain.Increment.RequirementID) is in needs-input, and Service.Renew refuses for a lease whose Increment has such a parent. Both guards call one shared helper, so they cannot disagree about what waiting means. Driven: a lease is claimed BEFORE the question is asked, the question is then asked, and the later Renew is refused with the lease's ExpiresAt asserted unchanged. WHAT IS GUARANTEED: no new claim is issued and no held claim is extended. WHAT IS NOT: the ask does not revoke the held lease. The test asserts the lease is still LeaseActive after the ask and that domain.ExpireLease refuses an instant before ExpiresAt, so a lease already held lapses at its existing ExpiresAt and is then handled by the existing expired-lease path. This record does not claim that a waiting Requirement holds no claim."
+  },
+  {
+   "name": "displayed-scope-and-enforcement-agree",
+   "status": "passed",
+   "argv": [
+    "devbox",
+    "run",
+    "--pure",
+    "--",
+    "go",
+    "test",
+    "-count=1",
+    "-v",
+    "-run",
+    "TestTheDisplayedStoppedScopeAndTheClaimRefusalAgree|TestHumanInputVocabulariesAreClosed",
+    "./internal/application"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 600,
+   "summary": "A7, PASSED in both halves. CLOSURE, following TestRequestedByActorTypeIsAClosedEnum's idiom: reason_class is closed to exactly the three values derived from the declaration's user_action (destructive-irreversible, limit-change, ambiguous-requirement) -- all three are accepted through the real command and a fourth ('the-loop-felt-unsure') is refused with ErrInvalidHumanInputRequest and writes no row; the scope vocabulary is closed to five values and an out-of-vocabulary entry ('everything-probably') is refused; an option with an empty impact is refused; an empty scope list is refused; and an ask that omits either enforced stopped-scope entry is refused. AGREEMENT, the biconditional, measured in ONE run over two cases: for a Requirement waiting for human input the detail reports new-claims-for-this-requirement as stopped AND Service.Claim refuses for one of its Increments (reported=true refused=true); for a Requirement that was never asked neither happens (reported=false refused=false). The test asserts reported == refused for each case and then asserts that both truth values actually occurred, so the biconditional cannot hold vacuously. The refusal is checked to be ErrAwaitingHumanInput specifically, so an unrelated Claim failure cannot be mistaken for the enforcement."
+  },
+  {
+   "name": "read-view-follows-v2-052",
+   "status": "passed",
+   "argv": [
+    "devbox",
+    "run",
+    "--pure",
+    "--",
+    "go",
+    "test",
+    "-count=1",
+    "-v",
+    "-run",
+    "TestLegacyRequirementWithoutNeedsInputRowStillReads|TestHumanInputListViewAndExportAreUnchanged",
+    "./internal/application"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 600,
+   "summary": "A8, PASSED. RequirementDetailView gained NeedsInput *HumanInputRequest with omitempty, populated by humanInputView(record, ok), which mirrors requestedByView exactly: nil when there is no row, and a DEEP copy (options and both scope slices copied) when there is, so a caller cannot mutate stored state through the pointer -- asserted by writing through the returned pointer's Question, Options[0].Impact and StoppedScope[0] and re-reading both the view and the stored row unchanged. MARSHALLED-BYTES SCAN, three cases: (a) a legacy Requirement with no row -- the marshalled detail does not contain the substring 'needs_input' at all; (b) a Requirement whose status IS needs-input with no row -- the status is asserted to be needs-input first so the case is not vacuous, and the marshalled detail again does not contain 'needs_input': no question is synthesised from the status; (c) a recorded question -- the marshalled detail DOES contain needs_input, reason_class, stopped_scope, continuing_scope and impact, so the absence in (a) and (b) is a statement about the value and not about the marshaller. While unanswered, the marshalled bytes contain neither 'answered_at' nor 'answered_option_id' nor '0001-01-01'; this required the answer fields to be POINTERS, because encoding/json's omitempty does not elide a zero time.Time or a zero struct -- measured directly: the first implementation emitted \"answered_at\":\"0001-01-01T00:00:00Z\" and \"answered_by\":{} on every unanswered question, and the pointer form removed both. The test is named TestLegacyRequirementWithoutNeedsInputRowStillReads after TestLegacyRequirementWithoutRequestedByStillReads so the precedent is visible from the name. RequirementView and Export are unchanged: the list page's marshalled bytes contain none of needs_input, reason_class or stopped_scope, and RequirementView is asserted by reflection to have gained no NeedsInput, Question or ReasonClass field."
+  },
+  {
+   "name": "bounds",
+   "status": "passed",
+   "argv": [
+    "devbox",
+    "run",
+    "--pure",
+    "--",
+    "go",
+    "test",
+    "-count=1",
+    "-v",
+    "-run",
+    "TestHumanInputFieldsAreBounded",
+    "./internal/application"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 600,
+   "summary": "A10, PASSED. The bounds are named constants in the MaxPageSize idiom, not inlined numbers, and their values are: MaxHumanInputQuestionLength 500 bytes, MaxHumanInputReasonLength 1000 bytes, MaxHumanInputOptions 8 entries, MaxHumanInputOptionIDLength 64 bytes, MaxHumanInputOptionTextLength 300 bytes (applied to an option's summary and to its impact independently), MaxHumanInputScopeEntries 8 entries per scope list. The constants' values are asserted, and nine over-bound or malformed asks are each refused with ErrInvalidHumanInputRequest and write no row: an over-long question, reason, option summary, option impact and option id; more options than the bound; no option at all; a repeated scope entry; and a scope reported as both stopped and continuing. An option list exactly AT the bound is accepted, so the bound is a bound rather than an off-by-one refusal."
+  },
+  {
+   "name": "seven-mode-matrix",
+   "status": "passed",
+   "argv": [
+    "devbox",
+    "run",
+    "--pure",
+    "--",
+    "go",
+    "test",
+    "-count=1",
+    "-v",
+    "-run",
+    "TestHumanInputSevenModeMatrix",
+    "./internal/application"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 600,
+   "summary": "A3/A4/d8's seven-mode matrix, MEASURED through the real Service over a store, one fresh fixture per mode built before any Control Intent exists. Measured cells, ask / answer / reference intake (a real Capture in the same fixture under the same mode): allow true/true/true; pause-intake true/false/false; pause-claim true/true/true; graceful-stop true/false/false; immediate-stop true/false/false; emergency-stop true/false/false; cancel true/false/false. Totals: ask allowed 7/7, answer allowed 2/7, reference intake allowed 2/7. The ask is allowed under every mode because it evaluates no Permit -- a stop must not take away the system's ability to record why it stopped. The answer's outcome is asserted EQUAL to the measured Capture outcome mode by mode, rather than against a copied table, plus a non-vacuity assertion that both truth values occur. CORRECTION TO AN ASSUMPTION MADE BEFORE MEASURING: the first version of this test expected the answer to be allowed only under ControlAllow. Measured, pause-claim ALLOWS intake (it stops claims, not intake), so the answer is allowed under allow and under pause-claim and denied under the other five, with 'control policy denies operation' as the refusal in each. That is the correct behaviour rather than a leak: resuming a Requirement to ready issues no claim, and the answer is gated by exactly the permit Capture is gated by."
+  },
+  {
+   "name": "quota",
+   "status": "passed",
+   "argv": [
+    "devbox",
+    "run",
+    "--pure",
+    "--",
+    "go",
+    "test",
+    "-count=1",
+    "-v",
+    "-run",
+    "TestBothHumanInputCommandsStayInsideTheMutationReservation",
+    "./internal/application"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 600,
+   "summary": "A15, PASSED. Both commands run through s.mutate, so the conservative mutation reservation quota.MutationUsage = {Reads: 32, Writes: 16} is taken before the callback can stage anything. MEASURED with a counting UnitOfWork decorator over the real memory adapter, counting the idempotency record, the aggregate and the side-table row explicitly and charging Record as three writes (event + idempotency record + quota document) so the count errs in the same direction the reservation does: the ask performed reads=2 writes=5, the answer reads=5 writes=5. The extra document the ask writes -- the question row -- therefore stays well inside the reservation (5 of 16 writes), and no budget needed raising, so nothing was escalated."
+  },
+  {
+   "name": "side-table-write-once",
+   "status": "passed",
+   "argv": [
+    "devbox",
+    "run",
+    "--pure",
+    "--",
+    "go",
+    "test",
+    "-count=1",
+    "-v",
+    "-run",
+    "TestTheQuestionRowIsWriteOnceAndTheAnswerNeverErasesIt",
+    "./internal/application"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 600,
+   "summary": "A2's store rule driven against the memory adapter through the port, PASSED. An identical re-write is an idempotent replay; changing the question half of an existing row is refused with domain.ErrStaleVersion; the answer is writable by a second, later transaction and SameQuestion reports the question unchanged afterwards; clearing a recorded answer is refused with domain.ErrStaleVersion; and a rolled-back transaction leaves the committed question unchanged, which is why the memory adapter deep-copies the record's slices in state.clone(). The port RequirementNeedsInputRepository was added to internal/application/ports.go and to UnitOfWork, following ControlRequestedByRepository's comment and implementation idiom, with the single documented difference -- the answer fields written by a second transaction -- stated in the port comment. internal/domain was NOT edited: git diff --cached --name-only lists no file under internal/domain/."
+  },
+  {
+   "name": "skips",
+   "status": "skipped",
+   "argv": [
+    "devbox",
+    "run",
+    "--pure",
+    "--",
+    "go",
+    "test",
+    "-count=1",
+    "./internal/store/firestore"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 600,
+   "summary": "Gate rule G7: recorded as a skip and NOT counted as a pass. internal/store/firestore's integration tests, including this task's new TestNeedsInputQuestionRowBehaviouralTableOnFirestore, call t.Skip when FIRESTORE_EMULATOR_HOST is unset -- the verdict line without the emulator is 'ok .../internal/store/firestore 0.014s' with the cases SKIPPED, which is why every Firestore claim in these records is backed by the separate emulator run recorded in the store-firestore record (scripts/firestore-emulator.sh, all five cases PASS). No other test in any package was skipped by this task, and no test was skipped in internal/application, internal/api, internal/store/memory, internal/contracts or internal/ci."
+  },
+  {
+   "name": "make-check-before-the-evidence-commit",
+   "status": "passed",
+   "argv": [
+    "devbox",
+    "run",
+    "--pure",
+    "--",
+    "make",
+    "check"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 3600,
+   "summary": "A19, first run, judged by the verdict lines rather than by the shell exit status. Zero FAIL lines; every package reports ok. Secret scan: '475 commits scanned. / scanned ~11379842 bytes (11.38 MB) in 924ms / no leaks found'. Ownership: {\"changed\":null,\"selected\":null,\"all\":false}. Firestore component under the emulator: ok .../internal/store/firestore 9.977s. Final line: 'workflow-pins: 3 unique (owner/repo, version) -> sha pins, no disagreement'."
+  },
+  {
+   "name": "evidence-key",
+   "status": "passed",
+   "argv": [
+    "devbox",
+    "run",
+    "--pure",
+    "--",
+    "make",
+    "evidence-keys"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 600,
+   "summary": "A18: the application component key read with make evidence-keys on the tree where make check is green and every touched file is already git-added is 8cf6f2a41db93838bb49adedef0921e50f165bee5122fb976512cb6efabd1ed9. Measured on the same tree, the key at base commit e01b771 was ad21165cec58be3664308d5997a2dc30a5f73f57b4e0e8e997cb0d918f83c7b1, so this task moved it. 13 of the 23 component keys moved in total (api, application, contracts, control-plane, docs, internal-contracts, reconciler, release, runner, store-firestore, store-memory, task-ledger, web): the dependency closure carries the two edited application files into every component that depends on application, and contracts/openapi/openapi-v1.yaml into the api contract dependency and the release bundle. task-ledger moves once more when these evidence artifacts are committed, so A18's re-verification was run on the final committed tree 58868bc: this component's key above is UNCHANGED there, and task-ledger read 15cfd0d3508c6f3c77888c7764dfe12decea802aec56d76ca7eba34d3ec5c859. Both observations are kept."
+  }
+ ]
+}

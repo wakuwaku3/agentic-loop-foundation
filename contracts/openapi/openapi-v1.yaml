@@ -185,6 +185,40 @@ paths:
       parameters: [{name: execution_id, in: path, required: true, schema: {type: string}}]
       requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/StartRequest'}}}}
       responses: {'200': {description: started, content: {application/json: {schema: {$ref: '#/components/schemas/StartResponse'}}}}, '400': {$ref: '#/components/responses/Error'}, '401': {$ref: '#/components/responses/Error'}, '403': {$ref: '#/components/responses/Error'}, '409': {$ref: '#/components/responses/Error'}, '500': {$ref: '#/components/responses/Error'}, '503': {$ref: '#/components/responses/Error'}}
+  /v1/requirements/{requirement_id}:request-input:
+    post:
+      operationId: requestHumanInput
+      security: [{runnerSession: []}]
+      description: |
+        The Loop asks the owner a question it may not answer itself, and the
+        Requirement moves to needs-input in the same transaction. Callable by
+        a Runner or by the scheduler; the owner is refused, because the owner
+        answers questions rather than asking them. No domain Permit is
+        evaluated and no outbox item is staged: asking only removes
+        capability, so gating it behind a side-effect permit would leave the
+        system unable to record why it stopped at exactly the moment a stop
+        is in force. While the Requirement waits, no new claim is issued and
+        no held claim is extended for its Increments.
+      parameters: [{name: requirement_id, in: path, required: true, schema: {type: string}}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/RequestHumanInputRequest'}}}}
+      responses: {'200': {description: the question was recorded and the Requirement is in needs-input, content: {application/json: {schema: {$ref: '#/components/schemas/RequestHumanInputResponse'}}}}, '400': {$ref: '#/components/responses/Error'}, '401': {$ref: '#/components/responses/Error'}, '403': {$ref: '#/components/responses/Error'}, '404': {$ref: '#/components/responses/Error'}, '409': {$ref: '#/components/responses/Error'}, '413': {$ref: '#/components/responses/Error'}, '415': {$ref: '#/components/responses/Error'}, '429': {$ref: '#/components/responses/Error'}, '500': {$ref: '#/components/responses/Error'}, '503': {$ref: '#/components/responses/Error'}}
+  /v1/requirements/{requirement_id}:answer-input:
+    post:
+      operationId: answerHumanInput
+      security: [{iapOwner: []}]
+      description: |
+        The owner answers a recorded question by naming one of its options,
+        and the SAME Requirement resumes: no Requirement is created. Owner
+        role only. The chosen option must be one of the recorded options --
+        there is no default option, no expiry-driven selection and no timeout
+        that answers anything -- and the expected Requirement version must
+        match. A second answer to an already-answered question is refused by
+        the domain transition table itself, not by an application flag. The
+        intake Permit is evaluated against the installation target, exactly
+        as capture is, so a pause-intake or any stop mode denies resuming.
+      parameters: [{name: requirement_id, in: path, required: true, schema: {type: string}}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/AnswerHumanInputRequest'}}}}
+      responses: {'200': {description: the answer was recorded and the same Requirement resumed, content: {application/json: {schema: {$ref: '#/components/schemas/AnswerHumanInputResponse'}}}}, '400': {$ref: '#/components/responses/Error'}, '401': {$ref: '#/components/responses/Error'}, '403': {$ref: '#/components/responses/Error'}, '404': {$ref: '#/components/responses/Error'}, '409': {$ref: '#/components/responses/Error'}, '413': {$ref: '#/components/responses/Error'}, '415': {$ref: '#/components/responses/Error'}, '429': {$ref: '#/components/responses/Error'}, '500': {$ref: '#/components/responses/Error'}, '503': {$ref: '#/components/responses/Error'}}
   /v1/repositories:
     get:
       operationId: listRepositories
@@ -418,7 +452,85 @@ components:
       type: object
       additionalProperties: false
       required: [requirement_id, status, version, increments, next_action, page_size, truncated]
-      properties: {requirement_id: {type: string}, original_text: {type: string}, status: {type: string}, version: {type: integer}, increments: {type: array, items: {type: object}}, next_action: {type: string}, page_size: {type: integer, maximum: 100}, truncated: {type: boolean}, requested_by: {$ref: '#/components/schemas/RequestedBy'}, repository_id: {type: string, description: 'the Repository this Requirement is linked to; omitted entirely when no link exists'}, captured_at: {type: string, format: date-time, description: 'the instant this Requirement was captured, taken from the transaction authority time at intake; omitted entirely for a Requirement recorded before the field existed, never reported as the zero instant'}}
+      properties: {requirement_id: {type: string}, original_text: {type: string}, status: {type: string}, version: {type: integer}, increments: {type: array, items: {type: object}}, next_action: {type: string}, page_size: {type: integer, maximum: 100}, truncated: {type: boolean}, requested_by: {$ref: '#/components/schemas/RequestedBy'}, repository_id: {type: string, description: 'the Repository this Requirement is linked to; omitted entirely when no link exists'}, captured_at: {type: string, format: date-time, description: 'the instant this Requirement was captured, taken from the transaction authority time at intake; omitted entirely for a Requirement recorded before the field existed, never reported as the zero instant'}, needs_input: {$ref: '#/components/schemas/NeedsInputQuestion'}}
+    HumanInputOption:
+      type: object
+      additionalProperties: false
+      required: [option_id, summary, impact]
+      properties:
+        option_id: {type: string, maxLength: 64}
+        summary: {type: string, maxLength: 300}
+        impact: {type: string, maxLength: 300, description: 'what choosing this option does; mandatory, so an option cannot be offered with no stated consequence'}
+    HumanInputScope:
+      type: string
+      enum: [new-claims-for-this-requirement, lease-renewal-for-this-requirement, other-requirements, intake-of-new-requirements, owner-reads]
+    NeedsInputQuestion:
+      type: object
+      additionalProperties: false
+      required: [requirement_id, question, reason_class, reason, options, stopped_scope, continuing_scope, asked_at, asked_by]
+      description: |
+        The question recorded for a Requirement in needs-input. The whole
+        object is omitted from the Requirement detail when no question was
+        recorded, including for a Requirement whose status is needs-input: no
+        question is ever synthesised from the status alone.
+      properties:
+        requirement_id: {type: string}
+        question: {type: string, maxLength: 500}
+        reason_class: {type: string, enum: [destructive-irreversible, limit-change, ambiguous-requirement]}
+        reason: {type: string, maxLength: 1000}
+        options: {type: array, minItems: 1, maxItems: 8, items: {$ref: '#/components/schemas/HumanInputOption'}}
+        stopped_scope: {type: array, minItems: 1, maxItems: 8, items: {$ref: '#/components/schemas/HumanInputScope'}, description: 'what stops until the question is answered; the entries new-claims-for-this-requirement and lease-renewal-for-this-requirement are each backed by an actual refusal in the issuing path'}
+        continuing_scope: {type: array, minItems: 1, maxItems: 8, items: {$ref: '#/components/schemas/HumanInputScope'}}
+        asked_at: {type: string, format: date-time}
+        asked_by: {$ref: '#/components/schemas/RequestedBy'}
+        answered_at: {type: string, format: date-time, description: 'omitted entirely while the question is unanswered'}
+        answered_option_id: {type: string, maxLength: 64, description: 'omitted entirely while the question is unanswered'}
+        answered_by: {$ref: '#/components/schemas/RequestedBy'}
+    RequestHumanInputRequest:
+      type: object
+      additionalProperties: false
+      required: [request_id, expected_requirement_version, question, reason_class, reason, options, stopped_scope, continuing_scope]
+      properties:
+        request_id: {type: string}
+        expected_requirement_version: {type: integer}
+        question: {type: string, maxLength: 500}
+        reason_class: {type: string, enum: [destructive-irreversible, limit-change, ambiguous-requirement]}
+        reason: {type: string, maxLength: 1000}
+        options: {type: array, minItems: 1, maxItems: 8, items: {$ref: '#/components/schemas/HumanInputOption'}}
+        stopped_scope: {type: array, minItems: 1, maxItems: 8, items: {$ref: '#/components/schemas/HumanInputScope'}}
+        continuing_scope: {type: array, minItems: 1, maxItems: 8, items: {$ref: '#/components/schemas/HumanInputScope'}}
+    RequestHumanInputResponse:
+      type: object
+      additionalProperties: false
+      required: [requirement_id, status, version, asked_at, asked_by]
+      properties:
+        requirement_id: {type: string}
+        status: {type: string}
+        version: {type: integer}
+        asked_at: {type: string, format: date-time}
+        asked_by: {$ref: '#/components/schemas/RequestedBy'}
+    AnswerHumanInputRequest:
+      type: object
+      additionalProperties: false
+      required: [request_id, expected_requirement_version, option_id]
+      description: |
+        There is deliberately no default_option, no expires_at and no timeout
+        field: nothing in this contract can answer on the owner's behalf.
+      properties:
+        request_id: {type: string}
+        expected_requirement_version: {type: integer}
+        option_id: {type: string, maxLength: 64}
+    AnswerHumanInputResponse:
+      type: object
+      additionalProperties: false
+      required: [requirement_id, status, version, answered_option_id, answered_at, answered_by]
+      properties:
+        requirement_id: {type: string}
+        status: {type: string, description: 'the SAME Requirement, resumed; no Requirement is created by an answer'}
+        version: {type: integer}
+        answered_option_id: {type: string, maxLength: 64}
+        answered_at: {type: string, format: date-time}
+        answered_by: {$ref: '#/components/schemas/RequestedBy'}
     ControlRead:
       type: object
       additionalProperties: false

@@ -40,6 +40,33 @@ Preview実環境で未実施であり、証跡なしである。
 正本は `contracts/release-contract/foundation-capabilities.json` の
 `cap-human-input-request` 宣言である。Preview Releaseが未deployのため証跡なし。
 
+ownerが読めるようになったもの: needs-inputのRequirement詳細（`GET /v1/requirements/{requirement_id}`）に
+質問が載る。載るのは、なぜ自律判断できないかを閉じた3値の理由class（破壊的・不可逆な判断／
+費用・権限上限の変更／要求の本質的な曖昧さ）とその理由文、何を決める必要があるかの質問文、
+選択肢とその選択肢ごとの影響（影響は必須であり、影響が空の選択肢は記録段階で拒否される）、
+そして回答まで何が停止し何が継続できるかの2つの範囲listである。範囲listは閉じた語彙であり、
+そのうち「このRequirementへの新規claim」と「保持中leaseの延長」の2値は実際の拒否で裏打ち
+されている。owner consoleにも同じ内容を読む欄が付き、選択肢を選んで押したときにだけ回答を
+送る。回答は`POST /v1/requirements/{requirement_id}:answer-input`（ownerのみ）で、選択肢idを
+1つ指定する。回答すると新しいRequirementは作られず、同じRequirementがreadyへ戻る。
+2回目の回答はdomainの遷移表自身が拒否する（readyはreadyコマンドの許可元ではない）。
+質問の記録は`POST /v1/requirements/{requirement_id}:request-input`（runnerまたはscheduler。
+ownerは拒否される）で、質問を記録しないRequirementは詳細でこのfieldごと欠落する。
+status がneeds-inputでも記録が無ければ欠落したままであり、statusから質問文を合成することはしない。
+
+この面が保証するもの／しないもの: 質問が開いている間、そのRequirementのIncrementへは
+新規claimが発行されず、保持中のleaseも延長されない（`Claim`と`Renew`が拒否する）。
+一方で、質問した瞬間に既存leaseが取り消されるわけではない。activeなleaseを早期にrevokeできる
+domain遷移が存在しない（`ExpireLease`は満了前を拒否する）ため、既に保持されているleaseは
+既存の`ExpiresAt`で失効し、以降は既存の期限切れlease経路が扱う。「待機中のRequirementは
+claimを一切保持しない」とは言えないので、そうは書かない。
+
+未配線の残余: 「質問すべきだと自動で判断する」経路は配線されていない。
+`docs/architecture/failure-model.md`がneeds-inputへ送ると定めているpolicy-denied、
+budget-exceeded、分類不能の失敗classからこのcommandを呼ぶ配線は存在せず、
+この版が備えるのはcommand・route・詳細fieldという露出面だけである。したがって
+cap-human-input-requestのuser journeyはこの版では実行されていない。
+
 <a id="cap-preview-operation"></a>
 ## Previewを運用する
 

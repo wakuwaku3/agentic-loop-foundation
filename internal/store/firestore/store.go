@@ -1279,6 +1279,54 @@ func (u *unit) EffectiveAllocationLimit(ctx context.Context) (application.Alloca
 	return best, found, nil
 }
 
+// The needs-input question (V2-065) lives in its own collection, keyed by the
+// Requirement id. One document per Requirement, read and written by key
+// alone, so no index is required and the read cost does not grow with the
+// Requirement count.
+//
+// The two rules are the ones the port states and the memory adapter applies
+// identically: a save that would change the question half of an existing row
+// is refused with domain.ErrStaleVersion, and so is one that would clear an
+// answer already recorded. An identical re-write stages nothing.
+func (u *unit) SaveHumanInputRequest(ctx context.Context, value application.HumanInputRequest) error {
+	if err := application.ValidateHumanInputRequest(value); err != nil {
+		return err
+	}
+	ref, err := u.store.path("requirement_needs_input", value.RequirementID)
+	if err != nil {
+		return err
+	}
+	var old application.HumanInputRequest
+	got, err := u.value(ref, "requirement-needs-input", &old)
+	if err != nil {
+		return err
+	}
+	if got {
+		if !old.SameQuestion(value) {
+			return domain.ErrStaleVersion
+		}
+		if old.Answered() && !value.Answered() {
+			return domain.ErrStaleVersion
+		}
+		if old.Answered() && value.Answered() && old.SameAnswer(value) {
+			return nil
+		}
+	}
+	return u.stage(ref, "requirement-needs-input", value, !got)
+}
+func (u *unit) HumanInputRequest(ctx context.Context, requirementID string) (application.HumanInputRequest, bool, error) {
+	ref, err := u.store.path("requirement_needs_input", requirementID)
+	if err != nil {
+		return application.HumanInputRequest{}, false, err
+	}
+	var v application.HumanInputRequest
+	ok, err := u.value(ref, "requirement-needs-input", &v)
+	if err != nil || !ok {
+		return application.HumanInputRequest{}, false, err
+	}
+	return v, true, nil
+}
+
 // Repository and its bounded forge Observation live in their own
 // collections. SaveRepository uses saveVersion, so the optimistic-concurrency
 // contract is byte-for-byte the one SaveRequirement uses: a create is staged

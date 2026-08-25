@@ -1,0 +1,106 @@
+{
+ "schema_version": "v1",
+ "id": "ev-v2-065-contracts",
+ "kind": "evidence",
+ "created_at": "2026-08-25T19:40:00Z",
+ "correlation_id": "v2-065-human-input-surface",
+ "task_id": "V2-065",
+ "component": "contracts",
+ "evidence_key": "da59810b0293d7c80951f75cabf1218ac12d0d4f45e2b6f1cdf78d8054c25644",
+ "result": "passed",
+ "observed_at": "2026-08-25T19:40:00Z",
+ "checks": [
+  {
+   "name": "environment-identifier",
+   "status": "passed",
+   "argv": [
+    "uname",
+    "-srm"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 10,
+   "summary": "execution environment: uname -srm = Linux 6.18.33.2-microsoft-standard-WSL2 x86_64; devbox run --pure -- go version = go1.25.0 linux/amd64; devbox 0.17.2, environment resolved from this worktree's devbox.json/devbox.lock, both untouched by this task; devbox run --pure -- git --version = git version 2.55.0; worktree /home/takushi/repos/agentic-loop-foundation-worktrees/v2-task-065 on branch v2-task/V2-065, base commit e01b771. No real Provider CLI was started, no gh was started and no Google Cloud resource was touched: the only store dependency exercised is the local Firestore emulator that scripts/firestore-emulator.sh starts for make component-store-firestore."
+  },
+  {
+   "name": "component-contracts",
+   "status": "passed",
+   "argv": [
+    "devbox",
+    "run",
+    "--pure",
+    "--",
+    "make",
+    "component-contracts"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 600,
+   "summary": "Verdict line: ok github.com/takushi/agentic-loop-foundation/v2/internal/contracts 0.100s. Measured test counts: 30 before, 30 after -- unchanged; internal/contracts/** is a prohibited path for this task, and the ledger and release-contract assertions there are what had to keep passing over the changed openapi document and the appended evidence entries. devbox run --pure -- go test -count=1 ./internal/contracts is green, and so is ./internal/release (ok 0.199s), which digests contracts/openapi/** as a bundle role member."
+  },
+  {
+   "name": "openapi-declarations",
+   "status": "passed",
+   "argv": [
+    "devbox",
+    "run",
+    "--pure",
+    "--",
+    "go",
+    "test",
+    "-count=1",
+    "./internal/contracts",
+    "./internal/release",
+    "./internal/api"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 600,
+   "summary": "A9's contract half and A14's measurement, PASSED. contracts/openapi/openapi-v1.yaml gained two literal path keys -- /v1/requirements/{requirement_id}:request-input and /v1/requirements/{requirement_id}:answer-input -- inserted before /v1/repositories: without reordering any existing path, and seven schemas (HumanInputOption, HumanInputScope, NeedsInputQuestion, RequestHumanInputRequest, RequestHumanInputResponse, AnswerHumanInputRequest, AnswerHumanInputResponse) inserted before ControlRead:. Path count went 24 -> 26 and schema count 63 -> 70. Every new object schema sets additionalProperties: false and carries an explicit required list; both enumerable fields are declared as enums matching the application's closed vocabularies value for value. RequirementDetailResponse gained needs_input, which was forced rather than chosen because that schema already set additionalProperties: false. No field name contains password, credential, raw_prompt or raw_provider_output. MEASURED FOR A14: cap-human-input-request's declared owner_surfaces entry /v1/requirements/{requirement_id} already resolves against openapi-v1.yaml (it is a declared path key and was before this task), so contracts/release-contract/foundation-capabilities.json needed no change and was not edited -- git diff --cached --name-only lists no file under contracts/release-contract/. No declaration was weakened. The document also parses as YAML with zero dangling $ref targets."
+  },
+  {
+   "name": "ledger",
+   "status": "passed",
+   "argv": [
+    "devbox",
+    "run",
+    "--pure",
+    "--",
+    "go",
+    "test",
+    "-count=1",
+    "./internal/contracts"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 600,
+   "summary": "A17, PASSED after the evidence commit. Seven artifacts were created -- .agents/v2/evidence/V2-065-{application,api,web,store-memory,store-firestore,contracts,docs}.json with ids ev-v2-065-{component}, all carrying task_id V2-065 and correlation_id v2-065-human-input-surface -- and registered with exactly one appended entry each at the END of .agents/v2/evidence/index.json, whose evidence_hash is the sha256 of that artifact's final committed bytes. The 120 pre-existing entries are byte-identical and no other task's entry was touched. The ledger test in internal/contracts is green with the entries in place."
+  },
+  {
+   "name": "make-check-before-the-evidence-commit",
+   "status": "passed",
+   "argv": [
+    "devbox",
+    "run",
+    "--pure",
+    "--",
+    "make",
+    "check"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 3600,
+   "summary": "A19, first run, judged by the verdict lines rather than by the shell exit status. Zero FAIL lines; every package reports ok. Secret scan: '475 commits scanned. / scanned ~11379842 bytes (11.38 MB) in 924ms / no leaks found'. Ownership: {\"changed\":null,\"selected\":null,\"all\":false}. Firestore component under the emulator: ok .../internal/store/firestore 9.977s. Final line: 'workflow-pins: 3 unique (owner/repo, version) -> sha pins, no disagreement'."
+  },
+  {
+   "name": "evidence-key",
+   "status": "passed",
+   "argv": [
+    "devbox",
+    "run",
+    "--pure",
+    "--",
+    "make",
+    "evidence-keys"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 600,
+   "summary": "A18: the contracts component key read with make evidence-keys on the tree where make check is green and every touched file is already git-added is da59810b0293d7c80951f75cabf1218ac12d0d4f45e2b6f1cdf78d8054c25644. Measured on the same tree, the key at base commit e01b771 was e712730687aba24617b733f63c05b5cf730ce18df3541ecfc072148ce2818f2c, so this task moved it. 13 of the 23 component keys moved in total (api, application, contracts, control-plane, docs, internal-contracts, reconciler, release, runner, store-firestore, store-memory, task-ledger, web): the dependency closure carries the two edited application files into every component that depends on application, and contracts/openapi/openapi-v1.yaml into the api contract dependency and the release bundle. task-ledger moves once more when these evidence artifacts are committed, so A18's re-verification was run on the final committed tree 58868bc: this component's key above is UNCHANGED there, and task-ledger read 15cfd0d3508c6f3c77888c7764dfe12decea802aec56d76ca7eba34d3ec5c859. Both observations are kept."
+  }
+ ]
+}

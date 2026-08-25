@@ -89,6 +89,15 @@ type RequirementDetailView struct {
 	// instant, which would marshal to a real-looking date in the year 1 and
 	// would be read by an ordering rule that rewards age as maximally old.
 	CapturedAt *time.Time `json:"captured_at,omitempty"`
+	// NeedsInput is the question the Loop asked about this Requirement
+	// (V2-065), read from the needs-input side table. It follows
+	// requestedByView's precedent exactly: a pointer, omitted entirely when
+	// no row exists, and never synthesised. A Requirement whose status is
+	// needs-input but which has no recorded row reads with this field
+	// ABSENT -- that combination is a real, reportable inconsistency, and
+	// inventing question text to fill the field would be a fabricated
+	// observation. Absent means absent.
+	NeedsInput *HumanInputRequest `json:"needs_input,omitempty"`
 }
 
 // RequirementView remains compatible with the original v1 response. Text is
@@ -145,6 +154,21 @@ func requestedByView(rb domain.RequestedBy) *domain.RequestedBy {
 // decide what an absent capture time means instead of silently inheriting an
 // unbounded age. A copy is returned so a caller cannot mutate stored state
 // through the pointer.
+// humanInputView mirrors requestedByView for the needs-input question
+// (V2-065). Its single source is the side-table read handed to it: there is
+// no fallback that looks at the Requirement's status, so a needs-input
+// Requirement with no row yields nil and the response omits needs_input
+// entirely rather than reporting an empty question. A deep COPY is returned,
+// so a caller cannot mutate stored state through the pointer or through the
+// record's option and scope slices.
+func humanInputView(v HumanInputRequest, ok bool) *HumanInputRequest {
+	if !ok {
+		return nil
+	}
+	out := v.Clone()
+	return &out
+}
+
 func capturedAtView(r domain.Requirement) *time.Time {
 	if !r.CaptureRecorded() {
 		return nil
@@ -238,6 +262,11 @@ func (s *Service) GetRequirementDetail(ctx context.Context, id string) (Requirem
 		if hasLink {
 			out.RepositoryID = link.RepositoryID.String()
 		}
+		question, hasQuestion, err := u.HumanInputRequest(ctx, id)
+		if err != nil {
+			return err
+		}
+		out.NeedsInput = humanInputView(question, hasQuestion)
 		incs := make([]domain.Increment, 0, len(r.Increments))
 		incrementIDs := r.Increments
 		if len(incrementIDs) > MaxPageSize {

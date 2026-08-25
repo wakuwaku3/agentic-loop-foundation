@@ -3,7 +3,7 @@
   "id": "ts-v2-072",
   "kind": "canonical-task-state",
   "task_id": "V2-072",
-  "status": "blocked",
+  "status": "queued",
   "dependencies": [
     "V2-065",
     "V2-071",
@@ -129,7 +129,30 @@
         "remaining": 2
       },
       "reason": "the live exercise compiles the application package, and every remaining surface task edits it, so a later merge would force re-observation under G6b and each re-observation writes a real branch to a real forge; placing this last makes that ordering cost zero"
+    },
+    {
+      "sequence": 5,
+      "at": "2026-08-25T16:00:00Z",
+      "from_status": "blocked",
+      "to_status": "queued",
+      "actor": "sol",
+      "input_refs": [
+        "V2-071",
+        "V2-072"
+      ],
+      "input_hash": "fd9366d783c9d35158f1b2bf9179f41743ec2c65d127e5f2fd6c9af0ad012237",
+      "output_refs": [
+        "V2-072"
+      ],
+      "output_hash": "90d18aaf5f7f9f0a931b20ef34b2a6e56e948f19b8d45c8e9da8124a81529010",
+      "owner": "luna",
+      "next_owner": "luna",
+      "retry_budget": {
+        "max_attempts": 2,
+        "attempts_used": 0,
+        "remaining": 2
+      },
+      "reason": "every task this one depends on is complete, so the block has cleared"
     }
-  ],
-  "block_reason": "V2-065,V2-077"
+  ]
 }

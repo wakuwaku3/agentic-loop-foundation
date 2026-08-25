@@ -408,6 +408,42 @@ func (h *Handler) route(w http.ResponseWriter, r *http.Request) {
 			h.start(w, r.WithContext(ctx), id)
 			return
 		}
+		// V2-065: the two needs-input verbs. They follow the same
+		// prefix-plus-suffix idiom as :renew and :start above, and they
+		// cannot be swallowed by the GET /v1/requirements/ prefix branch
+		// earlier in this function because that branch is gated on
+		// r.Method == http.MethodGet; an api test asserts that directly.
+		if strings.HasPrefix(r.URL.Path, requirementsPrefix) && strings.HasSuffix(r.URL.Path, requestInputSuffix) {
+			id := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, requirementsPrefix), requestInputSuffix)
+			if id == "" {
+				h.error(w, r, http.StatusNotFound, "not_found", "route not found")
+				return
+			}
+			// Asking is the Loop's own act: the Runner that could not decide
+			// and the scheduler that stops work are the two callers. The
+			// owner is refused here, gated exactly the way
+			// /v1/runner/permits:check gates RoleRunner, because the owner
+			// answers questions rather than asking them.
+			if caller.Role != application.RoleRunner && caller.Role != application.RoleScheduler {
+				h.error(w, r, 403, "forbidden", "runner or scheduler role required")
+				return
+			}
+			h.requestHumanInput(w, r.WithContext(ctx), id)
+			return
+		}
+		if strings.HasPrefix(r.URL.Path, requirementsPrefix) && strings.HasSuffix(r.URL.Path, answerInputSuffix) {
+			id := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, requirementsPrefix), answerInputSuffix)
+			if id == "" {
+				h.error(w, r, http.StatusNotFound, "not_found", "route not found")
+				return
+			}
+			if caller.Role != application.RoleOwner {
+				h.error(w, r, 403, "forbidden", "owner role required")
+				return
+			}
+			h.answerHumanInput(w, r.WithContext(ctx), id)
+			return
+		}
 		h.error(w, r, http.StatusNotFound, "not_found", "route not found")
 	}
 }
@@ -535,6 +571,96 @@ func (h *Handler) start(w http.ResponseWriter, r *http.Request, id string) {
 		return
 	}
 	writeJSON(w, 200, out)
+}
+
+// V2-065: the needs-input verbs on the Requirement path. The prefix and the
+// two suffixes are named constants for the same reason repositoriesPrefix is:
+// the router matches on them twice each, and a literal repeated four times is
+// a route that can drift from its own contract.
+const (
+	requirementsPrefix = "/v1/requirements/"
+	requestInputSuffix = ":request-input"
+	answerInputSuffix  = ":answer-input"
+)
+
+type humanInputOptionBody struct {
+	OptionID string `json:"option_id"`
+	Summary  string `json:"summary"`
+	Impact   string `json:"impact"`
+}
+
+// requestInputBody carries the question. It has no timestamp field: asked_at
+// is the transaction authority time, so neither a Runner clock nor a caller
+// can supply it. It has no default-option field and no expiry field, so no
+// request shape can answer on the owner's behalf.
+type requestInputBody struct {
+	RequestID                  string                 `json:"request_id"`
+	ExpectedRequirementVersion domain.Version         `json:"expected_requirement_version"`
+	Question                   string                 `json:"question"`
+	ReasonClass                string                 `json:"reason_class"`
+	Reason                     string                 `json:"reason"`
+	Options                    []humanInputOptionBody `json:"options"`
+	StoppedScope               []string               `json:"stopped_scope"`
+	ContinuingScope            []string               `json:"continuing_scope"`
+}
+
+type answerInputBody struct {
+	RequestID                  string         `json:"request_id"`
+	ExpectedRequirementVersion domain.Version `json:"expected_requirement_version"`
+	OptionID                   string         `json:"option_id"`
+}
+
+func (h *Handler) requestHumanInput(w http.ResponseWriter, r *http.Request, id string) {
+	var b requestInputBody
+	if !h.decode(w, r, &b) {
+		return
+	}
+	options := make([]application.HumanInputOption, 0, len(b.Options))
+	for _, o := range b.Options {
+		options = append(options, application.HumanInputOption{OptionID: o.OptionID, Summary: o.Summary, Impact: o.Impact})
+	}
+	stopped := make([]application.HumanInputScope, 0, len(b.StoppedScope))
+	for _, v := range b.StoppedScope {
+		stopped = append(stopped, application.HumanInputScope(v))
+	}
+	continuing := make([]application.HumanInputScope, 0, len(b.ContinuingScope))
+	for _, v := range b.ContinuingScope {
+		continuing = append(continuing, application.HumanInputScope(v))
+	}
+	out, err := h.config.Service.RequestHumanInput(r.Context(), application.RequestHumanInputRequest{
+		RequestID:                  b.RequestID,
+		RequirementID:              id,
+		ExpectedRequirementVersion: b.ExpectedRequirementVersion,
+		Question:                   b.Question,
+		ReasonClass:                application.HumanInputReasonClass(b.ReasonClass),
+		Reason:                     b.Reason,
+		Options:                    options,
+		StoppedScope:               stopped,
+		ContinuingScope:            continuing,
+	})
+	if err != nil {
+		h.domainError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (h *Handler) answerHumanInput(w http.ResponseWriter, r *http.Request, id string) {
+	var b answerInputBody
+	if !h.decode(w, r, &b) {
+		return
+	}
+	out, err := h.config.Service.AnswerHumanInput(r.Context(), application.AnswerHumanInputRequest{
+		RequestID:                  b.RequestID,
+		RequirementID:              id,
+		ExpectedRequirementVersion: b.ExpectedRequirementVersion,
+		OptionID:                   b.OptionID,
+	})
+	if err != nil {
+		h.domainError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 type heartbeatBody struct {
@@ -1028,6 +1154,14 @@ func (h *Handler) domainError(w http.ResponseWriter, r *http.Request, err error)
 		code = "conflict"
 	}
 	if errors.Is(err, domain.ErrStaleFence) || errors.Is(err, domain.ErrLeaseExpired) || errors.Is(err, application.ErrIdempotencyConflict) {
+		status = http.StatusConflict
+		code = "conflict"
+	}
+	if errors.Is(err, application.ErrAwaitingHumanInput) {
+		// The Increment's parent Requirement is waiting for the owner to
+		// answer a question. That is a conflict with existing state, not a
+		// malformed request and not a policy denial: nothing the caller can
+		// rewrite makes the claim issuable while the question is open.
 		status = http.StatusConflict
 		code = "conflict"
 	}

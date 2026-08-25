@@ -363,6 +363,19 @@ const id=()=>crypto.randomUUID();const json=v=>({headers:{"Content-Type":"applic
     }
     return out+'"';
   };
+// V2-065 needs-input question: self-contained additive block. Reads
+// GET /v1/requirements/{requirement_id} and renders the recorded question --
+// why the Loop could not decide, what has to be decided, each option with its
+// impact, and both scope lists -- then submits the selected option to
+// POST /v1/requirements/{requirement_id}:answer-input, and ONLY when the owner
+// selects an option and presses the button. There is no default selection, no
+// timer and no auto-submit, so this page cannot answer on the owner's behalf.
+// A Requirement whose response carries no needs_input object is reported as
+// carrying no recorded question rather than having one invented for it. It
+// renders no raw JSON, adds no timer and references no external asset, script
+// or font.
+(function(){
+  var el=function(i){return document.getElementById(i);};
   var setList=function(id,rows,empty){
     var list=el(id);if(!list){return;}list.textContent="";
     if(!rows||!rows.length){var li=document.createElement("li");li.className="muted";li.textContent=empty;list.appendChild(li);return;}
@@ -468,4 +481,82 @@ const id=()=>crypto.randomUUID();const json=v=>({headers:{"Content-Type":"applic
   var button=el("allocation-refresh");
   if(button){button.onclick=load;}
   load();
+  var current={requirement:"",version:0,option:""};
+  var scopeRow=function(s){
+    var li=document.createElement("li");line(li,"repo-state",s);return li;
+  };
+  var optionRow=function(o){
+    var li=document.createElement("li");
+    var label=document.createElement("label");
+    var radio=document.createElement("input");
+    radio.type="radio";radio.name="needs-input-option";radio.value=o.option_id||"";
+    radio.onchange=function(){
+      current.option=o.option_id||"";
+      var submit=el("needs-input-submit");if(submit){submit.disabled=!current.option;}
+      var state=el("needs-input-answer-state");
+      if(state){state.textContent=current.option?("Selected "+current.option+". Nothing is submitted until the button is pressed."):"Nothing is submitted until an option is selected and this button is pressed.";}
+    };
+    label.appendChild(radio);
+    var name=document.createElement("span");name.textContent=" "+(o.option_id||"unnamed option")+" \u2014 "+(o.summary||"no summary was reported");
+    label.appendChild(name);
+    li.appendChild(label);
+    line(li,"repo-reason","impact: "+(o.impact||"no impact was reported"));
+    return li;
+  };
+  var clear=function(message){
+    el("needs-input-question").textContent="";
+    el("needs-input-reason").textContent="";
+    setList("needs-input-options",[],message);
+    setList("needs-input-stopped",[],message);
+    setList("needs-input-continuing",[],message);
+    current.option="";
+    var submit=el("needs-input-submit");if(submit){submit.disabled=true;}
+  };
+  var render=function(v){
+    current.requirement=(v&&v.requirement_id)||"";
+    current.version=(v&&v.version)||0;
+    var q=v&&v.needs_input;
+    if(!q){
+      el("needs-input-state").textContent=(v&&v.status?("This Requirement is "+v.status+" and no question is recorded for it."):"The response carried no Requirement.")+" A recorded question is the only source for this section: nothing here is inferred from the status.";
+      clear("No question is recorded for this Requirement.");
+      return;
+    }
+    el("needs-input-state").textContent="Requirement "+current.requirement+" is "+((v&&v.status)||"in an unreported status")+" (v"+current.version+"), asked at "+(q.asked_at||"an unreported instant")+(q.answered_option_id?(" \u2014 already answered with "+q.answered_option_id):" \u2014 waiting for an answer");
+    el("needs-input-question").textContent=q.question||"no question text was reported";
+    el("needs-input-reason").textContent="why the Loop could not decide ["+(q.reason_class||"unreported class")+"]: "+(q.reason||"no reason was reported");
+    setList("needs-input-options",(q.options||[]).map(optionRow),"The recorded question carried no option.");
+    setList("needs-input-stopped",(q.stopped_scope||[]).map(scopeRow),"The recorded question named nothing as stopped.");
+    setList("needs-input-continuing",(q.continuing_scope||[]).map(scopeRow),"The recorded question named nothing as continuing.");
+  };
+  var failed=function(m){
+    el("needs-input-state").textContent=m;
+    clear(m);
+  };
+  var read=function(){
+    var input=el("needs-input-requirement");
+    var wanted=input?input.value:"";
+    if(!wanted){failed("Name a Requirement id first.");return;}
+    return fetch("/v1/requirements/"+encodeURIComponent(wanted)).then(function(r){
+      if(r.status===404){failed("No Requirement with that id was found.");return;}
+      if(!r.ok){failed("Unable to read the Requirement detail.");return;}
+      return r.json().then(render);
+    }).catch(function(){failed("Unable to read the Requirement detail.");});
+  };
+  var answer=function(){
+    if(!current.requirement||!current.option){
+      el("needs-input-answer-state").textContent="Select one option first.";
+      return;
+    }
+    return fetch("/v1/requirements/"+encodeURIComponent(current.requirement)+":answer-input",{method:"POST",...json({request_id:id(),expected_requirement_version:current.version,option_id:current.option})}).then(function(r){
+      return r.json().then(function(b){
+        if(!r.ok){el("needs-input-answer-state").textContent="The answer was refused: "+(b.message||"no reason was reported")+". The Requirement was not changed.";return;}
+        el("needs-input-answer-state").textContent="Answered with "+(b.answered_option_id||current.option)+"; the same Requirement resumed as "+(b.status||"an unreported status")+" (v"+(b.version||"unreported")+").";
+        read();
+      });
+    }).catch(function(){el("needs-input-answer-state").textContent="Unable to submit the answer.";});
+  };
+  var form=el("needs-input");
+  if(form){form.onsubmit=function(e){e.preventDefault();read();};}
+  var submit=el("needs-input-submit");
+  if(submit){submit.onclick=answer;}
 })();

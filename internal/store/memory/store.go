@@ -36,6 +36,7 @@ type state struct {
 	repositories       map[string]domain.Repository
 	repositoryObs      map[string]domain.RepositoryObservation
 	requirementRepo    map[string]domain.RequirementRepositoryLink
+	humanInput         map[string]application.HumanInputRequest
 	requests           map[string]application.IdempotentResponse
 	texts              map[string]string
 	targets            map[string]domain.ControlTarget
@@ -45,7 +46,7 @@ type state struct {
 }
 
 func newState() state {
-	return state{requirements: map[string]domain.Requirement{}, increments: map[string]domain.Increment{}, executions: map[string]domain.Execution{}, leases: map[string]domain.Lease{}, requests: map[string]application.IdempotentResponse{}, texts: map[string]string{}, targets: map[string]domain.ControlTarget{}, controlProgress: map[domain.Revision]domain.ControlProgress{}, controlRequestedBy: map[domain.Revision]domain.RequestedBy{}, allocationLimits: map[domain.Revision]application.AllocationLimit{}, runnerObservations: map[string]domain.RunnerObservation{}, runnerVersions: map[string]application.RunnerVersionReport{}, providerLogs: map[application.ProviderName]application.ProviderObservationLog{}, providerAssigns: map[string]application.ProviderAssignment{}, providerAssignSeq: map[application.ProviderName][]application.ProviderAssignment{}, repositories: map[string]domain.Repository{}, repositoryObs: map[string]domain.RepositoryObservation{}, requirementRepo: map[string]domain.RequirementRepositoryLink{}}
+	return state{requirements: map[string]domain.Requirement{}, increments: map[string]domain.Increment{}, executions: map[string]domain.Execution{}, leases: map[string]domain.Lease{}, requests: map[string]application.IdempotentResponse{}, texts: map[string]string{}, targets: map[string]domain.ControlTarget{}, controlProgress: map[domain.Revision]domain.ControlProgress{}, controlRequestedBy: map[domain.Revision]domain.RequestedBy{}, allocationLimits: map[domain.Revision]application.AllocationLimit{}, runnerObservations: map[string]domain.RunnerObservation{}, runnerVersions: map[string]application.RunnerVersionReport{}, providerLogs: map[application.ProviderName]application.ProviderObservationLog{}, providerAssigns: map[string]application.ProviderAssignment{}, providerAssignSeq: map[application.ProviderName][]application.ProviderAssignment{}, repositories: map[string]domain.Repository{}, repositoryObs: map[string]domain.RepositoryObservation{}, requirementRepo: map[string]domain.RequirementRepositoryLink{}, humanInput: map[string]application.HumanInputRequest{}}
 }
 func (s state) clone() state {
 	n := newState()
@@ -74,6 +75,12 @@ func (s state) clone() state {
 	// into the committed state.
 	for k, v := range s.allocationLimits {
 		n.allocationLimits[k] = v
+	}
+	// The needs-input question row is deep-copied (V2-065): its option and
+	// scope slices must not be shared with committed state, or a rolled-back
+	// transaction could still have rewritten a recorded question in place.
+	for k, v := range s.humanInput {
+		n.humanInput[k] = v.Clone()
 	}
 	for k, v := range s.runnerObservations {
 		v.Processes = append([]domain.ProcessObservation(nil), v.Processes...)
@@ -545,6 +552,33 @@ func (u *unit) EffectiveAllocationLimit(_ context.Context) (application.Allocati
 		}
 	}
 	return best, found, nil
+}
+
+// The needs-input question (V2-065) is one row per Requirement, and the same
+// two rules both adapters share: the question half of an existing row can
+// never be changed by a later save, and an answer already recorded can never
+// be cleared. Only the answer fields may be added by a second transaction.
+func (u *unit) SaveHumanInputRequest(_ context.Context, value application.HumanInputRequest) error {
+	if err := application.ValidateHumanInputRequest(value); err != nil {
+		return err
+	}
+	if old, ok := u.s.humanInput[value.RequirementID]; ok {
+		if !old.SameQuestion(value) {
+			return domain.ErrStaleVersion
+		}
+		if old.Answered() && !value.Answered() {
+			return domain.ErrStaleVersion
+		}
+	}
+	u.s.humanInput[value.RequirementID] = value.Clone()
+	return nil
+}
+func (u *unit) HumanInputRequest(_ context.Context, requirementID string) (application.HumanInputRequest, bool, error) {
+	v, ok := u.s.humanInput[requirementID]
+	if !ok {
+		return application.HumanInputRequest{}, false, nil
+	}
+	return v.Clone(), true, nil
 }
 
 // Repository and its Observation use the same optimistic-concurrency shape
