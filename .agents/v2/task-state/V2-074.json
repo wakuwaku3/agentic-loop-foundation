@@ -5,7 +5,8 @@
   "task_id": "V2-074",
   "status": "blocked",
   "dependencies": [
-    "V2-068"
+    "V2-068",
+    "V2-077"
   ],
   "outcome": "Decide and wire the two parts of Provider operation that no task owns: which Loop and Provider versions are compatible, and when work is handed to a different Provider.",
   "non_goals": [
@@ -129,5 +130,5 @@
       "reason": "the two remaining live observations are placed at the tail: each is invalidated under G6b by any later change inside the exercised closure, and each re-observation costs a real invocation budget or a real branch on a real forge"
     }
   ],
-  "block_reason": "V2-068"
+  "block_reason": "V2-068,V2-077"
 }

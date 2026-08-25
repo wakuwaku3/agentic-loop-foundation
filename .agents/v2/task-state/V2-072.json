@@ -5,6 +5,7 @@
   "task_id": "V2-072",
   "status": "blocked",
   "dependencies": [
+    "V2-065",
     "V2-071",
     "V2-077"
   ],
@@ -130,5 +131,5 @@
       "reason": "the live exercise compiles the application package, and every remaining surface task edits it, so a later merge would force re-observation under G6b and each re-observation writes a real branch to a real forge; placing this last makes that ordering cost zero"
     }
   ],
-  "block_reason": "V2-077"
+  "block_reason": "V2-065,V2-077"
 }
