@@ -1,0 +1,48 @@
+{
+ "schema_version": "v1",
+ "id": "dp-v2-059",
+ "kind": "design-packet",
+ "created_at": "2026-08-25T01:39:13Z",
+ "correlation_id": "v2-059-pause-semantics",
+ "problem_brief_id": "pb-v2-059",
+ "decisions": [
+  {
+   "id": "d1",
+   "decision": "Fix the document, not the code. docs/product/definition.md section 7's pause bullets are rewritten to state the measured blast radius; internal/domain is not touched and the L3 closure is not relaxed.",
+   "rationale": "The measured behaviour is not a defect. domain.Permit's per-kind table denies only intake under pause-intake and only claim under pause-claim, but the single effect constructor requires the current effective mode to be exactly ControlAllow, so every operation that needs a durable effect -- Claim, AcceptResult and all four outbox kinds -- is denied under every non-allow mode. That mode-blind gate is the L3 closure the M1 gate proved as invariant 2, and loosening it to make the documented wording true would trade a proven safety property for a sentence. The document is the thing that is wrong."
+  },
+  {
+   "id": "d2",
+   "decision": "Anchor the corrected sentence to a test rather than leaving it as prose: TestStopModeByKindMatrix gains an assertion of the per-mode allowed-cell counts as a named table (allow=8, pause-intake=1, pause-claim=2, graceful-stop=1, immediate-stop=0, emergency-stop=0, cancel=0, total 12 of 56), and the document cites the test by name.",
+   "rationale": "The drift being repaired here is exactly a documented claim that no test held. Repairing it with another unheld claim would leave the same failure mode in place. The matrix already computes every cell's expected outcome; asserting the per-mode totals costs nothing and makes any future change to the gate break the sentence's anchor instead of silently outdating it. The test keeps its name and every existing assertion."
+  },
+  {
+   "id": "d3",
+   "decision": "Re-measure the per-mode allowed sets in this task instead of copying them from V2-019's evidence prose, which is wrong for one mode.",
+   "rationale": "V2-019's a12 summary records pause-intake=2/8 (capture, checkpoint) and a total of 13/56. Read against the test's own permitAllowedTable, pause-intake denies PermitIntake and the matrix drives Capture as PermitIntake, so Capture is denied under pause-intake: the allowed set is {checkpoint} alone, and the total is 12/56. The test itself computes correctly and passes; only the prose is wrong. A documentation remediation that copied that prose would publish a second wrong number, so the counts must be measured by an assertion in this task."
+  },
+  {
+   "id": "d4",
+   "decision": "Scope the document change to docs/product/definition.md section 7. Other documents were checked and are left alone.",
+   "rationale": "docs/product/user-facing-spec.md section 4.8 lists the controls a user can issue without claiming what each one leaves running, and docs/architecture/domain-model.md lists the modes and their precedence; neither states anything the measurement contradicts. Editing them would be scope creep, and the precedence line in domain-model.md is a different claim with its own proof."
+  }
+ ],
+ "components": [
+  "docs",
+  "application"
+ ],
+ "verification": [
+  "devbox run --pure -- go test -count=1 -v -run TestStopModeByKindMatrix ./internal/application",
+  "devbox run --pure -- go test -count=1 ./internal/application",
+  "devbox run --pure -- make component-application",
+  "devbox run --pure -- make component-docs",
+  "devbox run --pure -- make check",
+  "devbox run --pure -- make evidence-keys"
+ ],
+ "risks": [
+  "The corrected sentence is only as good as the counts behind it. V2-019's evidence prose already got one mode wrong, so the counts must come from an assertion executed in this task, not from any prior record.",
+  "Adding an assertion to TestStopModeByKindMatrix touches a test that another task's evidence key covers; the assertion must be additive so the existing 56-cell and graceful-stop assertions keep their exact meaning.",
+  "Rewriting a product-definition bullet risks reading as a reduction of the promised control. The wording must make clear that pause stops strictly more than the name suggests, never less.",
+  "Editing docs/product/definition.md and internal/application/stop_matrix_test.go moves both the docs and the application component keys; two records are issued and the remaining staleness is a note resolved by V2-045 under gate rule G6."
+ ]
+}

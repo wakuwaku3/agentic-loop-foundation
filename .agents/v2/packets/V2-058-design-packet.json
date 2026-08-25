@@ -1,0 +1,66 @@
+{
+ "schema_version": "v1",
+ "id": "dp-v2-058",
+ "kind": "design-packet",
+ "created_at": "2026-08-25T01:39:13Z",
+ "correlation_id": "v2-058-orphan-source",
+ "problem_brief_id": "pb-v2-058",
+ "decisions": [
+  {
+   "id": "d1",
+   "decision": "Terminate the superseded Execution inside the very transaction that reclaims its expired Lease, in Service.Claim's reclaim branch, using domain.MarkExecutionLost and u.SaveExecution(ctx, next, exec.Version). No new port and no store change: the superseded Execution is reachable as u.Execution(ctx, expiredLease.ExecutionID.String()), and Claim already reads and writes the expired Lease in that same transaction.",
+   "rationale": "Today the reclaim branch expires the Lease and issues a new one but leaves the old Execution non-terminal, so every reclaim manufactures a fresh orphan that only the reconciler's OrphanSweep can later converge. V2-019 built that sweep and proved it converges every orphan that exists, but a sweep is a compensating mechanism: between the reclaim and the next sweep pass the store genuinely holds an Execution that outlives its Lease. Closing it in the same transaction makes the invariant hold at the source rather than eventually, and it costs one read and one write inside a transaction that is already open."
+  },
+  {
+   "id": "d2",
+   "decision": "TECH LEAD RULING: the changed pinned expected error in the crash journey is accepted. TestJourneyFourLocalCrashResumeAcrossExecutions's three subtests currently pin errors.Is(lateErr, domain.ErrLeaseExpired) for the crashed attempt's late AcceptResult; after d1 the same call is rejected with domain.ErrStaleVersion instead, and that revision is authorised.",
+   "rationale": "The mechanism is exact and was measured. AcceptResult checks exec.Version != req.ExpectedExecutionVersion (service.go, immediately after loading the Execution) before it ever calls domain.AcceptExecutionResult, and domain.MarkExecutionLost always increments Version. So after d1 the superseded Execution is at version N+1 while the crashed attempt replays with the version N it captured before the crash, and the outer optimistic-concurrency guard rejects first. The rejection is not weakened: it is moved earlier and outward. The set of accepted submissions was empty before the change and is empty after it, no durable effect is constructed on either path, and the rejection now happens before any domain state is even consulted. What is lost is only the diagnostic specificity of the error name, and d3 recovers that."
+  },
+  {
+   "id": "d3",
+   "decision": "Do not accept the loss of coverage of the lease-expiry rejection path. Each of the three subtests keeps its late-accept probe (now pinning ErrStaleVersion) and gains a second probe that re-reads the superseded Execution's current version and submits with it, which must still be rejected with domain.ErrLeaseExpired.",
+   "rationale": "The pin's purpose is to prove a fenced-out crashed Execution cannot write. After d1 there are two independent guards standing between it and the store, and the honest test asserts both rather than silently dropping one. This makes coverage strictly greater than today's -- today one guard is proven, afterwards two are -- and it keeps a live, named assertion on ValidateExecutionResult's !lease.ActiveAt branch at the application boundary, not only in internal/domain/core_test.go. Weakening the assertion to errors.Is(...ErrStaleVersion) || errors.Is(...ErrLeaseExpired) is explicitly rejected: a disjunction would pass under either behaviour and therefore pin nothing."
+  },
+  {
+   "id": "d4",
+   "decision": "Reject the alternative of avoiding the change by reordering AcceptResult so the domain validation runs before the expected-version check, and reject constructing the terminal state without advancing Version.",
+   "rationale": "Reordering would preserve the pinned error name only as a coincidence -- the assertion would then be measuring the deliberate deferral of a concurrency check rather than any safety property -- and it would change which error wins for every other caller that violates both preconditions at once, for no safety gain. Writing a terminal Execution without advancing Version is worse still: it would bypass the domain transition function that the M1 gate's closure proofs are stated over, and it would leave a durable state that a stale writer holding the old version could still successfully write to. Both alternatives trade a real property for a cosmetic one."
+  },
+  {
+   "id": "d5",
+   "decision": "The termination is conditional and must never make a reclaim fail: it happens only when the superseded Execution is found, is not already terminal, and its LeaseID/ExecutionID/FencingToken linkage matches the Lease being expired. In any other case the Execution is left untouched, the Claim proceeds, and the pre-existing OrphanSweep remains the fallback.",
+   "rationale": "The reclaim branch is the recovery path; turning it into a new way to fail closed would make a crashed Runner unrecoverable, which is a strictly worse outcome than an orphan the sweep already converges. domain.MarkExecutionLost returns ErrInvalidTransition for an already-terminal Execution and ErrStaleFence on a linkage mismatch, so an unconditional call would propagate exactly those errors out of Claim. Each of the three skip branches therefore needs its own test proving the Claim still succeeds."
+  },
+  {
+   "id": "d6",
+   "decision": "internal/runner/provider_live_test.go's identical pin (testI5AndI6) is revised in the same commit as a source-only change, is not executed, and is recorded as skipped rather than passed, together with an explicit note that V2-017's live provider evidence needs re-exercise.",
+   "rationale": "The live suite is skip-gated and starting a real Provider CLI is out of scope for this task, but leaving a stale expectation in a test that will next run against real infrastructure would convert this task's correct change into a future red run with a misleading message. Editing internal/application/service.go already invalidates that record under validation.md section 8's freshness rule regardless of the pin, so the honest handling is to fix the expectation, prove it compiles, and refuse to call an unexecuted test a pass (gate rule G7)."
+  },
+  {
+   "id": "d7",
+   "decision": "Do not change internal/domain, and do not change the OrphanSweep.",
+   "rationale": "MarkExecutionLost's unconditional Version increment is the correct behaviour -- a state change that did not advance the version would break optimistic concurrency for every other holder -- and the sweep still owns every orphan that arises from a path other than reclaim (an absent Lease record, a revoked Lease, a process that died without any reclaim ever happening). d1 removes one source of orphans, not the need for the sweep."
+  }
+ ],
+ "components": [
+  "application",
+  "runner"
+ ],
+ "verification": [
+  "devbox run --pure -- go test -count=1 -v ./internal/application",
+  "devbox run --pure -- go test -count=1 -v ./internal/runner",
+  "devbox run --pure -- make component-application",
+  "devbox run --pure -- make component-runner",
+  "devbox run --pure -- make component-reconciler",
+  "devbox run --pure -- go test -count=1 -race ./internal/application ./internal/runner",
+  "devbox run --pure -- make check",
+  "devbox run --pure -- make evidence-keys"
+ ],
+ "risks": [
+  "An unconditional domain.MarkExecutionLost call in the reclaim branch would turn ErrInvalidTransition (already-terminal Execution) or ErrStaleFence (linkage mismatch) into a Claim failure, making a crashed Runner unrecoverable. d5's three guarded branches are the mitigation and each needs its own test.",
+  "Weakening the crash journey's assertion to a disjunction of two error classes would silently satisfy both the old and the new behaviour and prove neither. It is prohibited.",
+  "internal/runner/provider_live_test.go's revised pin is not exercised in this task, so the fix is only compiled, not measured. It must be recorded as skipped with the reason, and V2-017's provider-live-claude record must be named as needing re-exercise.",
+  "Changing internal/application/service.go moves the application component key and, through the declared dependency, the reconciler and store component keys' freshness; changing internal/runner test files moves the runner key. Two records are issued (application, runner) and the remaining staleness is recorded as a note resolved by V2-045 under gate rule G6.",
+  "The new write in Claim's transaction adds one more compare-and-swap to a transaction that already carries several; if the superseded Execution's version were read outside the transaction the write would be a lost update. It must be read and written inside the same UnitOfWork closure."
+ ]
+}
