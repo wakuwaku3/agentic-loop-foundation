@@ -1,0 +1,85 @@
+{
+  "schema_version": "v1",
+  "id": "ts-v2-071",
+  "kind": "canonical-task-state",
+  "task_id": "V2-071",
+  "status": "blocked",
+  "dependencies": [
+    "V2-064"
+  ],
+  "outcome": "Give an Increment a real Git working copy inside the Runner's confinement, associate it with the Repository it belongs to, and repair the control target that is currently always empty, so a Requirement can reach a committed change on a branch.",
+  "non_goals": [
+    "Do not push to any remote in this task",
+    "Do not make the Git working copy a domain contract",
+    "Do not let a working copy outlive the Increment that owns it"
+  ],
+  "actor": "sol",
+  "input_refs": [
+    "V2-064",
+    "V2-071"
+  ],
+  "input_hash": "24f461d76f5b0556daca16f3d7d3f1f58ebda34b416077e7a85648271ae46946",
+  "output_refs": [
+    "V2-071"
+  ],
+  "output_hash": "94ee3da6fcf7c93ec7804efd23d09683cbdc89337a1a8215ca499fa476d068fe",
+  "owner": "terra",
+  "next_owner": "terra",
+  "retry_budget": {
+    "max_attempts": 2,
+    "attempts_used": 0,
+    "remaining": 2
+  },
+  "release_eligible": false,
+  "block_reason": "V2-064",
+  "transitions": [
+    {
+      "sequence": 1,
+      "at": "2026-08-25T03:05:00Z",
+      "from_status": null,
+      "to_status": "queued",
+      "actor": "sol",
+      "input_refs": [
+        "V2-064",
+        "V2-071"
+      ],
+      "input_hash": "24f461d76f5b0556daca16f3d7d3f1f58ebda34b416077e7a85648271ae46946",
+      "output_refs": [
+        "V2-071"
+      ],
+      "output_hash": "94ee3da6fcf7c93ec7804efd23d09683cbdc89337a1a8215ca499fa476d068fe",
+      "owner": "terra",
+      "next_owner": "terra",
+      "retry_budget": {
+        "max_attempts": 2,
+        "attempts_used": 0,
+        "remaining": 2
+      },
+      "reason": "the Repository registration design measured that no Go file operates a Git working copy, so decomposition reaches an Execution record and stops; it also measured that cmd/control-plane builds ServiceConfig without a RepositoryID, so ControlTarget.RepositoryID is always empty and a repository-scoped Control Intent can never match"
+    },
+    {
+      "sequence": 2,
+      "at": "2026-08-25T03:05:01Z",
+      "from_status": "queued",
+      "to_status": "blocked",
+      "actor": "sol",
+      "input_refs": [
+        "V2-064",
+        "V2-071"
+      ],
+      "input_hash": "24f461d76f5b0556daca16f3d7d3f1f58ebda34b416077e7a85648271ae46946",
+      "output_refs": [
+        "V2-071"
+      ],
+      "output_hash": "94ee3da6fcf7c93ec7804efd23d09683cbdc89337a1a8215ca499fa476d068fe",
+      "owner": "terra",
+      "next_owner": "terra",
+      "retry_budget": {
+        "max_attempts": 2,
+        "attempts_used": 0,
+        "remaining": 2
+      },
+      "reason": "the three stages reach nine components and the character of the verification changes at each boundary, from a deterministic local closure to a real kernel Git integration to a live forge record, so they are separate tasks rather than one"
+    }
+  ]
+}

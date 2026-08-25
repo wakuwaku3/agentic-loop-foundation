@@ -1,0 +1,85 @@
+{
+  "schema_version": "v1",
+  "id": "ts-v2-072",
+  "kind": "canonical-task-state",
+  "task_id": "V2-072",
+  "status": "blocked",
+  "dependencies": [
+    "V2-071"
+  ],
+  "outcome": "Publish a reviewable change to the real forge through the external side-effect protocol, so an Increment's result leaves the machine in a form a person can read.",
+  "non_goals": [
+    "Do not push to a repository the owner did not register",
+    "Do not treat a successful push as a completed Requirement",
+    "Do not record a credential value or a raw forge response"
+  ],
+  "actor": "sol",
+  "input_refs": [
+    "V2-071",
+    "V2-072"
+  ],
+  "input_hash": "fd9366d783c9d35158f1b2bf9179f41743ec2c65d127e5f2fd6c9af0ad012237",
+  "output_refs": [
+    "V2-072"
+  ],
+  "output_hash": "90d18aaf5f7f9f0a931b20ef34b2a6e56e948f19b8d45c8e9da8124a81529010",
+  "owner": "terra",
+  "next_owner": "terra",
+  "retry_budget": {
+    "max_attempts": 2,
+    "attempts_used": 0,
+    "remaining": 2
+  },
+  "release_eligible": false,
+  "block_reason": "V2-071",
+  "transitions": [
+    {
+      "sequence": 1,
+      "at": "2026-08-25T03:05:00Z",
+      "from_status": null,
+      "to_status": "queued",
+      "actor": "sol",
+      "input_refs": [
+        "V2-071",
+        "V2-072"
+      ],
+      "input_hash": "fd9366d783c9d35158f1b2bf9179f41743ec2c65d127e5f2fd6c9af0ad012237",
+      "output_refs": [
+        "V2-072"
+      ],
+      "output_hash": "90d18aaf5f7f9f0a931b20ef34b2a6e56e948f19b8d45c8e9da8124a81529010",
+      "owner": "terra",
+      "next_owner": "terra",
+      "retry_budget": {
+        "max_attempts": 2,
+        "attempts_used": 0,
+        "remaining": 2
+      },
+      "reason": "an Increment can produce a committed branch only inside its own working copy until the forge write leg exists, and that leg must go through the operation identifier, expected version, fencing token, outbox, read-after-write and needs-input protocol rather than a bare command"
+    },
+    {
+      "sequence": 2,
+      "at": "2026-08-25T03:05:01Z",
+      "from_status": "queued",
+      "to_status": "blocked",
+      "actor": "sol",
+      "input_refs": [
+        "V2-071",
+        "V2-072"
+      ],
+      "input_hash": "fd9366d783c9d35158f1b2bf9179f41743ec2c65d127e5f2fd6c9af0ad012237",
+      "output_refs": [
+        "V2-072"
+      ],
+      "output_hash": "90d18aaf5f7f9f0a931b20ef34b2a6e56e948f19b8d45c8e9da8124a81529010",
+      "owner": "terra",
+      "next_owner": "terra",
+      "retry_budget": {
+        "max_attempts": 2,
+        "attempts_used": 0,
+        "remaining": 2
+      },
+      "reason": "the three stages reach nine components and the character of the verification changes at each boundary, from a deterministic local closure to a real kernel Git integration to a live forge record, so they are separate tasks rather than one"
+    }
+  ]
+}
