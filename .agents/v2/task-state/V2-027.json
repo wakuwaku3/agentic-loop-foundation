@@ -1,1 +1,108 @@
-{"schema_version":"v1","id":"ts-v2-027","kind":"canonical-task-state","task_id":"V2-027","status":"blocked","dependencies":["V2-018"],"outcome":"Complete Claude and opencode adapters, Provider account pool, quota, circuit breaker, and provider-neutral handoff against secret-free contract fixtures.","non_goals":["Do not consume real Provider usage outside fixture capture","Do not place real credentials or raw prompts into fixtures"],"actor":"sol","input_refs":["V2-027","V2-018"],"input_hash":"d7c32ac702133966ecdd42b46cf708138b5b3347bf973d97b89da079b020d871","output_refs":["V2-027"],"output_hash":"f6c153f27d5473368c2287fcc0401e46b215c7c430d2fc4bfa06ffd1a9fefa09","owner":"luna","next_owner":"luna","block_reason":"V2-018","retry_budget":{"max_attempts":2,"attempts_used":0,"remaining":2},"release_eligible":false,"transitions":[{"sequence":1,"at":"2026-08-24T10:32:20Z","from_status":null,"to_status":"blocked","actor":"sol","input_refs":["V2-027","V2-018"],"input_hash":"d7c32ac702133966ecdd42b46cf708138b5b3347bf973d97b89da079b020d871","output_refs":["V2-027"],"output_hash":"f6c153f27d5473368c2287fcc0401e46b215c7c430d2fc4bfa06ffd1a9fefa09","owner":"luna","next_owner":"luna","retry_budget":{"max_attempts":2,"attempts_used":0,"remaining":2},"reason":"enqueued by Sol for the M6 local closure"}]}
+{
+  "schema_version": "v1",
+  "id": "ts-v2-027",
+  "kind": "canonical-task-state",
+  "task_id": "V2-027",
+  "status": "blocked",
+  "dependencies": [
+    "V2-076"
+  ],
+  "outcome": "Complete Claude and opencode adapters, Provider account pool, quota, circuit breaker, and provider-neutral handoff against secret-free contract fixtures.",
+  "non_goals": [
+    "Do not consume real Provider usage outside fixture capture",
+    "Do not place real credentials or raw prompts into fixtures"
+  ],
+  "actor": "sol",
+  "input_refs": [
+    "V2-027",
+    "V2-018"
+  ],
+  "input_hash": "d7c32ac702133966ecdd42b46cf708138b5b3347bf973d97b89da079b020d871",
+  "output_refs": [
+    "V2-027"
+  ],
+  "output_hash": "f6c153f27d5473368c2287fcc0401e46b215c7c430d2fc4bfa06ffd1a9fefa09",
+  "owner": "luna",
+  "next_owner": "luna",
+  "block_reason": "V2-076",
+  "retry_budget": {
+    "max_attempts": 2,
+    "attempts_used": 0,
+    "remaining": 2
+  },
+  "release_eligible": false,
+  "transitions": [
+    {
+      "sequence": 1,
+      "at": "2026-08-24T10:32:20Z",
+      "from_status": null,
+      "to_status": "blocked",
+      "actor": "sol",
+      "input_refs": [
+        "V2-027",
+        "V2-018"
+      ],
+      "input_hash": "d7c32ac702133966ecdd42b46cf708138b5b3347bf973d97b89da079b020d871",
+      "output_refs": [
+        "V2-027"
+      ],
+      "output_hash": "f6c153f27d5473368c2287fcc0401e46b215c7c430d2fc4bfa06ffd1a9fefa09",
+      "owner": "luna",
+      "next_owner": "luna",
+      "retry_budget": {
+        "max_attempts": 2,
+        "attempts_used": 0,
+        "remaining": 2
+      },
+      "reason": "enqueued by Sol for the M6 local closure"
+    },
+    {
+      "sequence": 2,
+      "at": "2026-08-25T08:50:00Z",
+      "from_status": "blocked",
+      "to_status": "queued",
+      "actor": "sol",
+      "input_refs": [
+        "V2-027",
+        "V2-018"
+      ],
+      "input_hash": "d7c32ac702133966ecdd42b46cf708138b5b3347bf973d97b89da079b020d871",
+      "output_refs": [
+        "V2-027"
+      ],
+      "output_hash": "f6c153f27d5473368c2287fcc0401e46b215c7c430d2fc4bfa06ffd1a9fefa09",
+      "owner": "luna",
+      "next_owner": "luna",
+      "retry_budget": {
+        "max_attempts": 2,
+        "attempts_used": 0,
+        "remaining": 2
+      },
+      "reason": "the M3 gate task this depended on failed and was superseded by a successor gate task, so the dependency is retargeted rather than left pointing at a terminal failure"
+    },
+    {
+      "sequence": 3,
+      "at": "2026-08-25T08:50:01Z",
+      "from_status": "queued",
+      "to_status": "blocked",
+      "actor": "sol",
+      "input_refs": [
+        "V2-027",
+        "V2-018"
+      ],
+      "input_hash": "d7c32ac702133966ecdd42b46cf708138b5b3347bf973d97b89da079b020d871",
+      "output_refs": [
+        "V2-027"
+      ],
+      "output_hash": "f6c153f27d5473368c2287fcc0401e46b215c7c430d2fc4bfa06ffd1a9fefa09",
+      "owner": "luna",
+      "next_owner": "luna",
+      "retry_budget": {
+        "max_attempts": 2,
+        "attempts_used": 0,
+        "remaining": 2
+      },
+      "reason": "the successor gate has not judged yet"
+    }
+  ]
+}
