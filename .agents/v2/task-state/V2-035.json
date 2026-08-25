@@ -1,1 +1,65 @@
-{"schema_version":"v1","id":"ts-v2-035","kind":"canonical-task-state","task_id":"V2-035","status":"blocked","dependencies":["V2-034","V2-032"],"outcome":"Have the new Loop deploy its own new version to Preview, break the Preview Control Plane and Runner, recover from the Stable launcher, and roll back without losing shared state.","non_goals":["Do not make Stable a destruction target","Do not delete old binaries or documents inside the rollback window"],"actor":"sol","input_refs":["V2-035","V2-034","V2-032"],"input_hash":"6604d029de98ceee2ae98a9ef2c5cdd4ffef8ca253380789a9f0cdc0156a0bad","output_refs":["V2-035"],"output_hash":"0b51fffc14affc846a836b7626fa9a345fb4b3479a65bf0792a5e5d1c7a27c6a","owner":"luna","next_owner":"luna","block_reason":"V2-034,V2-032","retry_budget":{"max_attempts":2,"attempts_used":0,"remaining":2},"release_eligible":false,"transitions":[{"sequence":1,"at":"2026-08-24T10:32:20Z","from_status":null,"to_status":"blocked","actor":"sol","input_refs":["V2-035","V2-034","V2-032"],"input_hash":"6604d029de98ceee2ae98a9ef2c5cdd4ffef8ca253380789a9f0cdc0156a0bad","output_refs":["V2-035"],"output_hash":"0b51fffc14affc846a836b7626fa9a345fb4b3479a65bf0792a5e5d1c7a27c6a","owner":"luna","next_owner":"luna","retry_budget":{"max_attempts":2,"attempts_used":0,"remaining":2},"reason":"enqueued by Sol for the M8 live verification"}]}
+{
+  "schema_version": "v1",
+  "id": "ts-v2-035",
+  "kind": "canonical-task-state",
+  "task_id": "V2-035",
+  "status": "blocked",
+  "dependencies": [
+    "V2-032",
+    "V2-034",
+    "V2-069",
+    "V2-070"
+  ],
+  "outcome": "Have the new Loop deploy its own new version to Preview, break the Preview Control Plane and Runner, recover from the Stable launcher, and roll back without losing shared state.",
+  "non_goals": [
+    "Do not make Stable a destruction target",
+    "Do not delete old binaries or documents inside the rollback window"
+  ],
+  "actor": "sol",
+  "input_refs": [
+    "V2-035",
+    "V2-034",
+    "V2-032"
+  ],
+  "input_hash": "6604d029de98ceee2ae98a9ef2c5cdd4ffef8ca253380789a9f0cdc0156a0bad",
+  "output_refs": [
+    "V2-035"
+  ],
+  "output_hash": "0b51fffc14affc846a836b7626fa9a345fb4b3479a65bf0792a5e5d1c7a27c6a",
+  "owner": "luna",
+  "next_owner": "luna",
+  "block_reason": "V2-032,V2-034,V2-069,V2-070",
+  "retry_budget": {
+    "max_attempts": 2,
+    "attempts_used": 0,
+    "remaining": 2
+  },
+  "release_eligible": false,
+  "transitions": [
+    {
+      "sequence": 1,
+      "at": "2026-08-24T10:32:20Z",
+      "from_status": null,
+      "to_status": "blocked",
+      "actor": "sol",
+      "input_refs": [
+        "V2-035",
+        "V2-034",
+        "V2-032"
+      ],
+      "input_hash": "6604d029de98ceee2ae98a9ef2c5cdd4ffef8ca253380789a9f0cdc0156a0bad",
+      "output_refs": [
+        "V2-035"
+      ],
+      "output_hash": "0b51fffc14affc846a836b7626fa9a345fb4b3479a65bf0792a5e5d1c7a27c6a",
+      "owner": "luna",
+      "next_owner": "luna",
+      "retry_budget": {
+        "max_attempts": 2,
+        "attempts_used": 0,
+        "remaining": 2
+      },
+      "reason": "enqueued by Sol for the M8 live verification"
+    }
+  ]
+}

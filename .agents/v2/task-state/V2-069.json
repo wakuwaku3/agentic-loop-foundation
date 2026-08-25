@@ -1,0 +1,60 @@
+{
+  "schema_version": "v1",
+  "id": "ts-v2-069",
+  "kind": "canonical-task-state",
+  "task_id": "V2-069",
+  "status": "queued",
+  "dependencies": [
+    "V2-016"
+  ],
+  "outcome": "Let the Control Plane know which version each Runner is actually running, so the rule that keeps two machines on compatible schemas has something real to read.",
+  "non_goals": [
+    "Do not treat a Runner's own claim about its version as authority over what it may read",
+    "Do not add a Runner aggregate wider than the version and compatibility question needs",
+    "Do not let an unreported version be indistinguishable from a compatible one"
+  ],
+  "actor": "sol",
+  "input_refs": [
+    "V2-016",
+    "V2-069"
+  ],
+  "input_hash": "50df250088dc6f67ecc94f53b88a58aa42efd6a490c64cbb6450644003853868",
+  "output_refs": [
+    "V2-069"
+  ],
+  "output_hash": "768a3368da3d081f660cbca09213526004f467322d79cd89e90a6cc64c6be323",
+  "owner": "terra",
+  "next_owner": "terra",
+  "retry_budget": {
+    "max_attempts": 2,
+    "attempts_used": 0,
+    "remaining": 2
+  },
+  "release_eligible": false,
+  "transitions": [
+    {
+      "sequence": 1,
+      "at": "2026-08-25T02:45:00Z",
+      "from_status": null,
+      "to_status": "queued",
+      "actor": "sol",
+      "input_refs": [
+        "V2-016",
+        "V2-069"
+      ],
+      "input_hash": "50df250088dc6f67ecc94f53b88a58aa42efd6a490c64cbb6450644003853868",
+      "output_refs": [
+        "V2-069"
+      ],
+      "output_hash": "768a3368da3d081f660cbca09213526004f467322d79cd89e90a6cc64c6be323",
+      "owner": "terra",
+      "next_owner": "terra",
+      "retry_budget": {
+        "max_attempts": 2,
+        "attempts_used": 0,
+        "remaining": 2
+      },
+      "reason": "the self-update design measured that no Runner reports its running version anywhere: the api layer carries only a static response schema_version and optimistic-lock expectations, and the domain has a RunnerID type but no Runner aggregate, so the cross-machine coexistence invariant has no input and the machines cannot be kept inside a common schema interval"
+    }
+  ]
+}
