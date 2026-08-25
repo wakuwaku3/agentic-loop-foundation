@@ -3,6 +3,7 @@ package application_test
 import (
 	"context"
 	"errors"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
@@ -843,3 +844,205 @@ func TestClaimReclaimSkipsWhenSupersededExecutionLinkageMismatches(t *testing.T)
 		t.Fatalf("mismatched execution changed during reclaim: before=%#v after=%#v", mismatched, after)
 	}
 }
+
+// ===========================================================================
+// V2-073: the Requirement's capture time comes from the transaction authority
+// time, exactly once, and from nowhere else.
+// ===========================================================================
+//
+// A4/A5. Every assertion below is about the SOURCE of the value, not about
+// its formatting: the value must equal the At of the requirement.captured
+// event recorded by the same operation, must not move when the transaction
+// callback is retried, must not be suppliable by a caller, and must not be
+// derivable from a read time or from the event log. Every instant comes from
+// an injected clock; there is no sleep, no timer and no goroutine.
+
+// errCaptureRetryAttempt aborts one emulated transaction attempt.
+var errCaptureRetryAttempt = errors.New("emulated transaction retry")
+
+// captureSpyUnit records the capture time of every Requirement staged through
+// it, and forwards the transaction-scoped authority context the way both real
+// adapters do.
+type captureSpyUnit struct {
+	application.UnitOfWork
+	authority context.Context
+	seen      *[]time.Time
+}
+
+func (u captureSpyUnit) AuthorityContext() context.Context { return u.authority }
+
+func (u captureSpyUnit) SaveRequirement(ctx context.Context, value domain.Requirement, expected domain.Version) error {
+	*u.seen = append(*u.seen, value.CapturedAt)
+	return u.UnitOfWork.SaveRequirement(ctx, value, expected)
+}
+
+// captureRetryTransactor emulates a Firestore transaction retry
+// deterministically: every attempt but the last runs the caller's callback in
+// full and is then aborted, so its writes roll back, and the callback is
+// invoked again with the SAME context -- which is what makes the authority
+// time survive a retry. No goroutine and no contention is involved, so the
+// number of attempts is fixed rather than raced for.
+type captureRetryTransactor struct {
+	inner    application.Transactor
+	attempts int
+	seen     []time.Time
+}
+
+func (r *captureRetryTransactor) Transact(ctx context.Context, fn func(application.UnitOfWork) error) error {
+	for attempt := 1; attempt < r.attempts; attempt++ {
+		err := r.inner.Transact(ctx, func(u application.UnitOfWork) error {
+			if e := fn(captureSpyUnit{UnitOfWork: u, authority: ctx, seen: &r.seen}); e != nil {
+				return e
+			}
+			return errCaptureRetryAttempt
+		})
+		if !errors.Is(err, errCaptureRetryAttempt) {
+			return err
+		}
+	}
+	return r.inner.Transact(ctx, func(u application.UnitOfWork) error {
+		return fn(captureSpyUnit{UnitOfWork: u, authority: ctx, seen: &r.seen})
+	})
+}
+
+// TestCaptureTimeIsTheTransactionAuthorityTime is A4's first assertion: the
+// stored value equals the requirement.captured event's At, compared value to
+// value rather than by format.
+func TestCaptureTimeIsTheTransactionAuthorityTime(t *testing.T) {
+	s, st := service()
+	ctx := owner(context.Background())
+	out, err := s.Capture(ctx, application.CaptureRequest{RequestID: "capture-authority", Text: "a requirement"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored, ok := st.Requirement(out.RequirementID)
+	if !ok {
+		t.Fatalf("requirement %q was not stored", out.RequirementID)
+	}
+	if !stored.CaptureRecorded() {
+		t.Fatal("a freshly captured Requirement reports no capture time")
+	}
+	var captured []application.Event
+	for _, e := range st.Events() {
+		if e.Type == "requirement.captured" && e.AggregateID == out.RequirementID {
+			captured = append(captured, e)
+		}
+	}
+	if len(captured) != 1 {
+		t.Fatalf("requirement.captured events = %d, want exactly 1", len(captured))
+	}
+	if !stored.CapturedAt.Equal(captured[0].At) {
+		t.Fatalf("capture time %v != the requirement.captured event's At %v", stored.CapturedAt, captured[0].At)
+	}
+	// Byte-identity, not merely the same instant: the persisted form is the
+	// representation, so the seconds, the nanoseconds and the location must
+	// all agree.
+	if stored.CapturedAt.Unix() != captured[0].At.Unix() || stored.CapturedAt.Nanosecond() != captured[0].At.Nanosecond() {
+		t.Fatalf("capture time representation %d.%09d != event At %d.%09d", stored.CapturedAt.Unix(), stored.CapturedAt.Nanosecond(), captured[0].At.Unix(), captured[0].At.Nanosecond())
+	}
+	if stored.CapturedAt.Location().String() != captured[0].At.Location().String() {
+		t.Fatalf("capture time location %q != event At location %q", stored.CapturedAt.Location().String(), captured[0].At.Location().String())
+	}
+	// The injected clock is the only source: the value is exactly what the
+	// clock returns, so no second read and no adjustment happened.
+	if !stored.CapturedAt.Equal(clock{}.Now()) {
+		t.Fatalf("capture time %v is not the injected clock's instant %v", stored.CapturedAt, clock{}.Now())
+	}
+}
+
+// TestCaptureTimeIsStableAcrossATransactionRetry is A4's retry assertion,
+// driven through a transactor that re-invokes the callback the way Firestore
+// does. The Firestore adapter's own contention retry cannot be driven without
+// concurrency, which the determinism rule forbids, so the retry is emulated at
+// the same seam the adapter retries at: the callback, with the same context.
+func TestCaptureTimeIsStableAcrossATransactionRetry(t *testing.T) {
+	const attempts = 4
+	st := memory.New()
+	tx := &captureRetryTransactor{inner: st, attempts: attempts}
+	s, err := application.NewServiceWithConfig(tx, clock{}, &ids{}, application.ServiceConfig{InstallationID: "install", LeaseTTL: time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := owner(context.Background())
+	out, err := s.Capture(ctx, application.CaptureRequest{RequestID: "capture-retry", Text: "retried"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tx.seen) != attempts {
+		t.Fatalf("the callback staged a Requirement %d times, want %d; the retry was not actually driven", len(tx.seen), attempts)
+	}
+	for i, at := range tx.seen {
+		if !at.Equal(tx.seen[0]) {
+			t.Fatalf("attempt %d staged capture time %v, attempt 1 staged %v; the value moved across a retry", i+1, at, tx.seen[0])
+		}
+		if at.Unix() != tx.seen[0].Unix() || at.Nanosecond() != tx.seen[0].Nanosecond() {
+			t.Fatalf("attempt %d staged representation %d.%09d, attempt 1 staged %d.%09d", i+1, at.Unix(), at.Nanosecond(), tx.seen[0].Unix(), tx.seen[0].Nanosecond())
+		}
+	}
+	stored, ok := st.Requirement(out.RequirementID)
+	if !ok {
+		t.Fatalf("requirement %q was not committed", out.RequirementID)
+	}
+	if !stored.CapturedAt.Equal(tx.seen[0]) {
+		t.Fatalf("committed capture time %v != the value every attempt staged %v", stored.CapturedAt, tx.seen[0])
+	}
+	// The aborted attempts leaked nothing: exactly one Requirement and one
+	// event are committed.
+	if got := len(st.Events()); got != 1 {
+		t.Fatalf("events = %d, want 1; an aborted attempt leaked", got)
+	}
+	for _, e := range st.Events() {
+		if !stored.CapturedAt.Equal(e.At) {
+			t.Fatalf("committed capture time %v != the committed event's At %v", stored.CapturedAt, e.At)
+		}
+	}
+}
+
+// TestCaptureRequestCarriesNoCaptureTimeField is A4's "a caller cannot supply
+// the value" assertion at the application boundary. The transport-level
+// refusal of a captured_at body field is asserted in internal/api.
+func TestCaptureRequestCarriesNoCaptureTimeField(t *testing.T) {
+	typ := reflect.TypeOf(application.CaptureRequest{})
+	var got []string
+	for i := 0; i < typ.NumField(); i++ {
+		got = append(got, typ.Field(i).Name)
+	}
+	want := []string{"RequestID", "RequirementID", "Text", "RepositoryID"}
+	if len(got) != len(want) {
+		t.Fatalf("CaptureRequest fields = %v, want exactly %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("CaptureRequest fields = %v, want exactly %v", got, want)
+		}
+	}
+}
+
+// TestCaptureRefusesAZeroClockRatherThanRecordingAZeroCaptureTime is A4's
+// last assertion: a clock that returns the zero instant still produces the
+// pre-existing error, and no Requirement (and therefore no zero capture time)
+// is written.
+func TestCaptureRefusesAZeroClockRatherThanRecordingAZeroCaptureTime(t *testing.T) {
+	st := memory.New()
+	s, err := application.NewServiceWithConfig(st, zeroClock{}, &ids{}, application.ServiceConfig{InstallationID: "install", LeaseTTL: time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = s.Capture(owner(context.Background()), application.CaptureRequest{RequestID: "capture-zero-clock", Text: "x"})
+	if err == nil {
+		t.Fatal("a zero clock was accepted")
+	}
+	if err.Error() != "clock returned zero time" {
+		t.Fatalf("error = %q, want the pre-existing \"clock returned zero time\"", err.Error())
+	}
+	if got := len(st.Events()); got != 0 {
+		t.Fatalf("events = %d, want 0", got)
+	}
+}
+
+// zeroClock returns the zero instant. clock{} above deliberately substitutes a
+// fixed instant for its own zero value, so a separate type is needed to reach
+// the refusal path.
+type zeroClock struct{}
+
+func (zeroClock) Now() time.Time { return time.Time{} }

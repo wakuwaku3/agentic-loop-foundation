@@ -83,6 +83,12 @@ type RequirementDetailView struct {
 	// unlinked Requirement omits the field entirely: an absent association
 	// is reported as absent, never as a guessed or defaulted repository.
 	RepositoryID string `json:"repository_id,omitempty"`
+	// CapturedAt is the instant the Requirement was captured (V2-073 A11).
+	// It is a pointer so a legacy Requirement -- one written before the field
+	// existed -- omits the key entirely instead of reporting the zero
+	// instant, which would marshal to a real-looking date in the year 1 and
+	// would be read by an ordering rule that rewards age as maximally old.
+	CapturedAt *time.Time `json:"captured_at,omitempty"`
 }
 
 // RequirementView remains compatible with the original v1 response. Text is
@@ -97,6 +103,10 @@ type RequirementView struct {
 	// RepositoryID follows RequirementDetailView's field of the same name:
 	// present only when a link was actually read, omitted otherwise.
 	RepositoryID string `json:"repository_id,omitempty"`
+	// CapturedAt follows RequirementDetailView's field of the same name: the
+	// recorded capture instant, or the key omitted entirely for a legacy
+	// Requirement that has none.
+	CapturedAt *time.Time `json:"captured_at,omitempty"`
 }
 
 func boundPageSize(size int) (int, error) {
@@ -122,6 +132,27 @@ func requestedByView(rb domain.RequestedBy) *domain.RequestedBy {
 	return &v
 }
 
+// capturedAtView mirrors requestedByView for the capture time (V2-073 A6),
+// and its single source is the Requirement record handed to it: there is no
+// clock read, no fallback to "now" and no scan of the event log here or
+// anywhere on the read path. A legacy Requirement -- CaptureRecorded() false,
+// i.e. a record written before the field existed -- yields nil, so the
+// response omits captured_at entirely rather than emitting
+// 0001-01-01T00:00:00Z. That matters more here than it does for attribution:
+// the zero instant reads as a real instant in the year 1, and an ordering
+// rule that rewards age would read every legacy record as maximally old and
+// therefore maximally privileged. Omitting the key forces every consumer to
+// decide what an absent capture time means instead of silently inheriting an
+// unbounded age. A copy is returned so a caller cannot mutate stored state
+// through the pointer.
+func capturedAtView(r domain.Requirement) *time.Time {
+	if !r.CaptureRecorded() {
+		return nil
+	}
+	v := r.CapturedAt
+	return &v
+}
+
 // requirementViews projects rows onto the wire shape. links is the batch link
 // read for exactly the ids on this page; a row absent from it carries no
 // repository_id at all, which is what distinguishes "not linked" from "linked
@@ -133,7 +164,7 @@ func requirementViews(rows []domain.Requirement, texts map[string]string, links 
 		for i, id := range r.Increments {
 			ids[i] = id.String()
 		}
-		out = append(out, RequirementView{RequirementID: r.ID.String(), Status: r.Status, Version: r.Version, IncrementIDs: ids, Text: texts[r.ID.String()], RequestedBy: requestedByView(r.RequestedBy), RepositoryID: links[r.ID.String()].RepositoryID.String()})
+		out = append(out, RequirementView{RequirementID: r.ID.String(), Status: r.Status, Version: r.Version, IncrementIDs: ids, Text: texts[r.ID.String()], RequestedBy: requestedByView(r.RequestedBy), RepositoryID: links[r.ID.String()].RepositoryID.String(), CapturedAt: capturedAtView(r)})
 	}
 	return out
 }
@@ -203,7 +234,7 @@ func (s *Service) GetRequirementDetail(ctx context.Context, id string) (Requirem
 		if err != nil {
 			return err
 		}
-		out = RequirementDetailView{RequirementID: id, OriginalText: text, Status: r.Status, Version: r.Version, Increments: []RequirementIncrementView{}, PageSize: MaxPageSize, RequestedBy: requestedByView(r.RequestedBy)}
+		out = RequirementDetailView{RequirementID: id, OriginalText: text, Status: r.Status, Version: r.Version, Increments: []RequirementIncrementView{}, PageSize: MaxPageSize, RequestedBy: requestedByView(r.RequestedBy), CapturedAt: capturedAtView(r)}
 		if hasLink {
 			out.RepositoryID = link.RepositoryID.String()
 		}

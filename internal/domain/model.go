@@ -190,7 +190,34 @@ type Requirement struct {
 	// Validate treats as legitimate and unknown rather than invalid: past
 	// records are never retrofitted.
 	RequestedBy RequestedBy
+	// CapturedAt records the instant this Requirement was captured, taken
+	// once at intake from the transaction's authority time -- the same value
+	// the requirement.captured event carries -- so the record and its own
+	// event can never disagree about when it was captured, and a transaction
+	// retry cannot move it. Like RequestedBy above it is a value addition
+	// only: DecideRequirement opens with `next := current` and every branch
+	// assigns only Status and Version, and CompleteRequirementFromRelease
+	// assigns only Status, Version and StableSnapshot, so no transition
+	// function inspects or rewrites it. A record captured before this field
+	// existed carries the zero value, which Validate treats as a legitimate
+	// legacy record rather than as invalid: past records are never
+	// retrofitted. The zero value is NOT an instant a consumer may use --
+	// it marshals to a real-looking date in the year 1, which an ordering
+	// rule that rewards age would read as maximally old and therefore
+	// maximally privileged -- so every read surface reports its absence as
+	// absence (see CaptureRecorded) instead of reporting the zero instant.
+	// It carries no json tag because no field on this struct does: the
+	// Firestore adapter serializes the whole value with a plain
+	// json.Marshal, and `omitempty` does not suppress a zero time.Time in
+	// any case.
+	CapturedAt time.Time
 }
+
+// CaptureRecorded reports whether a capture time was actually recorded on
+// this Requirement, distinguishing it from a legacy record that predates the
+// field. A consumer that needs an instant must branch on this rather than
+// use the zero value, which is not a usable instant.
+func (r Requirement) CaptureRecorded() bool { return !r.CapturedAt.IsZero() }
 
 // ActorType distinguishes an owner-originated request from a decision the
 // Loop made on its own. It carries no permission semantics: it does not

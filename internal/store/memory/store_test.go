@@ -8,6 +8,7 @@ package memory
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -415,5 +416,210 @@ func TestRunnerVersionReportRollbackLeaksNothing(t *testing.T) {
 		return u.SaveRunnerVersionReport(ctx, application.RunnerVersionReport{Version: "1.0.0"})
 	}); err == nil {
 		t.Fatal("a report with no runner id was accepted")
+	}
+}
+
+// ===========================================================================
+// V2-073 A10: the Requirement's capture time, one behavioural table, two
+// adapters.
+// ===========================================================================
+//
+// internal/store/firestore/store_test.go carries a table with the SAME name
+// and the same four cases. The design's claim is that neither adapter needs a
+// production change to carry the field -- this adapter copies the value with
+// the rest of the Requirement in state.clone(), and the Firestore adapter
+// serializes it through the existing plain json.Marshal -- so neither
+// store.go is edited and these tests are what makes that claim checkable
+// rather than asserted.
+//
+// Every instant is a literal or comes from an injected clock. There is no
+// sleep, no timer and no goroutine.
+
+type captureClock struct{ at time.Time }
+
+func (c captureClock) Now() time.Time { return c.at }
+
+type captureIDs struct{ n int }
+
+func (i *captureIDs) Next(kind string) (string, error) {
+	i.n++
+	return fmt.Sprintf("%s-%d", kind, i.n), nil
+}
+
+func captureRequirement(t *testing.T, id string, capturedAt time.Time, version domain.Version) domain.Requirement {
+	t.Helper()
+	rid, err := domain.NewRequirementID(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return domain.Requirement{ID: rid, Status: domain.RequirementCaptured, Version: version, CapturedAt: capturedAt}
+}
+
+// TestRequirementCaptureTimeBehaviouralTable is the shared table. Case names
+// and meanings are identical in both adapters' copies.
+func TestRequirementCaptureTimeBehaviouralTable(t *testing.T) {
+	recordedAt := time.Unix(1_650_000_000, 987_654_321).UTC()
+
+	t.Run("a captured Requirement round-trips its capture time unchanged", func(t *testing.T) {
+		store := New()
+		ctx := context.Background()
+		if err := store.Transact(ctx, func(u application.UnitOfWork) error {
+			return u.SaveRequirement(ctx, captureRequirement(t, "round-trip", recordedAt, 1), 0)
+		}); err != nil {
+			t.Fatal(err)
+		}
+		got, ok := store.Requirement("round-trip")
+		if !ok {
+			t.Fatal("the Requirement was not committed")
+		}
+		if !got.CaptureRecorded() {
+			t.Fatal("the round-tripped Requirement reports no capture time")
+		}
+		if !got.CapturedAt.Equal(recordedAt) {
+			t.Fatalf("capture time = %v, want %v", got.CapturedAt, recordedAt)
+		}
+		if got.CapturedAt.Unix() != recordedAt.Unix() || got.CapturedAt.Nanosecond() != recordedAt.Nanosecond() {
+			t.Fatalf("capture time representation = %d.%09d, want %d.%09d", got.CapturedAt.Unix(), got.CapturedAt.Nanosecond(), recordedAt.Unix(), recordedAt.Nanosecond())
+		}
+	})
+
+	t.Run("a rolled-back transaction leaks no capture time into committed state", func(t *testing.T) {
+		store := New()
+		ctx := context.Background()
+		if err := store.Transact(ctx, func(u application.UnitOfWork) error {
+			return u.SaveRequirement(ctx, captureRequirement(t, "committed", recordedAt, 1), 0)
+		}); err != nil {
+			t.Fatal(err)
+		}
+		rolledBackAt := time.Unix(1_777_777_777, 0).UTC()
+		abort := errors.New("abort")
+		err := store.Transact(ctx, func(u application.UnitOfWork) error {
+			if e := u.SaveRequirement(ctx, captureRequirement(t, "rolled-back", rolledBackAt, 1), 0); e != nil {
+				return e
+			}
+			// Also try to move the committed record's capture time.
+			moved := captureRequirement(t, "committed", rolledBackAt, 2)
+			if e := u.SaveRequirement(ctx, moved, 1); e != nil {
+				return e
+			}
+			return abort
+		})
+		if !errors.Is(err, abort) {
+			t.Fatalf("Transact = %v, want the abort error", err)
+		}
+		if _, ok := store.Requirement("rolled-back"); ok {
+			t.Fatal("a rolled-back Requirement leaked into committed state")
+		}
+		got, ok := store.Requirement("committed")
+		if !ok {
+			t.Fatal("the committed Requirement disappeared")
+		}
+		if !got.CapturedAt.Equal(recordedAt) {
+			t.Fatalf("the rolled-back capture time leaked: %v, want %v", got.CapturedAt, recordedAt)
+		}
+		if got.Version != 1 {
+			t.Fatalf("version = %d, want 1", got.Version)
+		}
+	})
+
+	t.Run("a record written before the field existed reads back as a legacy record", func(t *testing.T) {
+		store := New()
+		ctx := context.Background()
+		// This adapter holds typed Go values, so a record that predates the
+		// field is exactly a Requirement whose CapturedAt was never set.
+		if err := store.Transact(ctx, func(u application.UnitOfWork) error {
+			return u.SaveRequirement(ctx, captureRequirement(t, "legacy", time.Time{}, 1), 0)
+		}); err != nil {
+			t.Fatalf("a record with no capture time was refused: %v", err)
+		}
+		got, ok := store.Requirement("legacy")
+		if !ok {
+			t.Fatal("the legacy Requirement was not committed")
+		}
+		if got.CaptureRecorded() {
+			t.Fatalf("a legacy record reports a capture time: %v", got.CapturedAt)
+		}
+		if !got.CapturedAt.IsZero() {
+			t.Fatalf("capture time = %v, want the zero value", got.CapturedAt)
+		}
+	})
+
+	t.Run("the value is unchanged by every lifecycle transition applied through the service", func(t *testing.T) {
+		store := New()
+		clockAt := time.Unix(1_650_000_000, 987_654_321).UTC()
+		svc, err := application.NewServiceWithConfig(store, captureClock{at: clockAt}, &captureIDs{}, application.ServiceConfig{InstallationID: "install", LeaseTTL: time.Minute})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ctx := application.ContextWithCaller(context.Background(), application.Caller{Role: application.RoleOwner, Subject: "capture-owner"})
+		captured, err := svc.Capture(ctx, application.CaptureRequest{RequestID: "lifecycle-capture", Text: "x"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		first, ok := store.Requirement(captured.RequirementID)
+		if !ok {
+			t.Fatal("the captured Requirement is missing")
+		}
+		if !first.CapturedAt.Equal(clockAt) {
+			t.Fatalf("capture time = %v, want the injected clock's instant %v", first.CapturedAt, clockAt)
+		}
+		// Plan is the only other service path that writes a Requirement (it
+		// appends an Increment and bumps the version); the application-side
+		// AST assertion that these two are the complete set lives in
+		// internal/application.
+		for i, request := range []string{"lifecycle-plan-1", "lifecycle-plan-2"} {
+			previous, ok := store.Requirement(captured.RequirementID)
+			if !ok {
+				t.Fatal("the Requirement disappeared mid-lifecycle")
+			}
+			if _, e := svc.Plan(ctx, application.PlanRequest{RequestID: request, RequirementID: captured.RequirementID, ExpectedRequirementVersion: previous.Version}); e != nil {
+				t.Fatalf("Plan %d: %v", i+1, e)
+			}
+			got, ok := store.Requirement(captured.RequirementID)
+			if !ok {
+				t.Fatal("the Requirement disappeared mid-lifecycle")
+			}
+			if got.Version != previous.Version+1 {
+				t.Fatalf("Plan %d left the Requirement at version %d, want %d; the transition did not happen and the assertion below would be vacuous", i+1, got.Version, previous.Version+1)
+			}
+			if len(got.Increments) != i+1 {
+				t.Fatalf("Plan %d left %d increments, want %d", i+1, len(got.Increments), i+1)
+			}
+			if !got.CapturedAt.Equal(clockAt) {
+				t.Fatalf("after Plan %d the capture time is %v, want %v", i+1, got.CapturedAt, clockAt)
+			}
+			if got.CapturedAt.Unix() != clockAt.Unix() || got.CapturedAt.Nanosecond() != clockAt.Nanosecond() {
+				t.Fatalf("after Plan %d the capture time representation changed: %d.%09d", i+1, got.CapturedAt.Unix(), got.CapturedAt.Nanosecond())
+			}
+		}
+	})
+}
+
+// TestRequirementCaptureTimeRollbackLeaksNothing is the rollback half stated
+// as its own top-level test, matching this package's existing
+// ...RollbackLeaksNothing naming, and asserting the stronger property that a
+// rolled-back Capture leaves neither Requirement nor event behind.
+func TestRequirementCaptureTimeRollbackLeaksNothing(t *testing.T) {
+	store := New()
+	ctx := context.Background()
+	before := len(store.Events())
+	abort := errors.New("abort")
+	err := store.Transact(ctx, func(u application.UnitOfWork) error {
+		if e := u.SaveRequirement(ctx, captureRequirement(t, "leaky", time.Unix(1_650_000_000, 0).UTC(), 1), 0); e != nil {
+			return e
+		}
+		if e := u.Record(application.Event{ID: "event", AggregateID: "leaky", Type: "requirement.captured", At: time.Unix(1_650_000_000, 0).UTC()}, nil); e != nil {
+			return e
+		}
+		return abort
+	})
+	if !errors.Is(err, abort) {
+		t.Fatalf("Transact = %v, want the abort error", err)
+	}
+	if _, ok := store.Requirement("leaky"); ok {
+		t.Fatal("the Requirement leaked")
+	}
+	if got := len(store.Events()); got != before {
+		t.Fatalf("events = %d, want %d", got, before)
 	}
 }

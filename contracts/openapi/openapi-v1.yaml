@@ -389,7 +389,7 @@ components:
       type: object
       additionalProperties: false
       required: [requirement_id, status, version, increment_ids]
-      properties: {requirement_id: {type: string}, status: {type: string}, version: {type: integer}, increment_ids: {type: array, items: {type: string}}, text: {type: string}, requested_by: {$ref: '#/components/schemas/RequestedBy'}, repository_id: {type: string, description: 'the Repository this Requirement is linked to; omitted entirely when no link exists, never reported as an empty or defaulted value'}}
+      properties: {requirement_id: {type: string}, status: {type: string}, version: {type: integer}, increment_ids: {type: array, items: {type: string}}, text: {type: string}, requested_by: {$ref: '#/components/schemas/RequestedBy'}, repository_id: {type: string, description: 'the Repository this Requirement is linked to; omitted entirely when no link exists, never reported as an empty or defaulted value'}, captured_at: {type: string, format: date-time, description: 'the instant this Requirement was captured, taken from the transaction authority time at intake; omitted entirely for a Requirement recorded before the field existed, never reported as the zero instant'}}
     RequirementListResponse:
       type: object
       additionalProperties: false
@@ -404,7 +404,7 @@ components:
       type: object
       additionalProperties: false
       required: [requirement_id, status, version, increments, next_action, page_size, truncated]
-      properties: {requirement_id: {type: string}, original_text: {type: string}, status: {type: string}, version: {type: integer}, increments: {type: array, items: {type: object}}, next_action: {type: string}, page_size: {type: integer, maximum: 100}, truncated: {type: boolean}, requested_by: {$ref: '#/components/schemas/RequestedBy'}, repository_id: {type: string, description: 'the Repository this Requirement is linked to; omitted entirely when no link exists'}}
+      properties: {requirement_id: {type: string}, original_text: {type: string}, status: {type: string}, version: {type: integer}, increments: {type: array, items: {type: object}}, next_action: {type: string}, page_size: {type: integer, maximum: 100}, truncated: {type: boolean}, requested_by: {$ref: '#/components/schemas/RequestedBy'}, repository_id: {type: string, description: 'the Repository this Requirement is linked to; omitted entirely when no link exists'}, captured_at: {type: string, format: date-time, description: 'the instant this Requirement was captured, taken from the transaction authority time at intake; omitted entirely for a Requirement recorded before the field existed, never reported as the zero instant'}}
     ControlRead:
       type: object
       additionalProperties: false

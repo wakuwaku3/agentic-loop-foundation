@@ -20,6 +20,7 @@ import (
 
 	"github.com/takushi/agentic-loop-foundation/v2/internal/api"
 	"github.com/takushi/agentic-loop-foundation/v2/internal/application"
+	"github.com/takushi/agentic-loop-foundation/v2/internal/domain"
 	"github.com/takushi/agentic-loop-foundation/v2/internal/quota"
 	"github.com/takushi/agentic-loop-foundation/v2/internal/runner"
 	"github.com/takushi/agentic-loop-foundation/v2/internal/store/memory"
@@ -1540,4 +1541,244 @@ func TestOwnerConsoleExposesTheProviderRegistry(t *testing.T) {
 	if !strings.Contains(section, "Waiting for the owner to sign in to a CLI") {
 		t.Fatal("the Providers section does not name the authentication wait in plain words")
 	}
+}
+
+// ===========================================================================
+// V2-073 A11/A12: the capture time on the HTTP surface and on the owner
+// console.
+// ===========================================================================
+
+// captureTimeHandler builds a handler together with the store behind it, so a
+// Requirement that predates the capture time field can be written directly
+// rather than simulated.
+func captureTimeHandler(t *testing.T) (http.Handler, *memory.Store) {
+	t.Helper()
+	st := memory.New()
+	svc, err := application.NewServiceWithConfig(st, clock{}, &ids{}, application.ServiceConfig{InstallationID: "install", LeaseTTL: time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	auth := api.BearerAuthenticator{"owner": {Role: application.RoleOwner, Subject: "owner"}, "runner": {Role: application.RoleRunner, Subject: "runner", RunnerID: "runner-1"}}
+	enrollment, err := runner.NewService(runner.NewMemoryStore())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return api.New(api.Config{Authenticator: auth, Service: svc, RunnerEnrollment: enrollment, AllowedOrigins: []string{"https://console.example"}}), st
+}
+
+// TestRequirementResponsesCarryTheCaptureTimeAndOmitItWhenAbsent is A11.
+func TestRequirementResponsesCarryTheCaptureTimeAndOmitItWhenAbsent(t *testing.T) {
+	h, st := captureTimeHandler(t)
+
+	w := call(h, http.MethodPost, "/v1/requirements", `{"request_id":"capture-1","text":"a requirement"}`, "owner")
+	if w.Code != http.StatusCreated {
+		t.Fatalf("POST /v1/requirements status=%d body=%s", w.Code, w.Body.String())
+	}
+	created := decodeBody(t, w.Body.Bytes())
+	id, _ := created["requirement_id"].(string)
+	if id == "" {
+		t.Fatalf("no requirement_id in %s", w.Body.String())
+	}
+	// The capture response itself is NOT widened by this task.
+	if _, ok := created["captured_at"]; ok {
+		t.Fatalf("the capture response carries captured_at, which this Work Order did not name: %s", w.Body.String())
+	}
+
+	// A legacy Requirement written directly, with no capture time at all.
+	ctx := context.Background()
+	rid, err := domainRequirementID("requirement-legacy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Transact(ctx, func(u application.UnitOfWork) error {
+		return u.SaveRequirement(ctx, requirementWithNoCaptureTime(rid), 0)
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	wantDetailKeys := map[string]bool{"requirement_id": true, "original_text": true, "status": true, "version": true, "increments": true, "next_action": true, "page_size": true, "truncated": true, "requested_by": true, "repository_id": true, "captured_at": true}
+	// Detail: recorded.
+	w = call(h, http.MethodGet, "/v1/requirements/"+id, "", "owner")
+	if w.Code != 200 {
+		t.Fatalf("GET /v1/requirements/{id} status=%d body=%s", w.Code, w.Body.String())
+	}
+	detail := decodeBody(t, w.Body.Bytes())
+	at, ok := detail["captured_at"].(string)
+	if !ok || at == "" {
+		t.Fatalf("a recorded Requirement's detail carries no captured_at: %s", w.Body.String())
+	}
+	wantAt := (clock{}).Now().Format(time.RFC3339Nano)
+	if at != wantAt {
+		t.Fatalf("captured_at = %q, want the injected clock's instant %q", at, wantAt)
+	}
+	for key := range detail {
+		if !wantDetailKeys[key] {
+			t.Fatalf("the detail response carries %q, which this Work Order did not name", key)
+		}
+	}
+
+	// Detail: legacy. The key is absent, not empty and not the zero instant.
+	w = call(h, http.MethodGet, "/v1/requirements/requirement-legacy", "", "owner")
+	if w.Code != 200 {
+		t.Fatalf("GET legacy detail status=%d body=%s", w.Code, w.Body.String())
+	}
+	if _, present := decodeBody(t, w.Body.Bytes())["captured_at"]; present {
+		t.Fatalf("a legacy Requirement's detail carries captured_at: %s", w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), "0001-01-01") {
+		t.Fatalf("a legacy Requirement's detail carries the zero instant: %s", w.Body.String())
+	}
+
+	// List: one recorded and one legacy row in the same response.
+	w = call(h, http.MethodGet, "/v1/requirements", "", "owner")
+	if w.Code != 200 {
+		t.Fatalf("GET /v1/requirements status=%d body=%s", w.Code, w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), "0001-01-01") {
+		t.Fatalf("the Requirement list carries the zero instant: %s", w.Body.String())
+	}
+	rows, ok := decodeBody(t, w.Body.Bytes())["requirements"].([]any)
+	if !ok || len(rows) != 2 {
+		t.Fatalf("requirements array = %v, want 2 rows: %s", rows, w.Body.String())
+	}
+	wantRowKeys := map[string]bool{"requirement_id": true, "status": true, "version": true, "increment_ids": true, "text": true, "requested_by": true, "repository_id": true, "captured_at": true}
+	recorded, legacy := 0, 0
+	for _, raw := range rows {
+		row, ok := raw.(map[string]any)
+		if !ok {
+			t.Fatalf("row is not an object: %v", raw)
+		}
+		for key := range row {
+			if !wantRowKeys[key] {
+				t.Fatalf("a list row carries %q, which this Work Order did not name", key)
+			}
+		}
+		if _, present := row["captured_at"]; present {
+			recorded++
+		} else {
+			legacy++
+		}
+	}
+	if recorded != 1 || legacy != 1 {
+		t.Fatalf("rows with captured_at = %d, without = %d, want 1 and 1", recorded, legacy)
+	}
+
+	// Role gating and status codes are unchanged on both routes.
+	for _, path := range []string{"/v1/requirements", "/v1/requirements/" + id} {
+		if got := call(h, http.MethodGet, path, "", "").Code; got != 401 {
+			t.Fatalf("GET %s unauthenticated = %d, want 401", path, got)
+		}
+		if got := call(h, http.MethodGet, path, "", "runner").Code; got != 403 {
+			t.Fatalf("GET %s as runner = %d, want 403", path, got)
+		}
+	}
+	if got := call(h, http.MethodGet, "/v1/requirements/does-not-exist", "", "owner").Code; got != 404 {
+		t.Fatalf("GET an unknown Requirement = %d, want 404", got)
+	}
+}
+
+// TestCaptureRejectsACallerSuppliedCaptureTime is A4's transport half: the
+// capture time is not caller-suppliable, and a body that tries is refused with
+// 400 rather than silently ignored.
+func TestCaptureRejectsACallerSuppliedCaptureTime(t *testing.T) {
+	h, _ := captureTimeHandler(t)
+	w := call(h, http.MethodPost, "/v1/requirements", `{"request_id":"capture-supplied","text":"x","captured_at":"2020-01-01T00:00:00Z"}`, "owner")
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("a body carrying captured_at = %d, want 400: %s", w.Code, w.Body.String())
+	}
+	// The refusal happened before anything was written.
+	if got := call(h, http.MethodGet, "/v1/requirements", "", "owner"); !strings.Contains(got.Body.String(), `"requirements":[]`) {
+		t.Fatalf("the refused capture wrote something: %s", got.Body.String())
+	}
+	// The same body without the field is accepted, so the 400 above is about
+	// the field and not about the rest of the request.
+	if w = call(h, http.MethodPost, "/v1/requirements", `{"request_id":"capture-supplied","text":"x"}`, "owner"); w.Code != http.StatusCreated {
+		t.Fatalf("the same body without captured_at = %d, want 201: %s", w.Code, w.Body.String())
+	}
+}
+
+// TestOwnerConsoleExposesTheRequirementCaptureTime is A12.
+func TestOwnerConsoleExposesTheRequirementCaptureTime(t *testing.T) {
+	h, _ := captureTimeHandler(t)
+	w := call(h, http.MethodGet, "/owner/", "", "owner")
+	if w.Code != 200 {
+		t.Fatalf("owner console status=%d", w.Code)
+	}
+	html := w.Body.String()
+	for _, want := range []string{`id="captured-title"`, `id="captured-refresh"`, `id="captured-missing"`, `id="captured-rows"`, "V2-073 Requirement capture time"} {
+		if !strings.Contains(html, want) {
+			t.Fatalf("owner console does not carry %s", want)
+		}
+	}
+	// Additive only: every pre-existing surface, including the sibling tasks'
+	// sections, is still there.
+	for _, want := range []string{`id="capture"`, `id="control"`, `id="queue"`, `id="repository"`, `id="repository-list"`, "Release evidence", `id="release-conditions"`, `id="backlog-rows"`, `id="runners-rows"`, `id="providers-rows"`} {
+		if !strings.Contains(html, want) {
+			t.Fatalf("owner console lost the pre-existing surface %s", want)
+		}
+	}
+	w = call(h, http.MethodGet, "/owner/assets/owner.js", "", "")
+	if w.Code != 200 {
+		t.Fatalf("owner.js status=%d", w.Code)
+	}
+	js := w.Body.String()
+	marker := strings.Index(js, "// V2-073 Requirement capture time")
+	if marker < 0 {
+		t.Fatal("owner.js does not carry the V2-073 marker comment")
+	}
+	block := js[marker:]
+	for _, want := range []string{"/v1/requirements", "captured_at", "captured-rows", "captured-missing", "No capture time was recorded."} {
+		if !strings.Contains(block, want) {
+			t.Fatalf("the V2-073 owner.js block does not reference %q", want)
+		}
+	}
+	// The sibling blocks are still present in the same single file.
+	for _, want := range []string{"/v1/release/state", "/v1/runners", "/v1/providers", "executability", "requirement_backlog"} {
+		if !strings.Contains(js, want) {
+			t.Fatalf("owner.js lost the pre-existing block reference %q", want)
+		}
+	}
+	// No raw JSON, no timer, no external asset, script or font.
+	for _, forbidden := range []string{"JSON.stringify", "http://", "https://", "//cdn", "importScripts", "setInterval", "setTimeout", "@font-face"} {
+		if strings.Contains(block, forbidden) {
+			t.Fatalf("the V2-073 owner.js block references %q", forbidden)
+		}
+	}
+	// No credential-shaped and no email-shaped value. The matcher is verified
+	// first: the pre-existing repository-locator block does contain an '@', so
+	// a scan over the whole file would not be evidence about this block.
+	if !strings.Contains(js, `"@"`) {
+		t.Fatal("the pre-existing owner.js locator block no longer contains an '@'; this scan's control is stale")
+	}
+	if strings.Contains(block, "@") {
+		t.Fatal("the V2-073 owner.js block carries an '@'")
+	}
+	section := html[strings.Index(html, "V2-073 Requirement capture time"):]
+	if strings.Contains(section, "@") {
+		t.Fatal("the V2-073 owner console section carries an '@'")
+	}
+	lowered := strings.ToLower(section)
+	for _, forbidden := range []string{"password", "secret", "api_key", "apikey", "bearer ", "authorization:", "private_key", "@example.", "@gmail.", "accounts.google.com"} {
+		if strings.Contains(lowered, forbidden) {
+			t.Fatalf("the rendered capture-time section carries a credential- or email-shaped value %q", forbidden)
+		}
+	}
+	// The absence of a capture time is shown as an absence, in words: not an
+	// empty string and not the zero instant.
+	if strings.Contains(html, "0001-01-01") || strings.Contains(js, "0001-01-01") {
+		t.Fatal("the owner console renders the zero instant")
+	}
+	if !strings.Contains(section, "no capture time") {
+		t.Fatal("the capture-time section does not name the absent case in plain words")
+	}
+}
+
+// domainRequirementID and requirementWithNoCaptureTime build the legacy
+// fixture the assertions above need. They live here rather than in a shared
+// helper because internal/api is the only package in this task that needs a
+// Requirement written behind the HTTP surface.
+func domainRequirementID(id string) (domain.RequirementID, error) { return domain.NewRequirementID(id) }
+
+func requirementWithNoCaptureTime(id domain.RequirementID) domain.Requirement {
+	return domain.Requirement{ID: id, Status: domain.RequirementCaptured, Version: 1}
 }

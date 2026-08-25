@@ -1,0 +1,265 @@
+{
+ "schema_version": "v1",
+ "id": "ev-v2-073-application",
+ "kind": "evidence",
+ "created_at": "2026-08-25T16:40:00Z",
+ "correlation_id": "v2-073-requirement-capture-time",
+ "task_id": "V2-073",
+ "component": "application",
+ "evidence_key": "ad21165cec58be3664308d5997a2dc30a5f73f57b4e0e8e997cb0d918f83c7b1",
+ "result": "passed",
+ "observed_at": "2026-08-25T16:40:00Z",
+ "checks": [
+  {
+   "name": "environment-identifier",
+   "status": "passed",
+   "argv": [
+    "uname",
+    "-srm"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 10,
+   "summary": "execution environment: uname -srm = Linux 6.18.33.2-microsoft-standard-WSL2 x86_64; devbox run --pure -- go version = go1.25.0 linux/amd64; devbox 0.17.2, environment resolved from this worktree's devbox.json/devbox.lock, both untouched by this task; devbox run --pure -- git --version = git version 2.55.0; worktree /home/takushi/repos/agentic-loop-foundation-worktrees/v2-task-073 on branch v2-task/V2-073, base commit 2d1a514. No real Provider CLI was started, no gh was started, and no Google Cloud resource was touched: the Firestore assertions ran against the local emulator scripts/firestore-emulator.sh starts for make component-store-firestore."
+  },
+  {
+   "name": "component-application",
+   "status": "passed",
+   "argv": [
+    "devbox",
+    "run",
+    "--pure",
+    "--",
+    "go",
+    "test",
+    "-count=1",
+    "./internal/application"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 600,
+   "summary": "verdict line: ok github.com/takushi/agentic-loop-foundation/v2/internal/application 0.113s. 119 tests pass, up from a measured baseline of 107; comm(3) over the sorted go test -list output shows zero tests removed or renamed. Production diff: internal/application/service.go +26/-8 and internal/application/readmodels.go +33/-2."
+  },
+  {
+   "name": "capture-time-is-the-transaction-authority-time",
+   "status": "passed",
+   "argv": [
+    "devbox",
+    "run",
+    "--pure",
+    "--",
+    "go",
+    "test",
+    "-count=1",
+    "-v",
+    "-run",
+    "TestCaptureTimeIsTheTransactionAuthorityTime",
+    "./internal/application"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 600,
+   "summary": "A4, first verdict: PASSED. Capture sets CapturedAt from transactionAuthorityTime(ctx, u) -- the accessor Service.record (service.go:1638) also uses for every Event's At, declared once at internal/application/runner_version.go:315 and now called from both sites, so there is exactly ONE accessor in the package. It is NOT a second s.clock.Now() call. Measured: the stored CapturedAt equals the At of the single requirement.captured event recorded by the same operation, compared value to value on Equal AND on Unix seconds AND on nanoseconds AND on location name, and equals the injected clock's instant exactly. NOTE ON THE WORK ORDER's LINE NUMBERS: A4 cites service.go:1386-1393 for the accessor; measured, Service.record is at service.go:1638 and the shared accessor is at runner_version.go:315. The cited lines are stale; the accessor is the one A4 describes."
+  },
+  {
+   "name": "capture-time-is-stable-across-a-transaction-retry",
+   "status": "passed",
+   "argv": [
+    "devbox",
+    "run",
+    "--pure",
+    "--",
+    "go",
+    "test",
+    "-count=1",
+    "-v",
+    "-run",
+    "TestCaptureTimeIsStableAcrossATransactionRetry",
+    "./internal/application"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 600,
+   "summary": "A4, retry verdict: PASSED, UNCHANGED ACROSS 4 ATTEMPTS. The retry is driven at the seam the Firestore adapter actually retries at: a Transactor decorator runs the caller's callback in full and aborts it three times, then runs it a fourth time for real, passing the SAME context each attempt -- which is the mechanism, because Service.mutate reads the clock ONCE before Transact and puts the value on the context. A spy UnitOfWork records the CapturedAt staged on every attempt: all 4 are identical on Equal, on Unix seconds and on nanoseconds, the committed value equals them, and exactly one Requirement and one event are committed, so the aborted attempts leaked nothing. The Firestore adapter's own CONTENTION retry is recorded as not driven in the skips entry below, with its reason."
+  },
+  {
+   "name": "caller-cannot-supply-the-value",
+   "status": "passed",
+   "argv": [
+    "devbox",
+    "run",
+    "--pure",
+    "--",
+    "go",
+    "test",
+    "-count=1",
+    "-v",
+    "-run",
+    "TestCaptureRequestCarriesNoCaptureTimeField",
+    "./internal/application"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 600,
+   "summary": "A4: application.CaptureRequest's field list is pinned by reflection to exactly RequestID, RequirementID, Text, RepositoryID -- no field was added, so a caller cannot supply the value at this boundary. The transport half is asserted in internal/api: a POST /v1/requirements body carrying captured_at is refused with 400 (api.go's decoder already calls DisallowUnknownFields), the refusal writes nothing, and the identical body without the field is accepted with 201, so the 400 is about the field and not about the rest of the request."
+  },
+  {
+   "name": "zero-clock-still-refuses",
+   "status": "passed",
+   "argv": [
+    "devbox",
+    "run",
+    "--pure",
+    "--",
+    "go",
+    "test",
+    "-count=1",
+    "-v",
+    "-run",
+    "TestCaptureRefusesAZeroClockRatherThanRecordingAZeroCaptureTime",
+    "./internal/application"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 600,
+   "summary": "A4's last clause: a Clock returning the zero instant still produces the PRE-EXISTING error, verbatim \"clock returned zero time\", and writes no Requirement and no event -- so a zero clock can never be recorded as a zero capture time."
+  },
+  {
+   "name": "neither-read-time-nor-event-scan",
+   "status": "passed",
+   "argv": [
+    "devbox",
+    "run",
+    "--pure",
+    "--",
+    "go",
+    "test",
+    "-count=1",
+    "-v",
+    "-run",
+    "TestCaptureTimeDoesNotDependOnTheReadTime|TestCaptureTimeIsNotDerivedFromTheEventLog|TestCapturedAtViewReadsOnlyTheRequirementRecord|TestCapturedAtIsAssignedOnlyInsideCaptureFromTheAuthorityTime",
+    "./internal/application"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 600,
+   "summary": "A5, all four parts PASSED. (1) Reading the same Requirement through two Services with DIFFERENT injected clock instants (1700000000 and 1900000000) produces byte-identical marshalled responses, and the reported captured_at equals neither read time. (2) The identical record read from a store whose event log is EMPTY reports the identical capture time, so no derivation from events is possible; the comparison store is asserted to have at least one event and the emptied one exactly zero, so the check cannot pass vacuously. (3) An AST scan over capturedAtView asserts its parameter is domain.Requirement and that its body mentions NO identifier that is not a parameter, a local, or predeclared -- no imported package, no package-level state, no clock. The matcher is verified FIRST: a known-negative helper that reads only its parameter reports no external names, and a known-positive helper that calls time.Now() reports 'time'. (4) An AST scan over EVERY non-test file in the package finds exactly three CapturedAt write sites and classifies them by their value expression: two read-model projections from capturedAtView, both in readmodels.go, and exactly ONE domain write, in service.go's Capture, whose value is the local capturedAt -- which the same test proves is bound from a call to transactionAuthorityTime. The scan additionally asserts that Capture's transaction callback contains ZERO 'Now' selectors, so nothing inside the part Firestore may retry reads a clock."
+  },
+  {
+   "name": "legacy-record-omits-the-key-entirely",
+   "status": "passed",
+   "argv": [
+    "devbox",
+    "run",
+    "--pure",
+    "--",
+    "go",
+    "test",
+    "-count=1",
+    "-v",
+    "-run",
+    "TestLegacyRequirementOmitsCapturedAtEntirely|TestCapturedAtViewReturnsACopyNotAPointerIntoStoredState",
+    "./internal/application"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 600,
+   "summary": "A6, verdict: THE KEY IS OMITTED, NOT EMITTED AS THE ZERO INSTANT. For a Requirement with a zero CapturedAt, RequirementDetailView.CapturedAt and RequirementView.CapturedAt are both nil, and the MARSHALLED BYTES of the detail view, the list row and the whole page were scanned: none contains the string 'captured_at' and none contains the literal '0001-01-01'. A recorded record's detail view does contain 'captured_at', so the absence is a statement about the value and not about the marshaller. The same scan at the HTTP boundary is green in internal/api for GET /v1/requirements and GET /v1/requirements/{id}. capturedAtView returns nil for a legacy record and a COPY for a recorded one: writing through the returned pointer and re-reading leaves both the view and the stored Requirement unchanged. MEASURED AND RECORDED HONESTLY, because it is a real distinction: the PERSISTED Firestore payload for a Requirement whose CapturedAt is zero DOES carry \"CapturedAt\":\"0001-01-01T00:00:00Z\", which is what json.Marshal does with a zero time.Time and which omitempty cannot suppress (dp-v2-073 d2 says so). A6 constrains the READ VIEW, and the read view omits the key, so no consumer is ever handed the zero instant; a document written BEFORE the field existed carries no key at all and reads back as a legacy record, asserted on both adapters."
+  },
+  {
+   "name": "read-and-api-surface",
+   "status": "passed",
+   "argv": [
+    "devbox",
+    "run",
+    "--pure",
+    "--",
+    "go",
+    "test",
+    "-count=1",
+    "./internal/api",
+    "./internal/contracts",
+    "./internal/release"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 600,
+   "summary": "A11: verdict lines ok .../internal/api 0.027s, ok .../internal/contracts 0.092s, ok .../internal/release 0.153s. RequirementDetailView and RequirementView gained captured_at as an optional *time.Time, and contracts/openapi/openapi-v1.yaml gained captured_at (type string, format date-time) to RequirementDetailResponse and RequirementResponse, both of which set additionalProperties:false so the addition was forced rather than chosen. Every pre-existing openapi-conformance assertion in internal/contracts and internal/release still passes. The API test enumerates the response keys against a closed allowlist and fails on any key this Work Order did not name; the capture RESPONSE is deliberately NOT widened. GET /v1/requirements and GET /v1/requirements/{id} keep their status codes and role gating: 401 unauthenticated, 403 as runner, 404 for an unknown id, 200 for owner. THE EXPORT RECORD IS UNCHANGED: the marshalled ExportRequirement and its sha256 digest are byte-identical for the same input whether or not a capture time is recorded, the marshalled bytes are scanned for both 'captured_at' and 'CapturedAt' and contain neither, and ExportRequirement's field list is pinned by reflection, so no export digest moves."
+  },
+  {
+   "name": "persistence-in-both-stores",
+   "status": "passed",
+   "argv": [
+    "devbox",
+    "run",
+    "--pure",
+    "--",
+    "scripts/firestore-emulator.sh",
+    "go",
+    "test",
+    "-count=1",
+    "-v",
+    "-run",
+    "RequirementCaptureTime",
+    "./internal/store/firestore"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 600,
+   "summary": "A10: ONE behavioural table with the SAME NAME in both adapters -- TestRequirementCaptureTimeBehaviouralTable and TestRequirementCaptureTimeRollbackLeaksNothing exist in both internal/store/memory and internal/store/firestore with the same four cases. All four passed on Firestore against the local emulator (verdict line: ok .../internal/store/firestore 0.707s; subtests 0.49s / 0.05s / 0.02s / 0.13s) and on the memory adapter (ok .../internal/store/memory 0.005s): (1) a captured Requirement round-trips its capture time unchanged, compared on Equal and on the seconds/nanoseconds representation; (2) a rolled-back transaction leaks no capture time into committed state, including an attempt to MOVE an already-committed record's capture time, which is rolled back with its version; (3) a document written before the field existed reads back as a LEGACY RECORD rather than an error -- on Firestore the payload is built field by field WITHOUT the key (asserted not to contain 'CapturedAt', since marshalling a zero-valued Requirement would emit the key and test a different case) and written through writeRawFields; (4) the value is unchanged by every lifecycle transition applied through the service, driven as Capture followed by two Plans, with the version bump and the increment count asserted first so the capture-time assertion cannot be vacuous. NEITHER internal/store/memory/store.go NOR internal/store/firestore/store.go WAS EDITED, and neither needed to be: both are absent from git diff --cached, so the design's claim that the existing plain json.Marshal and state.clone() already carry the field is confirmed by measurement and no escalation was required. An AST test in internal/application pins that Capture and Plan are the COMPLETE set of service functions calling SaveRequirement, which is what makes case (4) exhaustive rather than a sample."
+  },
+  {
+   "name": "owner-console",
+   "status": "passed",
+   "argv": [
+    "devbox",
+    "run",
+    "--pure",
+    "--",
+    "go",
+    "test",
+    "-count=1",
+    "-v",
+    "-run",
+    "TestOwnerConsoleExposesTheRequirementCaptureTime",
+    "./internal/api"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 600,
+   "summary": "A12: one self-contained block appended to the END of internal/web/owner.html (+3 lines, inserted as the last section of <main>, since an HTML document has no valid tail after </html>) and one to the END of internal/web/owner.js (+53 lines), each introduced by a comment naming V2-073 and closed by a matching end marker. CHANGING NO EXISTING BYTE, verified programmatically: the new owner.js is byte-for-byte the old file plus the appended block (new.startswith(git show HEAD:...) is true), and removing the inserted HTML block reproduces the old owner.html exactly. The block shows a Requirement's capture time when recorded and, when the record is legacy, prints 'No capture time was recorded.' plus a sentence saying the field is omitted entirely and is never filled in from the time the page was opened -- not an empty string and not the zero instant. No external asset, script or font: the block contains none of http://, https://, //cdn, importScripts, setInterval, setTimeout, @font-face or JSON.stringify. No credential-shaped and no email-shaped value: the block and the rendered section contain no at-sign at all (the whole rendered console still contains none, which the pre-existing V2-069 assertion also requires), and the section contains none of password, secret, api_key, apikey, 'bearer ', 'authorization:', private_key, @example., @gmail. or accounts.google.com. Neither file contains '0001-01-01'. The pre-existing V2-064, V2-066, V2-067, V2-069 and V2-071 blocks are asserted still present in both files, and all their own tests still pass unmodified."
+  },
+  {
+   "name": "documentation",
+   "status": "passed",
+   "argv": [
+    "cat",
+    "docs/operations/scheduler-local.md"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 600,
+   "summary": "A13: docs/operations/scheduler-local.md gained one appended section (+100 lines) recording that the Requirement carries a capture time and that it comes from the transaction authority time at intake; the legacy omission and the one-sentence mapping rule from A7 with the measured reason (9223372036 seconds of saturated Duration versus a priority term of at most 30000); the derived capture-time spread interval with its full arithmetic and the measured eight-row D table including both failing endpoints; the A9 escalation naming the tech_lead as the owner of the follow-up decision; and the statement that no Snapshot builder exists yet and V2-068 owns wiring the value into it. No other document was edited: git diff --cached --name-only shows docs/operations/scheduler-local.md as the only file under docs/, and docs/operations/self-update.md is untouched. make docs is green inside make check."
+  },
+  {
+   "name": "make-check-before-the-evidence-commit",
+   "status": "passed",
+   "argv": [
+    "devbox",
+    "run",
+    "--pure",
+    "--",
+    "make",
+    "check"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 2400,
+   "summary": "A18, first run, judged by the VERDICT LINES and not by the shell exit status. Zero FAIL lines; every package reports ok. Secret scan: '468 commits scanned. / scanned ~10762422 bytes (10.76 MB) in 864ms / no leaks found'. Ownership: {\"changed\":null,\"selected\":null,\"all\":false}. Firestore component under the emulator: ok .../internal/store/firestore 10.011s. Final line: 'workflow-pins: 3 unique (owner/repo, version) -> sha pins, no disagreement'."
+  },
+  {
+   "name": "skips",
+   "status": "skipped",
+   "argv": [
+    "devbox",
+    "run",
+    "--pure",
+    "--",
+    "go",
+    "test",
+    "-count=1",
+    "./internal/store/firestore"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 600,
+   "summary": "Gate rule G7, every skip recorded and NONE counted as a pass. (1) internal/store/firestore's integration tests, including this task's two new ones, call t.Skip when FIRESTORE_EMULATOR_HOST is unset -- verdict line without the emulator: ok .../internal/store/firestore 0.012s with the cases SKIPPED, which is why every Firestore claim in this record is backed by the separate emulator run recorded in the persistence-in-both-stores check (scripts/firestore-emulator.sh, all four cases PASS). (2) A4's Firestore CONTENTION retry path was NOT DRIVEN. Reason: a real contention retry requires two concurrent transactions, and the repository's determinism rule forbids a goroutine in a test; forcing one would also make the number of attempts a race rather than a fixed number. A4 permits recording it as skipped with its reason, and the retry-stability property is instead driven deterministically at the same seam the adapter retries at -- the transaction callback, re-invoked with the same context -- which is recorded as PASSED with 4 attempts in the capture-time-is-stable-across-a-transaction-retry check. No other test in any package was skipped by this task."
+  }
+ ]
+}

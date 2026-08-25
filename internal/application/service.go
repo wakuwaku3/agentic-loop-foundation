@@ -810,7 +810,21 @@ func (s *Service) Capture(ctx context.Context, req CaptureRequest) (out CaptureR
 		if _, e = domain.Permit(effective, domain.PermitRequest{Kind: domain.PermitIntake, Target: target, ControlRevision: revision, Resource: id}); e != nil {
 			return e
 		}
-		r := domain.Requirement{ID: rid, Status: domain.RequirementCaptured, Version: 1, RequestedBy: reqBy}
+		// V2-073 A4: the capture time is this transaction's authority time,
+		// read through transactionAuthorityTime -- the one accessor
+		// Service.record also uses for every Event's At. It is therefore
+		// byte-identical to the At of the requirement.captured event recorded
+		// at the end of this same callback, and it does not move if Firestore
+		// retries the callback, because the value was captured once before
+		// the transaction started and is carried on the transaction-scoped
+		// context. It is NOT a second s.clock.Now() read, and CaptureRequest
+		// carries no field for it, so a caller cannot supply it either:
+		// runner clocks and caller-provided timestamps are not authoritative.
+		capturedAt, e := transactionAuthorityTime(ctx, u)
+		if e != nil {
+			return e
+		}
+		r := domain.Requirement{ID: rid, Status: domain.RequirementCaptured, Version: 1, RequestedBy: reqBy, CapturedAt: capturedAt}
 		if e = domain.Validate(r); e != nil {
 			return e
 		}
@@ -1625,13 +1639,9 @@ func (s *Service) record(ctx context.Context, u UnitOfWork, eventID, operationID
 	if authority, ok := u.(interface{ AuthorityContext() context.Context }); ok {
 		ctx = authority.AuthorityContext()
 	}
-	err := error(nil)
-	at, ok := ctx.Value(authorityTimeKey{}).(time.Time)
-	if !ok || at.IsZero() {
-		return errors.New("transaction authority time is required")
-	}
-	if at.IsZero() {
-		return errors.New("clock returned zero time")
+	at, err := transactionAuthorityTime(ctx, u)
+	if err != nil {
+		return err
 	}
 	if outbox != nil {
 		outbox.RequestID = requestID

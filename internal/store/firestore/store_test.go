@@ -2,9 +2,11 @@ package firestore
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -1057,4 +1059,219 @@ func TestProvidersReadCountDoesNotVaryWithRequirementCount(t *testing.T) {
 		t.Fatalf("one GET /v1/providers wrote %d and %d documents, want exactly the quota record", lowWrites, highWrites)
 	}
 	t.Logf("measured reads for one GET /v1/providers at both bounds: %d with 3 Requirements, %d with 11 Requirements; declared bound %d; writes %d", lowReads, highReads, bound, lowWrites)
+}
+
+// ===========================================================================
+// V2-073 A10: the Requirement's capture time, one behavioural table, two
+// adapters.
+// ===========================================================================
+//
+// internal/store/memory/store_test.go carries a table with the SAME name and
+// the same four cases. Neither store.go is edited: the design's claim is that
+// this adapter already carries the field through encodeDocument's plain
+// json.Marshal and decodePayload's json.Unmarshal, and the memory adapter
+// through state.clone(). These tests are what makes that claim checkable.
+//
+// Every instant is a literal or comes from an injected clock: no sleep, no
+// timer, no goroutine. The Firestore cases run against the local emulator
+// scripts/firestore-emulator.sh provides for make component-store-firestore
+// and are SKIPPED (never counted as a pass) when FIRESTORE_EMULATOR_HOST is
+// unset.
+
+func captureFirestoreRequirement(t *testing.T, id string, capturedAt time.Time, version domain.Version) domain.Requirement {
+	t.Helper()
+	rid, err := domain.NewRequirementID(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return domain.Requirement{ID: rid, Status: domain.RequirementCaptured, Version: version, CapturedAt: capturedAt}
+}
+
+// readCapturedRequirement reads one Requirement back through the adapter's own
+// read path (query cache included) rather than through a raw document read, so
+// the assertion is about the decoder and not about the emulator.
+func readCapturedRequirement(t *testing.T, s *Store, id string) (domain.Requirement, bool) {
+	t.Helper()
+	ctx := context.Background()
+	var out domain.Requirement
+	var found bool
+	if err := s.Transact(ctx, func(u application.UnitOfWork) error {
+		v, ok, e := u.Requirement(ctx, id)
+		out, found = v, ok
+		return e
+	}); err != nil {
+		t.Fatalf("read %q: %v", id, err)
+	}
+	return out, found
+}
+
+// TestRequirementCaptureTimeBehaviouralTable is the shared table. Case names
+// and meanings are identical in both adapters' copies.
+func TestRequirementCaptureTimeBehaviouralTable(t *testing.T) {
+	recordedAt := time.Unix(1_650_000_000, 987_654_321).UTC()
+
+	t.Run("a captured Requirement round-trips its capture time unchanged", func(t *testing.T) {
+		s := emulatorStore(t)
+		ctx := context.Background()
+		if err := s.Transact(ctx, func(u application.UnitOfWork) error {
+			return u.SaveRequirement(ctx, captureFirestoreRequirement(t, "round-trip", recordedAt, 1), 0)
+		}); err != nil {
+			t.Fatal(err)
+		}
+		got, ok := readCapturedRequirement(t, s, "round-trip")
+		if !ok {
+			t.Fatal("the Requirement was not committed")
+		}
+		if !got.CaptureRecorded() {
+			t.Fatal("the round-tripped Requirement reports no capture time")
+		}
+		if !got.CapturedAt.Equal(recordedAt) {
+			t.Fatalf("capture time = %v, want %v", got.CapturedAt, recordedAt)
+		}
+		if got.CapturedAt.Unix() != recordedAt.Unix() || got.CapturedAt.Nanosecond() != recordedAt.Nanosecond() {
+			t.Fatalf("capture time representation = %d.%09d, want %d.%09d", got.CapturedAt.Unix(), got.CapturedAt.Nanosecond(), recordedAt.Unix(), recordedAt.Nanosecond())
+		}
+	})
+
+	t.Run("a rolled-back transaction leaks no capture time into committed state", func(t *testing.T) {
+		s := emulatorStore(t)
+		ctx := context.Background()
+		if err := s.Transact(ctx, func(u application.UnitOfWork) error {
+			return u.SaveRequirement(ctx, captureFirestoreRequirement(t, "committed", recordedAt, 1), 0)
+		}); err != nil {
+			t.Fatal(err)
+		}
+		rolledBackAt := time.Unix(1_777_777_777, 0).UTC()
+		abort := errors.New("abort")
+		err := s.Transact(ctx, func(u application.UnitOfWork) error {
+			if e := u.SaveRequirement(ctx, captureFirestoreRequirement(t, "rolled-back", rolledBackAt, 1), 0); e != nil {
+				return e
+			}
+			if e := u.SaveRequirement(ctx, captureFirestoreRequirement(t, "committed", rolledBackAt, 2), 1); e != nil {
+				return e
+			}
+			return abort
+		})
+		if !errors.Is(err, abort) {
+			t.Fatalf("Transact = %v, want the abort error", err)
+		}
+		if _, ok := readCapturedRequirement(t, s, "rolled-back"); ok {
+			t.Fatal("a rolled-back Requirement leaked into committed state")
+		}
+		got, ok := readCapturedRequirement(t, s, "committed")
+		if !ok {
+			t.Fatal("the committed Requirement disappeared")
+		}
+		if !got.CapturedAt.Equal(recordedAt) {
+			t.Fatalf("the rolled-back capture time leaked: %v, want %v", got.CapturedAt, recordedAt)
+		}
+		if got.Version != 1 {
+			t.Fatalf("version = %d, want 1", got.Version)
+		}
+	})
+
+	t.Run("a record written before the field existed reads back as a legacy record", func(t *testing.T) {
+		s := emulatorStore(t)
+		// The payload is built field by field WITHOUT the capture time, which
+		// is exactly the document shape this adapter wrote before the field
+		// existed. Marshalling a zero-valued Requirement would not do: that
+		// emits the key with the zero instant, which is a different case.
+		payload, err := json.Marshal(map[string]any{
+			"requirement": map[string]any{"ID": "predates-the-field", "Status": string(domain.RequirementCaptured), "Version": 1},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(payload), "CapturedAt") {
+			t.Fatalf("the legacy fixture carries a capture time and proves nothing: %s", payload)
+		}
+		writeRawFields(t, s, "requirements", "predates-the-field", map[string]any{
+			"record_schema": RecordSchema,
+			"kind":          "requirement",
+			"payload":       string(payload),
+		})
+		got, ok := readCapturedRequirement(t, s, "predates-the-field")
+		if !ok {
+			t.Fatal("a document written before the field existed did not read back at all")
+		}
+		if got.ID.String() != "predates-the-field" || got.Status != domain.RequirementCaptured || got.Version != 1 {
+			t.Fatalf("the legacy document decoded wrongly: %+v", got)
+		}
+		if got.CaptureRecorded() {
+			t.Fatalf("a legacy record reports a capture time: %v", got.CapturedAt)
+		}
+		if !got.CapturedAt.IsZero() {
+			t.Fatalf("capture time = %v, want the zero value", got.CapturedAt)
+		}
+	})
+
+	t.Run("the value is unchanged by every lifecycle transition applied through the service", func(t *testing.T) {
+		s := emulatorStore(t)
+		clockAt := time.Unix(1_650_000_000, 987_654_321).UTC()
+		svc, err := application.NewServiceWithConfig(s, integrationClock{now: clockAt}, &integrationIDs{}, application.ServiceConfig{InstallationID: "install", LeaseTTL: time.Minute})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ctx := integrationOwner(context.Background())
+		captured, err := svc.Capture(ctx, application.CaptureRequest{RequestID: "lifecycle-capture", Text: "x"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		first, ok := readCapturedRequirement(t, s, captured.RequirementID)
+		if !ok {
+			t.Fatal("the captured Requirement is missing")
+		}
+		if !first.CapturedAt.Equal(clockAt) {
+			t.Fatalf("capture time = %v, want the injected clock's instant %v", first.CapturedAt, clockAt)
+		}
+		for i, request := range []string{"lifecycle-plan-1", "lifecycle-plan-2"} {
+			previous, ok := readCapturedRequirement(t, s, captured.RequirementID)
+			if !ok {
+				t.Fatal("the Requirement disappeared mid-lifecycle")
+			}
+			if _, e := svc.Plan(ctx, application.PlanRequest{RequestID: request, RequirementID: captured.RequirementID, ExpectedRequirementVersion: previous.Version}); e != nil {
+				t.Fatalf("Plan %d: %v", i+1, e)
+			}
+			got, ok := readCapturedRequirement(t, s, captured.RequirementID)
+			if !ok {
+				t.Fatal("the Requirement disappeared mid-lifecycle")
+			}
+			if got.Version != previous.Version+1 {
+				t.Fatalf("Plan %d left the Requirement at version %d, want %d; the transition did not happen and the assertion below would be vacuous", i+1, got.Version, previous.Version+1)
+			}
+			if len(got.Increments) != i+1 {
+				t.Fatalf("Plan %d left %d increments, want %d", i+1, len(got.Increments), i+1)
+			}
+			if !got.CapturedAt.Equal(clockAt) {
+				t.Fatalf("after Plan %d the capture time is %v, want %v", i+1, got.CapturedAt, clockAt)
+			}
+			if got.CapturedAt.Unix() != clockAt.Unix() || got.CapturedAt.Nanosecond() != clockAt.Nanosecond() {
+				t.Fatalf("after Plan %d the capture time representation changed: %d.%09d", i+1, got.CapturedAt.Unix(), got.CapturedAt.Nanosecond())
+			}
+		}
+	})
+}
+
+// TestRequirementCaptureTimeRollbackLeaksNothing is the rollback half stated
+// as its own top-level test, matching this package's existing
+// ...RollbackLeaksNothing naming and its memory-adapter twin.
+func TestRequirementCaptureTimeRollbackLeaksNothing(t *testing.T) {
+	s := emulatorStore(t)
+	ctx := context.Background()
+	abort := errors.New("abort")
+	err := s.Transact(ctx, func(u application.UnitOfWork) error {
+		if e := u.SaveRequirement(ctx, captureFirestoreRequirement(t, "leaky", time.Unix(1_650_000_000, 0).UTC(), 1), 0); e != nil {
+			return e
+		}
+		if e := u.Record(application.Event{ID: "event", AggregateID: "leaky", AggregateType: "requirement", Type: "requirement.captured", Version: 1, At: time.Unix(1_650_000_000, 0).UTC()}, nil); e != nil {
+			return e
+		}
+		return abort
+	})
+	if !errors.Is(err, abort) {
+		t.Fatalf("Transact = %v, want the abort error", err)
+	}
+	if _, ok := readCapturedRequirement(t, s, "leaky"); ok {
+		t.Fatal("the Requirement leaked")
+	}
 }

@@ -1,0 +1,161 @@
+{
+ "schema_version": "v1",
+ "id": "ev-v2-073-scheduler",
+ "kind": "evidence",
+ "created_at": "2026-08-25T16:40:00Z",
+ "correlation_id": "v2-073-requirement-capture-time",
+ "task_id": "V2-073",
+ "component": "scheduler",
+ "evidence_key": "9e573a7d72f47697f1f1b18e72091e3d1b1b285cd68d965becb3a0959974f71e",
+ "result": "passed",
+ "observed_at": "2026-08-25T16:40:00Z",
+ "checks": [
+  {
+   "name": "environment-identifier",
+   "status": "passed",
+   "argv": [
+    "uname",
+    "-srm"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 10,
+   "summary": "execution environment: uname -srm = Linux 6.18.33.2-microsoft-standard-WSL2 x86_64; devbox run --pure -- go version = go1.25.0 linux/amd64; devbox 0.17.2, environment resolved from this worktree's devbox.json/devbox.lock, both untouched by this task; devbox run --pure -- git --version = git version 2.55.0; worktree /home/takushi/repos/agentic-loop-foundation-worktrees/v2-task-073 on branch v2-task/V2-073, base commit 2d1a514. No real Provider CLI was started, no gh was started, and no Google Cloud resource was touched: the Firestore assertions ran against the local emulator scripts/firestore-emulator.sh starts for make component-store-firestore."
+  },
+  {
+   "name": "scope-boundary",
+   "status": "passed",
+   "argv": [
+    "grep",
+    "-rn",
+    "scheduler.Snapshot",
+    "--include=*.go",
+    "."
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 600,
+   "summary": "A1: NO PRODUCTION CODE CONSTRUCTS A scheduler.Snapshot AT THIS COMMIT. grep -rn 'scheduler.Snapshot|scheduler.Decide|scheduler.Apply' --include=*.go . returns no hits at all, and grep -rln for the internal/scheduler import path returns no importers. Nothing in this record claims the scheduler is wired to the running system and nothing claims any release gate. This task declares and proves the mapping rule and the validity interval; V2-068 owns the builder that applies them."
+  },
+  {
+   "name": "component-scheduler",
+   "status": "passed",
+   "argv": [
+    "devbox",
+    "run",
+    "--pure",
+    "--",
+    "go",
+    "test",
+    "-count=1",
+    "./internal/scheduler"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 600,
+   "summary": "verdict line: ok github.com/takushi/agentic-loop-foundation/v2/internal/scheduler 0.010s. 26 tests pass, up from a measured baseline of 20; comm(3) over the sorted go test -list output shows zero tests removed or renamed. The only file added is internal/scheduler/capture_time_test.go (+462/-0). scheduler.go, priority.go, decision.go, starvation_test.go, priority_test.go, scheduler_test.go, rollback_test.go, budget_test.go and source_guard_test.go are ABSENT from git diff --cached -- internal/scheduler and are therefore byte-identical. No weight, clamp, comparator or bound changed; StarvationBoundTicks is still 5. The new file imports only testing, time and internal/domain, all already in source_guard_test.go's testImportAllowlist, so no allowlist was widened."
+  },
+  {
+   "name": "capture-spread-interval-derivation",
+   "status": "passed",
+   "argv": [
+    "devbox",
+    "run",
+    "--pure",
+    "--",
+    "go",
+    "test",
+    "-count=1",
+    "-run",
+    "TestCaptureSpreadIntervalIsDerivedFromTheDeclaredNumbers",
+    "./internal/scheduler"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 600,
+   "summary": "A8's derivation, recomputed in code from the declared numbers so a weight change cannot leave the interval stale. Let D be the seconds by which the flood's capture time precedes the waiter's, so age_flood = age_waiter + D. flood = legacyPriority(100)*300 + age = 30000 + age_waiter + D. waiter = 50*weightValue(400) + 10*weightUrgency(350) + StarvationRisk*weightStarvationRisk(500) + age = 23500 + 2500*(tick-1) + age_waiter. Decide's comparator at scheduler.go:156 gives a tie to the lexically smaller id and every flood id ('flood-NN') sorts before 'important', so the waiter must be STRICTLY greater: 2500*(tick-1) > 6500 + D. With StarvationBoundTicks = 5 that gives D <= 3499 (captureSpreadCeilingSeconds). The negative control's waiter scores a flat 23500 + age, so it stays behind the flood only while 23500 <= 30000 + D, i.e. D >= -6500 (captureSpreadFloorSeconds). The one-tick margin needs convergence by tick 4: 2500*3 = 7500 > 6500 + D, i.e. D <= 999 (captureSpreadMarginCeilingSeconds). The test recomputes the deficit (30000-23500 = 6500), the step (5*500 = 2500), the ceiling, the margin ceiling and the floor from priority.go's weights and scheduler.go's bound and fails if any declared constant disagrees; it also fails if StarvationBoundTicks is no longer 5, and asserts the fixtures' base age (100000 s) exceeds the largest tested |D| so ageSeconds' negative clamp never silently replaces the arithmetic."
+  },
+  {
+   "name": "capture-spread-interval-measured-table",
+   "status": "passed",
+   "argv": [
+    "devbox",
+    "run",
+    "--pure",
+    "--",
+    "go",
+    "test",
+    "-count=1",
+    "-v",
+    "-run",
+    "TestCaptureSpreadConvergesInsideTheDerivedInterval|TestCaptureSpreadAboveTheCeilingExceedsTheDeclaredBound|TestCaptureSpreadBelowTheFloorBreaksTheNegativeControl|TestCaptureSpreadScenarioMatchesV2030WhenTheSpreadIsZero",
+    "./internal/scheduler"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 600,
+   "summary": "A8(a)(b)(c)(d), the full measured table, one tick per second of injected Snapshot.Now, driven through starvation_test.go's own runStarvationTicks and floodID unchanged: D=-6501 s -> tick 1, margin n/a [passed] | D=-6500 s -> tick 2, margin 3 [passed] | D=-1 s -> tick 4, margin 1 [passed] | D=0 s -> tick 4, margin 1 [passed] | D=+999 s -> tick 4, margin 1 [passed] | D=+1000 s -> tick 5, margin 0 [passed] | D=+3499 s -> tick 5, margin 0 [passed] | D=+3500 s -> tick 6, margin -1 [passed]. Every expected tick is computed by firstTickSatisfying from the declared numbers rather than typed in, so the measurement is against the derivation. The margin assertion runs in BOTH directions: at or below D=999 the margin must be at least 1, above 999 it must be exactly 0. V2-030's own starvationScenario was re-run side by side and converges on tick 4, the same tick as this file's D=0 scenario, which pins the new scenario builder as V2-030's scenario plus a spread and nothing else. No existing test was edited and starvationScenario was neither modified nor copied."
+  },
+  {
+   "name": "escalation-nothing-in-production-bounds-d",
+   "status": "passed",
+   "argv": [
+    "cat",
+    "docs/operations/scheduler-local.md"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 600,
+   "summary": "A9, RECORDED AND NOT FIXED. A Requirement's capture time is whatever instant its intake transaction happened at, and NOTHING IN PRODUCTION CONSTRAINS THE SPREAD between the capture times of competing Requirements: no clamp, no cap, no validation and no scheduling policy references it. A flood whose candidates were captured more than 3499 seconds (58 minutes 19 seconds) before the waiter therefore EXCEEDS the declared StarvationBoundTicks in a running system, and the D=+3500 case above measures exactly that at tick 6. Every available remedy -- raising the StarvationRisk step, normalizing or capping the age term, raising StarvationBoundTicks -- is a change to a scheduler decision rule, which V2-073's non_goal 3 forbids, and choosing among them means deciding what production should guarantee about capture-time spread. OWNER OF THE FOLLOW-UP DECISION: the tech_lead; V2-068, as the owner of the Snapshot builder, is where a chosen guarantee would be enforced. No assertion anywhere in this task was weakened, relaxed or reworded to make the limit disappear, and no number was adjusted to improve the appearance of the table. A further measured correction to the design packet is recorded in the mapping-rule check below."
+  },
+  {
+   "name": "missing-capture-time-mapping-rule",
+   "status": "passed",
+   "argv": [
+    "devbox",
+    "run",
+    "--pure",
+    "--",
+    "go",
+    "test",
+    "-count=1",
+    "-v",
+    "-run",
+    "TestMissingCaptureTimeMapsToAgeZeroAndNotToTheZeroInstant",
+    "./internal/scheduler"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 600,
+   "summary": "A7, with the computed scores recorded. THE RULE: a Requirement with no recorded capture time is ordered as if captured at the snapshot's Now -- age zero -- never as an unbounded age. Half one, measured: a candidate at age zero ranked BELOW an otherwise identical candidate captured one hour earlier (recorded rank=0 score=18600 age=3600; age-zero-mapped rank=1 score=15000 age=0). The age-zero candidate deliberately carries the lexically SMALLER id ('aaa-missing' vs 'zzz-recorded'), so on a tie the comparator would have ranked it first; ranking the recorded one first is therefore a statement about the score, not about the ids. Half two, run explicitly as a POSITIVE CONTROL: a priority-ZERO candidate presented with the ZERO INSTANT scored 9223372036 (age 9223372036 seconds) and took rank 0, beating a priority-100 candidate scoring 33600 (age 3600 seconds). That is why the rule is age zero and not the zero instant: a missing value would otherwise become absolute precedence. MEASURED CORRECTION TO dp-v2-073 d6, recorded rather than glossed: d6 predicted 'roughly two thousand years expressed in seconds'. The measured magnitude is 9223372036 seconds, about 292 years, because time.Duration is an int64 of nanoseconds and now.Sub(time.Time{}) SATURATES at the maximum Duration instead of reaching year 1. The consequence d6 drew is unchanged -- 9223372036 dwarfs legacyScore's priority term, which is at most 30000 -- and that consequence is what the test asserts. The correction is written into the test file's own comment."
+  },
+  {
+   "name": "determinism",
+   "status": "passed",
+   "argv": [
+    "devbox",
+    "run",
+    "--pure",
+    "--",
+    "go",
+    "test",
+    "-count=1",
+    "-race",
+    "./internal/scheduler"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 600,
+   "summary": "A14: verdict line ok .../internal/scheduler 1.030s under -race. The new file contains no goroutine, no time.Sleep, no timer and no time.Now call; each tick is a loop iteration over an explicitly advanced Snapshot.Now, and every capture time is derived from that same injected instant. The scoreFn substitution in the negative-control test is restored with defer, exactly as starvation_test.go does it, and the test asserts scoreFn is still non-nil at the end. Every scenario in the D table is rebuilt fresh, because runStarvationTicks raises StarvationRisk through the shared *domain.PriorityAssessment pointer and a reused scenario would carry an elevated value into the next case. Three consecutive runs produced identical output apart from the elapsed-seconds field."
+  },
+  {
+   "name": "skips",
+   "status": "skipped",
+   "argv": [
+    "devbox",
+    "run",
+    "--pure",
+    "--",
+    "go",
+    "test",
+    "-count=1",
+    "./internal/scheduler"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 600,
+   "summary": "Gate rule G7: no test in internal/scheduler was skipped, and no skip is counted as a pass. This entry is marked skipped so it cannot be read as a passing check."
+  }
+ ]
+}

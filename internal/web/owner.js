@@ -283,3 +283,56 @@ const id=()=>crypto.randomUUID();const json=v=>({headers:{"Content-Type":"applic
   if(button){button.onclick=load;}
   load();
 })();
+
+// V2-073 Requirement capture time: self-contained additive block. Reads
+// GET /v1/requirements and renders, for each Requirement, the instant it was
+// captured. A Requirement recorded before the field existed carries no
+// captured_at key at all, and this block says so in plain words rather than
+// rendering an empty string or a year-1 date: an absent capture time is
+// reported as absent. It renders no raw JSON, adds no timer and references no
+// external asset, script or font.
+(function(){
+  var el=function(i){return document.getElementById(i);};
+  var setList=function(id,rows,empty){
+    var list=el(id);if(!list){return;}list.textContent="";
+    if(!rows||!rows.length){var li=document.createElement("li");li.className="muted";li.textContent=empty;list.appendChild(li);return;}
+    rows.forEach(function(r){list.appendChild(r);});
+  };
+  var line=function(li,cls,text){
+    var p=document.createElement("p");p.className=cls;p.textContent=text;li.appendChild(p);return p;
+  };
+  var captureRow=function(q){
+    var li=document.createElement("li");
+    line(li,"repo-id",(q.requirement_id||"unnamed requirement")+" — "+(q.status||"unreported status"));
+    if(q.captured_at){
+      line(li,"repo-state","Captured at "+q.captured_at);
+    }else{
+      line(li,"repo-state","No capture time was recorded.");
+      line(li,"repo-reason","This Requirement was recorded before the capture time existed, so the response omits the field entirely. It is not an empty value and not a year-1 date: it is an absence, and it is never filled in from the time this page was opened.");
+    }
+    return li;
+  };
+  var render=function(v){
+    var rows=(v&&v.requirements)||[];
+    setList("captured-rows",rows.map(captureRow),"The response carried no Requirement at all.");
+    var missing=rows.filter(function(q){return !q.captured_at;});
+    var count=el("captured-missing");
+    if(count){
+      count.textContent=missing.length?(missing.length+" of "+rows.length+" Requirements have no recorded capture time."):
+        (rows.length?"Every Requirement on this page carries a recorded capture time.":"No Requirement was read.");
+    }
+  };
+  var failed=function(m){
+    setList("captured-rows",[],m);
+    var count=el("captured-missing");if(count){count.textContent=m;}
+  };
+  var load=function(){
+    return fetch("/v1/requirements").then(function(r){
+      if(!r.ok){failed("Unable to read the Requirement list.");return;}
+      return r.json().then(render);
+    }).catch(function(){failed("Unable to read the Requirement list.");});
+  };
+  var button=el("captured-refresh");
+  if(button){button.onclick=load;}
+  load();
+})();

@@ -106,3 +106,103 @@ entities across two or more Repositories with injected clock skew between
 them -- that is `internal/scheduler`'s own planning purity plus an execution
 substrate this package structurally cannot witness on its own, and it remains
 V2-031's scope.
+
+## The Requirement's capture time, and the interval in which the starvation bound is true (V2-073)
+
+A `domain.Requirement` now carries `CapturedAt`, the instant it was captured.
+The value is set exactly once, at intake, from the transaction's authority
+time -- the same instant the `requirement.captured` event carries -- so the
+record and its own event can never disagree, and a Firestore retry of the
+transaction callback cannot move it. It is not read from a second clock call,
+it is not derived from a read time, it is not derived from a scan of the event
+log, and `CaptureRequest` carries no field for it, so a caller cannot supply
+it. `GET /v1/requirements` and `GET /v1/requirements/{id}` report it as
+`captured_at`.
+
+### A Requirement with no recorded capture time
+
+A Requirement recorded before the field existed carries the zero value.
+`Validate` accepts it, and the read views omit `captured_at` **entirely**
+rather than emitting `0001-01-01T00:00:00Z`: the zero instant reads as a real
+instant in the year 1, and an ordering rule that rewards age would read every
+such record as maximally old and therefore maximally privileged.
+
+**The mapping rule, in one sentence: a Requirement with no recorded capture
+time is ordered as if captured at the snapshot's `Now` -- age zero -- never as
+an unbounded age.** The rule is declared and proven here
+(`internal/scheduler/capture_time_test.go`); the task that builds the
+`Snapshot` applies it. Nothing in production constructs a `scheduler.Snapshot`
+at this commit, and V2-068 owns the builder, so wiring `CapturedAt` into
+`Snapshot.Requirements[i].CreatedAt` -- with this rule for the absent case --
+is V2-068's item, not this one's.
+
+Why age zero and not the zero instant: `ageSeconds` clamps only the negative
+side, and `now.Sub(time.Time{})` saturates at the maximum `time.Duration`,
+which is 9223372036 seconds (about 292 years). `legacyScore` is
+`legacyPriority(p)*300 + age`, so a priority-100 candidate scores at most
+30000 from priority; a candidate presented with the zero instant scores
+9223372036 from age alone and outranks everything regardless of priority. Age
+zero is the conservative direction: a missing value makes a Requirement the
+least privileged rather than the most, so the failure mode of an absent value
+is a delayed Requirement rather than a starved queue.
+
+### The capture-time spread interval
+
+V2-030 proved the starvation bound with **every candidate sharing one
+`CreatedAt`**, and its own comments say so three times: the age term is
+identical across the scenario and cancels out of every comparison. Feeding
+real capture times removes that cancellation, and the cancellation is what the
+proof rested on. The bound is therefore a conditional statement.
+
+Let **D** be the number of seconds by which the flood candidates' capture time
+precedes the waiter's. From the declared numbers only:
+
+- flood score = `legacyPriority(100)*300 + age` = `30000 + age_waiter + D`
+- waiter score = `50*weightValue(400) + 10*weightUrgency(350) + StarvationRisk*weightStarvationRisk(500) + age` = `23500 + 2500*(tick-1) + age_waiter`
+- flood ids sort before `important`, and `Decide`'s comparator gives a tie to
+  the lexically smaller id, so the waiter must be **strictly** greater:
+  `2500*(tick-1) > 6500 + D`
+- with `StarvationBoundTicks = 5`, convergence inside the bound requires
+  `D <= 3499`
+- the negative control (the same scenario with the `StarvationRisk` term
+  neutralised) stays non-convergent only while `23500 <= 30000 + D`, that is
+  `D >= -6500`
+
+**V2-030's two starvation tests are true statements exactly for
+D in [-6500, +3499] seconds.** Measured, at one second per tick:
+
+| D (seconds) | converges on tick | margin vs the 5-tick bound | verdict |
+| --- | --- | --- | --- |
+| -6501 | 1 (negative control, StarvationRisk neutralised) | -- | **positive control: the proof stops attributing convergence to the StarvationRisk term** |
+| -6500 | 2 (negative control: never, in 20 ticks) | 3 | inside the interval, floor endpoint |
+| -1 | 4 | 1 | inside |
+| 0 | 4 | 1 | inside; identical to V2-030's own scenario |
+| +999 | 4 | 1 | inside; last D with a margin |
+| +1000 | 5 | 0 | inside, no margin |
+| +3499 | 5 | 0 | inside, ceiling endpoint |
+| +3500 | 6 | -1 | **positive control: the declared bound is exceeded** |
+
+The "one-tick margin" `StarvationBoundTicks`'s own comment records therefore
+exists **only for D below 1000 seconds**. From 1000 to 3499 seconds
+convergence lands on the bound itself with no margin at all.
+
+### Escalation: nothing in production bounds D
+
+A Requirement's capture time is whatever instant its intake transaction
+happened at. **Nothing in production constrains the spread between the capture
+times of competing Requirements**, so a flood whose candidates were captured
+more than 3499 seconds (58 minutes 19 seconds) before the waiter can exceed
+the declared starvation bound in a running system. This is recorded, not
+fixed. Every available remedy -- raising the `StarvationRisk` step,
+normalizing or capping the age term, raising `StarvationBoundTicks` -- is a
+change to a scheduler decision rule, which V2-073's non-goals forbid, and
+choosing among them means deciding what production should guarantee about
+capture-time spread, which is a scheduling policy question. **The tech_lead
+owns that follow-up decision; V2-068, as the owner of the `Snapshot` builder,
+is where a chosen guarantee would be enforced.** No weight, clamp, comparator
+or bound was changed here, `starvation_test.go` was not edited, and no
+assertion was weakened to make the limit disappear.
+
+Run the derivation and the endpoint measurements with
+`make component-scheduler`, or
+`go test -run 'CaptureSpread|MissingCaptureTime' ./internal/scheduler`.
