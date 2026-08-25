@@ -1,0 +1,95 @@
+{
+    "schema_version": "v1",
+    "id": "ev-v2-071-store-firestore",
+    "kind": "evidence",
+    "created_at": "2026-08-25T13:45:00Z",
+    "correlation_id": "v2-071-working-copy",
+    "task_id": "V2-071",
+    "component": "store-firestore",
+    "evidence_key": "664c63926a480d7b75bc9957894b3c5705d9452793b4f2014d63d207fa36859c",
+    "result": "passed",
+    "observed_at": "2026-08-25T13:45:00Z",
+    "checks": [
+        {
+            "name": "environment-identifier",
+            "status": "passed",
+            "argv": [
+                "uname",
+                "-srm"
+            ],
+            "working_directory": ".",
+            "timeout_seconds": 10,
+            "summary": "execution environment: uname -srm = Linux 6.18.33.2-microsoft-standard-WSL2 x86_64; devbox run --pure -- go version = go1.25.0 linux/amd64; devbox 0.17.2, environment resolved from this worktree's devbox.json/devbox.lock, both untouched by this task; resolved absolute git path = /home/takushi/repos/agentic-loop-foundation-worktrees/v2-task-071/.devbox/nix/profile/default/bin/git, git version 2.55.0; unshare is present on the devbox --pure PATH and gh is absent; worktree /home/takushi/repos/agentic-loop-foundation-worktrees/v2-task-071 on branch v2-task/V2-071, base commit cf9682a, code commit dd8fdb6. No real Provider CLI was started, no gh was started, and no Google Cloud resource was touched."
+        },
+        {
+            "name": "component-store-firestore",
+            "status": "passed",
+            "argv": [
+                "devbox",
+                "run",
+                "--pure",
+                "--",
+                "scripts/firestore-emulator.sh",
+                "go",
+                "test",
+                "-race",
+                "-count=1",
+                "./internal/store/firestore"
+            ],
+            "working_directory": ".",
+            "timeout_seconds": 600,
+            "summary": "verdict line: ok github.com/takushi/agentic-loop-foundation/v2/internal/store/firestore 10.515s standalone with -race against the emulator; 8.090s in make check's own component-store-firestore leg. Top-level test count 19 -> 20. No test in this package skips while the emulator is running."
+        },
+        {
+            "name": "no-new-firestore-index",
+            "status": "passed",
+            "argv": [
+                "git",
+                "diff",
+                "--stat",
+                "cf9682a..HEAD",
+                "--",
+                "firestore.indexes.json"
+            ],
+            "working_directory": ".",
+            "timeout_seconds": 30,
+            "summary": "measured: firestore.indexes.json is absent from the diff and therefore byte-identical. The per-repository read is a single-field equality query, Where(\"index_repository_id\", \"==\", id) with OrderBy(DocumentID) and Limit(n+1) -- the same shape the existing index_lease_id queries use -- and Firestore indexes every single field automatically, so no composite index is needed. The declared indexes in that file cover only outbox and leases and none was added, changed or removed."
+        },
+        {
+            "name": "write-once-and-bounded-reads",
+            "status": "passed",
+            "argv": [
+                "devbox",
+                "run",
+                "--pure",
+                "--",
+                "scripts/firestore-emulator.sh",
+                "go",
+                "test",
+                "-race",
+                "-count=1",
+                "-run",
+                "TestRequirementRepositoryLinkIsWriteOnceAndBounded",
+                "./internal/store/firestore"
+            ],
+            "working_directory": ".",
+            "timeout_seconds": 600,
+            "summary": "the same test name and the same assertions as the memory adapter's, against the real emulator. The link lives in its own collection keyed by the Requirement id, with the repository id projected onto one indexed envelope field. The write and the query are in separate transactions because a Firestore transaction's staged writes are visible to a keyed read but not to a query -- the same reason ExecutionByLease is never called after SaveExecution in one callback. The batch read is a keyed read per id on the caller's page rather than a collection scan, so its bound is the caller's own list and a link staged earlier in the same transaction is visible."
+        },
+        {
+            "name": "evidence-key",
+            "status": "passed",
+            "argv": [
+                "devbox",
+                "run",
+                "--pure",
+                "--",
+                "make",
+                "evidence-keys"
+            ],
+            "working_directory": ".",
+            "timeout_seconds": 600,
+            "summary": "store-firestore component key on the final tree where make check is green, with every touched file git-added and committed: 664c63926a480d7b75bc9957894b3c5705d9452793b4f2014d63d207fa36859c. Read with build/evidence removed first. The base-tree value of the same key was NOT measured: reading it would require moving HEAD, and git checkout is forbidden for this task, so no before value is recorded rather than a plausible one being invented. Recorded and deliberately not repaired: the control-plane component's roots (cmd/control-plane/**) are unchanged by this task, but contracts/openapi/openapi-v1.yaml is one of its declared contract_dependencies and this task changed that file, so control-plane's evidence key can move with unchanged roots. ci/components.json is a prohibited path here and that behaviour is V2-045's. Recorded key movement: this component's key was 345b5db94ecbb6413197af936b712405f02efcf959525960dd611a7a73258393 on the first green tree of this task and is 664c63926a480d7b75bc9957894b3c5705d9452793b4f2014d63d207fa36859c on the final one. The only change between the two is internal/runner/git_live_test.go, which gained the execution-environment identifiers and the shallow-grafts measurement the live clone leg now records. This component declares runner as a dependency in ci/components.json, and the evidence key is a closure over declared dependencies rather than over roots alone -- measured, not assumed: editing only a file under internal/runner/** moved runner, api and store-firestore and left domain, application, store-memory, web, contracts and docs byte-identical. ci/components.json was not touched."
+        }
+    ]
+}

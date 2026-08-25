@@ -1,0 +1,85 @@
+{
+    "schema_version": "v1",
+    "id": "ev-v2-071-docs",
+    "kind": "evidence",
+    "created_at": "2026-08-25T13:45:00Z",
+    "correlation_id": "v2-071-working-copy",
+    "task_id": "V2-071",
+    "component": "docs",
+    "evidence_key": "9af06f63ef35cbe8ad2b7868ca561e07cd5226bd2f04c503c311f5be07cad6ed",
+    "result": "passed",
+    "observed_at": "2026-08-25T13:45:00Z",
+    "checks": [
+        {
+            "name": "environment-identifier",
+            "status": "passed",
+            "argv": [
+                "uname",
+                "-srm"
+            ],
+            "working_directory": ".",
+            "timeout_seconds": 10,
+            "summary": "execution environment: uname -srm = Linux 6.18.33.2-microsoft-standard-WSL2 x86_64; devbox run --pure -- go version = go1.25.0 linux/amd64; devbox 0.17.2, environment resolved from this worktree's devbox.json/devbox.lock, both untouched by this task; resolved absolute git path = /home/takushi/repos/agentic-loop-foundation-worktrees/v2-task-071/.devbox/nix/profile/default/bin/git, git version 2.55.0; unshare is present on the devbox --pure PATH and gh is absent; worktree /home/takushi/repos/agentic-loop-foundation-worktrees/v2-task-071 on branch v2-task/V2-071, base commit cf9682a, code commit dd8fdb6. No real Provider CLI was started, no gh was started, and no Google Cloud resource was touched."
+        },
+        {
+            "name": "component-docs",
+            "status": "passed",
+            "argv": [
+                "devbox",
+                "run",
+                "--pure",
+                "--",
+                "make",
+                "docs"
+            ],
+            "working_directory": ".",
+            "timeout_seconds": 600,
+            "summary": "verdict: the docs leg of make check produced no output, which is its pass condition (two negated ripgrep assertions over docs, README.md and AGENTS.md for links to retired document names). make check's overall run reported 0 FAILS."
+        },
+        {
+            "name": "runner-local-measurements-recorded",
+            "status": "passed",
+            "argv": [
+                "git",
+                "diff",
+                "--stat",
+                "cf9682a..HEAD",
+                "--",
+                "docs/"
+            ],
+            "working_directory": ".",
+            "timeout_seconds": 30,
+            "summary": "measured: docs/operations/runner-local.md is the only file under docs/ in the diff. A new section \"Git working copy: real clone, closed argv, no remote (V2-071)\" was inserted before the existing \"Bounded diagnostic log\" section, in the same class as the V2-064 forge measurements above it. It records the working copy's location and Execution ownership, the resolved absolute git path and version, why clone is used and worktree add refused (--git-common-dir == \".git\" versus a .git file pointing outside the confinement), the closed subcommand and pre-subcommand-option allowlists, the guarded environment with no HOME and why its absence is the stronger property, every kernel refusal measured inside the namespace together with the positive control taken without it, the fail-closed probe behaviour, the split between the executed Git-level verification and the fail-closed project-level stage with the governance reason, the bounded output rule, the descriptor and the deterministic sweep, and the two clone-source regimes with the owner-designated-URL rule. Nothing already in the file was rewritten."
+        },
+        {
+            "name": "nothing-claimed-that-was-not-measured",
+            "status": "passed",
+            "argv": [
+                "devbox",
+                "run",
+                "--pure",
+                "--",
+                "make",
+                "check"
+            ],
+            "working_directory": ".",
+            "timeout_seconds": 3600,
+            "summary": "the section states only measurements this task actually produced, each of which appears as a verdict in ev-v2-071-runner: the git version and absolute path, the kernel release, --git-common-dir, the four EROFS refusals, the three positive controls, the push refusal and its exact kernel message, and the gate behaviour of the live clone. The live clone itself is described as gated and is NOT claimed to have run."
+        },
+        {
+            "name": "evidence-key",
+            "status": "passed",
+            "argv": [
+                "devbox",
+                "run",
+                "--pure",
+                "--",
+                "make",
+                "evidence-keys"
+            ],
+            "working_directory": ".",
+            "timeout_seconds": 600,
+            "summary": "docs component key on the final tree where make check is green, with every touched file git-added and committed: 9af06f63ef35cbe8ad2b7868ca561e07cd5226bd2f04c503c311f5be07cad6ed. Read with build/evidence removed first. The base-tree value of the same key was NOT measured: reading it would require moving HEAD, and git checkout is forbidden for this task, so no before value is recorded rather than a plausible one being invented. Recorded and deliberately not repaired: the control-plane component's roots (cmd/control-plane/**) are unchanged by this task, but contracts/openapi/openapi-v1.yaml is one of its declared contract_dependencies and this task changed that file, so control-plane's evidence key can move with unchanged roots. ci/components.json is a prohibited path here and that behaviour is V2-045's."
+        }
+    ]
+}

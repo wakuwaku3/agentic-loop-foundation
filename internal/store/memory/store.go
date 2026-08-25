@@ -5,6 +5,7 @@ package memory
 
 import (
 	"context"
+	"errors"
 	"sort"
 	"sync"
 	"time"
@@ -29,6 +30,7 @@ type state struct {
 	runnerObservations map[string]domain.RunnerObservation
 	repositories       map[string]domain.Repository
 	repositoryObs      map[string]domain.RepositoryObservation
+	requirementRepo    map[string]domain.RequirementRepositoryLink
 	requests           map[string]application.IdempotentResponse
 	texts              map[string]string
 	targets            map[string]domain.ControlTarget
@@ -38,7 +40,7 @@ type state struct {
 }
 
 func newState() state {
-	return state{requirements: map[string]domain.Requirement{}, increments: map[string]domain.Increment{}, executions: map[string]domain.Execution{}, leases: map[string]domain.Lease{}, requests: map[string]application.IdempotentResponse{}, texts: map[string]string{}, targets: map[string]domain.ControlTarget{}, controlProgress: map[domain.Revision]domain.ControlProgress{}, controlRequestedBy: map[domain.Revision]domain.RequestedBy{}, runnerObservations: map[string]domain.RunnerObservation{}, repositories: map[string]domain.Repository{}, repositoryObs: map[string]domain.RepositoryObservation{}}
+	return state{requirements: map[string]domain.Requirement{}, increments: map[string]domain.Increment{}, executions: map[string]domain.Execution{}, leases: map[string]domain.Lease{}, requests: map[string]application.IdempotentResponse{}, texts: map[string]string{}, targets: map[string]domain.ControlTarget{}, controlProgress: map[domain.Revision]domain.ControlProgress{}, controlRequestedBy: map[domain.Revision]domain.RequestedBy{}, runnerObservations: map[string]domain.RunnerObservation{}, repositories: map[string]domain.Repository{}, repositoryObs: map[string]domain.RepositoryObservation{}, requirementRepo: map[string]domain.RequirementRepositoryLink{}}
 }
 func (s state) clone() state {
 	n := newState()
@@ -74,6 +76,12 @@ func (s state) clone() state {
 	}
 	for k, v := range s.repositoryObs {
 		n.repositoryObs[k] = v
+	}
+	// The Requirement-to-Repository link is copied on write like every other
+	// record, so a rolled-back transaction cannot leak an association into
+	// the committed state.
+	for k, v := range s.requirementRepo {
+		n.requirementRepo[k] = v
 	}
 	for k, v := range s.requests {
 		n.requests[k] = v
@@ -499,6 +507,57 @@ func (u *unit) RepositoryObservation(_ context.Context, repositoryID string) (do
 func (u *unit) SaveRepositoryObservation(_ context.Context, value domain.RepositoryObservation) error {
 	u.s.repositoryObs[value.RepositoryID.String()] = value
 	return nil
+}
+
+// The Requirement-to-Repository link is write-once, keyed by the Requirement.
+// A second link naming a different Repository is a conflict, reported with
+// the same ErrOptimisticConflict every other save in this adapter uses; an
+// identical re-write is an idempotent replay and leaves exactly one record.
+func (u *unit) SaveRequirementRepositoryLink(_ context.Context, value domain.RequirementRepositoryLink) error {
+	if err := domain.ValidateRequirementRepositoryLink(value); err != nil {
+		return err
+	}
+	key := value.RequirementID.String()
+	if old, ok := u.s.requirementRepo[key]; ok {
+		if old.RepositoryID != value.RepositoryID {
+			return ErrOptimisticConflict
+		}
+		return nil
+	}
+	u.s.requirementRepo[key] = value
+	return nil
+}
+func (u *unit) RequirementRepositoryLink(_ context.Context, requirementID string) (domain.RequirementRepositoryLink, bool, error) {
+	v, ok := u.s.requirementRepo[requirementID]
+	return v, ok, nil
+}
+func (u *unit) RequirementRepositoryLinks(_ context.Context, ids []string) (map[string]domain.RequirementRepositoryLink, error) {
+	out := make(map[string]domain.RequirementRepositoryLink, len(ids))
+	for _, id := range ids {
+		if v, ok := u.s.requirementRepo[id]; ok {
+			out[id] = v
+		}
+	}
+	return out, nil
+}
+func (u *unit) RequirementIDsForRepository(_ context.Context, repositoryID string, limit int) ([]string, bool, error) {
+	if repositoryID == "" {
+		return nil, false, errors.New("repository id is required")
+	}
+	if limit <= 0 {
+		return nil, false, nil
+	}
+	all := make([]string, 0, len(u.s.requirementRepo))
+	for id, link := range u.s.requirementRepo {
+		if link.RepositoryID.String() == repositoryID {
+			all = append(all, id)
+		}
+	}
+	sort.Strings(all)
+	if len(all) > limit {
+		return all[:limit], true, nil
+	}
+	return all, false, nil
 }
 
 func (u *unit) RunnerObservation(_ context.Context, runnerID string) (domain.RunnerObservation, bool, error) {

@@ -55,3 +55,64 @@ const id=()=>crypto.randomUUID();const json=v=>({headers:{"Content-Type":"applic
   if(button){button.onclick=refreshRelease;}
   refreshRelease();
 })();
+
+// V2-071 repository-scoped Requirement backlog: self-contained additive block.
+// It renders the Repository detail's repository-scoped Requirement Backlog
+// count and the per-row Repository of each Requirement. Every value comes from
+// the API; nothing is restated, defaulted or guessed here. An absent
+// measurement is rendered as its own explicit state and reason, and a
+// Requirement with no association is rendered as having none. The block loads
+// no external asset and no library, starts no timer and no poll loop, and
+// fetches only this origin's own relative paths.
+(function(){
+  var el=function(i){return document.getElementById(i);};
+  var setList=function(id,items,empty){
+    var list=el(id);if(!list){return;}
+    list.textContent="";
+    if(!items.length){var li=document.createElement("li");li.className="muted";li.textContent=empty;list.appendChild(li);return;}
+    items.forEach(function(r){list.appendChild(r);});
+  };
+  var requirementRow=function(r){
+    var li=document.createElement("li");
+    var head=document.createElement("div");head.className="repo-id";
+    head.textContent=(r.requirement_id||"unnamed requirement")+" — "+(r.status||"unreported status");
+    li.appendChild(head);
+    var assoc=document.createElement("div");
+    assoc.className="repo-state state-"+(r.repository_id?"executable":"unobserved");
+    assoc.textContent=r.repository_id?("repository: "+r.repository_id):"records no Repository association";
+    li.appendChild(assoc);
+    return li;
+  };
+  var renderBacklog=function(v){
+    var b=(v&&v.requirement_backlog)||null;
+    if(!b){el("backlog-state").textContent="the response carried no requirement_backlog";el("backlog-reason").textContent="";return;}
+    if(b.state!=="measured"){
+      el("backlog-state").textContent="repository-scoped backlog: "+(b.state||"unreported state")+" (no count was measured)";
+    }else{
+      var scope=b.installation_scope||{};
+      el("backlog-state").textContent="repository-scoped Requirements: "+(b.truncated?"at least ":"")+b.requirement_count+
+        " — installation-wide Requirements: "+(scope.requirements===undefined?"unreported":scope.requirements);
+    }
+    el("backlog-reason").textContent=b.reason||"no reason was reported";
+  };
+  var backlogFailed=function(m){el("backlog-state").textContent=m;el("backlog-reason").textContent="";};
+  var loadRows=function(){
+    return fetch("/v1/requirements").then(function(r){
+      if(!r.ok){setList("backlog-rows",[],"Unable to read the Requirement list.");return;}
+      return r.json().then(function(v){
+        setList("backlog-rows",((v&&v.requirements)||[]).map(requirementRow),"No Requirement is captured.");
+      });
+    }).catch(function(){setList("backlog-rows",[],"Unable to read the Requirement list.");});
+  };
+  var loadBacklog=function(id){
+    if(!id){backlogFailed("Name a Repository id to read its scoped backlog.");return Promise.resolve();}
+    return fetch("/v1/repositories/"+encodeURIComponent(id)).then(function(r){
+      if(r.status===404){backlogFailed("No Repository is registered under that id.");return;}
+      if(!r.ok){backlogFailed("Unable to read that Repository.");return;}
+      return r.json().then(renderBacklog);
+    }).catch(function(){backlogFailed("Unable to read that Repository.");});
+  };
+  var form=el("backlog");
+  if(form){form.onsubmit=function(e){e.preventDefault();loadBacklog((el("backlog-repository").value||"").trim());loadRows();};}
+  loadRows();
+})();

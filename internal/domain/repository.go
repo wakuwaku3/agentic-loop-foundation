@@ -467,3 +467,62 @@ func RepositoryExecutabilityFrom(repository Repository, control EffectiveControl
 	}
 	return RepositoryExecutability{State: RepositoryExecutable, Executable: true, Reason: "the forge Observation reports the Repository reachable with push permission and a default branch, and no Control Intent denies work for it", ObservedAt: observation.ObservedAt, Stale: stale}
 }
+
+// --- V2-071: the Requirement-to-Repository association ---------------------
+//
+// RequirementRepositoryLink is the write-once side record that says which
+// Repository a Requirement belongs to. It is declared here, beside the
+// Repository aggregate, and not as a field on Requirement, Increment or
+// Repository, for two measured reasons (dp-v2-071 d11, d12).
+//
+// First, internal/domain/model.go is the proven-closed M1 surface: the
+// precedent for adding an association to it is the one already recorded in
+// internal/application/ports.go for ControlRequestedByRepository -- the
+// immutable aggregate keeps its shape and the new fact is tracked as its own
+// keyed record. Second, the association is keyed by the Requirement rather
+// than held as a list on the Repository: a slice on Repository would grow
+// without bound and would turn every intake into a write to one shared
+// document, which is the same contention argument that put
+// RepositoryObservation in its own record above.
+//
+// The record is Requirement-keyed and written at most once. The store, not
+// this value object, enforces at-most-once (the domain reads no state), but
+// the shape is what makes at-most-once expressible: one Requirement id is the
+// whole key, so a second link for the same Requirement is a conflict rather
+// than an append.
+type RequirementRepositoryLink struct {
+	RequirementID RequirementID `json:"requirement_id"`
+	RepositoryID  RepositoryID  `json:"repository_id"`
+	AssignedAt    time.Time     `json:"assigned_at"`
+	// RequestedBy records who caused the association, for attribution only.
+	// It is never interpreted, authenticated or authorized here, exactly as
+	// Repository.RequestedBy above is not.
+	RequestedBy RequestedBy `json:"requested_by,omitempty"`
+}
+
+// Recorded distinguishes a real link from a zero value, so a caller can tell
+// "this Requirement names no Repository" from "nothing was read".
+func (l RequirementRepositoryLink) Recorded() bool {
+	return l.RequirementID != "" && l.RepositoryID != ""
+}
+
+// ValidateRequirementRepositoryLink is this value object's own invariant
+// check, the analogue of ValidateRepository above. It refuses an empty or
+// non-opaque identifier on either side and refuses a link that does not say
+// when it was made: an association with no instant cannot be ordered against
+// the Requirement it describes, so it is not a record of anything.
+func ValidateRequirementRepositoryLink(value RequirementRepositoryLink) error {
+	if _, err := NewRequirementID(value.RequirementID.String()); err != nil {
+		return err
+	}
+	if _, err := NewRepositoryID(value.RepositoryID.String()); err != nil {
+		return err
+	}
+	if value.AssignedAt.IsZero() {
+		return errors.New("requirement-to-repository link requires an explicit assignment timestamp")
+	}
+	if value.RequestedBy.ActorType != "" && !validActorType(value.RequestedBy.ActorType) {
+		return fmt.Errorf("unknown requested_by actor_type %q", value.RequestedBy.ActorType)
+	}
+	return nil
+}

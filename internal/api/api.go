@@ -690,6 +690,10 @@ type captureBody struct {
 	RequestID     string `json:"request_id"`
 	RequirementID string `json:"requirement_id,omitempty"`
 	Text          string `json:"text"`
+	// RepositoryID is optional (V2-071 A12). When present, Capture writes the
+	// write-once Requirement-to-Repository link; when absent, nothing about
+	// the existing capture path changes.
+	RepositoryID string `json:"repository_id,omitempty"`
 }
 
 func (h *Handler) capture(w http.ResponseWriter, r *http.Request) {
@@ -697,7 +701,7 @@ func (h *Handler) capture(w http.ResponseWriter, r *http.Request) {
 	if !h.decode(w, r, &b) {
 		return
 	}
-	out, err := h.config.Service.Capture(r.Context(), application.CaptureRequest{RequestID: b.RequestID, RequirementID: b.RequirementID, Text: b.Text})
+	out, err := h.config.Service.Capture(r.Context(), application.CaptureRequest{RequestID: b.RequestID, RequirementID: b.RequirementID, Text: b.Text, RepositoryID: b.RepositoryID})
 	if err != nil {
 		h.domainError(w, r, err)
 		return

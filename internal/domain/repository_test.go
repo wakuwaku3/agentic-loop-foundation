@@ -423,3 +423,114 @@ func repositoryStructFields(t *testing.T, typeName string) []string {
 	}
 	return fields
 }
+
+// --- V2-071: the Requirement-to-Repository link ----------------------------
+
+func TestRequirementRepositoryLinkRefusesAnIncompleteAssociation(t *testing.T) {
+	at := time.Date(2026, 8, 25, 6, 0, 0, 0, time.UTC)
+	valid := RequirementRepositoryLink{RequirementID: "req-1", RepositoryID: "repo-1", AssignedAt: at, RequestedBy: RequestedBy{ActorType: ActorTypeOwner, Subject: "owner-1"}}
+	if err := ValidateRequirementRepositoryLink(valid); err != nil {
+		t.Fatalf("positive control: a complete link must validate, got %v", err)
+	}
+	if !valid.Recorded() {
+		t.Fatal("positive control: a complete link must report itself recorded")
+	}
+	// Every refusal below is a separate assertion, so a single over-broad
+	// check cannot stand in for four distinct invariants.
+	cases := []struct {
+		name  string
+		value RequirementRepositoryLink
+	}{
+		{"empty requirement id", RequirementRepositoryLink{RepositoryID: "repo-1", AssignedAt: at}},
+		{"blank requirement id", RequirementRepositoryLink{RequirementID: "   ", RepositoryID: "repo-1", AssignedAt: at}},
+		{"empty repository id", RequirementRepositoryLink{RequirementID: "req-1", AssignedAt: at}},
+		{"blank repository id", RequirementRepositoryLink{RequirementID: "req-1", RepositoryID: "\t", AssignedAt: at}},
+		{"zero assigned_at", RequirementRepositoryLink{RequirementID: "req-1", RepositoryID: "repo-1"}},
+		{"unknown actor type", RequirementRepositoryLink{RequirementID: "req-1", RepositoryID: "repo-1", AssignedAt: at, RequestedBy: RequestedBy{ActorType: ActorType("robot")}}},
+	}
+	for _, tc := range cases {
+		if err := ValidateRequirementRepositoryLink(tc.value); err == nil {
+			t.Fatalf("%s: expected a refusal, got none", tc.name)
+		}
+	}
+	if err := ValidateRequirementRepositoryLink(RequirementRepositoryLink{RequirementID: "req-1", RepositoryID: "repo-1", AssignedAt: at}); err != nil {
+		t.Fatalf("a link with no requested_by is still valid (attribution is optional), got %v", err)
+	}
+	if (RequirementRepositoryLink{}).Recorded() {
+		t.Fatal("a zero link must not report itself recorded")
+	}
+	if !errors.Is(ValidateRequirementRepositoryLink(RequirementRepositoryLink{RepositoryID: "repo-1", AssignedAt: at}), ErrEmptyID) {
+		t.Fatal("an empty requirement id must be refused as ErrEmptyID, the package's own opaque-id refusal")
+	}
+}
+
+// TestRequirementRepositoryLinkAddsNoFieldToAnyExistingAggregate is the
+// structural half of the same claim: the association exists without any of
+// the M1 aggregates gaining a field, which is what makes model.go's
+// byte-identity possible at all.
+func TestRequirementRepositoryLinkAddsNoFieldToAnyExistingAggregate(t *testing.T) {
+	for _, spec := range []struct{ file, typeName string }{
+		{"model.go", "Requirement"}, {"model.go", "Increment"}, {"model.go", "Execution"},
+		{"model.go", "Lease"}, {"control.go", "ControlIntent"}, {"control.go", "ControlTarget"},
+	} {
+		for _, field := range structFieldsInFile(t, spec.file, spec.typeName) {
+			if strings.Contains(strings.ToLower(field), "repositorylink") {
+				t.Fatalf("%s %s carries a link field %q; the association must stay a side record", spec.file, spec.typeName, field)
+			}
+		}
+	}
+	// Repository itself must not have grown a Requirement list either.
+	for _, field := range structFieldsInFile(t, "repository.go", "Repository") {
+		if strings.Contains(strings.ToLower(field), "requirement") {
+			t.Fatalf("Repository carries %q; the association is Requirement-keyed, not a list on the aggregate", field)
+		}
+	}
+	fields := structFieldsInFile(t, "repository.go", "RequirementRepositoryLink")
+	want := []string{"RequirementID", "RepositoryID", "AssignedAt", "RequestedBy"}
+	if len(fields) != len(want) {
+		t.Fatalf("RequirementRepositoryLink fields = %v, want exactly %v", fields, want)
+	}
+	for i := range want {
+		if fields[i] != want[i] {
+			t.Fatalf("RequirementRepositoryLink fields = %v, want exactly %v", fields, want)
+		}
+	}
+}
+
+// structFieldsInFile is repositoryStructFields generalised over the file to
+// parse, so the assertion above can read model.go's aggregates without
+// modifying model.go or duplicating the walk a third time.
+func structFieldsInFile(t *testing.T, fileName, typeName string) []string {
+	t.Helper()
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, fileName, nil, 0)
+	if err != nil {
+		t.Fatalf("parse %s: %v", fileName, err)
+	}
+	var fields []string
+	found := false
+	ast.Inspect(file, func(n ast.Node) bool {
+		spec, ok := n.(*ast.TypeSpec)
+		if !ok || spec.Name == nil || spec.Name.Name != typeName {
+			return true
+		}
+		structType, ok := spec.Type.(*ast.StructType)
+		if !ok || structType.Fields == nil {
+			return true
+		}
+		found = true
+		for _, field := range structType.Fields.List {
+			for _, name := range field.Names {
+				fields = append(fields, name.Name)
+			}
+		}
+		return false
+	})
+	if !found {
+		t.Fatalf("struct type %q not found in %s", typeName, fileName)
+	}
+	if len(fields) == 0 {
+		t.Fatalf("struct type %q in %s has no fields; the AST walk is not finding them", typeName, fileName)
+	}
+	return fields
+}

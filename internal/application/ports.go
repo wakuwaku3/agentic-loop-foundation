@@ -214,6 +214,30 @@ type RepositoryRepository interface {
 	SaveRepositoryObservation(ctx context.Context, value domain.RepositoryObservation) error
 }
 
+// RequirementRepositoryLinkRepository is the persistence contract of the
+// write-once Requirement-to-Repository association (V2-071). It follows
+// ControlRequestedByRepository's precedent exactly: domain.Requirement lives
+// in internal/domain/model.go, the proven-closed M1 surface, so which
+// Repository a Requirement belongs to is tracked here as its own keyed
+// record rather than as a new field on that struct.
+//
+// The record is written at most once per Requirement. An implementation must
+// refuse a second link for the same Requirement naming a different
+// Repository (a conflict, surfaced as domain.ErrStaleVersion) and must treat
+// an identical re-write as an idempotent replay rather than a second record.
+//
+// The batch read and the per-repository read are bounded reads and must apply
+// their bound in the storage query, matching RequirementReadRepository's
+// stated contract above. RequirementIDsForRepository's bool reports that the
+// bound truncated the answer, so a caller can say "at least n" rather than
+// reporting a wrong total as if it were exact.
+type RequirementRepositoryLinkRepository interface {
+	SaveRequirementRepositoryLink(ctx context.Context, value domain.RequirementRepositoryLink) error
+	RequirementRepositoryLink(ctx context.Context, requirementID string) (domain.RequirementRepositoryLink, bool, error)
+	RequirementRepositoryLinks(ctx context.Context, ids []string) (map[string]domain.RequirementRepositoryLink, error)
+	RequirementIDsForRepository(ctx context.Context, repositoryID string, limit int) ([]string, bool, error)
+}
+
 type IdempotencyRepository interface {
 	Idempotency(ctx context.Context, requestID string, operation string) (IdempotentResponse, bool, error)
 	SaveIdempotency(ctx context.Context, value IdempotentResponse) error
@@ -243,6 +267,7 @@ type UnitOfWork interface {
 	ControlProgressRepository
 	RunnerObservationRepository
 	RepositoryRepository
+	RequirementRepositoryLinkRepository
 	RequirementReadRepository
 	EventReadRepository
 	QueueSummaryRepository

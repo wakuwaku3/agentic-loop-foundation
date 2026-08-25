@@ -399,15 +399,25 @@ const (
 	ObservedNotImplemented = "not-implemented"
 )
 
-// RepositoryBacklogView answers "Requirement Backlogの状態" honestly. The
-// repository-scoped answer is unavailable because no Requirement-to-Repository
-// association exists at this commit (dp-v2-064 d13 defers it), so State says
-// so and names the reason. InstallationScope carries the one thing that WAS
-// measured -- the Installation-wide queue counts -- under a name that states
-// its scope, so the reader cannot mistake it for a repository-scoped figure.
+// RepositoryBacklogView answers "Requirement Backlogの状態". Since V2-071 the
+// repository-scoped answer is measured: RequirementCount is the number of
+// Requirements actually linked to this Repository, read in this request
+// through the write-once Requirement-to-Repository link, and State is
+// ObservedMeasured to say so.
+//
+// Truncated reports that the bounded read hit its limit, so RequirementCount
+// is "at least this many" rather than an exact total. A bounded count that
+// silently presented itself as exact would be the plausible-looking
+// unmeasured value this view exists to avoid.
+//
+// InstallationScope is unchanged and keeps its name: it is the
+// Installation-wide queue summary, not a repository-scoped figure, and a
+// reader must still be able to tell the two apart.
 type RepositoryBacklogView struct {
 	State             string        `json:"state"`
 	Reason            string        `json:"reason"`
+	RequirementCount  int           `json:"requirement_count"`
+	Truncated         bool          `json:"truncated,omitempty"`
 	InstallationScope *QueueSummary `json:"installation_scope,omitempty"`
 }
 
@@ -439,6 +449,16 @@ type RepositoryDetailView struct {
 	// Repository, a measured input of Executability.
 	EffectiveControlMode     domain.ControlMode `json:"effective_control_mode"`
 	EffectiveControlRevision domain.Revision    `json:"effective_control_revision"`
+}
+
+// backlogReason states what was measured and how it was bounded, so the
+// reason is a description of the measurement rather than a restatement of the
+// number. A truncated count says so in words as well as in the flag.
+func backlogReason(count int, truncated bool) string {
+	if truncated {
+		return fmt.Sprintf("at least %d Requirements are linked to this Repository through the write-once Requirement-to-Repository association; the read was bounded at %d rows in the storage query, so this is a lower bound and not an exact total. installation_scope below remains the Installation-wide count, not a repository-scoped figure", count, MaxPageSize)
+	}
+	return fmt.Sprintf("%d Requirements are linked to this Repository through the write-once Requirement-to-Repository association, read in this request and bounded at %d rows in the storage query. installation_scope below remains the Installation-wide count, not a repository-scoped figure", count, MaxPageSize)
 }
 
 // ListRepositories returns every registered Repository. Retired Repositories
@@ -518,6 +538,13 @@ func (s *Service) GetRepository(ctx context.Context, repositoryID string) (out R
 		if e != nil {
 			return e
 		}
+		// The repository-scoped backlog is read through the write-once
+		// Requirement-to-Repository link, bounded by MaxPageSize in the
+		// storage query. The bound is reported rather than hidden.
+		backlogIDs, backlogTruncated, e := u.RequirementIDsForRepository(ctx, repositoryID, MaxPageSize)
+		if e != nil {
+			return e
+		}
 		now := s.clock.Now()
 		effective := domain.EffectiveControl(controls, s.repositoryTarget(repositoryID))
 		mode := effective.Mode
@@ -539,8 +566,10 @@ func (s *Service) GetRepository(ctx context.Context, repositoryID string) (out R
 				Reason: "no policy aggregate exists at this commit: neither the 大原則 set nor a Repository Contract / repository-specific rule record is persisted or exposed through any application port",
 			},
 			RequirementBacklog: RepositoryBacklogView{
-				State:             ObservedUnobserved,
-				Reason:            "no Requirement-to-Repository association exists at this commit, so no backlog can be scoped to this Repository; installation_scope below is the Installation-wide count that was actually measured, not a repository-scoped figure",
+				State:             ObservedMeasured,
+				Reason:            backlogReason(len(backlogIDs), backlogTruncated),
+				RequirementCount:  len(backlogIDs),
+				Truncated:         backlogTruncated,
 				InstallationScope: &summary,
 			},
 			RunnersAndAIResources: ObservedState{

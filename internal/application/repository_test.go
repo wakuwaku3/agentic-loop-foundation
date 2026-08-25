@@ -316,10 +316,19 @@ func TestRepositoryDetailRendersAllSixDeclaredObservables(t *testing.T) {
 			t.Fatalf("%s reason is not a stated reason: %q", name, field.Reason)
 		}
 	}
-	// 4. Requirement Backlog: repository scope unobserved with a reason, plus
-	// the Installation-scoped count that actually was measured.
-	if detail.RequirementBacklog.State != application.ObservedUnobserved || detail.RequirementBacklog.Reason == "" {
+	// 4. Requirement Backlog: the repository scope is MEASURED since V2-071
+	// (A11). This assertion is the one deliberate change to this test: it
+	// previously demanded ObservedUnobserved with a reason, because no
+	// Requirement-to-Repository association existed. The association now
+	// exists, so the honest answer is the count that was actually read --
+	// zero here, because this Repository has no linked Requirement yet, and a
+	// measured zero is a measurement, not an absence. The Installation-scoped
+	// count keeps being reported under its own name, unchanged.
+	if detail.RequirementBacklog.State != application.ObservedMeasured || detail.RequirementBacklog.Reason == "" {
 		t.Fatalf("backlog = %+v", detail.RequirementBacklog)
+	}
+	if detail.RequirementBacklog.RequirementCount != 0 || detail.RequirementBacklog.Truncated {
+		t.Fatalf("backlog count = %d truncated=%v; no Requirement is linked to this Repository in this test", detail.RequirementBacklog.RequirementCount, detail.RequirementBacklog.Truncated)
 	}
 	if detail.RequirementBacklog.InstallationScope == nil {
 		t.Fatal("backlog installation_scope is absent; the measured Installation-wide count must be reported under its own scope name")
@@ -431,5 +440,449 @@ func TestRegisterRepositoryTouchesNothingExternal(t *testing.T) {
 		return nil
 	}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// V2-071: the Requirement-to-Repository association, and the repair of the
+// repository Control scope. Every test below is deterministic: the clock is
+// injected, no sleep is taken, no timer fires and no goroutine is started.
+// ---------------------------------------------------------------------------
+
+// TestCaptureWritesTheWriteOnceRequirementRepositoryLink is acceptance A3 and
+// A4: Capture writes the link with Capture's own ceremony, the link is
+// write-once, an unlinked Capture keeps working exactly as before, and a
+// Capture naming a Repository that does not exist or has been retired is
+// refused and creates no Requirement.
+func TestCaptureWritesTheWriteOnceRequirementRepositoryLink(t *testing.T) {
+	s, st := service()
+	ctx := owner(context.Background())
+	registered := registerRepository(t, s, ctx, "reg-1", "https://github.com/O/N")
+
+	captured, err := s.Capture(ctx, application.CaptureRequest{RequestID: "cap-1", Text: "linked", RepositoryID: registered.RepositoryID})
+	if err != nil {
+		t.Fatalf("linked capture: %v", err)
+	}
+	if captured.RepositoryID != registered.RepositoryID {
+		t.Fatalf("capture response repository_id = %q, want %q", captured.RepositoryID, registered.RepositoryID)
+	}
+	readLink := func(requirementID string) (domain.RequirementRepositoryLink, bool) {
+		t.Helper()
+		var link domain.RequirementRepositoryLink
+		var found bool
+		if e := st.Transact(context.Background(), func(u application.UnitOfWork) error {
+			var x error
+			link, found, x = u.RequirementRepositoryLink(context.Background(), requirementID)
+			return x
+		}); e != nil {
+			t.Fatalf("reading the link: %v", e)
+		}
+		return link, found
+	}
+	link, found := readLink(captured.RequirementID)
+	if !found {
+		t.Fatal("Capture with a repository_id wrote no link")
+	}
+	if link.RepositoryID.String() != registered.RepositoryID || link.RequirementID.String() != captured.RequirementID {
+		t.Fatalf("link = %+v", link)
+	}
+	if link.AssignedAt.IsZero() {
+		t.Fatal("the link carries no assignment instant; the injected clock was not read")
+	}
+	if link.RequestedBy.ActorType != domain.ActorTypeOwner || link.RequestedBy.Subject != "actor-1" {
+		t.Fatalf("link attribution = %+v; Capture's own requestedBy must be carried", link.RequestedBy)
+	}
+
+	// A Capture with no repository_id keeps working exactly as today and
+	// writes no link at all.
+	unlinked, err := s.Capture(ctx, application.CaptureRequest{RequestID: "cap-2", Text: "unlinked"})
+	if err != nil {
+		t.Fatalf("unlinked capture: %v", err)
+	}
+	if unlinked.RepositoryID != "" {
+		t.Fatalf("unlinked capture reported repository_id %q", unlinked.RepositoryID)
+	}
+	if _, found = readLink(unlinked.RequirementID); found {
+		t.Fatal("a Capture with no repository_id wrote a link")
+	}
+
+	// A3, case 1: an identical link written again is an idempotent replay,
+	// not a second record.
+	if e := st.Transact(context.Background(), func(u application.UnitOfWork) error {
+		return u.SaveRequirementRepositoryLink(context.Background(), link)
+	}); e != nil {
+		t.Fatalf("identical re-write must be an idempotent replay: %v", e)
+	}
+	replayed, found := readLink(captured.RequirementID)
+	if !found || replayed != link {
+		t.Fatalf("idempotent replay changed the record: %+v vs %+v", replayed, link)
+	}
+	// A3, case 2: a second link for the same Requirement naming a different
+	// Repository is a conflict refusal.
+	other := registerRepository(t, s, ctx, "reg-2", "https://github.com/O/Other")
+	conflict := link
+	conflict.RepositoryID = domain.RepositoryID(other.RepositoryID)
+	err = st.Transact(context.Background(), func(u application.UnitOfWork) error {
+		return u.SaveRequirementRepositoryLink(context.Background(), conflict)
+	})
+	if !errors.Is(err, domain.ErrStaleVersion) {
+		t.Fatalf("a second, differing link must be a conflict refusal, got %v", err)
+	}
+	if still, _ := readLink(captured.RequirementID); still.RepositoryID != link.RepositoryID {
+		t.Fatalf("the refused write changed the stored link: %+v", still)
+	}
+
+	// A4: naming a Repository that does not exist is refused, and no
+	// Requirement is created.
+	if _, err = s.Capture(ctx, application.CaptureRequest{RequestID: "cap-missing", Text: "x", RequirementID: "req-missing-repo", RepositoryID: "no-such-repository"}); !errors.Is(err, application.ErrNotFound) {
+		t.Fatalf("capture naming an unregistered repository = %v, want ErrNotFound", err)
+	}
+	if _, ok, e := s.GetRequirement(ctx, "req-missing-repo"); e != nil || ok {
+		t.Fatalf("the refused capture created a Requirement: ok=%v err=%v", ok, e)
+	}
+	// A4: naming a retired Repository is refused too.
+	if _, err = s.RetireRepository(ctx, application.RetireRepositoryRequest{RequestID: "retire-1", RepositoryID: other.RepositoryID}); err != nil {
+		t.Fatalf("retire: %v", err)
+	}
+	if _, err = s.Capture(ctx, application.CaptureRequest{RequestID: "cap-retired", Text: "x", RequirementID: "req-retired-repo", RepositoryID: other.RepositoryID}); !errors.Is(err, application.ErrRepositoryNotAvailable) {
+		t.Fatalf("capture naming a retired repository = %v, want ErrRepositoryNotAvailable", err)
+	}
+	if _, ok, e := s.GetRequirement(ctx, "req-retired-repo"); e != nil || ok {
+		t.Fatalf("the refused capture created a Requirement: ok=%v err=%v", ok, e)
+	}
+}
+
+// TestRepositoryScopedControlIntentActuallyMatchesAPlannedIncrement is
+// acceptance A10 and A7: the dead repository Control scope is proven alive.
+// It carries both controls A10 demands -- the positive control (the canonical
+// target's RepositoryID is non-empty and equal to the registered id, which is
+// the assertion that fails on the starting tree, where the value came from the
+// deleted ServiceConfig.RepositoryID and was always empty) and the negative
+// control (a different repository id neither matches nor appears in the
+// ControlProgress snapshot).
+func TestRepositoryScopedControlIntentActuallyMatchesAPlannedIncrement(t *testing.T) {
+	s, st := service()
+	ctx := owner(context.Background())
+	registered := registerRepository(t, s, ctx, "reg-1", "https://github.com/O/N")
+
+	captured, err := s.Capture(ctx, application.CaptureRequest{RequestID: "cap-1", Text: "scoped", RepositoryID: registered.RepositoryID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	planned, err := s.Plan(ctx, application.PlanRequest{RequestID: "plan-1", RequirementID: captured.RequirementID, ExpectedRequirementVersion: captured.Version})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// (i) The positive control: A7's assertion. The stored canonical target
+	// carries the registered Repository's own id.
+	var stored domain.ControlTarget
+	if e := st.Transact(context.Background(), func(u application.UnitOfWork) error {
+		target, ok, x := u.CanonicalTarget(context.Background(), planned.IncrementID, "")
+		if x != nil {
+			return x
+		}
+		if !ok {
+			t.Fatal("Plan stored no canonical target")
+		}
+		stored = target
+		return nil
+	}); e != nil {
+		t.Fatal(e)
+	}
+	if stored.RepositoryID == "" {
+		t.Fatal("positive control: the canonical target's RepositoryID is empty; the repository Control scope is still dead")
+	}
+	if stored.RepositoryID != registered.RepositoryID {
+		t.Fatalf("canonical target repository = %q, want %q", stored.RepositoryID, registered.RepositoryID)
+	}
+
+	// (ii) The domain's own matcher holds for a repository-scoped intent
+	// naming that id. internal/domain/control.go is untouched: matching
+	// always worked, it had simply never been given a value to match.
+	scope := domain.ControlScope{Kind: domain.ScopeRepository, Value: registered.RepositoryID}
+	if !domain.ControlApplies(scope, stored) {
+		t.Fatalf("ControlApplies(%+v, %+v) = false", scope, stored)
+	}
+	// (iii) The negative control: another repository id does not match.
+	otherScope := domain.ControlScope{Kind: domain.ScopeRepository, Value: "some-other-repository"}
+	if domain.ControlApplies(otherScope, stored) {
+		t.Fatalf("negative control: ControlApplies(%+v, %+v) = true", otherScope, stored)
+	}
+
+	// The same proof, end to end through Control's own snapshot: claim the
+	// Increment so a lease exists, then request a repository-scoped graceful
+	// stop and read the ControlProgress targets.
+	if _, err = s.Prepare(ctx, application.PrepareRequest{RequestID: "prep-1", IncrementID: planned.IncrementID, ExpectedVersion: planned.Version}); err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := s.Claim(runner(ctx, "runner-1"), application.ClaimRequest{RequestID: "claim-1", IncrementID: planned.IncrementID, ExpectedIncrementVersion: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	at := clock{}.Now()
+	matching, err := s.Control(ctx, application.ControlRequest{RequestID: "ctl-1", Scope: scope, Mode: domain.ControlGracefulStop, Reason: "repository-scoped stop", At: at})
+	if err != nil {
+		t.Fatal(err)
+	}
+	nonMatching, err := s.Control(ctx, application.ControlRequest{RequestID: "ctl-2", Scope: otherScope, Mode: domain.ControlGracefulStop, Reason: "unrelated repository", At: at})
+	if err != nil {
+		t.Fatal(err)
+	}
+	progressTargets := func(revision domain.Revision) []domain.ControlTargetSnapshot {
+		t.Helper()
+		var targets []domain.ControlTargetSnapshot
+		if e := st.Transact(context.Background(), func(u application.UnitOfWork) error {
+			progress, ok, x := u.ControlProgress(context.Background(), revision)
+			if x != nil {
+				return x
+			}
+			if !ok {
+				t.Fatalf("no ControlProgress for revision %d", revision)
+			}
+			targets = progress.Targets
+			return nil
+		}); e != nil {
+			t.Fatal(e)
+		}
+		return targets
+	}
+	targets := progressTargets(matching.Revision)
+	if len(targets) != 1 {
+		t.Fatalf("a repository-scoped intent naming the registered repository matched %d targets, want 1", len(targets))
+	}
+	if targets[0].LeaseID.String() != claimed.LeaseID || targets[0].Target.RepositoryID != registered.RepositoryID {
+		t.Fatalf("matched target = %+v", targets[0])
+	}
+	if unrelated := progressTargets(nonMatching.Revision); len(unrelated) != 0 {
+		t.Fatalf("negative control: an intent naming another repository matched %d targets: %+v", len(unrelated), unrelated)
+	}
+}
+
+// TestHeartbeatTargetCarriesNoRepository is acceptance A9. Heartbeat is the
+// deliberate exception: its target names a Runner and nothing else, so a
+// repository-scoped stop must NOT match it.
+func TestHeartbeatTargetCarriesNoRepository(t *testing.T) {
+	s, st := service()
+	ctx := owner(context.Background())
+	registered := registerRepository(t, s, ctx, "reg-1", "https://github.com/O/N")
+	runnerCtx := runner(context.Background(), "runner-1")
+	if _, err := s.Heartbeat(runnerCtx, application.HeartbeatRequest{RequestID: "hb-1"}); err != nil {
+		t.Fatal(err)
+	}
+	var observed domain.RunnerObservation
+	if e := st.Transact(context.Background(), func(u application.UnitOfWork) error {
+		v, ok, x := u.RunnerObservation(context.Background(), "runner-1")
+		if x != nil {
+			return x
+		}
+		if !ok {
+			t.Fatal("no RunnerObservation was recorded")
+		}
+		observed = v
+		return nil
+	}); e != nil {
+		t.Fatal(e)
+	}
+	if observed.Target.RepositoryID != "" {
+		t.Fatalf("a heartbeat target carries a repository %q; a Runner is not repository-bound", observed.Target.RepositoryID)
+	}
+	if observed.Target.RunnerID.String() != "runner-1" || observed.Target.InstallationID != "install" {
+		t.Fatalf("heartbeat target = %+v", observed.Target)
+	}
+	scope := domain.ControlScope{Kind: domain.ScopeRepository, Value: registered.RepositoryID}
+	if domain.ControlApplies(scope, observed.Target) {
+		t.Fatal("a repository-scoped Control Intent matches a heartbeat target; a repository-scoped stop would apply to unrelated work")
+	}
+	// The runner-scoped intent that IS meant to reach it still does.
+	if !domain.ControlApplies(domain.ControlScope{Kind: domain.ScopeRunner, Value: "runner-1"}, observed.Target) {
+		t.Fatal("a runner-scoped Control Intent no longer matches a heartbeat target")
+	}
+}
+
+// TestControlSnapshotResolvesTheRepositoryFromTheLeasesIncrement is
+// acceptance A8: with no canonical target stored, the snapshot path still
+// carries a real RepositoryID, resolved lease -> Increment -> Requirement ->
+// link, and the fill-only-when-empty RunnerID merge is unchanged.
+//
+// The lease is written directly rather than through Plan/Prepare/Claim
+// precisely because Plan is what stores a canonical target: a lease with none
+// is exactly the state a lease created before this change is in, and it
+// cannot be produced by running Plan.
+func TestControlSnapshotResolvesTheRepositoryFromTheLeasesIncrement(t *testing.T) {
+	s, st := service()
+	ctx := owner(context.Background())
+	at := clock{}.Now()
+	registered := registerRepository(t, s, ctx, "reg-1", "https://github.com/O/N")
+	linked, err := s.Capture(ctx, application.CaptureRequest{RequestID: "cap-1", Text: "fallback", RepositoryID: registered.RepositoryID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	unlinked, err := s.Capture(ctx, application.CaptureRequest{RequestID: "cap-2", Text: "no repository"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedLease := func(u application.UnitOfWork, incrementID, leaseID, requirementID string) error {
+		inc := domain.Increment{ID: domain.IncrementID(incrementID), RequirementID: domain.RequirementID(requirementID), Status: domain.IncrementProposed, Version: 1}
+		if x := u.SaveIncrement(context.Background(), inc, 0); x != nil {
+			return x
+		}
+		lease := domain.Lease{
+			ID: domain.LeaseID(leaseID), IncrementID: domain.IncrementID(incrementID),
+			ExecutionID: domain.ExecutionID("exec-" + incrementID), RunnerID: "runner-1",
+			FencingToken: 1, IssuedAt: at, ExpiresAt: at.Add(time.Minute),
+			Status: domain.LeaseActive, Version: 1,
+		}
+		return u.SaveLease(context.Background(), lease, 0)
+	}
+	if e := st.Transact(context.Background(), func(u application.UnitOfWork) error {
+		if x := seedLease(u, "inc-linked", "lease-linked", linked.RequirementID); x != nil {
+			return x
+		}
+		return seedLease(u, "inc-unlinked", "lease-unlinked", unlinked.RequirementID)
+	}); e != nil {
+		t.Fatal(e)
+	}
+	// Neither Increment has a canonical target: nothing called Plan.
+	if e := st.Transact(context.Background(), func(u application.UnitOfWork) error {
+		for _, id := range []string{"inc-linked", "inc-unlinked"} {
+			if _, ok, x := u.CanonicalTarget(context.Background(), id, ""); x != nil {
+				return x
+			} else if ok {
+				t.Fatalf("increment %s already has a canonical target; the fallback path would not be exercised", id)
+			}
+		}
+		return nil
+	}); e != nil {
+		t.Fatal(e)
+	}
+
+	scope := domain.ControlScope{Kind: domain.ScopeRepository, Value: registered.RepositoryID}
+	out, err := s.Control(ctx, application.ControlRequest{RequestID: "ctl-1", Scope: scope, Mode: domain.ControlGracefulStop, Reason: "fallback path", At: at})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var targets []domain.ControlTargetSnapshot
+	if e := st.Transact(context.Background(), func(u application.UnitOfWork) error {
+		progress, ok, x := u.ControlProgress(context.Background(), out.Revision)
+		if x != nil {
+			return x
+		}
+		if !ok {
+			t.Fatal("no ControlProgress")
+		}
+		targets = progress.Targets
+		return nil
+	}); e != nil {
+		t.Fatal(e)
+	}
+	// The negative control is structural: two active leases exist and only
+	// the one whose Requirement carries a link matches.
+	if len(targets) != 1 {
+		t.Fatalf("the fallback path matched %d targets, want exactly the linked one: %+v", len(targets), targets)
+	}
+	got := targets[0]
+	if got.Target.RepositoryID != registered.RepositoryID {
+		t.Fatalf("fallback target repository = %q, want %q", got.Target.RepositoryID, registered.RepositoryID)
+	}
+	if got.Target.IncrementID.String() != "inc-linked" || got.Target.RunnerID.String() != "runner-1" {
+		t.Fatalf("fallback target = %+v; the fill-only-when-empty RunnerID merge must still apply", got.Target)
+	}
+	if got.LeaseID.String() != "lease-linked" || got.ExecutionID.String() != "exec-inc-linked" {
+		t.Fatalf("fallback snapshot = %+v", got)
+	}
+}
+
+// TestRepositoryScopedBacklogIsMeasured is acceptance A11's positive side: the
+// Repository detail reports a Requirement count that was actually read and
+// scoped to this Repository, while the Installation-wide summary keeps its own
+// name and its own (larger) value, so the two can never be confused.
+func TestRepositoryScopedBacklogIsMeasured(t *testing.T) {
+	s, _ := service()
+	ctx := owner(context.Background())
+	first := registerRepository(t, s, ctx, "reg-1", "https://github.com/O/First")
+	second := registerRepository(t, s, ctx, "reg-2", "https://github.com/O/Second")
+
+	if _, err := s.Capture(ctx, application.CaptureRequest{RequestID: "cap-1", Text: "a", RepositoryID: first.RepositoryID}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Capture(ctx, application.CaptureRequest{RequestID: "cap-2", Text: "b", RepositoryID: first.RepositoryID}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Capture(ctx, application.CaptureRequest{RequestID: "cap-3", Text: "c", RepositoryID: second.RepositoryID}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Capture(ctx, application.CaptureRequest{RequestID: "cap-4", Text: "d"}); err != nil {
+		t.Fatal(err)
+	}
+
+	detail, ok, err := s.GetRepository(ctx, first.RepositoryID)
+	if err != nil || !ok {
+		t.Fatal(err)
+	}
+	if detail.RequirementBacklog.State != application.ObservedMeasured {
+		t.Fatalf("backlog state = %q, want %q", detail.RequirementBacklog.State, application.ObservedMeasured)
+	}
+	if detail.RequirementBacklog.RequirementCount != 2 || detail.RequirementBacklog.Truncated {
+		t.Fatalf("backlog = %+v; two Requirements name this Repository", detail.RequirementBacklog)
+	}
+	if detail.RequirementBacklog.InstallationScope == nil || detail.RequirementBacklog.InstallationScope.Requirements != 4 {
+		t.Fatalf("installation scope = %+v; all four Requirements are Installation-wide", detail.RequirementBacklog.InstallationScope)
+	}
+	secondDetail, ok, err := s.GetRepository(ctx, second.RepositoryID)
+	if err != nil || !ok {
+		t.Fatal(err)
+	}
+	if secondDetail.RequirementBacklog.RequirementCount != 1 {
+		t.Fatalf("second repository backlog = %+v", secondDetail.RequirementBacklog)
+	}
+
+}
+
+// TestRequirementRowCarriesItsRepository is acceptance A12: a linked
+// Requirement row reports its repository and an unlinked one omits the field
+// entirely, on both the page row and the detail view. It is a separate test
+// from the backlog above because each read crosses one bounded read-quota
+// reservation (quota.ReadTransactionUsage) and the two together would exceed
+// the hard daily budget the memory adapter enforces.
+func TestRequirementRowCarriesItsRepository(t *testing.T) {
+	s, _ := service()
+	ctx := owner(context.Background())
+	first := registerRepository(t, s, ctx, "reg-1", "https://github.com/O/First")
+	linkedA, err := s.Capture(ctx, application.CaptureRequest{RequestID: "cap-1", Text: "a", RepositoryID: first.RepositoryID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	unlinked, err := s.Capture(ctx, application.CaptureRequest{RequestID: "cap-4", Text: "d"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	page, err := s.ListRequirementsPage(ctx, "", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byID := map[string]application.RequirementView{}
+	for _, row := range page.Requirements {
+		byID[row.RequirementID] = row
+	}
+	if got := byID[linkedA.RequirementID].RepositoryID; got != first.RepositoryID {
+		t.Fatalf("linked row repository_id = %q, want %q", got, first.RepositoryID)
+	}
+	if got := byID[unlinked.RequirementID].RepositoryID; got != "" {
+		t.Fatalf("unlinked row repository_id = %q, want the field absent", got)
+	}
+	linkedDetail, ok, err := s.GetRequirementDetail(ctx, linkedA.RequirementID)
+	if err != nil || !ok {
+		t.Fatal(err)
+	}
+	if linkedDetail.RepositoryID != first.RepositoryID {
+		t.Fatalf("detail repository_id = %q, want %q", linkedDetail.RepositoryID, first.RepositoryID)
+	}
+	unlinkedDetail, ok, err := s.GetRequirementDetail(ctx, unlinked.RequirementID)
+	if err != nil || !ok {
+		t.Fatal(err)
+	}
+	if unlinkedDetail.RepositoryID != "" {
+		t.Fatalf("unlinked detail repository_id = %q, want the field absent", unlinkedDetail.RepositoryID)
 	}
 }

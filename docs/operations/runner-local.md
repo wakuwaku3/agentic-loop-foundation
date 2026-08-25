@@ -113,6 +113,123 @@ same class of environment-dependent fact:
   `git -c credential.helper=...` is the form to use. `gh auth setup-git` must
   not be run and git configuration must not be mutated at any scope.
 
+## Git working copy: real clone, closed argv, no remote (V2-071)
+
+Measured facts about the Source Control port (`internal/runner/sourcecontrol.go`)
+and its one adapter (`internal/runner/git.go`), recorded in the same class as
+the forge measurements above.
+
+- **Location and owner.** A working copy is
+  `<workspace_root>/<execution_id>/source`, produced by the existing
+  `Workspace.Create(execution_id)` followed by the clone into the `source`
+  child. The owner is the **Execution**, not the Increment:
+  `domain.Execution` carries `IncrementID`, so an Execution belongs to exactly
+  one Increment for its whole life, and keying the directory on the Execution
+  makes "a copy that outlives its Increment" unrepresentable rather than
+  merely discouraged. A retry is a fresh clone at its own path; a copy is
+  never shared between two Executions. Nothing keyed by increment id alone is
+  created on disk.
+- **Resolution.** `git` **is** on the `PATH` inside `devbox run --pure` (while
+  `gh` is not), so the adapter resolves it with the same `resolveTool` helper
+  `confinement.go` and `forge.go` use. The measured resolution in this
+  environment is `<worktree>/.devbox/nix/profile/default/bin/git`,
+  `git version 2.55.0`. The resolved path must be absolute, its
+  `filepath.Base` must equal `git`, and it must stat to a regular file -- all
+  asserted before any process could exist, with an injectable `Stat` hook so
+  the refusals touch no filesystem.
+- **Clone, never `worktree add`.** `git clone --no-hardlinks` was measured
+  inside the namespace to give `git rev-parse --git-common-dir == ".git"`: a
+  fully independent repository whose every write lands inside the workspace.
+  A linked worktree's `.git` is a *file* pointing into the outer repository's
+  `.git`, i.e. a write path outside the confinement, so `worktree` is absent
+  from the argv allowlist.
+- **Closed argv allowlist.** The subcommand of every argv the adapter can
+  build comes from one closed set: `version`, `init`, `clone`, `checkout`,
+  `switch`, `add`, `commit`, `rev-parse`, `status`, `diff`, `fsck`,
+  `ls-files`, `cat-file`, `symbolic-ref`. `push`, `fetch`, `remote`,
+  `submodule`, `config`, `credential` and `worktree` are **absent**, so no
+  code path can construct such an argv. The only pre-subcommand options
+  admitted are `-C <absolute path>` and `-c user.name=` / `-c user.email=`;
+  `ProcessSupervisor` has no `Dir` field, so the working directory is
+  expressed as `-C` in argv.
+- **Guarded environment, no `HOME`.** The child receives exactly `PATH`,
+  `GIT_CONFIG_GLOBAL=/dev/null`, `GIT_CONFIG_SYSTEM=/dev/null` and
+  `GIT_TERMINAL_PROMPT=0`, plus `GIT_AUTHOR_DATE` and `GIT_COMMITTER_DATE` on
+  the commit call only, from the injected clock. `HOME` is deliberately **not**
+  allowlisted: it was measured that clone, `checkout -b`, `add` and `commit`
+  all succeed without it under git 2.55.0, so excluding it is the strongest
+  available property -- with no `HOME` the adapter cannot reach the invoking
+  user's own tool configuration store even in principle. That is strictly
+  stronger than the forge adapter, which must allowlist `HOME`. No `git config`
+  is written at repository, global or system scope, and `gh auth setup-git` is
+  never run.
+- **Kernel refusals, measured.** Inside `NamespaceConfinement` with
+  `Workspace = <workspace_root>/<execution_id>` (unshare `--user
+  --map-root-user --mount`, kernel `6.18.33.2-microsoft-standard-WSL2`,
+  x86_64): the clone from a local bare origin succeeded; `checkout -b`, `add`
+  and `commit` succeeded; a write to the sealed top-level ancestor, a write
+  into the origin directory and a write into a **sibling Execution's**
+  workspace all failed with `EROFS`; and a hand-built `git push` to that same
+  file-path origin was refused by the kernel with
+  `remote unpack failed: unable to create temporary object directory`. That
+  kernel refusal is the second, independent guarantee beside the argv
+  allowlist. The identical outside writes, run **without** the namespace,
+  all succeeded -- the positive control
+  `docs/architecture/validation.md` requires by name, without which the
+  `EROFS` results would prove nothing about the confinement.
+- **Fail-closed confinement.** `ProcessSupervisor.Run` calls `Confine.Probe`
+  on every invocation, so a working-copy sequence pays one namespace probe per
+  git command. A probe failure is returned as a hard error and no child is
+  ever started unconfined. Only `git --version` runs unconfined, and only
+  because it writes nothing. A kernel that cannot provide the namespace is a
+  stop-and-escalate with the kernel identifier and the probe's reason, never a
+  skip counted as a pass.
+- **Two verification stages, one executed.** The Git-level verification is
+  **executed**: `status --porcelain=v2`, `diff --exit-code HEAD`, `rev-parse`
+  for HEAD, its tree and the base, `symbolic-ref --short HEAD`,
+  `fsck --no-progress --connectivity-only`, `cat-file -t` on the committed
+  tree, and `diff --name-only` for the changed-path count. It returns a
+  bounded observation (branch, head commit, tree name, base commit, clean
+  flag, changed-path count) and nothing else. Project-level verification --
+  running the cloned project's own build or test command -- is **declared and
+  fails closed** with `ErrProjectVerificationNotWired`, starting no process:
+  it is unbounded in cost and duration and is the surface the `CostLedger`,
+  the provider preflight and the standing-authorisation records exist to
+  govern, so wiring it here would create a second execution path past those
+  gates. It is never reported as passed.
+- **Bounded output, nothing verbatim.** stdout is captured into a bounded
+  buffer with a hard byte cap and stderr is discarded outright, so no error
+  the adapter returns can carry a child's bytes, a path outside the workspace
+  or anything credential-shaped. The one preserved detail is
+  `ErrNamespaceUnsupported`'s own reason, which is the confinement
+  machinery's diagnostic about this kernel rather than git's output.
+- **Lifetime and crash cleanup.** A plain-text descriptor beside the copy names
+  `increment_id`, `execution_id`, `repository_id` and `created_at` and nothing
+  else, so an orphan can be attributed without consulting the Control Plane --
+  which is exactly the state a crashed Runner leaves behind. `Discard` is
+  idempotent, re-applies the `Workspace.Path` escape check and is called on
+  Materialize's error path too. `SweepWorkingCopies(active)` removes every
+  workspace child whose execution id is not in the active set, in a single
+  pass at Runner start: no goroutine, no sleep and no timer, and it refuses to
+  remove anything that is not a validated single-segment directory child.
+- **Two clone-source regimes.** Inside `make check` the origin is always a bare
+  repository created at test time by the real git binary in `t.TempDir()`; no
+  git fixture, pack file or bare directory is committed to this repository
+  (gitleaks scans every ref, so a probe commit reaching this repository's refs
+  would keep the gate red), and no test in `make check` resolves a hostname or
+  opens a socket. The one live clone is gated on `AGENTIC_LOOP_LIVE_GIT=1`
+  **together with** an owner-supplied `AGENTIC_LOOP_LIVE_GIT_CLONE_URL`, and
+  clones anonymously with `--depth 1 --no-tags`. The URL is not hardcoded on
+  purpose: a hardcoded default would make the check's meaning depend on an
+  unmeasured fact about that repository's visibility. If the gate is set and
+  the URL is absent the check **fails** naming the missing designation; it
+  does not skip.
+- **Nothing reaches a remote in this Increment.** No clone target is a remote
+  this Loop writes to, no push argv is constructible, and the adapter has no
+  remote-mutating code path at all. Reaching the real forge with a push is a
+  separate Increment with its own credential design; the note in the forge
+  section above records what was already measured for it.
+
 ## Bounded diagnostic log
 
 `BoundedLog` is a per-execution `0600` file under the data root's `logs/`

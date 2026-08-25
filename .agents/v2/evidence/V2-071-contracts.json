@@ -1,0 +1,87 @@
+{
+    "schema_version": "v1",
+    "id": "ev-v2-071-contracts",
+    "kind": "evidence",
+    "created_at": "2026-08-25T13:45:00Z",
+    "correlation_id": "v2-071-working-copy",
+    "task_id": "V2-071",
+    "component": "contracts",
+    "evidence_key": "5c178981350157632afa23ef4c777af672710f1147bb89c10a1724376a2d06ad",
+    "result": "passed",
+    "observed_at": "2026-08-25T13:45:00Z",
+    "checks": [
+        {
+            "name": "environment-identifier",
+            "status": "passed",
+            "argv": [
+                "uname",
+                "-srm"
+            ],
+            "working_directory": ".",
+            "timeout_seconds": 10,
+            "summary": "execution environment: uname -srm = Linux 6.18.33.2-microsoft-standard-WSL2 x86_64; devbox run --pure -- go version = go1.25.0 linux/amd64; devbox 0.17.2, environment resolved from this worktree's devbox.json/devbox.lock, both untouched by this task; resolved absolute git path = /home/takushi/repos/agentic-loop-foundation-worktrees/v2-task-071/.devbox/nix/profile/default/bin/git, git version 2.55.0; unshare is present on the devbox --pure PATH and gh is absent; worktree /home/takushi/repos/agentic-loop-foundation-worktrees/v2-task-071 on branch v2-task/V2-071, base commit cf9682a, code commit dd8fdb6. No real Provider CLI was started, no gh was started, and no Google Cloud resource was touched."
+        },
+        {
+            "name": "component-contracts",
+            "status": "passed",
+            "argv": [
+                "devbox",
+                "run",
+                "--pure",
+                "--",
+                "go",
+                "test",
+                "-count=1",
+                "./internal/contracts"
+            ],
+            "working_directory": ".",
+            "timeout_seconds": 600,
+            "summary": "verdict line: ok github.com/takushi/agentic-loop-foundation/v2/internal/contracts 0.106s. Top-level test count 30 -> 30 (unchanged): the ledger tests are the definition of done for this task's evidence, not a place this task adds tests."
+        },
+        {
+            "name": "openapi-declares-every-changed-field",
+            "status": "passed",
+            "argv": [
+                "git",
+                "diff",
+                "cf9682a..HEAD",
+                "--",
+                "contracts/"
+            ],
+            "working_directory": ".",
+            "timeout_seconds": 30,
+            "summary": "measured: contracts/openapi/openapi-v1.yaml is the only file under contracts/ in the diff. Declared: repository_id on CaptureRequest (with the note that the Repository must be registered and not retired), repository_id on CaptureResponse, RequirementResponse and RequirementDetailResponse (each omitted entirely when no link exists), and requirement_count plus truncated on RepositoryBacklogView, with requirement_count added to that schema's required list. Every schema keeps additionalProperties: false, so an undeclared field would be a contract violation rather than a tolerated extra."
+        },
+        {
+            "name": "release-contract-and-schemas-untouched",
+            "status": "passed",
+            "argv": [
+                "git",
+                "diff",
+                "--stat",
+                "cf9682a..HEAD",
+                "--",
+                "contracts/release-contract/",
+                "contracts/schemas/"
+            ],
+            "working_directory": ".",
+            "timeout_seconds": 30,
+            "summary": "measured: both paths are absent from the diff and therefore byte-identical. No capability declaration was weakened, narrowed or reinterpreted. This task does not claim cap-autonomous-resolution: it removes the \"no working copy exists\" and \"the repository control scope is dead\" conditions and does NOT remove the \"no change reaches the forge\" condition, which belongs to the push Increment. Nothing this task produces is visible outside the Runner's workspace."
+        },
+        {
+            "name": "evidence-key",
+            "status": "passed",
+            "argv": [
+                "devbox",
+                "run",
+                "--pure",
+                "--",
+                "make",
+                "evidence-keys"
+            ],
+            "working_directory": ".",
+            "timeout_seconds": 600,
+            "summary": "contracts component key on the final tree where make check is green, with every touched file git-added and committed: 5c178981350157632afa23ef4c777af672710f1147bb89c10a1724376a2d06ad. Read with build/evidence removed first. The base-tree value of the same key was NOT measured: reading it would require moving HEAD, and git checkout is forbidden for this task, so no before value is recorded rather than a plausible one being invented. Recorded and deliberately not repaired: the control-plane component's roots (cmd/control-plane/**) are unchanged by this task, but contracts/openapi/openapi-v1.yaml is one of its declared contract_dependencies and this task changed that file, so control-plane's evidence key can move with unchanged roots. ci/components.json is a prohibited path here and that behaviour is V2-045's."
+        }
+    ]
+}

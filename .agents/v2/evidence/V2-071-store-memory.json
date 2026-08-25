@@ -1,0 +1,94 @@
+{
+    "schema_version": "v1",
+    "id": "ev-v2-071-store-memory",
+    "kind": "evidence",
+    "created_at": "2026-08-25T13:45:00Z",
+    "correlation_id": "v2-071-working-copy",
+    "task_id": "V2-071",
+    "component": "store-memory",
+    "evidence_key": "562577de7e2c67698b3a9557432e9ff48947fffaaeb5eaf9fee735f8eaf3ebf9",
+    "result": "passed",
+    "observed_at": "2026-08-25T13:45:00Z",
+    "checks": [
+        {
+            "name": "environment-identifier",
+            "status": "passed",
+            "argv": [
+                "uname",
+                "-srm"
+            ],
+            "working_directory": ".",
+            "timeout_seconds": 10,
+            "summary": "execution environment: uname -srm = Linux 6.18.33.2-microsoft-standard-WSL2 x86_64; devbox run --pure -- go version = go1.25.0 linux/amd64; devbox 0.17.2, environment resolved from this worktree's devbox.json/devbox.lock, both untouched by this task; resolved absolute git path = /home/takushi/repos/agentic-loop-foundation-worktrees/v2-task-071/.devbox/nix/profile/default/bin/git, git version 2.55.0; unshare is present on the devbox --pure PATH and gh is absent; worktree /home/takushi/repos/agentic-loop-foundation-worktrees/v2-task-071 on branch v2-task/V2-071, base commit cf9682a, code commit dd8fdb6. No real Provider CLI was started, no gh was started, and no Google Cloud resource was touched."
+        },
+        {
+            "name": "component-store-memory",
+            "status": "passed",
+            "argv": [
+                "devbox",
+                "run",
+                "--pure",
+                "--",
+                "go",
+                "test",
+                "-count=1",
+                "./internal/store/memory"
+            ],
+            "working_directory": ".",
+            "timeout_seconds": 600,
+            "summary": "verdict line: ok github.com/takushi/agentic-loop-foundation/v2/internal/store/memory 0.005s. Top-level test count 5 -> 6."
+        },
+        {
+            "name": "write-once-and-bounded-reads",
+            "status": "passed",
+            "argv": [
+                "devbox",
+                "run",
+                "--pure",
+                "--",
+                "go",
+                "test",
+                "-count=1",
+                "-run",
+                "TestRequirementRepositoryLinkIsWriteOnceAndBounded",
+                "./internal/store/memory"
+            ],
+            "working_directory": ".",
+            "timeout_seconds": 600,
+            "summary": "the memory adapter refuses an invalid link outright (validated through domain.ValidateRequirementRepositoryLink rather than stored), treats an identical re-write as an idempotent replay, refuses a second link naming a different Repository with ErrOptimisticConflict (= domain.ErrStaleVersion), returns exactly the linked ids from the batch read and invents no entry for an unlinked one, applies the bound on the per-repository read and reports truncation when the bound bites, returns an empty answer for a Repository with no links, refuses an empty repository id, and leaks nothing into committed state from a rolled-back transaction. The Firestore adapter carries a test of the SAME NAME with the SAME assertions, so both implementations satisfy one contract."
+        },
+        {
+            "name": "skips",
+            "status": "skipped",
+            "argv": [
+                "devbox",
+                "run",
+                "--pure",
+                "--",
+                "go",
+                "test",
+                "-count=1",
+                "-v",
+                "./internal/store/memory"
+            ],
+            "working_directory": ".",
+            "timeout_seconds": 600,
+            "summary": "no test in internal/store/memory is skipped."
+        },
+        {
+            "name": "evidence-key",
+            "status": "passed",
+            "argv": [
+                "devbox",
+                "run",
+                "--pure",
+                "--",
+                "make",
+                "evidence-keys"
+            ],
+            "working_directory": ".",
+            "timeout_seconds": 600,
+            "summary": "store-memory component key on the final tree where make check is green, with every touched file git-added and committed: 562577de7e2c67698b3a9557432e9ff48947fffaaeb5eaf9fee735f8eaf3ebf9. Read with build/evidence removed first. The base-tree value of the same key was NOT measured: reading it would require moving HEAD, and git checkout is forbidden for this task, so no before value is recorded rather than a plausible one being invented. Recorded and deliberately not repaired: the control-plane component's roots (cmd/control-plane/**) are unchanged by this task, but contracts/openapi/openapi-v1.yaml is one of its declared contract_dependencies and this task changed that file, so control-plane's evidence key can move with unchanged roots. ci/components.json is a prohibited path here and that behaviour is V2-045's."
+        }
+    ]
+}

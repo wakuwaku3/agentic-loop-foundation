@@ -1,0 +1,109 @@
+{
+    "schema_version": "v1",
+    "id": "ev-v2-071-domain",
+    "kind": "evidence",
+    "created_at": "2026-08-25T13:45:00Z",
+    "correlation_id": "v2-071-working-copy",
+    "task_id": "V2-071",
+    "component": "domain",
+    "evidence_key": "88af3ce1a6104d79983afc938fba5f012e389cf5950dcee607500bdce13f1388",
+    "result": "passed",
+    "observed_at": "2026-08-25T13:45:00Z",
+    "checks": [
+        {
+            "name": "environment-identifier",
+            "status": "passed",
+            "argv": [
+                "uname",
+                "-srm"
+            ],
+            "working_directory": ".",
+            "timeout_seconds": 10,
+            "summary": "execution environment: uname -srm = Linux 6.18.33.2-microsoft-standard-WSL2 x86_64; devbox run --pure -- go version = go1.25.0 linux/amd64; devbox 0.17.2, environment resolved from this worktree's devbox.json/devbox.lock, both untouched by this task; resolved absolute git path = /home/takushi/repos/agentic-loop-foundation-worktrees/v2-task-071/.devbox/nix/profile/default/bin/git, git version 2.55.0; unshare is present on the devbox --pure PATH and gh is absent; worktree /home/takushi/repos/agentic-loop-foundation-worktrees/v2-task-071 on branch v2-task/V2-071, base commit cf9682a, code commit dd8fdb6. No real Provider CLI was started, no gh was started, and no Google Cloud resource was touched."
+        },
+        {
+            "name": "component-domain",
+            "status": "passed",
+            "argv": [
+                "devbox",
+                "run",
+                "--pure",
+                "--",
+                "go",
+                "test",
+                "-count=1",
+                "./internal/domain"
+            ],
+            "working_directory": ".",
+            "timeout_seconds": 600,
+            "summary": "verdict line: ok github.com/takushi/agentic-loop-foundation/v2/internal/domain 0.626s (inside make check; 0.575s standalone). Added exactly one additive value object to internal/domain/repository.go: RequirementRepositoryLink{RequirementID, RepositoryID, AssignedAt, RequestedBy} with Recorded() and ValidateRequirementRepositoryLink. model.go's generic Validate and Decide type switches were not extended and no field was added to Requirement, Increment, Execution, Lease, ControlIntent, ControlTarget or Repository."
+        },
+        {
+            "name": "domain-diff-stat",
+            "status": "passed",
+            "argv": [
+                "git",
+                "diff",
+                "--stat",
+                "cf9682a..HEAD",
+                "--",
+                "internal/domain"
+            ],
+            "working_directory": ".",
+            "timeout_seconds": 30,
+            "summary": "measured: only internal/domain/repository.go (+59) and internal/domain/repository_test.go (+111) appear. internal/domain/model.go, control.go, lease.go, release.go, id.go and source_guard_test.go are absent from the diff and therefore byte-identical. internal/domain/source_guard_test.go keeps passing unmodified, including its import allowlists (the new test code uses only errors, go/ast, go/parser, go/token, strings, testing and time, all already allowlisted)."
+        },
+        {
+            "name": "write-once-and-validation",
+            "status": "passed",
+            "argv": [
+                "devbox",
+                "run",
+                "--pure",
+                "--",
+                "go",
+                "test",
+                "-count=1",
+                "-run",
+                "TestRequirementRepositoryLinkRefusesAnIncompleteAssociation|TestRequirementRepositoryLinkAddsNoFieldToAnyExistingAggregate",
+                "./internal/domain"
+            ],
+            "working_directory": ".",
+            "timeout_seconds": 600,
+            "summary": "ValidateRequirementRepositoryLink refuses an empty requirement id, a blank (whitespace-only) requirement id, an empty repository id, a blank repository id, a zero AssignedAt and an unknown requested_by actor type; an empty identifier is refused as the package's own ErrEmptyID. The positive control asserts a complete link validates and reports itself Recorded, and that attribution stays optional. A second AST test reads model.go, control.go and repository.go and asserts no aggregate gained a link field and that RequirementRepositoryLink's fields are exactly the four declared ones, so a rename cannot make the assertion pass vacuously."
+        },
+        {
+            "name": "skips",
+            "status": "skipped",
+            "argv": [
+                "devbox",
+                "run",
+                "--pure",
+                "--",
+                "go",
+                "test",
+                "-count=1",
+                "-v",
+                "./internal/domain"
+            ],
+            "working_directory": ".",
+            "timeout_seconds": 600,
+            "summary": "no test in internal/domain is skipped. This entry exists so the absence is recorded rather than assumed; the five skips in the wider touched set are listed in ev-v2-071-runner and ev-v2-071-api."
+        },
+        {
+            "name": "evidence-key",
+            "status": "passed",
+            "argv": [
+                "devbox",
+                "run",
+                "--pure",
+                "--",
+                "make",
+                "evidence-keys"
+            ],
+            "working_directory": ".",
+            "timeout_seconds": 600,
+            "summary": "domain component key on the final tree where make check is green, with every touched file git-added and committed: 88af3ce1a6104d79983afc938fba5f012e389cf5950dcee607500bdce13f1388. Read with build/evidence removed first. The base-tree value of the same key was NOT measured: reading it would require moving HEAD, and git checkout is forbidden for this task, so no before value is recorded rather than a plausible one being invented. Recorded and deliberately not repaired: the control-plane component's roots (cmd/control-plane/**) are unchanged by this task, but contracts/openapi/openapi-v1.yaml is one of its declared contract_dependencies and this task changed that file, so control-plane's evidence key can move with unchanged roots. ci/components.json is a prohibited path here and that behaviour is V2-045's."
+        }
+    ]
+}

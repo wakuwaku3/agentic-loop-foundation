@@ -236,6 +236,7 @@ type document struct {
 	OutboxLeaseUntil    string `firestore:"outbox_lease_until,omitempty"`
 	IndexIncrementID    string `firestore:"index_increment_id,omitempty"`
 	IndexLeaseID        string `firestore:"index_lease_id,omitempty"`
+	IndexRepositoryID   string `firestore:"index_repository_id,omitempty"`
 	LeaseStatus         string `firestore:"lease_status,omitempty"`
 	LeaseExpiresAt      string `firestore:"lease_expires_at,omitempty"`
 	ControlVerification string `firestore:"control_verification,omitempty"`
@@ -270,6 +271,14 @@ func encodeDocument(kind string, value any) (document, error) {
 	if v, ok := value.(domain.Execution); ok {
 		d.IndexIncrementID = v.IncrementID.String()
 		d.IndexLeaseID = v.LeaseID.String()
+	}
+	// The Requirement-to-Repository link is projected onto one indexed
+	// field so the per-repository read is a single-field equality query.
+	// Firestore indexes every single field automatically, so
+	// firestore.indexes.json (which declares only the composite indexes for
+	// outbox and leases) needs no entry for it.
+	if v, ok := value.(domain.RequirementRepositoryLink); ok {
+		d.IndexRepositoryID = v.RepositoryID.String()
 	}
 	if v, ok := value.(domain.Lease); ok {
 		d.LeaseStatus = string(v.Status)
@@ -1266,6 +1275,113 @@ func (u *unit) SaveRepositoryObservation(ctx context.Context, value domain.Repos
 		return err
 	}
 	return u.stage(ref, "repository-observation", value, false)
+}
+
+// The Requirement-to-Repository link lives in its own collection, keyed by
+// the Requirement id, and is written at most once: a second link naming a
+// different Repository is refused with domain.ErrStaleVersion (the same
+// conflict every other save in this adapter reports) and an identical
+// re-write is an idempotent replay that stages nothing.
+func (u *unit) SaveRequirementRepositoryLink(ctx context.Context, value domain.RequirementRepositoryLink) error {
+	if err := domain.ValidateRequirementRepositoryLink(value); err != nil {
+		return err
+	}
+	ref, err := u.store.path("requirement_repository_links", value.RequirementID.String())
+	if err != nil {
+		return err
+	}
+	var old domain.RequirementRepositoryLink
+	got, err := u.value(ref, "requirement-repository-link", &old)
+	if err != nil {
+		return err
+	}
+	if got {
+		if old.RepositoryID != value.RepositoryID {
+			return domain.ErrStaleVersion
+		}
+		return nil
+	}
+	return u.stage(ref, "requirement-repository-link", value, true)
+}
+func (u *unit) RequirementRepositoryLink(ctx context.Context, requirementID string) (domain.RequirementRepositoryLink, bool, error) {
+	ref, err := u.store.path("requirement_repository_links", requirementID)
+	if err != nil {
+		return domain.RequirementRepositoryLink{}, false, err
+	}
+	var v domain.RequirementRepositoryLink
+	ok, err := u.value(ref, "requirement-repository-link", &v)
+	return v, ok, err
+}
+
+// RequirementRepositoryLinks reads exactly the ids on the caller's page: one
+// bounded document read per id rather than a collection scan, so the bound is
+// the caller's own list. Reading each key directly also means a link staged
+// earlier in this same transaction is visible, which a query would not be.
+func (u *unit) RequirementRepositoryLinks(ctx context.Context, ids []string) (map[string]domain.RequirementRepositoryLink, error) {
+	out := make(map[string]domain.RequirementRepositoryLink, len(ids))
+	if len(ids) == 0 {
+		return out, nil
+	}
+	if len(ids) > MaxQueryRows {
+		return nil, ErrQueryLimit
+	}
+	for _, id := range ids {
+		if id == "" {
+			continue
+		}
+		v, ok, err := u.RequirementRepositoryLink(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			out[id] = v
+		}
+	}
+	return out, nil
+}
+
+// RequirementIDsForRepository applies its bound in the storage query, in the
+// same Where(...).Limit(n+1) shape ExecutionByLease and OutboxResolution
+// already use for index_lease_id. The extra row is what distinguishes "this
+// is the whole answer" from "the answer was truncated", which the bool
+// reports so no caller can present a bounded count as an exact total.
+func (u *unit) RequirementIDsForRepository(ctx context.Context, repositoryID string, limit int) ([]string, bool, error) {
+	if repositoryID == "" {
+		return nil, false, errors.New("repository id is required")
+	}
+	if limit <= 0 {
+		return nil, false, nil
+	}
+	if limit > MaxQueryRows {
+		limit = MaxQueryRows
+	}
+	path, err := CollectionPath(u.store.installation, "requirement_repository_links")
+	if err != nil {
+		return nil, false, err
+	}
+	q := u.store.client.Collection(path).
+		Where("index_repository_id", "==", repositoryID).
+		OrderBy(cloudfirestore.DocumentID, cloudfirestore.Asc).
+		Limit(limit + 1)
+	snaps, err := u.tx.Documents(q).GetAll()
+	if err != nil {
+		return nil, false, err
+	}
+	u.countReads(snaps)
+	truncated := len(snaps) > limit
+	if truncated {
+		snaps = snaps[:limit]
+	}
+	out := make([]string, 0, len(snaps))
+	for _, snap := range snaps {
+		var v domain.RequirementRepositoryLink
+		if decodeDocument(snap, "requirement-repository-link", &v) != nil {
+			return nil, false, ErrInvalidSchema
+		}
+		out = append(out, v.RequirementID.String())
+	}
+	sort.Strings(out)
+	return out, truncated, nil
 }
 
 func (u *unit) RunnerObservation(ctx context.Context, runnerID string) (domain.RunnerObservation, bool, error) {

@@ -78,6 +78,11 @@ type RequirementDetailView struct {
 	PageSize      int                        `json:"page_size"`
 	Truncated     bool                       `json:"truncated"`
 	RequestedBy   *domain.RequestedBy        `json:"requested_by,omitempty"`
+	// RepositoryID is the Repository this Requirement is linked to, read
+	// from the write-once Requirement-to-Repository link (V2-071 A12). An
+	// unlinked Requirement omits the field entirely: an absent association
+	// is reported as absent, never as a guessed or defaulted repository.
+	RepositoryID string `json:"repository_id,omitempty"`
 }
 
 // RequirementView remains compatible with the original v1 response. Text is
@@ -89,6 +94,9 @@ type RequirementView struct {
 	IncrementIDs  []string                 `json:"increment_ids"`
 	Text          string                   `json:"text,omitempty"`
 	RequestedBy   *domain.RequestedBy      `json:"requested_by,omitempty"`
+	// RepositoryID follows RequirementDetailView's field of the same name:
+	// present only when a link was actually read, omitted otherwise.
+	RepositoryID string `json:"repository_id,omitempty"`
 }
 
 func boundPageSize(size int) (int, error) {
@@ -114,14 +122,18 @@ func requestedByView(rb domain.RequestedBy) *domain.RequestedBy {
 	return &v
 }
 
-func requirementViews(rows []domain.Requirement, texts map[string]string) []RequirementView {
+// requirementViews projects rows onto the wire shape. links is the batch link
+// read for exactly the ids on this page; a row absent from it carries no
+// repository_id at all, which is what distinguishes "not linked" from "linked
+// to the empty string".
+func requirementViews(rows []domain.Requirement, texts map[string]string, links map[string]domain.RequirementRepositoryLink) []RequirementView {
 	out := make([]RequirementView, 0, len(rows))
 	for _, r := range rows {
 		ids := make([]string, len(r.Increments))
 		for i, id := range r.Increments {
 			ids[i] = id.String()
 		}
-		out = append(out, RequirementView{RequirementID: r.ID.String(), Status: r.Status, Version: r.Version, IncrementIDs: ids, Text: texts[r.ID.String()], RequestedBy: requestedByView(r.RequestedBy)})
+		out = append(out, RequirementView{RequirementID: r.ID.String(), Status: r.Status, Version: r.Version, IncrementIDs: ids, Text: texts[r.ID.String()], RequestedBy: requestedByView(r.RequestedBy), RepositoryID: links[r.ID.String()].RepositoryID.String()})
 	}
 	return out
 }
@@ -155,7 +167,12 @@ func (s *Service) ListRequirementsPage(ctx context.Context, cursor string, pageS
 		if err != nil {
 			return err
 		}
-		page.Requirements = requirementViews(rows, texts)
+		links := map[string]domain.RequirementRepositoryLink{}
+		links, err = u.RequirementRepositoryLinks(ctx, ids)
+		if err != nil {
+			return err
+		}
+		page.Requirements = requirementViews(rows, texts, links)
 		page.PageSize = limit
 		if more && len(rows) != 0 {
 			page.NextCursor = encodeCursor(rows[len(rows)-1].ID.String())
@@ -182,7 +199,14 @@ func (s *Service) GetRequirementDetail(ctx context.Context, id string) (Requirem
 		if err != nil {
 			return err
 		}
+		link, hasLink, err := u.RequirementRepositoryLink(ctx, id)
+		if err != nil {
+			return err
+		}
 		out = RequirementDetailView{RequirementID: id, OriginalText: text, Status: r.Status, Version: r.Version, Increments: []RequirementIncrementView{}, PageSize: MaxPageSize, RequestedBy: requestedByView(r.RequestedBy)}
+		if hasLink {
+			out.RepositoryID = link.RepositoryID.String()
+		}
 		incs := make([]domain.Increment, 0, len(r.Increments))
 		incrementIDs := r.Increments
 		if len(incrementIDs) > MaxPageSize {

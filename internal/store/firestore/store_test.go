@@ -468,3 +468,136 @@ func TestRepositoryRegistrationThroughTheServiceOnFirestore(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// TestRequirementRepositoryLinkIsWriteOnceAndBounded is the Firestore half of
+// V2-071 A3/A5/A13, carrying the same name and the same assertions as
+// internal/store/memory/store_test.go's test, so both implementations satisfy
+// one contract. The write and the query are in separate transactions because a
+// Firestore transaction's staged writes are not visible to a query inside the
+// same transaction (only a keyed read sees them), which is the same reason
+// ExecutionByLease is never called after SaveExecution in one callback.
+//
+// The per-repository read is a single-field equality query on
+// index_repository_id. Firestore indexes every single field automatically, so
+// firestore.indexes.json is unchanged: it declares only the composite indexes
+// the outbox and lease queries need.
+func TestRequirementRepositoryLinkIsWriteOnceAndBounded(t *testing.T) {
+	s := emulatorStore(t)
+	ctx := context.Background()
+	at := time.Unix(1700000000, 0).UTC()
+	link := func(requirementID, repositoryID string) domain.RequirementRepositoryLink {
+		return domain.RequirementRepositoryLink{
+			RequirementID: domain.RequirementID(requirementID),
+			RepositoryID:  domain.RepositoryID(repositoryID),
+			AssignedAt:    at,
+			RequestedBy:   domain.RequestedBy{ActorType: domain.ActorTypeOwner, Subject: "owner-1"},
+		}
+	}
+
+	if err := s.Transact(ctx, func(u application.UnitOfWork) error {
+		return u.SaveRequirementRepositoryLink(ctx, domain.RequirementRepositoryLink{RequirementID: "req-1", RepositoryID: "repo-1"})
+	}); err == nil {
+		t.Fatal("a link with no assignment instant was accepted")
+	}
+
+	if err := s.Transact(ctx, func(u application.UnitOfWork) error {
+		if e := u.SaveRequirementRepositoryLink(ctx, link("req-1", "repo-1")); e != nil {
+			return e
+		}
+		if e := u.SaveRequirementRepositoryLink(ctx, link("req-2", "repo-1")); e != nil {
+			return e
+		}
+		return u.SaveRequirementRepositoryLink(ctx, link("req-3", "repo-2"))
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.Transact(ctx, func(u application.UnitOfWork) error {
+		return u.SaveRequirementRepositoryLink(ctx, link("req-1", "repo-1"))
+	}); err != nil {
+		t.Fatalf("identical re-write must be an idempotent replay: %v", err)
+	}
+	if err := s.Transact(ctx, func(u application.UnitOfWork) error {
+		return u.SaveRequirementRepositoryLink(ctx, link("req-1", "repo-9"))
+	}); !errors.Is(err, domain.ErrStaleVersion) {
+		t.Fatalf("a second, differing link = %v, want ErrStaleVersion", err)
+	}
+
+	if err := s.Transact(ctx, func(u application.UnitOfWork) error {
+		stored, ok, e := u.RequirementRepositoryLink(ctx, "req-1")
+		if e != nil {
+			return e
+		}
+		if !ok || stored.RepositoryID != "repo-1" || !stored.AssignedAt.Equal(at) {
+			t.Fatalf("stored link = %+v ok=%v", stored, ok)
+		}
+		if _, ok, e = u.RequirementRepositoryLink(ctx, "req-absent"); e != nil {
+			return e
+		} else if ok {
+			t.Fatal("an unlinked Requirement reported a link")
+		}
+		batch, e := u.RequirementRepositoryLinks(ctx, []string{"req-1", "req-3", "req-absent"})
+		if e != nil {
+			return e
+		}
+		if len(batch) != 2 || batch["req-1"].RepositoryID != "repo-1" || batch["req-3"].RepositoryID != "repo-2" {
+			t.Fatalf("batch = %+v", batch)
+		}
+		if _, present := batch["req-absent"]; present {
+			t.Fatal("the batch read invented an entry for an unlinked Requirement")
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.Transact(ctx, func(u application.UnitOfWork) error {
+		ids, truncated, e := u.RequirementIDsForRepository(ctx, "repo-1", 10)
+		if e != nil {
+			return e
+		}
+		if truncated || len(ids) != 2 || ids[0] != "req-1" || ids[1] != "req-2" {
+			t.Fatalf("per-repository read = %v truncated=%v", ids, truncated)
+		}
+		ids, truncated, e = u.RequirementIDsForRepository(ctx, "repo-1", 1)
+		if e != nil {
+			return e
+		}
+		if !truncated || len(ids) != 1 {
+			t.Fatalf("bounded per-repository read = %v truncated=%v; the bound must be reported", ids, truncated)
+		}
+		ids, truncated, e = u.RequirementIDsForRepository(ctx, "repo-none", 10)
+		if e != nil {
+			return e
+		}
+		if truncated || len(ids) != 0 {
+			t.Fatalf("a repository with no linked Requirement = %v truncated=%v", ids, truncated)
+		}
+		if _, _, e = u.RequirementIDsForRepository(ctx, "", 10); e == nil {
+			t.Fatal("an empty repository id was accepted")
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	failure := errors.New("rollback")
+	if err := s.Transact(ctx, func(u application.UnitOfWork) error {
+		if e := u.SaveRequirementRepositoryLink(ctx, link("req-rolled-back", "repo-1")); e != nil {
+			return e
+		}
+		return failure
+	}); !errors.Is(err, failure) {
+		t.Fatalf("rollback = %v", err)
+	}
+	if err := s.Transact(ctx, func(u application.UnitOfWork) error {
+		if _, ok, e := u.RequirementRepositoryLink(ctx, "req-rolled-back"); e != nil {
+			return e
+		} else if ok {
+			t.Fatal("a rolled-back transaction committed a link")
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}

@@ -576,3 +576,147 @@ func TestOwnerConsoleExposesTheReleaseSurface(t *testing.T) {
 		}
 	}
 }
+
+// TestCaptureCarriesRepositoryIDThroughTheTransport is acceptance A12 at the
+// transport boundary: capture accepts repository_id, and the requirement list
+// row and detail response each carry it for a linked Requirement and omit the
+// field entirely for an unlinked one. The JSON itself is asserted, not the Go
+// struct, so "omitted" means the key is absent from the document.
+//
+// Two handlers are used deliberately: each bounded owner read reserves
+// internal/quota.ReadTransactionUsage against the Installation's daily budget,
+// which is a real production property (see the note in repositories_test.go).
+func TestCaptureCarriesRepositoryIDThroughTheTransport(t *testing.T) {
+	h := testHandler(t)
+	repositoryID := registerViaAPI(t, h, "reg-1", "https://github.com/O/N")
+
+	w := call(h, http.MethodPost, "/v1/requirements", `{"request_id":"cap-1","text":"linked","repository_id":"`+repositoryID+`"}`, "owner")
+	if w.Code != http.StatusCreated {
+		t.Fatalf("linked capture status=%d body=%s", w.Code, w.Body.String())
+	}
+	linked := decodeBody(t, w.Body.Bytes())
+	if linked["repository_id"] != repositoryID {
+		t.Fatalf("capture response repository_id = %v, want %q (%s)", linked["repository_id"], repositoryID, w.Body.String())
+	}
+	linkedID, _ := linked["requirement_id"].(string)
+	if linkedID == "" {
+		t.Fatalf("capture returned no requirement_id: %s", w.Body.String())
+	}
+
+	w = call(h, http.MethodPost, "/v1/requirements", `{"request_id":"cap-2","text":"unlinked"}`, "owner")
+	if w.Code != http.StatusCreated {
+		t.Fatalf("unlinked capture status=%d body=%s", w.Code, w.Body.String())
+	}
+	unlinked := decodeBody(t, w.Body.Bytes())
+	if _, present := unlinked["repository_id"]; present {
+		t.Fatalf("an unlinked capture response carries repository_id: %s", w.Body.String())
+	}
+	unlinkedID, _ := unlinked["requirement_id"].(string)
+
+	// A capture naming a Repository that is not registered is refused as a
+	// 404 and creates nothing.
+	w = call(h, http.MethodPost, "/v1/requirements", `{"request_id":"cap-3","text":"x","repository_id":"no-such-repository"}`, "owner")
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("capture naming an unregistered repository status=%d body=%s", w.Code, w.Body.String())
+	}
+
+	// The page row: the linked row carries the key, the unlinked one omits it.
+	w = call(h, http.MethodGet, "/v1/requirements", "", "owner")
+	if w.Code != 200 {
+		t.Fatalf("list status=%d body=%s", w.Code, w.Body.String())
+	}
+	page := decodeBody(t, w.Body.Bytes())
+	rows, ok := page["requirements"].([]any)
+	if !ok || len(rows) != 2 {
+		t.Fatalf("requirements page = %s", w.Body.String())
+	}
+	seen := map[string]map[string]any{}
+	for _, row := range rows {
+		m := row.(map[string]any)
+		seen[m["requirement_id"].(string)] = m
+	}
+	if got := seen[linkedID]["repository_id"]; got != repositoryID {
+		t.Fatalf("linked row repository_id = %v, want %q (%s)", got, repositoryID, w.Body.String())
+	}
+	if _, present := seen[unlinkedID]["repository_id"]; present {
+		t.Fatalf("unlinked row carries repository_id: %s", w.Body.String())
+	}
+
+	// The detail response, on a fresh handler so the read budget is not the
+	// thing under test.
+	h2 := testHandler(t)
+	repositoryID2 := registerViaAPI(t, h2, "reg-1", "https://github.com/O/N")
+	w = call(h2, http.MethodPost, "/v1/requirements", `{"request_id":"cap-1","text":"linked","repository_id":"`+repositoryID2+`"}`, "owner")
+	if w.Code != http.StatusCreated {
+		t.Fatalf("linked capture status=%d body=%s", w.Code, w.Body.String())
+	}
+	detailID := decodeBody(t, w.Body.Bytes())["requirement_id"].(string)
+	w = call(h2, http.MethodPost, "/v1/requirements", `{"request_id":"cap-2","text":"unlinked"}`, "owner")
+	if w.Code != http.StatusCreated {
+		t.Fatalf("unlinked capture status=%d body=%s", w.Code, w.Body.String())
+	}
+	unlinkedDetailID := decodeBody(t, w.Body.Bytes())["requirement_id"].(string)
+
+	w = call(h2, http.MethodGet, "/v1/requirements/"+detailID, "", "owner")
+	if w.Code != 200 {
+		t.Fatalf("detail status=%d body=%s", w.Code, w.Body.String())
+	}
+	if got := decodeBody(t, w.Body.Bytes())["repository_id"]; got != repositoryID2 {
+		t.Fatalf("detail repository_id = %v, want %q (%s)", got, repositoryID2, w.Body.String())
+	}
+	w = call(h2, http.MethodGet, "/v1/requirements/"+unlinkedDetailID, "", "owner")
+	if w.Code != 200 {
+		t.Fatalf("unlinked detail status=%d body=%s", w.Code, w.Body.String())
+	}
+	if _, present := decodeBody(t, w.Body.Bytes())["repository_id"]; present {
+		t.Fatalf("unlinked detail carries repository_id: %s", w.Body.String())
+	}
+}
+
+// TestOwnerConsoleExposesTheRepositoryScopedBacklog is acceptance A27's
+// observable check. internal/web has no test file of its own (it has no
+// browser and no deterministic render to assert), so the assertion that the
+// server actually serves the new surface lives with the transport, exactly as
+// V2-064's and V2-066's console assertions do.
+func TestOwnerConsoleExposesTheRepositoryScopedBacklog(t *testing.T) {
+	h := testHandler(t)
+	w := call(h, http.MethodGet, "/owner/", "", "owner")
+	if w.Code != 200 {
+		t.Fatalf("owner console status=%d", w.Code)
+	}
+	html := w.Body.String()
+	for _, want := range []string{`id="backlog-title"`, `id="backlog"`, `id="backlog-repository"`, `id="backlog-state"`, `id="backlog-reason"`, `id="backlog-rows"`, "V2-071 repository-scoped Requirement backlog"} {
+		if !strings.Contains(html, want) {
+			t.Fatalf("owner console does not carry %s", want)
+		}
+	}
+	// Additive only: every pre-existing surface, including the two sibling
+	// tasks' sections, is still there.
+	for _, want := range []string{`id="capture"`, `id="control"`, `id="queue"`, `id="repository"`, `id="repository-list"`, "Release evidence", `id="release-conditions"`} {
+		if !strings.Contains(html, want) {
+			t.Fatalf("owner console lost the pre-existing surface %s", want)
+		}
+	}
+	w = call(h, http.MethodGet, "/owner/assets/owner.js", "", "")
+	if w.Code != 200 {
+		t.Fatalf("owner.js status=%d", w.Code)
+	}
+	js := w.Body.String()
+	for _, want := range []string{"requirement_backlog", "requirement_count", "installation_scope", "records no Repository association", "no count was measured", "/v1/repositories/", "/v1/requirements"} {
+		if !strings.Contains(js, want) {
+			t.Fatalf("owner.js does not reference %q", want)
+		}
+	}
+	// Both sibling blocks must still be present in the same single file.
+	for _, want := range []string{"/v1/release/state", "executability"} {
+		if !strings.Contains(js, want) {
+			t.Fatalf("owner.js lost the pre-existing block reference %q", want)
+		}
+	}
+	// The block must not claim a measurement that is absent.
+	for _, forbidden := range []string{"capability exercised", "backlog measured for every repository"} {
+		if strings.Contains(strings.ToLower(html), forbidden) || strings.Contains(strings.ToLower(js), forbidden) {
+			t.Fatalf("owner console claims %q", forbidden)
+		}
+	}
+}

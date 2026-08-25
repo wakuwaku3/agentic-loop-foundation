@@ -1,0 +1,104 @@
+{
+    "schema_version": "v1",
+    "id": "ev-v2-071-web",
+    "kind": "evidence",
+    "created_at": "2026-08-25T13:45:00Z",
+    "correlation_id": "v2-071-working-copy",
+    "task_id": "V2-071",
+    "component": "web",
+    "evidence_key": "63f1a043f180062f648bd96cfa81d5d43aca0147311b0a570121f432d2e00ecf",
+    "result": "passed",
+    "observed_at": "2026-08-25T13:45:00Z",
+    "checks": [
+        {
+            "name": "environment-identifier",
+            "status": "passed",
+            "argv": [
+                "uname",
+                "-srm"
+            ],
+            "working_directory": ".",
+            "timeout_seconds": 10,
+            "summary": "execution environment: uname -srm = Linux 6.18.33.2-microsoft-standard-WSL2 x86_64; devbox run --pure -- go version = go1.25.0 linux/amd64; devbox 0.17.2, environment resolved from this worktree's devbox.json/devbox.lock, both untouched by this task; resolved absolute git path = /home/takushi/repos/agentic-loop-foundation-worktrees/v2-task-071/.devbox/nix/profile/default/bin/git, git version 2.55.0; unshare is present on the devbox --pure PATH and gh is absent; worktree /home/takushi/repos/agentic-loop-foundation-worktrees/v2-task-071 on branch v2-task/V2-071, base commit cf9682a, code commit dd8fdb6. No real Provider CLI was started, no gh was started, and no Google Cloud resource was touched."
+        },
+        {
+            "name": "component-web",
+            "status": "passed",
+            "argv": [
+                "devbox",
+                "run",
+                "--pure",
+                "--",
+                "go",
+                "test",
+                "-count=1",
+                "./internal/web"
+            ],
+            "working_directory": ".",
+            "timeout_seconds": 600,
+            "summary": "verdict line: ? github.com/takushi/agentic-loop-foundation/v2/internal/web [no test files]. The target exits 0 but executes ZERO tests, so it is not by itself evidence of anything and is NOT counted here as a passing suite. internal/web is still left without a test file of its own, following the precedent recorded in ev-v2-064-web and ev-v2-066-web: the only deterministic, browser-free assertion available is that the server actually serves the new surface, and that belongs with the transport, so it lives in internal/api as TestOwnerConsoleExposesTheRepositoryScopedBacklog, recorded in ev-v2-071-api."
+        },
+        {
+            "name": "additive-only-edit",
+            "status": "passed",
+            "argv": [
+                "git",
+                "diff",
+                "--numstat",
+                "cf9682a..HEAD",
+                "--",
+                "internal/web/"
+            ],
+            "working_directory": ".",
+            "timeout_seconds": 30,
+            "summary": "measured: owner.html 3 insertions 1 deletion (the pre-existing </main> line is re-emitted unchanged after the appended section; every element above it is byte-identical) and owner.js 1 insertion 0 deletions at the end of the file (the pre-existing single minified line and the two sibling blocks are untouched). internal/web/owner.css is NOT in the diff: the new block reuses the existing muted, repositories, repo-id, repo-state, repo-reason and state-* classes. Both files carry a task-named marker: the HTML block is wrapped in '<!-- V2-071 repository-scoped Requirement backlog ... -->' and its closing counterpart, and the JS block opens with '// V2-071 repository-scoped Requirement backlog: self-contained additive block'. The V2-064 and V2-066 blocks were neither restored nor rewritten."
+        },
+        {
+            "name": "self-contained-no-sdk-no-external-asset",
+            "status": "passed",
+            "argv": [
+                "node",
+                "--check",
+                "internal/web/owner.js"
+            ],
+            "working_directory": ".",
+            "timeout_seconds": 600,
+            "summary": "JS SYNTAX OK (host node v24.18.0, syntax check only, no execution and no browser). node is not in the devbox --pure environment, so this one check ran with the host node and is recorded as such. The appended block is an IIFE using only fetch against this origin's own relative paths /v1/repositories/<id> and /v1/requirements, document.getElementById, document.createElement and textContent. It loads no library, no external asset, no remote font and no remote script, starts no timer and no poll loop, and reads no credential-bearing field. The pre-existing internal/api scan that forbids the substrings token, secret, credential and any http(s) URL in owner.js still passes."
+        },
+        {
+            "name": "absent-measurement-is-rendered-as-absent",
+            "status": "passed",
+            "argv": [
+                "devbox",
+                "run",
+                "--pure",
+                "--",
+                "go",
+                "test",
+                "-count=1",
+                "-v",
+                "-run",
+                "TestOwnerConsoleExposesTheRepositoryScopedBacklog",
+                "./internal/api"
+            ],
+            "working_directory": ".",
+            "timeout_seconds": 600,
+            "summary": "the block renders the repository-scoped Requirement Backlog count beside the Installation-wide figure under its own name, prefixes a bounded count with \"at least\", and renders a backlog whose state is not \"measured\" as that state plus its reason instead of a number. A Requirement row whose response carries no repository_id is rendered as \"records no Repository association\" in the unobserved state class, never as a plausible repository. A 404 and an unreadable response each get their own message."
+        },
+        {
+            "name": "evidence-key",
+            "status": "passed",
+            "argv": [
+                "devbox",
+                "run",
+                "--pure",
+                "--",
+                "make",
+                "evidence-keys"
+            ],
+            "working_directory": ".",
+            "timeout_seconds": 600,
+            "summary": "web component key on the final tree where make check is green, with every touched file git-added and committed: 63f1a043f180062f648bd96cfa81d5d43aca0147311b0a570121f432d2e00ecf. Read with build/evidence removed first. The base-tree value of the same key was NOT measured: reading it would require moving HEAD, and git checkout is forbidden for this task, so no before value is recorded rather than a plausible one being invented. Recorded and deliberately not repaired: the control-plane component's roots (cmd/control-plane/**) are unchanged by this task, but contracts/openapi/openapi-v1.yaml is one of its declared contract_dependencies and this task changed that file, so control-plane's evidence key can move with unchanged roots. ci/components.json is a prohibited path here and that behaviour is V2-045's."
+        }
+    ]
+}

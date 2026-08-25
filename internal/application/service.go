@@ -14,6 +14,11 @@ import (
 var (
 	ErrNotFound         = errors.New("application record not found")
 	ErrDuplicateRequest = errors.New("request id has already been used for another operation")
+	// ErrRepositoryNotAvailable refuses an operation that names a Repository
+	// that exists but is no longer one the Installation operates on (its
+	// registration was rolled back by a retire). It is a conflict with
+	// existing state rather than a malformed request.
+	ErrRepositoryNotAvailable = errors.New("repository is registered no longer and cannot take new work")
 )
 
 func requireRequest(requestID string) error {
@@ -147,9 +152,16 @@ func (s *Service) mutate(ctx context.Context, key string, fn func(UnitOfWork) er
 	})
 }
 
+// ServiceConfig carries process-level authority only. It deliberately holds
+// no repository id (V2-071 A6, dp-v2-071 d14): an Installation registers many
+// Repositories, so a single per-process repository id would make a
+// domain.ScopeRepository Control Intent match the wrong Repository instead of
+// none. Every ControlTarget's RepositoryID is resolved from the aggregate
+// graph inside the transaction that builds it -- from the canonical target's
+// stored value, or from the Requirement-to-Repository link -- and never from
+// configuration, an environment variable or a flag.
 type ServiceConfig struct {
 	InstallationID string
-	RepositoryID   string
 	LeaseTTL       time.Duration
 }
 
@@ -166,11 +178,23 @@ func NewServiceWithConfig(tx Transactor, clock Clock, ids IDGenerator, config Se
 	return &Service{tx: tx, clock: clock, ids: ids, config: config}, nil
 }
 
-type CaptureRequest struct{ RequestID, RequirementID, Text string }
+// CaptureRequest gains the optional RepositoryID (V2-071 A4). When it is
+// supplied, Capture writes the write-once Requirement-to-Repository link in
+// its own transaction and gates the intake on a ControlTarget that names that
+// Repository; when it is empty, Capture behaves exactly as before and writes
+// no link.
+type CaptureRequest struct {
+	RequestID, RequirementID, Text string
+	RepositoryID                   string
+}
 type CaptureResponse struct {
 	RequirementID string             `json:"requirement_id"`
 	Version       domain.Version     `json:"version"`
 	RequestedBy   domain.RequestedBy `json:"requested_by"`
+	// RepositoryID is present only when this Capture actually wrote a link.
+	// An unlinked Requirement omits the field entirely rather than reporting
+	// an empty string that could be read as "no repository was measured".
+	RepositoryID string `json:"repository_id,omitempty"`
 }
 type LifecycleResponse struct {
 	Accepted            bool                        `json:"accepted"`
@@ -448,7 +472,15 @@ func (s *Service) Heartbeat(ctx context.Context, req HeartbeatRequest) (out Life
 		if e != nil {
 			return e
 		}
-		target := domain.ControlTarget{InstallationID: s.config.InstallationID, RepositoryID: s.config.RepositoryID, RunnerID: runner}
+		// A Heartbeat's target deliberately carries no RepositoryID.
+		// HeartbeatRequest names a Runner and nothing else -- no Increment
+		// and no Lease -- and a Runner is not repository-bound: one Runner
+		// serves every Repository of the Installation. Attaching a
+		// repository here would make a repository-scoped stop apply to
+		// unrelated work, so the runner-scoped observation stays
+		// runner-scoped and TestHeartbeatTargetCarriesNoRepository asserts
+		// that a domain.ScopeRepository intent does not match it.
+		target := domain.ControlTarget{InstallationID: s.config.InstallationID, RunnerID: runner}
 		effective := domain.EffectiveControl(controls, target)
 		latest := effective.Revision
 		var deadline time.Time
@@ -551,6 +583,14 @@ func (s *Service) ListRequirements(ctx context.Context) ([]RequirementView, erro
 			return err
 		}
 		sort.Slice(rows, func(i, j int) bool { return rows[i].ID.String() < rows[j].ID.String() })
+		pageIDs := make([]string, len(rows))
+		for i := range rows {
+			pageIDs[i] = rows[i].ID.String()
+		}
+		links, err := u.RequirementRepositoryLinks(ctx, pageIDs)
+		if err != nil {
+			return err
+		}
 		for _, r := range rows {
 			text, _, e := u.RequirementText(ctx, r.ID.String())
 			if e != nil {
@@ -560,7 +600,7 @@ func (s *Service) ListRequirements(ctx context.Context) ([]RequirementView, erro
 			for i, id := range r.Increments {
 				ids[i] = id.String()
 			}
-			out = append(out, RequirementView{RequirementID: r.ID.String(), Status: r.Status, Version: r.Version, IncrementIDs: ids, Text: text})
+			out = append(out, RequirementView{RequirementID: r.ID.String(), Status: r.Status, Version: r.Version, IncrementIDs: ids, Text: text, RepositoryID: links[r.ID.String()].RepositoryID.String()})
 		}
 		return nil
 	})
@@ -589,7 +629,14 @@ func (s *Service) GetRequirement(ctx context.Context, id string) (RequirementVie
 		for i, x := range r.Increments {
 			ids[i] = x.String()
 		}
+		link, hasLink, e := u.RequirementRepositoryLink(ctx, id)
+		if e != nil {
+			return e
+		}
 		out = RequirementView{RequirementID: r.ID.String(), Status: r.Status, Version: r.Version, IncrementIDs: ids, Text: text}
+		if hasLink {
+			out.RepositoryID = link.RepositoryID.String()
+		}
 		return nil
 	})
 	return out, found, err
@@ -626,6 +673,13 @@ func (s *Service) Capture(ctx context.Context, req CaptureRequest) (out CaptureR
 	if err != nil {
 		return out, err
 	}
+	// The link's assignment instant comes from the injected clock, read once
+	// before the transaction, exactly as RegisterRepository does. No wall
+	// clock is read inside the callback, which Firestore may retry.
+	assignedAt := s.clock.Now()
+	if assignedAt.IsZero() {
+		return out, errors.New("clock returned zero time")
+	}
 	err = s.mutate(ctx, "capture:"+req.RequestID, func(u UnitOfWork) error {
 		if prior, ok, e := u.Idempotency(ctx, req.RequestID, "capture"); e != nil {
 			return e
@@ -639,11 +693,31 @@ func (s *Service) Capture(ctx context.Context, req CaptureRequest) (out CaptureR
 		if e != nil {
 			return e
 		}
+		// A4: a Capture may name the Repository the Requirement belongs to.
+		// The Repository must already exist and must still be registered:
+		// a retired Repository is a rolled-back registration, so associating
+		// new intake with it would be an association with something the
+		// Installation no longer operates on. Both refusals happen before
+		// any aggregate is staged, so a refused Capture creates nothing.
+		repositoryID := ""
+		if req.RepositoryID != "" {
+			repository, ok, x := u.Repository(ctx, req.RepositoryID)
+			if x != nil {
+				return x
+			}
+			if !ok {
+				return fmt.Errorf("%w: repository %q is not registered", ErrNotFound, req.RepositoryID)
+			}
+			if repository.Status != domain.RepositoryRegistered {
+				return fmt.Errorf("%w: repository %q", ErrRepositoryNotAvailable, req.RepositoryID)
+			}
+			repositoryID = repository.ID.String()
+		}
 		controls, e := u.Controls(ctx)
 		if e != nil {
 			return e
 		}
-		target := domain.ControlTarget{InstallationID: s.config.InstallationID}
+		target := domain.ControlTarget{InstallationID: s.config.InstallationID, RepositoryID: repositoryID}
 		effective := domain.EffectiveControl(controls, target)
 		revision := domain.Revision(0)
 		if effective.Found {
@@ -662,7 +736,16 @@ func (s *Service) Capture(ctx context.Context, req CaptureRequest) (out CaptureR
 		if e = u.SaveRequirementText(ctx, id, req.Text); e != nil {
 			return e
 		}
-		out = CaptureResponse{RequirementID: id, Version: r.Version, RequestedBy: reqBy}
+		if repositoryID != "" {
+			link := domain.RequirementRepositoryLink{RequirementID: rid, RepositoryID: domain.RepositoryID(repositoryID), AssignedAt: assignedAt, RequestedBy: reqBy}
+			if e = domain.ValidateRequirementRepositoryLink(link); e != nil {
+				return e
+			}
+			if e = u.SaveRequirementRepositoryLink(ctx, link); e != nil {
+				return e
+			}
+		}
+		out = CaptureResponse{RequirementID: id, Version: r.Version, RequestedBy: reqBy, RepositoryID: repositoryID}
 		return s.record(ctx, u, eventID, operationID, fingerprint, req.RequestID, "capture", "requirement", id, r.Version, "requirement.captured", actor.String(), nil, out)
 	})
 	return out, err
@@ -748,7 +831,19 @@ func (s *Service) Plan(ctx context.Context, req PlanRequest) (out PlanResponse, 
 		if e = u.SaveIncrement(ctx, inc, 0); e != nil {
 			return e
 		}
-		target := domain.ControlTarget{InstallationID: s.config.InstallationID, RepositoryID: s.config.RepositoryID}
+		// A7: the canonical target's RepositoryID comes from the captured
+		// Requirement's own link, read inside this same transaction. A
+		// Requirement with no link yields an empty RepositoryID, which is
+		// not an error: the association is optional.
+		link, hasLink, e := u.RequirementRepositoryLink(ctx, req.RequirementID)
+		if e != nil {
+			return e
+		}
+		linkedRepository := ""
+		if hasLink {
+			linkedRepository = link.RepositoryID.String()
+		}
+		target := domain.ControlTarget{InstallationID: s.config.InstallationID, RepositoryID: linkedRepository}
 		target.IncrementID = iid
 		target.RequirementID = rid
 		if e = u.SaveCanonicalTarget(ctx, id, target); e != nil {
@@ -1137,7 +1232,29 @@ func (s *Service) Control(ctx context.Context, req ControlRequest) (out ControlR
 				return x
 			}
 			if !found {
-				target = domain.ControlTarget{InstallationID: s.config.InstallationID, RepositoryID: s.config.RepositoryID, IncrementID: lease.IncrementID, RunnerID: lease.RunnerID}
+				// A8: with no stored canonical target the repository is
+				// resolved from the aggregate graph the lease already
+				// names -- lease -> Increment -> Requirement -> link -- so
+				// the snapshot still carries a real RepositoryID and a
+				// repository-scoped Control Intent still matches it. A
+				// missing Increment or a Requirement with no link yields an
+				// empty RepositoryID, which is the honest answer rather than
+				// a guess.
+				fallbackRepository := ""
+				increment, hasIncrement, x := u.Increment(ctx, lease.IncrementID.String())
+				if x != nil {
+					return x
+				}
+				if hasIncrement {
+					link, hasLink, x := u.RequirementRepositoryLink(ctx, increment.RequirementID.String())
+					if x != nil {
+						return x
+					}
+					if hasLink {
+						fallbackRepository = link.RepositoryID.String()
+					}
+				}
+				target = domain.ControlTarget{InstallationID: s.config.InstallationID, RepositoryID: fallbackRepository, IncrementID: lease.IncrementID, RunnerID: lease.RunnerID}
 			} else if target.RunnerID == "" {
 				// CanonicalTarget is saved once at Plan time, before any
 				// Runner has claimed the Increment, so it never durably

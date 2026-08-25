@@ -92,8 +92,14 @@ func TestRepositoryRegisterNormalisesAndIsListedAndDetailed(t *testing.T) {
 			t.Fatalf("detail %s = %v; an absent data source must be an explicit state plus a reason", field, nested)
 		}
 	}
+	// V2-071 A11/A28: the repository-scoped backlog is measured now, so this
+	// one assertion changed from "unobserved" to the measured count. The test
+	// name and every other assertion in it are unchanged. This Repository has
+	// no linked Requirement in this test, so the measured count is zero -- a
+	// measurement, not an absence -- and installation_scope is still reported
+	// separately under its own name.
 	backlog := detail["requirement_backlog"].(map[string]any)
-	if backlog["state"] != "unobserved" || backlog["installation_scope"] == nil {
+	if backlog["state"] != "measured" || backlog["installation_scope"] == nil || backlog["requirement_count"] != float64(0) {
 		t.Fatalf("detail requirement_backlog = %v", backlog)
 	}
 	executability := detail["executability"].(map[string]any)

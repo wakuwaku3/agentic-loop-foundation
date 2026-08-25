@@ -275,7 +275,7 @@ components:
       type: object
       additionalProperties: false
       required: [request_id, text]
-      properties: {request_id: {type: string}, requirement_id: {type: string}, text: {type: string}}
+      properties: {request_id: {type: string}, requirement_id: {type: string}, text: {type: string}, repository_id: {type: string, description: 'optional loop-issued repository id; when present the capture writes the write-once Requirement-to-Repository link and the Repository must be registered and not retired'}}
     RunnerEnrollmentRequest:
       type: object
       additionalProperties: false
@@ -325,12 +325,12 @@ components:
       type: object
       additionalProperties: false
       required: [requirement_id, version, requested_by]
-      properties: {requirement_id: {type: string}, version: {type: integer}, requested_by: {$ref: '#/components/schemas/RequestedBy'}}
+      properties: {requirement_id: {type: string}, version: {type: integer}, requested_by: {$ref: '#/components/schemas/RequestedBy'}, repository_id: {type: string, description: 'present only when this capture actually wrote a Requirement-to-Repository link; omitted entirely when the Requirement names no Repository'}}
     RequirementResponse:
       type: object
       additionalProperties: false
       required: [requirement_id, status, version, increment_ids]
-      properties: {requirement_id: {type: string}, status: {type: string}, version: {type: integer}, increment_ids: {type: array, items: {type: string}}, text: {type: string}, requested_by: {$ref: '#/components/schemas/RequestedBy'}}
+      properties: {requirement_id: {type: string}, status: {type: string}, version: {type: integer}, increment_ids: {type: array, items: {type: string}}, text: {type: string}, requested_by: {$ref: '#/components/schemas/RequestedBy'}, repository_id: {type: string, description: 'the Repository this Requirement is linked to; omitted entirely when no link exists, never reported as an empty or defaulted value'}}
     RequirementListResponse:
       type: object
       additionalProperties: false
@@ -345,7 +345,7 @@ components:
       type: object
       additionalProperties: false
       required: [requirement_id, status, version, increments, next_action, page_size, truncated]
-      properties: {requirement_id: {type: string}, original_text: {type: string}, status: {type: string}, version: {type: integer}, increments: {type: array, items: {type: object}}, next_action: {type: string}, page_size: {type: integer, maximum: 100}, truncated: {type: boolean}, requested_by: {$ref: '#/components/schemas/RequestedBy'}}
+      properties: {requirement_id: {type: string}, original_text: {type: string}, status: {type: string}, version: {type: integer}, increments: {type: array, items: {type: object}}, next_action: {type: string}, page_size: {type: integer, maximum: 100}, truncated: {type: boolean}, requested_by: {$ref: '#/components/schemas/RequestedBy'}, repository_id: {type: string, description: 'the Repository this Requirement is linked to; omitted entirely when no link exists'}}
     ControlRead:
       type: object
       additionalProperties: false
@@ -484,8 +484,8 @@ components:
     RepositoryBacklogView:
       type: object
       additionalProperties: false
-      required: [state, reason]
-      properties: {state: {type: string, enum: [measured, unobserved, not-implemented]}, reason: {type: string}, installation_scope: {$ref: '#/components/schemas/QueueSummary'}}
+      required: [state, reason, requirement_count]
+      properties: {state: {type: string, enum: [measured, unobserved, not-implemented]}, reason: {type: string}, requirement_count: {type: integer, minimum: 0, description: 'Requirements linked to this Repository through the write-once Requirement-to-Repository association, read in this request and bounded in the storage query'}, truncated: {type: boolean, description: 'the bounded read hit its limit, so requirement_count is a lower bound and not an exact total'}, installation_scope: {$ref: '#/components/schemas/QueueSummary'}}
     RepositoryDetailResponse:
       type: object
       additionalProperties: false
