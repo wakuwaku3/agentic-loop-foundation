@@ -39,6 +39,13 @@ task-state側を信じ、本文書を更新する。
 | V2-052 | M2 remediation | luna | V2-013 | local | none |
 | V2-053 | 文書remediation | luna | V2-006 | local | none |
 | V2-054 | D1 gate | sol | V2-014 | live（preview-gcp） | none |
+| V2-055 | M3 remediation | sol | V2-050 | local | none |
+| V2-056 | M3 remediation | sol | V2-047 | local | none |
+| V2-057 | M4 remediation | sol | V2-019 | local | none |
+| V2-058 | M4 remediation | luna | V2-019 | local | none |
+| V2-059 | M4 remediation | terra | V2-019 | local | none |
+| V2-060 | M2 remediation | sol | V2-051, V2-052 | live（preview-local） | none |
+| V2-061 | 文書remediation | luna | V2-053 | local | none |
 | V2-010 | M1 | luna | V2-006 | local | none |
 | V2-011 | M1 gate | sol | V2-010 | local | none |
 | V2-012 | M2設計 | terra | V2-006 | local | none |
@@ -146,6 +153,12 @@ gate taskのcomplete transitionの`reason`に「`gate M<N> passed`」という�
   M4の根拠componentはreconcilerである）、gateは判定時に当該`make component-<id>`を
   再実行し、verdictをcomplete transitionのreasonへ記録する。この再実行はevidence
   entryを追加しない。
+
+  evidence-keys の出力に無い**合成component**（例: `control-plane-local-live` のように
+  複数componentの実証を1つのlive exerciseとして束ねたもの）の`evidence_key`は、その
+  evidenceが宣言した算出方法（構成component keyの連結のsha256）を判定commitのkeyで
+  再計算して一致することを鮮度とする。算出方法をevidenceに書いていない合成keyは
+  鮮度を判定できないため、G6を満たさない。
 
   G2は「記録の完全性」（存在・passed・hash一致）を見るのに対し、G6は「記録と現在の
   treeの結合」を見る。M1 gateの判定でこの検査を実務として行っていたが成文化されて

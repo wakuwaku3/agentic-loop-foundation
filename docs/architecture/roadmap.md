@@ -98,12 +98,12 @@ v1 sourceのarchiveはGit historyとcutover tagを正本とし、v2 treeへ残�
 
 - 候補versionのControl Planeがowner実機のlocalhostで実プロセスとして稼働し、GitHub Issueなしで課題を永続化できる
 - Firestore emulator上でcurrent state＋Event＋Outboxが動き、無料quotaの50% hard budgetをside effect前に強制する
-- OpenTofu構成がclean project前提のplan/validateを通り、D1で使う承認対象plan digestを生成できる
+- OpenTofu構成がclean project前提のoffline validate（`tofu init -backend=false`＋`tofu validate`）を通り、承認対象plan digestの生成経路（`scripts/infra-plan.sh`のplan→show -json→sha256）がcredentialと実project無しではfail-closedに停止する。実planからのdigest生成は`infra/main.tf`の`data "google_project"`が実GCP API接続を要するため、D1の完了条件とする
 - 次の4点はM2では判定せず、初回deploy gate（D1）へ後置する: (i) IAPの認証境界（未認証requestの拒否）、(ii) idle時scale-to-zero、(iii) 実Firestoreの権限と競合、(iv) deploy経路（承認済みplan digest→apply→revision rollback）
 
 ### D1: 初回deploy gate
 
-deploy先はGCPとする。M2 gate通過後の任意の時点で実行でき、M9 cutoverより前に必須。完了条件は上記4点を`preview-gcp`のlive evidenceで実証すること。
+deploy先はGCPとする。M2 gate通過後の任意の時点で実行でき、M9 cutoverより前に必須。完了条件は上記4点を`preview-gcp`のlive evidenceで実証すること。加えて、承認対象plan digestの実生成（実projectに対する`tofu plan`からの再現可能なdigest）も`preview-gcp`のlive evidenceで実証すること。
 
 ### M3: One Runner・代表Provider vertical slice
 
