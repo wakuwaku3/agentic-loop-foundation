@@ -241,15 +241,22 @@ func TestMemberPathEscapingRootIsRefused(t *testing.T) {
 // self-declaring, recomputed from ci/components.json directly (no import of
 // internal/ci), per dp-v2-021 d5.
 
-type ciComponent struct {
-	ID                   string   `json:"id"`
-	Roots                []string `json:"roots"`
-	PublicContracts      []string `json:"public_contracts"`
-	ContractDependencies []string `json:"contract_dependencies"`
-	Dependencies         []string `json:"dependencies"`
+// keyClosureDocument is the published evidence-key closure, read from
+// ci/key-closure.json (dp-v2-045 d10). internal/release must not import
+// internal/ci (dp-v2-021 d12, enforced by source_guard_test.go), so the
+// closure rule is consumed as data rather than reimplemented here: the
+// previous local copy of the rule would have kept the pre-v2 semantics after
+// V2-045 and turned this test into a test of a rule nobody uses.
+type keyClosureEntry struct {
+	Component string   `json:"component"`
+	Closure   []string `json:"closure"`
+	Patterns  []string `json:"patterns"`
 }
-type ciManifest struct {
-	Components []ciComponent `json:"components"`
+type keyClosureDocument struct {
+	Version       int               `json:"version"`
+	KeyVersion    string            `json:"key_version"`
+	Unconditional []string          `json:"unconditional"`
+	Components    []keyClosureEntry `json:"components"`
 }
 
 // planMatch mirrors internal/ci/planner.go's unexported match(), duplicated
@@ -273,36 +280,25 @@ func planMatch(pattern, path string) bool {
 
 func releaseEvidenceKeyClosure(t *testing.T, root string) []string {
 	t.Helper()
-	data, err := os.ReadFile(filepath.Join(root, "ci", "components.json"))
+	data, err := os.ReadFile(filepath.Join(root, "ci", "key-closure.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	var manifest ciManifest
-	if err := json.Unmarshal(data, &manifest); err != nil {
+	var doc keyClosureDocument
+	if err := json.Unmarshal(data, &doc); err != nil {
 		t.Fatal(err)
 	}
-	var release *ciComponent
-	byID := map[string]ciComponent{}
-	for _, c := range manifest.Components {
-		byID[c.ID] = c
-		if c.ID == "release" {
-			cp := c
-			release = &cp
+	if doc.Version != 1 || doc.KeyVersion == "" || len(doc.Unconditional) == 0 {
+		t.Fatalf("ci/key-closure.json is not a v1 closure document: %+v", doc)
+	}
+	for _, e := range doc.Components {
+		if e.Component != "release" {
+			continue
 		}
+		return append(append([]string(nil), e.Patterns...), doc.Unconditional...)
 	}
-	if release == nil {
-		t.Fatal("ci/components.json has no release component")
-	}
-	patterns := append([]string{}, release.Roots...)
-	patterns = append(patterns, release.PublicContracts...)
-	patterns = append(patterns, release.ContractDependencies...)
-	for _, dep := range release.Dependencies {
-		if d, ok := byID[dep]; ok {
-			patterns = append(patterns, d.PublicContracts...)
-		}
-	}
-	patterns = append(patterns, "ci/components.json", "go.mod", "go.sum", "devbox.lock")
-	return patterns
+	t.Fatal("ci/key-closure.json has no release component")
+	return nil
 }
 
 func closureCovers(patterns []string, path string) bool {
@@ -335,6 +331,9 @@ func TestReleaseEvidenceKeyClosureAndUnguardedAllowlist(t *testing.T) {
 		"go.mod",
 		"go.sum",
 		"devbox.lock",
+		"Makefile",
+		"devbox.json",
+		"ci/key-closure.json",
 	} {
 		if !closureCovers(patterns, must) {
 			t.Fatalf("expected release evidence-key closure to cover %s", must)
@@ -375,13 +374,14 @@ func TestReleaseEvidenceKeyClosureAndUnguardedAllowlist(t *testing.T) {
 		if guardedRoles[m.Role] && !covered {
 			t.Fatalf("guarded role %s member %s is unexpectedly outside the evidence-key closure", m.Role, m.Path)
 		}
-		if !guardedRoles[m.Role] {
-			if covered {
-				t.Fatalf("unguarded role %s member %s is unexpectedly covered by the evidence-key closure", m.Role, m.Path)
-			}
-			if !allowlisted {
-				t.Fatalf("unguarded role %s member %s must be named in UnguardedMembers", m.Role, m.Path)
-			}
+		// The clause that failed when an unguarded-role member IS covered was
+		// deleted by V2-045 (dp-v2-045 d11): it encoded a fact about the old,
+		// narrower closure, and coverage widening is the improvement. devbox.json
+		// is now covered through the unconditional set and is no longer
+		// allowlisted. The surviving requirement below is the one that matters:
+		// a member outside the closure must be named in UnguardedMembers.
+		if !guardedRoles[m.Role] && !covered && !allowlisted {
+			t.Fatalf("unguarded role %s member %s must be named in UnguardedMembers", m.Role, m.Path)
 		}
 	}
 }

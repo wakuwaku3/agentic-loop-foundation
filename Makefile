@@ -1,4 +1,4 @@
-.PHONY: check environment format lint test contracts docs secrets smoke clean infra-policy infra-lint infra-validate workflow-pins component-plan affected candidate candidate-affected component ownership component-ci component-contracts component-control-plane component-runner component-provider component-domain component-application component-store-memory component-store-firestore component-api component-web component-docs component-test component-infra component-tooling component-reconciler component-release component-scheduler component-legacy-import component-update evidence-all evidence-keys
+.PHONY: check environment format lint test contracts docs secrets smoke clean infra-policy infra-lint infra-validate workflow-pins component-plan affected candidate candidate-affected component ownership component-ci component-contracts component-control-plane component-runner component-provider component-domain component-application component-store-memory component-store-firestore component-api component-web component-docs component-test component-infra component-tooling component-reconciler component-release component-scheduler component-legacy-import component-update evidence-all evidence-keys key-closure
 
 GO ?= go
 EVIDENCE_DIR ?= build/evidence
@@ -32,6 +32,9 @@ evidence-all:
 
 evidence-keys:
 	@go run ./cmd/ci-plan --all --keys
+
+key-closure:
+	@go run ./cmd/ci-plan --closure-out ci/key-closure.json
 
 component-ci:
 	@go test ./internal/ci ./cmd/ci-plan

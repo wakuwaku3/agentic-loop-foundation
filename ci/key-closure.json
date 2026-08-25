@@ -1,0 +1,490 @@
+{
+  "version": 1,
+  "key_version": "agentic-loop/evidence-key/v2",
+  "unconditional": [
+    "Makefile",
+    "ci/components.json",
+    "ci/key-closure.json",
+    "devbox.json",
+    "devbox.lock",
+    "go.mod",
+    "go.sum"
+  ],
+  "components": [
+    {
+      "component": "api",
+      "closure": [
+        "api",
+        "application",
+        "contracts",
+        "control-plane",
+        "domain",
+        "environment",
+        "infra",
+        "internal-contracts",
+        "provider",
+        "reconciler",
+        "runner",
+        "store-firestore",
+        "store-memory",
+        "update",
+        "web"
+      ],
+      "patterns": [
+        ".github/**",
+        ".gitleaks.toml",
+        "Containerfile",
+        "Makefile",
+        "cmd/bootstrap/**",
+        "cmd/control-plane/**",
+        "cmd/runner/**",
+        "contracts/**",
+        "contracts/openapi/openapi-v1.yaml",
+        "devbox.json",
+        "devbox.lock",
+        "firebase.json",
+        "firestore.indexes.json",
+        "go.mod",
+        "go.sum",
+        "infra/**",
+        "internal/api/**",
+        "internal/application/**",
+        "internal/contracts/**",
+        "internal/domain/**",
+        "internal/provider/**",
+        "internal/quota/**",
+        "internal/reconciler/**",
+        "internal/runner/**",
+        "internal/store/firestore/**",
+        "internal/store/memory/**",
+        "internal/update/**",
+        "internal/web/**",
+        "scripts/**"
+      ]
+    },
+    {
+      "component": "application",
+      "closure": [
+        "application",
+        "domain",
+        "environment",
+        "infra",
+        "store-memory"
+      ],
+      "patterns": [
+        ".github/**",
+        ".gitleaks.toml",
+        "Containerfile",
+        "Makefile",
+        "devbox.json",
+        "devbox.lock",
+        "firebase.json",
+        "go.mod",
+        "go.sum",
+        "infra/**",
+        "internal/application/**",
+        "internal/domain/**",
+        "internal/quota/**",
+        "internal/store/memory/**",
+        "scripts/**"
+      ]
+    },
+    {
+      "component": "ci",
+      "closure": [
+        "ci"
+      ],
+      "patterns": [
+        "ci/**",
+        "cmd/ci-plan/**",
+        "internal/ci/**"
+      ]
+    },
+    {
+      "component": "contracts",
+      "closure": [
+        "contracts",
+        "internal-contracts"
+      ],
+      "patterns": [
+        "contracts/**",
+        "internal/contracts/**"
+      ]
+    },
+    {
+      "component": "control-plane",
+      "closure": [
+        "api",
+        "application",
+        "contracts",
+        "control-plane",
+        "domain",
+        "environment",
+        "infra",
+        "internal-contracts",
+        "provider",
+        "reconciler",
+        "runner",
+        "store-firestore",
+        "store-memory",
+        "update",
+        "web"
+      ],
+      "patterns": [
+        ".github/**",
+        ".gitleaks.toml",
+        "Containerfile",
+        "Makefile",
+        "cmd/bootstrap/**",
+        "cmd/control-plane/**",
+        "cmd/runner/**",
+        "contracts/**",
+        "contracts/openapi/openapi-v1.yaml",
+        "devbox.json",
+        "devbox.lock",
+        "firebase.json",
+        "firestore.indexes.json",
+        "go.mod",
+        "go.sum",
+        "infra/**",
+        "internal/api/**",
+        "internal/application/**",
+        "internal/contracts/**",
+        "internal/domain/**",
+        "internal/provider/**",
+        "internal/quota/**",
+        "internal/reconciler/**",
+        "internal/runner/**",
+        "internal/store/firestore/**",
+        "internal/store/memory/**",
+        "internal/update/**",
+        "internal/web/**",
+        "scripts/**"
+      ]
+    },
+    {
+      "component": "docs",
+      "closure": [
+        "docs"
+      ],
+      "patterns": [
+        "AGENTS.md",
+        "README.md",
+        "docs/**"
+      ]
+    },
+    {
+      "component": "domain",
+      "closure": [
+        "domain"
+      ],
+      "patterns": [
+        "internal/domain/**"
+      ]
+    },
+    {
+      "component": "environment",
+      "closure": [
+        "environment"
+      ],
+      "patterns": [
+        ".github/**",
+        ".gitleaks.toml",
+        "Containerfile",
+        "Makefile",
+        "devbox.json",
+        "devbox.lock",
+        "firebase.json",
+        "go.mod",
+        "go.sum",
+        "scripts/**"
+      ]
+    },
+    {
+      "component": "infra",
+      "closure": [
+        "environment",
+        "infra"
+      ],
+      "patterns": [
+        ".github/**",
+        ".gitleaks.toml",
+        "Containerfile",
+        "Makefile",
+        "devbox.json",
+        "devbox.lock",
+        "firebase.json",
+        "go.mod",
+        "go.sum",
+        "infra/**",
+        "internal/quota/**",
+        "scripts/**"
+      ]
+    },
+    {
+      "component": "internal-contracts",
+      "closure": [
+        "contracts",
+        "internal-contracts"
+      ],
+      "patterns": [
+        "contracts/**",
+        "internal/contracts/**"
+      ]
+    },
+    {
+      "component": "legacy-import",
+      "closure": [
+        "legacy-import"
+      ],
+      "patterns": [
+        "cmd/legacy-import/**",
+        "internal/legacyimport/**"
+      ]
+    },
+    {
+      "component": "provider",
+      "closure": [
+        "provider"
+      ],
+      "patterns": [
+        "internal/provider/**"
+      ]
+    },
+    {
+      "component": "reconciler",
+      "closure": [
+        "application",
+        "contracts",
+        "domain",
+        "environment",
+        "infra",
+        "internal-contracts",
+        "provider",
+        "reconciler",
+        "runner",
+        "store-memory",
+        "update"
+      ],
+      "patterns": [
+        ".github/**",
+        ".gitleaks.toml",
+        "Containerfile",
+        "Makefile",
+        "cmd/bootstrap/**",
+        "cmd/runner/**",
+        "contracts/**",
+        "devbox.json",
+        "devbox.lock",
+        "firebase.json",
+        "go.mod",
+        "go.sum",
+        "infra/**",
+        "internal/application/**",
+        "internal/contracts/**",
+        "internal/domain/**",
+        "internal/provider/**",
+        "internal/quota/**",
+        "internal/reconciler/**",
+        "internal/runner/**",
+        "internal/store/memory/**",
+        "internal/update/**",
+        "scripts/**"
+      ]
+    },
+    {
+      "component": "release",
+      "closure": [
+        "contracts",
+        "domain",
+        "internal-contracts",
+        "release"
+      ],
+      "patterns": [
+        "contracts/**",
+        "contracts/release-contract/**",
+        "contracts/schemas/release-contract.json",
+        "internal/contracts/**",
+        "internal/domain/**",
+        "internal/release/**"
+      ]
+    },
+    {
+      "component": "repository-meta",
+      "closure": [
+        "repository-meta"
+      ],
+      "patterns": [
+        ".codex/**"
+      ]
+    },
+    {
+      "component": "runner",
+      "closure": [
+        "application",
+        "contracts",
+        "domain",
+        "environment",
+        "infra",
+        "internal-contracts",
+        "provider",
+        "reconciler",
+        "runner",
+        "store-memory",
+        "update"
+      ],
+      "patterns": [
+        ".github/**",
+        ".gitleaks.toml",
+        "Containerfile",
+        "Makefile",
+        "cmd/bootstrap/**",
+        "cmd/runner/**",
+        "contracts/**",
+        "devbox.json",
+        "devbox.lock",
+        "firebase.json",
+        "go.mod",
+        "go.sum",
+        "infra/**",
+        "internal/application/**",
+        "internal/contracts/**",
+        "internal/domain/**",
+        "internal/provider/**",
+        "internal/quota/**",
+        "internal/reconciler/**",
+        "internal/runner/**",
+        "internal/store/memory/**",
+        "internal/update/**",
+        "scripts/**"
+      ]
+    },
+    {
+      "component": "scheduler",
+      "closure": [
+        "scheduler"
+      ],
+      "patterns": [
+        "internal/scheduler/**"
+      ]
+    },
+    {
+      "component": "store-firestore",
+      "closure": [
+        "application",
+        "contracts",
+        "domain",
+        "environment",
+        "infra",
+        "internal-contracts",
+        "provider",
+        "reconciler",
+        "runner",
+        "store-firestore",
+        "store-memory",
+        "update"
+      ],
+      "patterns": [
+        ".github/**",
+        ".gitleaks.toml",
+        "Containerfile",
+        "Makefile",
+        "cmd/bootstrap/**",
+        "cmd/runner/**",
+        "contracts/**",
+        "devbox.json",
+        "devbox.lock",
+        "firebase.json",
+        "firestore.indexes.json",
+        "go.mod",
+        "go.sum",
+        "infra/**",
+        "internal/application/**",
+        "internal/contracts/**",
+        "internal/domain/**",
+        "internal/provider/**",
+        "internal/quota/**",
+        "internal/reconciler/**",
+        "internal/runner/**",
+        "internal/store/firestore/**",
+        "internal/store/memory/**",
+        "internal/update/**",
+        "scripts/**"
+      ]
+    },
+    {
+      "component": "store-memory",
+      "closure": [
+        "application",
+        "domain",
+        "environment",
+        "infra",
+        "store-memory"
+      ],
+      "patterns": [
+        ".github/**",
+        ".gitleaks.toml",
+        "Containerfile",
+        "Makefile",
+        "devbox.json",
+        "devbox.lock",
+        "firebase.json",
+        "go.mod",
+        "go.sum",
+        "infra/**",
+        "internal/application/**",
+        "internal/domain/**",
+        "internal/quota/**",
+        "internal/store/memory/**",
+        "scripts/**"
+      ]
+    },
+    {
+      "component": "task-ledger",
+      "closure": [
+        "contracts",
+        "internal-contracts",
+        "task-ledger"
+      ],
+      "patterns": [
+        ".agents/**",
+        "contracts/**",
+        "contracts/schemas/evidence-index.json",
+        "contracts/schemas/evidence.json",
+        "contracts/schemas/historical-evidence-index.json",
+        "contracts/schemas/task-state-retry.json",
+        "contracts/schemas/task-state-transition.json",
+        "contracts/schemas/task-state.json",
+        "internal/contracts/**"
+      ]
+    },
+    {
+      "component": "tooling",
+      "closure": [
+        "tooling"
+      ],
+      "patterns": [
+        ".editorconfig",
+        ".gitignore"
+      ]
+    },
+    {
+      "component": "update",
+      "closure": [
+        "update"
+      ],
+      "patterns": [
+        "internal/update/**"
+      ]
+    },
+    {
+      "component": "web",
+      "closure": [
+        "web"
+      ],
+      "patterns": [
+        "internal/web/**"
+      ]
+    }
+  ]
+}

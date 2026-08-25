@@ -252,6 +252,14 @@ Requirement Done:
 component ごとに、component source、公開 contract、依存 surface、test source／runner、lockfile／toolchain／Devbox 等の環境定義を hash 化した evidence key を作る。同じ key の成功 evidence は再利用できる。候補 commit の gate は、全 component について現在の key に対応する新鮮な evidence が存在することを aggregate attestation で確認する。
 component の evidence key は、`make check`（`format` を含む）が緑になった最終 tree で読む。formatting のみの後続 commit でも tracked file の内容が変わるため component の key は動き、先に読んだ key はその後の tree を attest しない。
 
+evidence key の算法は V2-045 で次のとおり確定した（version prefix `agentic-loop/evidence-key/v2`）。
+
+- **依存面の推移閉包を hash する。** key の入力 pattern は、`dependencies` と `verification_dependencies` の和集合による推移閉包の各 member について、その `roots`・`public_contracts`・`contract_dependencies` を集めたものである。依存先の `public_contracts` だけを混ぜる旧算法では、`public_contracts` が空の component への依存が 1 byte も寄与せず、依存先の source を 1 byte 変えても consumer の key が動かなかった。閉包を取ることで、依存先の非 test source の 1 byte 変更が consumer の key を動かす。
+- **無条件 file は次の 7 path である。** `Makefile`、`ci/components.json`、`ci/key-closure.json`、`devbox.json`、`devbox.lock`、`go.mod`、`go.sum`。`Makefile` は全 component の検証入口 recipe を持つため、`devbox.json` は `devbox run --pure` が実行する package と script を宣言するため、`ci/key-closure.json` は閉包の公開形であるためである。
+- **framing は versioned かつ length-prefixed である。** version prefix、component id、閉包 id 列、各 file の (path, 内容)、検証入口の runner／target を、いずれも長さ prefix 付きで書き込む。path bytes の直後に内容 bytes を連結する旧 framing では (path `ab`, 内容 `c`) と (path `a`, 内容 `bc`) が同じ hash になった。
+- **`verification_dependencies` は影響閉包の選択には使わない。** この field は test 由来の cross-component import、test が out-of-band build／run に渡す module import path、検証入口が実行する他 component 所有の package／script を収容する。test 由来の辺には実在の循環があるため（`runner` と `reconciler` の test が相互 import する）、この field は循環禁止の対象外とする。key の閉包には入るので、辺を宣言すれば key は動く。
+- 閉包は `ci/key-closure.json` として tracked file に publish する。この file は evidence key も hash も一切含まない。自身が全 key に hash されるため、key を含めれば解の無い不動点になる。golden test が `ci/components.json` から再計算して byte 一致を検証する。
+
 ### aggregate attestation と identity 注入
 
 `cmd/ci-plan` は `--task-id` / `--correlation-id` を受け取り、evidence record にそのまま記録する。値が空または空白のみのときは既定値（`task_id=V2-000`, `correlation_id=local-component-evidence`）へ fallback し、`task_id` は `^V2-[0-9]{3}$` を満たさない限り record を1件も書かずに失敗する。identity は環境変数ではなく argv で注入する。`devbox run --pure` は継承した環境変数を落とすため、共通入口 `devbox run --pure -- make <target>` を経由しても確実に届く経路は make 変数（argv 展開）だけである。
@@ -279,3 +287,5 @@ component の evidence key は、`make check`（`format` を含む）が緑に�
 ### CI 自身の検証
 
 代表的な差分 fixture に対し、期待する影響閉包と実際の matrix が一致することを test する。依存 DAG と file ownership manifest の変更も通常の validation 対象とし、影響範囲を狭める変更ほど強い根拠を要求する。
+
+manifest 自身に対しては 3 つの検査を課す。`VerifyDependencyCoverage`（宣言 `dependencies` は AST 由来の非 test import 辺の上位集合であり、`dependencies` と `verification_dependencies` の和は test 由来・literal 由来・検証入口由来の辺の上位集合である）、`VerifyNoUnjustifiedEdges`（導出されない宣言辺は理由付きの justification table に載っていなければならない。この検査が無いと「全 component が全 component に依存」で被覆 assert が自明に通る）、`VerifyCheckTargetInsideClosure`（検証入口が実行する package と script の所有者は key 閉包の内側でなければならない）であり、いずれにも「壊せば落ちる」positive control を 1 本以上付けることを要求する。

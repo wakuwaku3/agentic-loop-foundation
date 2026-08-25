@@ -71,7 +71,6 @@ var UnguardedMembers = []UnguardedMember{
 	{Glob: "docs/preview/**.md", Reason: "docs has no public_contracts, so nothing couples it to the release component's contract_dependencies (E1)"},
 	{Glob: "docs/stable/**.md", Reason: "docs has no public_contracts, so nothing couples it to the release component's contract_dependencies (E1)"},
 	{Glob: "firestore.indexes.json", Reason: "declared only under the store-firestore component's roots, not release's closure (E1/E4)"},
-	{Glob: "devbox.json", Reason: "declared only under the environment/tooling components' roots, not release's closure (E1/E4)"},
 	{Glob: "firebase.json", Reason: "declared only under the environment component's roots, not release's closure (E1/E4)"},
 }
 

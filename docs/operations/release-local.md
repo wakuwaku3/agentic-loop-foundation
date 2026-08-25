@@ -37,11 +37,14 @@ V2-034（signed update bundle）の責務である。
 ## 実装がguardされない範囲（escalation E1・E4）
 
 `ci/components.json`のrelease componentは`internal/release/**`、
-`contracts/**`（`contracts` dependencyの`public_contracts`経由）、および
-無条件4file（`ci/components.json`、`go.mod`、`go.sum`、`devbox.lock`）だけを
-evidence keyのclosureに含む。したがってbundleのcontract／schema／
-api-contract／implementation-manifest roleはguardされるが、migration／
-configuration／documentation roleはguardされない。この境界は
+`contracts/**`と`internal/contracts/**`（依存面の推移閉包経由）、および
+無条件7file（`Makefile`、`ci/components.json`、`ci/key-closure.json`、
+`devbox.json`、`devbox.lock`、`go.mod`、`go.sum`）をevidence keyのclosureに
+含む。したがってbundleのcontract／schema／api-contract／
+implementation-manifest roleはguardされ、V2-045で`devbox.json`が無条件file
+に加わったことによりconfiguration roleのうち`devbox.json`もguardされる。
+migration role（`firestore.indexes.json`）、configuration roleの残り
+（`firebase.json`）、およびdocumentation roleはguardされない。この境界は
 `UnguardedMembers`という明示allowlistとしてcodeへ書かれ、
 `TestReleaseEvidenceKeyClosureAndUnguardedAllowlist`がclosureとallowlistの
 双方をci/components.jsonから再計算して検証する。
@@ -51,8 +54,11 @@ configuration／documentation roleはguardされない。この境界は
 `make test`では強制されるが、docs-only commitに対するselective CI run
 としては強制されない。これはE1として記録された未解決事項であり、fixには
 `ci/components.json`の編集（禁止path）とmilestone境界での23-key
-再evidence化が要る。E4として、migration／configuration role、および
-将来の binary role は同じ理由でM5-localではsource-guardできない。
+再evidence化が要る。E4のうち`devbox.json`の部分はV2-045で解消した
+（`devbox.json`が無条件fileに加わり、`UnguardedMembers`のentryを削除した）。
+`firestore.indexes.json`（migration role）と`firebase.json`（configuration
+roleの残り）、および将来の binary role は同じ理由でM5-localでは
+source-guardできない。
 
 allowlist entryを削除してtestを通すことは誤りであり、closureが実際に
 その member を覆うようになったときにだけ削除してよい。

@@ -25,7 +25,14 @@ type Component struct {
 	PublicContracts      []string `json:"public_contracts"`
 	ContractDependencies []string `json:"contract_dependencies"`
 	Dependencies         []string `json:"dependencies"`
-	Check                Check    `json:"check"`
+	// VerificationDependencies names the components whose sources participate
+	// in this component's verification without being one of its non-test
+	// imports (dp-v2-045 d7). It is deliberately NOT consulted by Affected()
+	// and is exempt from the acyclicity rule, because the test-import graph
+	// really does contain cycles (runner <-> reconciler). It IS part of the
+	// evidence-key closure, so an edge here still moves this component's key.
+	VerificationDependencies []string `json:"verification_dependencies"`
+	Check                    Check    `json:"check"`
 }
 type Check struct {
 	Runner string `json:"runner"`
@@ -74,6 +81,16 @@ func Validate(m Manifest) error {
 		for _, d := range c.Dependencies {
 			if !ids[d] {
 				return fmt.Errorf("component %s depends on unknown %s", c.ID, d)
+			}
+		}
+		// verification_dependencies must name known components, but is NOT
+		// fed into the cycle walk below: dp-v2-045 d7 exempts it on purpose.
+		for _, d := range c.VerificationDependencies {
+			if !ids[d] {
+				return fmt.Errorf("component %s verification-depends on unknown %s", c.ID, d)
+			}
+			if d == c.ID {
+				return fmt.Errorf("component %s verification-depends on itself", c.ID)
 			}
 		}
 		for _, d := range c.ContractDependencies {
@@ -236,36 +253,65 @@ func Affected(m Manifest, changed []string) (Plan, error) {
 	sort.Strings(p.Selected)
 	return p, nil
 }
-func EvidenceKey(root string, c Component) (string, error) {
-	return evidenceKey(root, c, nil)
+
+// ListTracked returns the repository's tracked paths, sorted. It is the only
+// part of evidence-key computation that shells out, which is what lets the
+// key-sensitivity controls (dp-v2-045 d9 PC4-PC6) inject a file list instead.
+func ListTracked(root string) ([]string, error) {
+	out, err := exec.Command("git", "-C", root, "ls-files").Output()
+	if err != nil {
+		return nil, err
+	}
+	var files []string
+	for _, line := range strings.Split(string(out), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		files = append(files, line)
+	}
+	sort.Strings(files)
+	return files, nil
 }
+
+// EvidenceKeyWithManifest computes the component's evidence key over the
+// repository's tracked files.
 func EvidenceKeyWithManifest(root string, m Manifest, c Component) (string, error) {
-	return evidenceKey(root, c, m.Components)
-}
-func evidenceKey(root string, c Component, all []Component) (string, error) {
-	h := sha256.New()
-	cmd := exec.Command("git", "-C", root, "ls-files")
-	out, err := cmd.Output()
+	files, err := ListTracked(root)
 	if err != nil {
 		return "", err
 	}
-	patterns := append([]string{}, c.Roots...)
-	patterns = append(patterns, c.PublicContracts...)
-	patterns = append(patterns, c.ContractDependencies...)
-	for _, d := range c.Dependencies {
-		for _, dep := range all {
-			if dep.ID == d {
-				patterns = append(patterns, dep.PublicContracts...)
-			}
-		}
+	return EvidenceKeyFromFiles(root, files, m, c)
+}
+
+// EvidenceKeyFromFiles computes the evidence key of c over the given file
+// list, per dp-v2-045 d2. Every dependency-derived input is the depended-on
+// component's own file set, reached through the transitive key closure, so
+// appending one byte to a dependency's non-test source moves this key. Every
+// variable-length field is length-prefixed, which removes the ambiguity the
+// pre-v2 framing had (path bytes immediately followed by content bytes). No
+// map is iterated: the closure ids and the patterns both pass through
+// sort.Strings, and the file list is re-sorted here.
+func EvidenceKeyFromFiles(root string, files []string, m Manifest, c Component) (string, error) {
+	closureIDs := KeyClosure(m, c.ID)
+	patterns := KeyPatterns(m, c.ID)
+	unconditional := make(map[string]bool, len(UnconditionalKeyPaths))
+	for _, p := range UnconditionalKeyPaths {
+		unconditional[p] = true
 	}
-	files := strings.Split(strings.TrimSpace(string(out)), "\n")
-	sort.Strings(files)
-	for _, p := range files {
+
+	h := sha256.New()
+	fmt.Fprintf(h, "%s\n", KeyVersion)
+	fmt.Fprintf(h, "component:%d:%s\n", len(c.ID), c.ID)
+	joined := strings.Join(closureIDs, ",")
+	fmt.Fprintf(h, "closure:%d:%s\n", len(joined), joined)
+
+	sorted := append([]string(nil), files...)
+	sort.Strings(sorted)
+	for _, p := range sorted {
 		if p == "" {
 			continue
 		}
-		include := p == "ci/components.json" || p == "go.mod" || p == "go.sum" || p == "devbox.lock"
+		include := unconditional[p]
 		for _, pattern := range patterns {
 			if match(pattern, p) {
 				include = true
@@ -281,13 +327,14 @@ func evidenceKey(root string, c Component, all []Component) (string, error) {
 			} // deleted files remain in git index during migration
 			return "", e
 		}
-		h.Write([]byte(p))
+		fmt.Fprintf(h, "file:%d:%s:%d:", len(p), p, len(b))
 		h.Write(b)
+		h.Write([]byte("\n"))
 	}
-	h.Write([]byte(c.Check.Runner))
-	h.Write([]byte(c.Check.Target))
+	fmt.Fprintf(h, "check:%d:%s:%d:%s\n", len(c.Check.Runner), c.Check.Runner, len(c.Check.Target), c.Check.Target)
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
+
 func Candidate(m Manifest, root, evidenceDir string) error {
 	ids := make([]string, 0, len(m.Components))
 	for _, c := range m.Components {
@@ -304,11 +351,15 @@ func CandidateComponents(m Manifest, root, evidenceDir string, ids []string) err
 	for _, id := range ids {
 		wanted[id] = true
 	}
+	files, err := ListTracked(root)
+	if err != nil {
+		return err
+	}
 	for _, c := range m.Components {
 		if !wanted[c.ID] {
 			continue
 		}
-		k, err := evidenceKey(root, c, m.Components)
+		k, err := EvidenceKeyFromFiles(root, files, m, c)
 		if err != nil {
 			return err
 		}

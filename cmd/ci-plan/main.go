@@ -34,6 +34,7 @@ func main() {
 	evidence := flag.String("evidence-dir", "build/evidence", "evidence directory")
 	root := flag.String("root", ".", "repository root")
 	tracked := flag.String("tracked", "", "comma/newline separated tracked paths to validate")
+	closureOut := flag.String("closure-out", "", "write the published evidence-key closure (ci/key-closure.json) to this path and exit")
 	taskID := flag.String("task-id", "", "task id recorded in evidence (defaults to "+defaultTaskID+")")
 	correlationID := flag.String("correlation-id", "", "correlation id recorded in evidence (defaults to "+defaultCorrelationID+")")
 	flag.Parse()
@@ -55,6 +56,19 @@ func main() {
 		if err := ci.ValidateTracked(m, split(*tracked)); err != nil {
 			fail(err)
 		}
+	}
+	if *closureOut != "" {
+		b, err := ci.RenderKeyClosureDocument(ci.BuildKeyClosureDocument(m))
+		if err != nil {
+			fail(err)
+		}
+		if err := os.MkdirAll(filepath.Dir(*closureOut), 0755); err != nil {
+			fail(err)
+		}
+		if err := os.WriteFile(*closureOut, b, 0644); err != nil {
+			fail(err)
+		}
+		return
 	}
 	if *candidate {
 		var candidateErr error
