@@ -6,7 +6,8 @@
   "status": "blocked",
   "dependencies": [
     "V2-016",
-    "V2-064"
+    "V2-064",
+    "V2-068"
   ],
   "outcome": "Expose the human-input request the domain already models: an application command, an API route and a Requirement detail field that carry the question, its options, its impact and the scope that stops while it waits.",
   "non_goals": [
@@ -82,5 +83,5 @@
       "reason": "three tasks were designed to append a section to the same owner console files, and three concurrent writers to one file produce a textual conflict the coordinator would have to resolve by hand at integration, so the console work is serialised behind the task already running"
     }
   ],
-  "block_reason": "V2-064"
+  "block_reason": "V2-064,V2-068"
 }

@@ -3,9 +3,10 @@
   "id": "ts-v2-066",
   "kind": "canonical-task-state",
   "task_id": "V2-066",
-  "status": "running",
+  "status": "blocked",
   "dependencies": [
-    "V2-021"
+    "V2-021",
+    "V2-064"
   ],
   "outcome": "Wire the release machinery into an observable surface: the running Preview version, the promotion conditions still unmet, and the rollback target, read through the API rather than inferred from the repository tree.",
   "non_goals": [
@@ -13,7 +14,7 @@
     "Do not duplicate the release contract's rules in the API layer",
     "Do not place a digest inside a document that reports that digest"
   ],
-  "actor": "luna",
+  "actor": "sol",
   "input_refs": [
     "V2-066",
     "V2-021",
@@ -83,6 +84,33 @@
         "remaining": 1
       },
       "reason": "wo-v2-066に基づき着手。applicationがreleaseをimportする方向で、稼働Preview version・未充足の昇格条件（tri-state）・rollback先をread-onlyのGETで観測可能にする"
+    },
+    {
+      "sequence": 3,
+      "at": "2026-08-25T03:40:02Z",
+      "from_status": "running",
+      "to_status": "blocked",
+      "actor": "sol",
+      "input_refs": [
+        "V2-066",
+        "V2-021",
+        "wo-v2-066",
+        "dp-v2-066"
+      ],
+      "input_hash": "bae6943ee85b4de04b83d1a62b4de361ccb64aa9de11fcc456244be4a5335b3e",
+      "output_refs": [
+        "V2-066"
+      ],
+      "output_hash": "28cdf21cb8deff8911e5871fb05fe81fd7133beaffa1ba40a1ca40b0b7336ee8",
+      "owner": "luna",
+      "next_owner": "luna",
+      "retry_budget": {
+        "max_attempts": 2,
+        "attempts_used": 1,
+        "remaining": 1
+      },
+      "reason": "the five surface tasks were each designed to widen the same six files (the api handler, the application ports, service and read models, the openapi document, the owner console and both stores), so they cannot run at once: three concurrent writers to one file leave the coordinator resolving a textual conflict by hand, and an evidence key measured on a tree that never becomes a commit is the defect that ev-v2-013-infra-plan already recorded. They are serialised, each branching from the tip the previous one landed on"
     }
-  ]
+  ],
+  "block_reason": "V2-064"
 }

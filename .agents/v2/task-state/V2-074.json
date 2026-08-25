@@ -1,0 +1,85 @@
+{
+  "schema_version": "v1",
+  "id": "ts-v2-074",
+  "kind": "canonical-task-state",
+  "task_id": "V2-074",
+  "status": "blocked",
+  "dependencies": [
+    "V2-067"
+  ],
+  "outcome": "Decide and wire the two parts of Provider operation that no task owns: which Loop and Provider versions are compatible, and when work is handed to a different Provider.",
+  "non_goals": [
+    "Do not claim a compatibility check the code does not perform",
+    "Do not hand work to a Provider the owner has not authorized",
+    "Do not lose the Increment, Artifact or Evidence across a handoff"
+  ],
+  "actor": "sol",
+  "input_refs": [
+    "V2-067",
+    "V2-074"
+  ],
+  "input_hash": "129f59cc695ea807c418e4a6ae168fbc73c9220616d1d278fa54fd48ebf73a54",
+  "output_refs": [
+    "V2-074"
+  ],
+  "output_hash": "4b540ef3a3a66008bd8d90e05989b8fa19cd3c099731f3a1c972b7c532f70937",
+  "owner": "terra",
+  "next_owner": "terra",
+  "retry_budget": {
+    "max_attempts": 2,
+    "attempts_used": 0,
+    "remaining": 2
+  },
+  "release_eligible": false,
+  "block_reason": "V2-067",
+  "transitions": [
+    {
+      "sequence": 1,
+      "at": "2026-08-25T03:40:00Z",
+      "from_status": null,
+      "to_status": "queued",
+      "actor": "sol",
+      "input_refs": [
+        "V2-067",
+        "V2-074"
+      ],
+      "input_hash": "129f59cc695ea807c418e4a6ae168fbc73c9220616d1d278fa54fd48ebf73a54",
+      "output_refs": [
+        "V2-074"
+      ],
+      "output_hash": "4b540ef3a3a66008bd8d90e05989b8fa19cd3c099731f3a1c972b7c532f70937",
+      "owner": "terra",
+      "next_owner": "terra",
+      "retry_budget": {
+        "max_attempts": 2,
+        "attempts_used": 0,
+        "remaining": 2
+      },
+      "reason": "the declared capability names a supported version, a supported Loop version, and a handoff or waiting reason; the provider surface design deliberately excluded the version compatibility check and the handoff decision wiring and recorded that neither belongs to any existing task, so the capability cannot be exercised until one owns them"
+    },
+    {
+      "sequence": 2,
+      "at": "2026-08-25T03:40:01Z",
+      "from_status": "queued",
+      "to_status": "blocked",
+      "actor": "sol",
+      "input_refs": [
+        "V2-067",
+        "V2-074"
+      ],
+      "input_hash": "129f59cc695ea807c418e4a6ae168fbc73c9220616d1d278fa54fd48ebf73a54",
+      "output_refs": [
+        "V2-074"
+      ],
+      "output_hash": "4b540ef3a3a66008bd8d90e05989b8fa19cd3c099731f3a1c972b7c532f70937",
+      "owner": "terra",
+      "next_owner": "terra",
+      "retry_budget": {
+        "max_attempts": 2,
+        "attempts_used": 0,
+        "remaining": 2
+      },
+      "reason": "the input this task needs is produced by the task it depends on"
+    }
+  ]
+}

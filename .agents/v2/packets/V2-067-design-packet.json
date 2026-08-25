@@ -1,0 +1,105 @@
+{
+ "schema_version": "v1",
+ "id": "dp-v2-067",
+ "kind": "design-packet",
+ "created_at": "2026-08-25T03:10:00Z",
+ "correlation_id": "v2-067-provider-surface",
+ "problem_brief_id": "pb-v2-067",
+ "decisions": [
+  {
+   "id": "d1",
+   "decision": "The Provider registry lives in internal/application as a read model plus two new UnitOfWork ports, not in internal/domain. internal/domain is not edited by this task at all.",
+   "rationale": "A Provider is not a domain aggregate: it has no state transition, no Version, no invariant that domain.Validate or domain.Permit consults, and no rule in internal/domain reads it. internal/domain/source_guard_test.go states as its own purpose 'zero database, GitHub, Provider, network and real-clock dependency' and enforces a five-entry non-test import allowlist; introducing a Provider vocabulary there would make the one package that must describe only decidable state describe an outside resource instead. internal/application is already where facts observed about the outside world are held for the owner console (OutboxObservation, RunnerObservationRepository read-through, QueueSummary), so the registry joins an existing pattern rather than inventing a layer. The measured cost of the alternative is concrete: a registry in domain would need either a clock read (forbidden by the real-clock scan) or an explicit ObservedAt on every record, and would still have to be projected into application for the API, so nothing is gained."
+  },
+  {
+   "id": "d2",
+   "decision": "A Provider's identity is its adapter name alone: exactly one of codex, claude, opencode. Identity is not name+account. The closed three-name set is pinned twice, independently: a test in internal/provider asserts CodexAdapter/ClaudeAdapter/OpenCodeAdapter.Name() are exactly those three, and a test in internal/application asserts the registry's own name table is exactly those three. internal/application does not import internal/provider.",
+   "rationale": "Measured facts decide this. The subscription set is one account per CLI, so the name is already unique; internal/runner.CostLedger keys on Provider (a name), contracts/schemas/provider-preflight.json keys provider.name, and contracts/schemas/provider-standing-authorization.json constrains providers to the enum [codex, claude, opencode]. Keying on name therefore joins the registry to every record that already exists with no mapping table. Adding an account discriminator would mean recording owner identity in a read model, which is exactly the class of value the repository keeps out of its schemas (internal/domain/source_guard_test.go's deny list, domain.RequestedBy carrying actor_type and an opaque subject only), and 'one human owns many Providers' is a fact about people, not evidence that one CLI has many accounts. Pinning the set in two packages instead of importing keeps the provider component a leaf in ci/components.json: no new component edge is created, so the DAG note this task must file stays small. The consequence is recorded rather than hidden: if a second account of the same CLI is ever introduced, the registry key must be revisited, and that is a separate task, not a speculative field added now."
+  },
+  {
+   "id": "d3",
+   "decision": "Health is passive. It is derived only from observations the Loop's own execution path already produced, and the registry has no probe path of any kind: no CLI is started, no network call is made, and no timer polls anything. This is proven mechanically, not promised: an import scan over internal/application's own *.go files, modelled on internal/domain/source_guard_test.go, asserts the package imports none of os/exec, net, net/http, internal/provider, internal/runner, and fails outright on a zero-file scan.",
+   "rationale": "An active health probe is an invocation, and every invocation on the Loop's path passes internal/runner.CostLedger.Reserve, which counts against max_invocations and is settled against the 2.00 USD single-invocation anomaly threshold. A registry that probed on every read would therefore consume the runaway detector's own counters and could itself trip the halt it is meant to report -- the observability surface would become the runaway. docs/architecture/validation.md section 5 already lists 'provider health probe does not grow with Requirement count' as a growth rate to verify; a passive derivation satisfies it at zero, and the import scan is what makes that a measured fact instead of a claim in a document. The same scan is the only durable defence against a later change quietly adding a probe."
+  },
+  {
+   "id": "d4",
+   "decision": "Observations enter through the runner-authenticated report the runner already makes. POST /v1/executions/result gains one additive optional object, provider_observation: {name, failure_class?, stopped_for_inspection?}. POST /v1/executions/{id}:start gains one additive optional field, provider. No new endpoint, no new authenticator, no new idempotency story.",
+   "rationale": "The cost ledger and the CLIs live on the local Runner machine; the registry lives in the control plane. The control plane therefore cannot read the ledger, and any design that pretends otherwise is a fiction. The runner already posts a result for every Execution with a request_id under the existing runnerSession security scheme and the existing idempotency path, so extending that body is the smallest surface that makes the observation durable, and start is the natural place for the assignment because the runner is the only party that knows which Provider it is about to invoke. Both additions are optional so every existing client and every existing test keeps working unchanged; contracts/openapi/openapi-v1.yaml sets additionalProperties:false on both request schemas, so neither addition can be made accidentally or informally."
+  },
+  {
+   "id": "d5",
+   "decision": "Health is a closed set of six values with staleness always explicit: unknown, healthy, degraded, unavailable, unauthenticated, stopped-for-inspection. Every entry also carries last_observed_at, observation_count within a fixed window, and stale (true when the newest observation is older than a declared window). No value is ever inferred from silence: a Provider with no observation in the window is unknown and stale, never healthy.",
+   "rationale": "The failure mode this task exists to remove is a surface that reads as reassuring when it actually knows nothing. Making 'we have not observed this' a first-class value, distinct from both healthy and unavailable, is the only way a reader can tell the difference between a working Provider and an unexercised one -- and today two of the three Providers are unexercised, so the common case is exactly the one a default-to-healthy design would misreport. stopped-for-inspection is separated from unavailable for the reason recorded in docs/operations/provider-live-claude.md: reaching a runaway threshold is a stop for inspection and is neither a success nor a failure, so folding it into a failure value would misstate it."
+  },
+  {
+   "id": "d6",
+   "decision": "Limits are split by who actually owns them. runaway_detection: {scope, state, thresholds_declared_in} reports the runner-local detector by state only -- state is one of within-thresholds, stopped-for-inspection, unknown -- and carries no numbers; the numbers stay in the owner-approved, digest-bound provider-preflight record, which the block names by id. concurrency: {active_assignments, declared_ceiling, ceiling_source, remaining, exhausted} reports the control-plane-owned allocation limit, which the control plane genuinely knows. No field or enum value in the read model or the openapi schema may contain the substrings budget, quota, billing, spend, cost, or remaining_credit; a mechanical test over the emitted JSON keys and the schema asserts this.",
+   "rationale": "Two different limits were being conflated, and the conflation is what the non_goal forbids. The runaway thresholds are 16 invocations, 10.00 USD total and 2.00 USD per invocation in an owner-approved record whose approval.subject_digest binds it to a work order; republishing those numbers through an unverified runner report would create a second copy of a safety threshold that can silently disagree with the approved one, and the capability's observable_result needs the exhaustion state, not the arithmetic. Meanwhile the concurrent-execution limit really is the control plane's, so it is reported with its actual source. The substring test exists because the naming requirement is otherwise unenforceable: a later contributor adding remaining_budget_usd would reintroduce the billing reading the standing authorization explicitly denies ('Preflight limits stay in force only as runaway-detection thresholds; reaching one is a stop for inspection, never a success')."
+  },
+  {
+   "id": "d7",
+   "decision": "Current assignment is recorded in a side table keyed by Execution id (ProviderAssignmentRepository), written inside the same transaction as Start. domain.Execution gains no Provider field and internal/domain is not touched.",
+   "rationale": "This follows the precedent the repository already set and documented: ControlRequestedByRepository is a side table keyed by Control Intent revision because domain.ControlIntent is proven-closed M1 surface. domain.Execution sits inside the transition functions the M1 gate proved; widening it would put a label with no transition semantics inside the structure every state assertion reads, for no gain, since the join Execution id -> Provider name is all the read model needs. Writing it in Start's existing transaction makes the assignment appear and disappear with the Execution it describes, so the registry can never report an assignment to an Execution that was never started."
+  },
+  {
+   "id": "d8",
+   "decision": "A not-yet-authenticated Provider is represented as two separate, separately-sourced facts, never as one blurred 'connected' flag. authorized (boolean) plus authorization_ref (the standing authorization record id, e.g. psa-foundation-001) reports the owner's in-repository standing authorization. verified_by_loop_invocation (boolean) reports whether the Loop has ever completed an invocation through this Provider. When authorized is true and verified_by_loop_invocation is false, health is unauthenticated or unknown and blocked_reason names the human action in plain words: owner-must-authenticate-cli-on-runner-machine, or never-invoked-by-loop when no invocation has been attempted. The approver's email address from the standing authorization record is never carried into the read model or the response.",
+   "rationale": "Authorization and authentication are different facts with different owners, and today they disagree for two of three Providers: psa-foundation-001 authorises codex, claude and opencode, while only claude is actually logged in. A single 'connected' boolean would have to pick one of the two facts and would then be wrong about the other. The Loop cannot close the gap itself: authenticating a CLI requires the owner's own identity, so no agent can do it, and the only way to observe the state without a probe (forbidden by d3) is the failure class of a real invocation. Reporting the gap explicitly, with the required human action named, is precisely what makes M6's authentication wait observable instead of appearing as an unexplained absence of activity. The approver email is excluded because contracts/schemas/provider-standing-authorization.json requires it in an email pattern and the read models in this repository carry attribution as actor_type plus an opaque subject only (domain.RequestedBy); an owner console field is not a reason to start moving a personal identifier through the API."
+  },
+  {
+   "id": "d9",
+   "decision": "internal/provider gains one FailureClass constant, FailureUnauthenticated = \"provider-unauthenticated\", plus the pattern in normalize that produces it, so an unauthenticated CLI is classified as unauthenticated rather than as generic transport. The classifier never copies provider text into the Failure: it sets the closed class and a fixed message, and the existing safeMessage/secret redaction path is unchanged.",
+   "rationale": "Without this constant the first invocation of codex or opencode reports FailureTransport, which reads as an infrastructure fault and sends the owner looking in the wrong place; the state that actually blocks M6 would be invisible in the exact record meant to reveal it. The change is additive: no existing class, no existing classification and no existing test changes meaning, and internal/provider stays a leaf component in ci/components.json with no new import."
+  },
+  {
+   "id": "d10",
+   "decision": "The observable surface is GET /v1/providers, owner-role only, bounded to the three declared Providers, declared in contracts/openapi/openapi-v1.yaml, plus a Providers section in the owner console (internal/web/owner.html and owner.js).",
+   "rationale": "cap-provider-operation's own promotion_prerequisites include 'release-contract.md condition 8: publish an owner API path and add it to contracts/openapi/openapi-v1.yaml', and its owner_surfaces list is ['/owner/']. Both halves are therefore required by the declaration itself, not chosen here. The response is bounded by construction because the registry enumerates a three-element closed set, so no pagination, cursor or page_size is introduced -- MaxPageSize and cursors exist for collections that grow, and this one cannot."
+  },
+  {
+   "id": "d11",
+   "decision": "The reported concurrency ceiling is the settable installation limit when one exists and the docs/architecture/validation.md section 5 design ceiling of 20 concurrent Executions when none does, with ceiling_source stating which it is. V2-068 owns the settable limit; whichever of V2-067 and V2-068 lands second wires the registry's ceiling to the shared accessor, and V2-068's Work Order carries that item.",
+   "rationale": "V2-067 depends on V2-017 and V2-068 depends on V2-030, so V2-067 can complete first and must not block on a store it does not own. Reporting the architecture ceiling with its source named is honest and immediately useful; silently reporting 20 as though an owner had chosen it would not be. Naming the follow-up in V2-068's acceptance rather than leaving it implicit is what keeps the two surfaces from drifting into two different ceilings."
+  },
+  {
+   "id": "d12",
+   "decision": "The observation carries no prompt, no response, no session identifier and no free text. provider_observation.failure_class is a closed enum and there is no message, detail or output field on it anywhere in the request DTO, the port, the stored record or the read model, so text is structurally unrepresentable rather than merely filtered.",
+   "rationale": "internal/provider.WorkPacket and internal/runner.ProviderRequest already establish this shape ('no Prompt field exists on this type, so a raw prompt is structurally unrepresentable rather than merely asserted absent'), and internal/runner/source_guard_test.go scans field names for credential shapes. Following the same construction means the guarantee survives a careless future edit: there is no field to put text in, so no redaction step can be forgotten."
+  },
+  {
+   "id": "d13",
+   "decision": "ci/components.json is not edited. The evidence records a measured note for V2-045: this task adds application->store port surface and moves the api, application, store-memory, store-firestore, provider, web, contracts and docs component keys, while ci/components.json declares application's dependencies as [domain] only.",
+   "rationale": "V2-045 is re-issuing the component DAG and the toolchain surface concurrently; two tasks editing that file produce a conflict whose resolution is worse than the note. There is also a measured precedent that the declared DAG already understates reality: internal/application/ports.go imports internal/quota, whose roots ci/components.json assigns to the infra component, with no application->infra edge declared. Recording the note and naming V2-045 as the owner is therefore the consistent action, exactly as dp-v2-030 d12 did for scheduler->domain."
+  }
+ ],
+ "components": [
+  "application",
+  "api",
+  "provider",
+  "store-memory",
+  "store-firestore",
+  "web",
+  "contracts",
+  "docs"
+ ],
+ "verification": [
+  "devbox run --pure -- go test -count=1 ./internal/provider",
+  "devbox run --pure -- go test -count=1 ./internal/application",
+  "devbox run --pure -- go test -count=1 ./internal/api",
+  "devbox run --pure -- go test -count=1 ./internal/store/memory ./internal/store/firestore",
+  "devbox run --pure -- go test -count=1 -race ./internal/application ./internal/api",
+  "devbox run --pure -- go test -count=1 ./internal/contracts",
+  "devbox run --pure -- make component-provider",
+  "devbox run --pure -- make component-application",
+  "devbox run --pure -- make component-api",
+  "devbox run --pure -- make check",
+  "devbox run --pure -- make evidence-keys"
+ ],
+ "risks": [
+  "The registry can only ever report what the Loop's own execution path observed (the boundary V2-062 recorded for the cost ledger). A Provider a human drove by hand leaves no trace, so the surface must say unknown for it; if a reader takes unknown as 'broken' the surface has traded one wrong reading for another. The mitigation is that unknown is documented and rendered with its reason, never as a fault.",
+  "Two of the three Providers are unauthenticated and cannot be authenticated by any agent, so the acceptance for the unauthenticated path must be satisfied with recorded observations and fixtures rather than by making codex or opencode work. Any attempt to satisfy it by invoking a real CLI is out of scope and would consume runaway-detection counters.",
+  "Adding two ports to UnitOfWork obliges both store adapters to implement them. The Firestore adapter's QueueSummary already uses sharded counters and a bounded read budget; a naive per-read scan of assignments would add read cost that docs/architecture/validation.md section 5 gates. The implementation must be a bounded, keyed read, and the measured read count must be recorded.",
+  "Editing contracts/openapi/openapi-v1.yaml moves the contracts component key and is a declared contract dependency of both the api and control-plane components. Only the application and api evidence records are issued here; the remaining key movement is a note for V2-045 under gate rule G6.",
+  "The three-name closed set is pinned in two packages rather than shared by an import. If a fourth Provider is ever added, both tables must change together; the two independent tests are what force that, and the design note must say so plainly."
+ ]
+}

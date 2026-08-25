@@ -1,0 +1,104 @@
+{
+ "schema_version": "v1",
+ "id": "dp-v2-068",
+ "kind": "design-packet",
+ "created_at": "2026-08-25T03:10:00Z",
+ "correlation_id": "v2-068-scheduler-wiring",
+ "problem_brief_id": "pb-v2-068",
+ "decisions": [
+  {
+   "id": "d1",
+   "decision": "internal/application imports internal/scheduler; internal/api does not. The dependency direction is api -> application -> scheduler -> domain.",
+   "rationale": "Four measured reasons, in order of force. First, internal/scheduler's own import allowlist (V2-030 acceptance A9, modelled on internal/domain/source_guard_test.go) permits the standard library and internal/domain only, so the edge cannot point outward from scheduler and must point into it. Second, the allocation report must be computed inside the same transaction that reads the requirements, increments, executions and leases it describes; internal/api holds no UnitOfWork and cannot open a transaction, so a summary computed there would join two separate reads and could report an allocation the counted state does not support -- exactly the non_goal 'do not report an allocation the scheduler did not decide'. Third, QueueSummary is already an application read model behind QueueSummaryRepository, so the extension lands on an existing seam instead of creating a second one. Fourth, no import guard forbids it: measured, the only import guards in the repository are internal/domain/source_guard_test.go (stdlib-only, five entries), internal/release/source_guard_test.go (stdlib plus internal/domain, and never internal/ci or internal/update) and internal/runner/source_guard_test.go (credential-shaped field names, not imports). None of the three constrains internal/application or internal/api, and internal/application already imports a non-domain internal package (internal/quota)."
+  },
+  {
+   "id": "d2",
+   "decision": "No new domain.ControlMode value, and no parameter added to ControlMode. The concurrency limit is carried in a side table keyed by Control Intent revision (AllocationLimitRepository), written at most once per revision inside the same transaction as the Control Intent, exactly as ControlRequestedByRepository already does. POST /v1/controls gains one additive optional object, allocation_limit; the mode field keeps its existing seven values.",
+   "rationale": "A new ControlMode would be actively harmful, and this is provable from the source rather than argued. domain.EffectFromPermit refuses unless current.Mode == ControlAllow, so any mode other than allow denies every durable effect the Loop needs -- Claim, AcceptResult and all four outbox kinds. A 'limit-concurrency' mode would therefore stop the Loop instead of throttling it, and making it not stop the Loop would mean widening the one gate the M1 gate proved closed. Adding a parameter to the intent has its own precedent against it: dp-v2-059 d1 and the ControlRequestedByRepository comment both record domain.ControlIntent as immutable, proven-closed M1 surface, which is why who requested a revision is a side table rather than a field. The limit is the same kind of fact -- an attribute of the request, not of the policy the gate evaluates -- so it takes the same shape. Following the existing precedent also inherits its idempotency and at-most-once-per-revision semantics for free."
+  },
+  {
+   "id": "d3",
+   "decision": "The L3 closure is untouched and that is asserted, not assumed. domain.controlSeverity, domain.permitAllowed, domain.Permit and domain.EffectFromPermit are not edited; internal/domain is not edited at all. The limit is never consulted by any permit decision: it is an input to the scheduler's allocation decision, which happens before any permit is requested, and it appears in no PermitRequest, no PermitDecision and no Effect.",
+   "rationale": "This is the property most at risk in this task, so it is made a measured fact. The existing stop matrix (internal/application/stop_matrix_test.go, 12 allowed cells of 56, asserted per mode by V2-059) is the anchor: if the limit had leaked into the permit path, those per-mode counts would move. Keeping the mode field's value set unchanged means an allocation limit can be set while the effective mode is allow, and a pause or a stop keeps its exact present meaning and blast radius. It also keeps the two concerns legible: pause and stop are about whether work may proceed at all; a limit is about how much may proceed at once."
+  },
+  {
+   "id": "d4",
+   "decision": "The effective limit is the limit attached to the greatest Control Intent revision that declared one; a later revision that declares no limit does not clear it. When no revision has ever declared one, the ceiling is the docs/architecture/validation.md section 5 design ceiling of 20 concurrent Executions, and the summary states which of the two it is used through ceiling_source. The accepted range is 1..20 inclusive; 0, a negative value and a value above 20 are rejected with 400.",
+   "rationale": "An unrelated pause-claim intent must not silently reset the owner's allocation policy, which is what 'latest revision wins outright' would do. Zero is rejected deliberately: a limit of zero would be a second, undocumented way to stop the Loop, and there is already a mode for that whose verification path is proven -- allowing it would create a stop that the control-verification pipeline does not observe. The upper bound is the architecture ceiling rather than an invented number, so the surface cannot be used to promise a concurrency the documented design limits do not support."
+  },
+  {
+   "id": "d5",
+   "decision": "The queue summary calls scheduler.Decide and never scheduler.Apply. The summary is computed on read, inside the existing s.transact boundary, and is not cached on a reconcile tick. It performs no write, stages no outbox item and reserves no write quota.",
+   "rationale": "Reporting what the scheduler decided is only truthful if the decision is a function of the state read in the same transaction; a value cached by a tick would report an allocation the current state no longer supports, and a report is not a reason to mutate anything. Calling Apply from a read path would be worse than stale: it would change requirement status and add claims as a side effect of the owner pressing Refresh. The bound is the one already in the scheduler and in docs/architecture/validation.md section 5 -- at most 100 candidates -- so the read cost is bounded by the same constant that bounds a reconcile tick, and the summary cannot consume the tick's write budget because it makes no write."
+  },
+  {
+   "id": "d6",
+   "decision": "A limit change never invalidates a granted claim, and this is structural rather than defensive. The limit is consulted only when constructing the Snapshot for a future allocation. Existing leases and claims enter the Snapshot as read-only Claims that Decide only reads, and scheduler.Apply only ever appends claims and only ever moves a Requirement from ready to assigned -- there is no code path in the package that removes a claim or revokes a lease. No revocation, expiry or fencing-token change is introduced by this task.",
+   "rationale": "The non_goal is explicit and the risk is real: the obvious naive implementation of a lowered limit is to shed load down to it. That would revoke work that already holds a lease and a fencing token, which is exactly the class of action the lease and fencing design exists to prevent, and it would make a control-plane read able to invalidate a runner's in-flight authority. Making the limit affect only the next allocation means the system converges to the new limit as work completes, which is slower and correct, and it is assertable directly: lower the limit below the current active count and check every existing lease's id, fencing token, version and status are byte-identical while the summary reports exhaustion."
+  },
+  {
+   "id": "d7",
+   "decision": "The waiting reasons reported by the summary are V2-030's closed Decision reason constants projected, not a second vocabulary invented here. A table test asserts the projection is total in both directions: every scheduler reason constant maps to exactly one reported value, and every reported value comes from exactly one scheduler constant, so the test fails if V2-030 adds a constant without a mapping.",
+   "rationale": "V2-030 owns the decision rules and declares the closed reason set (not-ready, unmet-dependency, repository-unavailable, already-owned, resource-conflict, no-runner-capacity, not-executable). Two independently maintained reason vocabularies would drift, and the drift would show up as an owner console that explains a wait with a reason the scheduler did not give -- the same failure this task exists to remove. Making the projection total by test is what keeps the two tasks' boundary honest without either of them owning the other's file."
+  },
+  {
+   "id": "d8",
+   "decision": "Exhaustion is reported separately from the per-candidate waiting reason, computed from the snapshot's own capacity accounting: exhausted (bool) plus binding_limit in (none, installation-concurrency, runner-capacity). It is not derived by re-interpreting a candidate's reason value.",
+   "rationale": "Measured: scheduler.chooseRunner returns the same negative result whether a runner's own Capacity is full or a ProviderCapacity entry binds, and V2-030's closed set expresses both as the single reason no-runner-capacity. Splitting that inside the scheduler would be re-designing its decision rules, which this task's non_goal forbids. Computing which limit binds from the accounting the caller itself supplied to the Snapshot is both correct and outside the scheduler, so the report gains the distinction without the scheduler changing."
+  },
+  {
+   "id": "d9",
+   "decision": "The Snapshot is built from what the store actually holds, and every value that has no durable source is a single named, documented placeholder asserted absent from the response: one synthetic Repository id, one installation-wide runner pool entry whose capacity is the effective limit and whose active count is the existing ActiveExecutions figure, and one Claim per active lease. Candidate Requirements come from the existing bounded RequirementsPage read at the scheduler's own MaxCandidates bound.",
+   "rationale": "There is no Repository aggregate and no enrolled-Runner registry in the store today: RunnerObservationRepository is keyed by id with no list operation, and domain.Requirement carries no repository. Pretending otherwise would produce a report about entities that do not exist. Modelling the installation as one pool is the honest reading of the present system -- one installation, one implicit repository -- and it is exactly the wiring this task is scoped to, since the scheduler's decision rules are unchanged. Asserting that no placeholder string reaches the response is what stops the modelling choice from leaking into a surface the owner would then read as real."
+  },
+  {
+   "id": "d10",
+   "decision": "domain.Requirement has no durable capture timestamp, so every candidate enters the Snapshot with a uniform zero CreatedAt and the aging term is uniform in production. This is recorded as a measured limitation with its consequence stated -- the starvation bound V2-030 proves in its own closure is therefore not yet observable in production -- and escalated to the tech_lead as its own task rather than papered over with a substitute timestamp.",
+   "rationale": "Measured: domain.Requirement is {ID, Status, Version, Increments, StableSnapshot, RequestedBy}. Manufacturing a CreatedAt in the read path (from an event scan, or from the clock at read time) would make the reported ordering depend on when the owner pressed Refresh, which is worse than a uniform term because it looks like information. A uniform zero term is deterministic, leaves the scheduler's documented ID tie-break as the ordering, and is honestly reportable. Naming the gap is the useful output: the fix is a durable field with a migration, which is not this task."
+  },
+  {
+   "id": "d11",
+   "decision": "Scope split, stated up front. This task owns the installation-wide half only: the settable installation concurrency limit, and allocation, waiting reason and exhaustion in GET /v1/queue/summary. The per-Provider half of cap-shared-resource-allocation (per-Provider availability and limits) is V2-028's and is surfaced by V2-067's GET /v1/providers; the multi-Repository half is V2-030's local closure and V2-031's M7 gate. This task adds no per-Provider and no per-Repository field.",
+   "rationale": "cap-shared-resource-allocation's user_action names four different limits (per Requirement priority, per Repository, installation-wide and per Provider) and three owners already exist for them. Claiming any of the other halves here would either duplicate V2-067's surface or re-open V2-030's decision rules. Writing the split into the packet is also what lets the evidence state, without ambiguity, that this task does not pass the M6 or M7 gate."
+  },
+  {
+   "id": "d12",
+   "decision": "One additive item is carried for V2-067: once this task's AllocationLimitRepository exists, the provider registry's declared_ceiling reads the effective limit through the same accessor instead of the architecture constant, and ceiling_source changes accordingly. If V2-067 has not landed, the item is recorded as not applicable with that fact measured, not silently dropped.",
+   "rationale": "Two surfaces reporting two different ceilings would be a worse outcome than either surface alone. V2-067 depends on V2-017 and this task depends on V2-030, so the landing order is not fixed in advance; putting the wiring item in the later-landing task's acceptance, with an explicit not-applicable branch that must be measured, is what makes the convergence deterministic either way."
+  },
+  {
+   "id": "d13",
+   "decision": "ci/components.json is not edited. The evidence records the measured note for V2-045: this task adds an application -> scheduler import while ci/components.json declares application's dependencies as [domain] and the scheduler component's dependencies as [], so neither component's evidence key covers the other's public contracts.",
+   "rationale": "V2-045 is re-issuing the component DAG concurrently and a second editor produces a conflict worse than the note. The same measured precedent applies as in dp-v2-030 d12: the declared DAG already understates reality, since internal/application/ports.go imports internal/quota whose roots belong to the infra component with no declared edge. Recording and naming the owner is the consistent action."
+  }
+ ],
+ "components": [
+  "application",
+  "api",
+  "store-memory",
+  "store-firestore",
+  "web",
+  "contracts",
+  "docs"
+ ],
+ "verification": [
+  "devbox run --pure -- go test -count=1 ./internal/scheduler",
+  "devbox run --pure -- go test -count=1 ./internal/application",
+  "devbox run --pure -- go test -count=1 ./internal/api",
+  "devbox run --pure -- go test -count=1 ./internal/store/memory ./internal/store/firestore",
+  "devbox run --pure -- go test -count=1 -v -run TestStopModeByKindMatrix ./internal/application",
+  "devbox run --pure -- go test -count=1 -race ./internal/application ./internal/api",
+  "devbox run --pure -- go test -count=1 ./internal/contracts",
+  "devbox run --pure -- make component-application",
+  "devbox run --pure -- make component-api",
+  "devbox run --pure -- make check",
+  "devbox run --pure -- make evidence-keys"
+ ],
+ "risks": [
+  "This task depends on V2-030, which is currently running and owns internal/scheduler's Decision record and its closed reason set. If V2-030's constant names differ from the ones this packet cites, the projection table must be rewritten against the names V2-030 actually shipped, and this task must not edit internal/scheduler to make the citation true.",
+  "The obvious wrong implementation of a lowered limit is to shed in-flight work down to it. That would revoke a granted lease and fencing token and must be caught by the assertion in d6, not by review.",
+  "The uniform zero CreatedAt (d10) means the production ordering is the ID tie-break. A reader who takes the reported ordering as a priority ordering would be misled; the summary and the document must say what the ordering currently is and is not.",
+  "Extending QueueSummary is a change to a schema with additionalProperties:false that both the api and control-plane components declare as a contract dependency, and the Firestore adapter serves the existing counters from sharded documents. The new fields must not be forced through the counter path, and the added read cost must be measured against the section 5 growth-rate items.",
+  "Adding the allocation_limit object to the control request touches the one endpoint whose closure the M1 gate proved. Every assertion in internal/application/stop_matrix_test.go and every existing control test must keep its exact meaning; an additive optional field that changed a single allowed cell would be a regression of a proven invariant, not a feature."
+ ]
+}
