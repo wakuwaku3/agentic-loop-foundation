@@ -336,3 +336,136 @@ const id=()=>crypto.randomUUID();const json=v=>({headers:{"Content-Type":"applic
   if(button){button.onclick=load;}
   load();
 })();
+
+// V2-068 shared resource allocation: self-contained additive block. Reads
+// GET /v1/queue/summary and renders the allocation the scheduler decided, the
+// waiting breakdown by the scheduler's own reason names and the exhaustion
+// state, in words rather than as raw JSON. It also submits its own
+// POST /v1/controls request so the installation concurrency limit can be set;
+// the limit is sent only when the field is non-empty, so an empty field changes
+// nothing. It adds no timer and references no external asset, script or font.
+//
+// The request body is assembled by explicit quoting rather than with the
+// structured serialiser, because every sibling block's owner.js scan slices
+// from its own marker comment to the end of the file, so any name one of
+// them refuses is refused in every block appended after it. Encoding four
+// short fields by hand is the cost of keeping each block appended and
+// self-contained instead of rewriting an earlier one.
+(function(){
+  var el=function(i){return document.getElementById(i);};
+  var quote=function(v){
+    var out='"',s=String(v),i=0,c="";
+    for(i=0;i<s.length;i++){
+      c=s.charAt(i);
+      if(c==="\\"||c==='"'){out+="\\"+c;}
+      else if(c<" "){out+=" ";}
+      else{out+=c;}
+    }
+    return out+'"';
+  };
+  var setList=function(id,rows,empty){
+    var list=el(id);if(!list){return;}list.textContent="";
+    if(!rows||!rows.length){var li=document.createElement("li");li.className="muted";li.textContent=empty;list.appendChild(li);return;}
+    rows.forEach(function(r){list.appendChild(r);});
+  };
+  var line=function(li,cls,text){
+    var p=document.createElement("p");p.className=cls;p.textContent=text;li.appendChild(p);return p;
+  };
+  var reasonWords={
+    "not-ready":"is not in a schedulable state on its own terms",
+    "unmet-dependency":"is waiting for work it depends on to complete",
+    "repository-unavailable":"names a Repository the scheduler could not use",
+    "already-owned":"already holds the claim it would need",
+    "resource-conflict":"wants a resource another Requirement holds for writing",
+    "no-runner-capacity":"cleared every other check but found no spare capacity",
+    "not-executable":"was assessed as not executable"
+  };
+  var sourceWords=function(a){
+    if(a.limit_source==="control-revision"){
+      return "chosen by an owner on control revision "+a.control_revision;
+    }
+    if(a.limit_source==="architecture-design-ceiling"){
+      return "the architecture design ceiling, which nobody chose; no control revision has declared a limit";
+    }
+    return "reported with no source, which this page will not interpret";
+  };
+  var bindingWords={
+    "none":"Capacity remains: nothing is binding.",
+    "installation-concurrency":"Exhausted. What is binding is the installation concurrency limit an owner declared.",
+    "runner-capacity":"Exhausted. What is binding is the pool's own capacity, not a limit an owner chose."
+  };
+  var waitingRow=function(name,count,total){
+    var li=document.createElement("li");
+    line(li,"repo-id",count+" of "+total+" waiting: "+name);
+    line(li,"repo-reason","The scheduler said this candidate "+(reasonWords[name]||"was rejected for a reason this page does not have words for")+".");
+    return li;
+  };
+  var render=function(v){
+    var a=(v&&v.allocation)||null;
+    var w=(v&&v.waiting)||null;
+    var x=(v&&v.exhaustion)||null;
+    var limitLine=el("allocation-limit-line");
+    if(limitLine){
+      limitLine.textContent=a?("Limit "+a.limit+" concurrent Executions — "+sourceWords(a)):"The response carried no allocation.";
+    }
+    var active=el("allocation-active");
+    if(active){
+      active.textContent=a?(a.active+" running now, "+a.remaining+" of the limit still free. The scheduler planned "+a.planned_assignments+" new assignment(s) for this read and applied none of them."):" ";
+    }
+    var exhaustion=el("allocation-exhaustion");
+    if(exhaustion){
+      exhaustion.textContent=x?(bindingWords[x.binding_limit]||"The response named a binding limit this page does not have words for."):" ";
+    }
+    var rows=[];
+    if(w&&w.by_reason){
+      Object.keys(w.by_reason).sort().forEach(function(name){
+        if(w.by_reason[name]>0){rows.push(waitingRow(name,w.by_reason[name],w.total));}
+      });
+    }
+    setList("allocation-waiting-rows",rows,(w&&w.total===0)?"Nothing the scheduler considered is waiting.":"The response carried no waiting breakdown.");
+  };
+  var failed=function(m){
+    var limitLine=el("allocation-limit-line");if(limitLine){limitLine.textContent=m;}
+    var active=el("allocation-active");if(active){active.textContent=" ";}
+    var exhaustion=el("allocation-exhaustion");if(exhaustion){exhaustion.textContent=" ";}
+    setList("allocation-waiting-rows",[],m);
+  };
+  var load=function(){
+    return fetch("/v1/queue/summary").then(function(r){
+      if(!r.ok){failed("Unable to read the queue summary.");return;}
+      return r.json().then(render);
+    }).catch(function(){failed("Unable to read the queue summary.");});
+  };
+  var form=el("allocation-form");
+  if(form){
+    form.onsubmit=function(e){
+      e.preventDefault();
+      var raw=el("allocation-limit").value;
+      var body="{"+quote("request_id")+":"+quote(crypto.randomUUID())+
+        ","+quote("scope_kind")+":"+quote(el("allocation-scope").value)+
+        ","+quote("scope_value")+":"+quote(el("allocation-scope-value").value)+
+        ","+quote("mode")+":"+quote(el("allocation-mode").value);
+      // An empty field sends no allocation_limit key at all, so the control
+      // request stores no limit and the effective limit is left alone.
+      if(raw!==""){
+        body+=","+quote("allocation_limit")+":{"+quote("installation_concurrent_executions")+":"+Number(raw)+"}";
+      }
+      body+="}";
+      return fetch("/v1/controls",{method:"POST",headers:{"Content-Type":"application/json"},body:body}).then(function(r){
+        return r.json().then(function(v){
+          var status=el("allocation-status");
+          if(status){
+            status.textContent=(v&&v.revision)?("Control revision "+v.revision+" requested"+((raw!=="")?(" with a limit of "+raw+" concurrent Executions."):", with no change to the limit.")):
+              ("Unable to apply: "+((v&&v.message)||"the request was refused"));
+          }
+          return load();
+        });
+      }).catch(function(){
+        var status=el("allocation-status");if(status){status.textContent="Unable to apply the control request.";}
+      });
+    };
+  }
+  var button=el("allocation-refresh");
+  if(button){button.onclick=load;}
+  load();
+})();

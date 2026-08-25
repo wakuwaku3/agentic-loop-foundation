@@ -1275,3 +1275,232 @@ func TestRequirementCaptureTimeRollbackLeaksNothing(t *testing.T) {
 		t.Fatal("the Requirement leaked")
 	}
 }
+
+// ===========================================================================
+// V2-068: the installation concurrency limit side table, and the read cost of
+// one GET /v1/queue/summary
+// ===========================================================================
+
+// TestAllocationLimitSideTableIsKeyedByRevisionAndWriteOnce is the adapter half
+// of A4: the Firestore store must implement the same contract the memory store
+// does, so the memory store cannot pass behaviour this one does not.
+func TestAllocationLimitSideTableIsKeyedByRevisionAndWriteOnce(t *testing.T) {
+	store := emulatorStore(t)
+	ctx := context.Background()
+
+	// A row is keyed by its revision and reads back exactly.
+	if err := store.Transact(ctx, func(u application.UnitOfWork) error {
+		return u.SaveAllocationLimit(ctx, application.AllocationLimit{Revision: 4, InstallationConcurrentExecutions: 6})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Transact(ctx, func(u application.UnitOfWork) error {
+		row, ok, e := u.AllocationLimit(ctx, 4)
+		if e != nil {
+			return e
+		}
+		if !ok || row.Revision != 4 || row.InstallationConcurrentExecutions != 6 {
+			t.Fatalf("row = %#v ok=%v", row, ok)
+		}
+		// A revision with no row is an absence, never a defaulted value.
+		if _, ok, e = u.AllocationLimit(ctx, 5); e != nil {
+			return e
+		} else if ok {
+			t.Fatal("revision 5 declared no limit but a row was returned")
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// An identical re-write is an idempotent replay.
+	if err := store.Transact(ctx, func(u application.UnitOfWork) error {
+		return u.SaveAllocationLimit(ctx, application.AllocationLimit{Revision: 4, InstallationConcurrentExecutions: 6})
+	}); err != nil {
+		t.Fatalf("an identical re-write was refused: %v", err)
+	}
+	// A second write for the same revision naming a different limit is a
+	// conflict, and it leaves the stored row alone.
+	if err := store.Transact(ctx, func(u application.UnitOfWork) error {
+		return u.SaveAllocationLimit(ctx, application.AllocationLimit{Revision: 4, InstallationConcurrentExecutions: 7})
+	}); !errors.Is(err, domain.ErrStaleVersion) {
+		t.Fatalf("a changed limit on the same revision returned %v, want a stale-version conflict", err)
+	}
+	if err := store.Transact(ctx, func(u application.UnitOfWork) error {
+		row, ok, e := u.AllocationLimit(ctx, 4)
+		if e != nil {
+			return e
+		}
+		if !ok || row.InstallationConcurrentExecutions != 6 {
+			t.Fatalf("the refused write changed the stored row: %#v ok=%v", row, ok)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Shape refusals: no revision, and an out-of-range limit.
+	for _, bad := range []application.AllocationLimit{
+		{Revision: 0, InstallationConcurrentExecutions: 3},
+		{Revision: 9, InstallationConcurrentExecutions: 0},
+		{Revision: 9, InstallationConcurrentExecutions: -1},
+		{Revision: 9, InstallationConcurrentExecutions: 21},
+	} {
+		value := bad
+		if err := store.Transact(ctx, func(u application.UnitOfWork) error {
+			return u.SaveAllocationLimit(ctx, value)
+		}); err == nil {
+			t.Fatalf("the adapter accepted %#v", value)
+		}
+	}
+}
+
+// TestEffectiveAllocationLimitIsTheGreatestDeclaringRevision is the adapter half
+// of A6, including the clause that matters most: a later revision that declares
+// no limit does not clear an earlier one.
+func TestEffectiveAllocationLimitIsTheGreatestDeclaringRevision(t *testing.T) {
+	store := emulatorStore(t)
+	ctx := context.Background()
+
+	// Nothing declared: an absence, not a zero.
+	if err := store.Transact(ctx, func(u application.UnitOfWork) error {
+		row, ok, e := u.EffectiveAllocationLimit(ctx)
+		if e != nil {
+			return e
+		}
+		if ok {
+			t.Fatalf("an empty side table reported an effective limit: %#v", row)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Revisions 2 and 5 declare limits; 3, 4 and 6 declare none, so they simply
+	// have no row at all.
+	for _, row := range []application.AllocationLimit{
+		{Revision: 2, InstallationConcurrentExecutions: 3},
+		{Revision: 5, InstallationConcurrentExecutions: 11},
+	} {
+		value := row
+		if err := store.Transact(ctx, func(u application.UnitOfWork) error {
+			return u.SaveAllocationLimit(ctx, value)
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.Transact(ctx, func(u application.UnitOfWork) error {
+		row, ok, e := u.EffectiveAllocationLimit(ctx)
+		if e != nil {
+			return e
+		}
+		if !ok || row.Revision != 5 || row.InstallationConcurrentExecutions != 11 {
+			t.Fatalf("effective limit = %#v ok=%v, want revision 5's limit of 11", row, ok)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// A row written earlier in the SAME transaction is visible to the resolution
+	// read, so a Control request that declares a limit resolves to its own.
+	if err := store.Transact(ctx, func(u application.UnitOfWork) error {
+		if e := u.SaveAllocationLimit(ctx, application.AllocationLimit{Revision: 9, InstallationConcurrentExecutions: 2}); e != nil {
+			return e
+		}
+		row, ok, e := u.EffectiveAllocationLimit(ctx)
+		if e != nil {
+			return e
+		}
+		if !ok || row.Revision != 9 || row.InstallationConcurrentExecutions != 2 {
+			t.Fatalf("a limit staged in this transaction is invisible to the resolution read: %#v ok=%v", row, ok)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestQueueSummaryReadCostAtTenFiftyAndOneHundredCandidates is A13 (c). The
+// numbers are OBSERVATIONS and nothing here asserts a threshold on them: the
+// trued-up quota total is the adapter's own record of the documents a
+// transaction actually read (trueUpQuota uses len(u.cache)), so the delta across
+// one GET /v1/queue/summary is the measured read count.
+//
+// The one thing that IS asserted is the write count, because "this read writes
+// nothing" is a property rather than a budget: the only document written is the
+// quota reservation every bounded owner read already writes.
+func TestQueueSummaryReadCostAtTenFiftyAndOneHundredCandidates(t *testing.T) {
+	at := time.Unix(1700000000, 0).UTC()
+	measure := func(candidates int) (reads, writes int64, reported int) {
+		store := emulatorStore(t)
+		svc, err := application.NewServiceWithConfig(store, integrationClock{now: at}, &integrationIDs{}, application.ServiceConfig{InstallationID: "install", LeaseTTL: time.Minute})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ctx := context.Background()
+		for i := 0; i < candidates; i++ {
+			if _, err := svc.Capture(integrationOwner(ctx), application.CaptureRequest{RequestID: fmt.Sprintf("cap-%04d", i), Text: "work"}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		before, err := readQuotaRecord(ctx, store, at)
+		if err != nil {
+			t.Fatal(err)
+		}
+		summary, err := svc.QueueSummary(integrationOwner(ctx))
+		if err != nil {
+			t.Fatal(err)
+		}
+		after, err := readQuotaRecord(ctx, store, at)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return after.Total.Reads - before.Total.Reads, after.Total.Writes - before.Total.Writes, summary.Requirements
+	}
+
+	observations := map[int]int64{}
+	for _, candidates := range []int{10, 50, 100} {
+		reads, writes, reported := measure(candidates)
+		if reported != candidates {
+			t.Fatalf("with %d candidates the summary reported %d Requirements", candidates, reported)
+		}
+		if writes != 1 {
+			t.Fatalf("one GET /v1/queue/summary wrote %d documents with %d candidates, want exactly the quota record", writes, candidates)
+		}
+		observations[candidates] = reads
+		t.Logf("observation: one GET /v1/queue/summary read %d documents with %d candidates, and wrote %d (the quota record only)", reads, candidates, writes)
+	}
+	t.Logf("observations only, never asserted as a threshold: reads at 10/50/100 candidates = %d/%d/%d", observations[10], observations[50], observations[100])
+
+	// The boundedness claim itself, which is a PROPERTY and not a budget: below
+	// the scheduler's candidate bound the read cost grows with the page, and
+	// BEYOND the bound it stops growing, because the page read is bounded in the
+	// storage query. Two measurements taken at DIFFERENT sizes both beyond the
+	// bound must therefore be equal. This asserts equality between two
+	// measurements and never a ceiling on either.
+	//
+	// MEASURED, and worth stating precisely rather than rounding off: the figure
+	// beyond the bound is one document HIGHER than the figure at exactly the
+	// bound, because RequirementsPage asks the storage query for limit+1 rows in
+	// order to report whether more exist. At exactly 100 stored Requirements
+	// there is no 101st document for that probe to find; at any larger count
+	// there is exactly one, and never more. So the honest statement is "bounded
+	// by a constant beyond the bound", not "equal to the figure at the bound".
+	first, firstWrites, firstReported := measure(application.MaxPageSize + 50)
+	second, secondWrites, secondReported := measure(application.MaxPageSize + 200)
+	if firstReported != application.MaxPageSize+50 || secondReported != application.MaxPageSize+200 {
+		t.Fatalf("the fixtures beyond the bound reported %d and %d Requirements", firstReported, secondReported)
+	}
+	if firstWrites != 1 || secondWrites != 1 {
+		t.Fatalf("one GET /v1/queue/summary wrote %d and %d documents beyond the bound", firstWrites, secondWrites)
+	}
+	if first != second {
+		t.Fatalf("read cost is %d at %d candidates and %d at %d; beyond the candidate bound it must not grow with the Requirement count",
+			first, application.MaxPageSize+50, second, application.MaxPageSize+200)
+	}
+	if first != observations[100]+1 {
+		t.Fatalf("read cost beyond the bound is %d and at the bound it is %d; the difference must be exactly the one more-rows probe", first, observations[100])
+	}
+	t.Logf("observation: %d and %d candidates both read %d documents -- one more than the %d read at exactly the bound, which is the single more-rows probe -- so the cost is bounded by a constant beyond the scheduler's own candidate bound",
+		application.MaxPageSize+50, application.MaxPageSize+200, first, observations[100])
+}

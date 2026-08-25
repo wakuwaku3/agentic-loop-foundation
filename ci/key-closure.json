@@ -26,6 +26,7 @@
         "reconciler",
         "release",
         "runner",
+        "scheduler",
         "store-firestore",
         "store-memory",
         "update",
@@ -59,6 +60,7 @@
         "internal/reconciler/**",
         "internal/release/**",
         "internal/runner/**",
+        "internal/scheduler/**",
         "internal/store/firestore/**",
         "internal/store/memory/**",
         "internal/update/**",
@@ -76,6 +78,7 @@
         "infra",
         "internal-contracts",
         "release",
+        "scheduler",
         "store-memory"
       ],
       "patterns": [
@@ -97,6 +100,7 @@
         "internal/domain/**",
         "internal/quota/**",
         "internal/release/**",
+        "internal/scheduler/**",
         "internal/store/memory/**",
         "scripts/**"
       ]
@@ -138,6 +142,7 @@
         "reconciler",
         "release",
         "runner",
+        "scheduler",
         "store-firestore",
         "store-memory",
         "update",
@@ -171,6 +176,7 @@
         "internal/reconciler/**",
         "internal/release/**",
         "internal/runner/**",
+        "internal/scheduler/**",
         "internal/store/firestore/**",
         "internal/store/memory/**",
         "internal/update/**",
@@ -280,6 +286,7 @@
         "reconciler",
         "release",
         "runner",
+        "scheduler",
         "store-memory",
         "update"
       ],
@@ -307,6 +314,7 @@
         "internal/reconciler/**",
         "internal/release/**",
         "internal/runner/**",
+        "internal/scheduler/**",
         "internal/store/memory/**",
         "internal/update/**",
         "scripts/**"
@@ -351,6 +359,7 @@
         "reconciler",
         "release",
         "runner",
+        "scheduler",
         "store-memory",
         "update"
       ],
@@ -378,6 +387,7 @@
         "internal/reconciler/**",
         "internal/release/**",
         "internal/runner/**",
+        "internal/scheduler/**",
         "internal/store/memory/**",
         "internal/update/**",
         "scripts/**"
@@ -407,6 +417,7 @@
         "reconciler",
         "release",
         "runner",
+        "scheduler",
         "store-firestore",
         "store-memory",
         "update"
@@ -436,6 +447,7 @@
         "internal/reconciler/**",
         "internal/release/**",
         "internal/runner/**",
+        "internal/scheduler/**",
         "internal/store/firestore/**",
         "internal/store/memory/**",
         "internal/update/**",
@@ -452,6 +464,7 @@
         "infra",
         "internal-contracts",
         "release",
+        "scheduler",
         "store-memory"
       ],
       "patterns": [
@@ -473,6 +486,7 @@
         "internal/domain/**",
         "internal/quota/**",
         "internal/release/**",
+        "internal/scheduler/**",
         "internal/store/memory/**",
         "scripts/**"
       ]

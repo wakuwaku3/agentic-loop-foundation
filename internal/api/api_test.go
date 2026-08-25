@@ -11,8 +11,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -1781,4 +1783,495 @@ func domainRequirementID(id string) (domain.RequirementID, error) { return domai
 
 func requirementWithNoCaptureTime(id domain.RequirementID) domain.Requirement {
 	return domain.Requirement{ID: id, Status: domain.RequirementCaptured, Version: 1}
+}
+
+// ===========================================================================
+// V2-068: the allocation surface, the import boundary and the untouched packages
+// ===========================================================================
+
+// --- the import boundary ----------------------------------------------------
+
+// schedulerImportPathForAPI is assembled from internalPackagePrefix for the
+// reason that variable's own comment records: a full module-path literal here
+// would be read by ci/components.json's dependency derivation as an api ->
+// scheduler edge, which is the very thing this guard asserts does not exist.
+var schedulerImportPathForAPI = internalPackagePrefix + "scheduler"
+
+// isSchedulerImport matches the exact path or that path followed by a slash.
+// Prefix-without-slash matching would make "scheduler" forbid "schedulerless".
+func isSchedulerImport(path string) bool {
+	return path == schedulerImportPathForAPI || strings.HasPrefix(path, schedulerImportPathForAPI+"/")
+}
+
+// TestAPIDoesNotImportTheScheduler is V2-068 A3. internal/application imports
+// internal/scheduler because the allocation report must be computed inside the
+// transaction that reads the state it describes, and internal/api holds no
+// UnitOfWork and cannot open one. The edge must therefore point into the
+// scheduler through the application layer and nowhere else.
+func TestAPIDoesNotImportTheScheduler(t *testing.T) {
+	// The matcher is verified against a known-positive and a known-negative
+	// before the scan trusts it.
+	for _, positive := range []string{schedulerImportPathForAPI, schedulerImportPathForAPI + "/sub"} {
+		if !isSchedulerImport(positive) {
+			t.Fatalf("known-positive %q was not detected", positive)
+		}
+	}
+	for _, negative := range []string{
+		"net/http",
+		internalPackagePrefix + "application",
+		internalPackagePrefix + "domain",
+		internalPackagePrefix + "schedulerless",
+	} {
+		if isSchedulerImport(negative) {
+			t.Fatalf("known-negative %q was flagged", negative)
+		}
+	}
+	// Positive control on the scan itself: a synthetic file that does import
+	// the scheduler must be reported.
+	src := "package api\n\nimport (\n\t\"net/http\"\n\t_ \"" + schedulerImportPathForAPI + "\"\n)\n\nvar _ = http.StatusOK\n"
+	file, err := parser.ParseFile(token.NewFileSet(), "synthetic_scheduler.go", src, parser.ImportsOnly)
+	if err != nil {
+		t.Fatal(err)
+	}
+	flagged := false
+	for _, path := range importPathsOf(file) {
+		if isSchedulerImport(path) {
+			flagged = true
+		}
+	}
+	if !flagged {
+		t.Fatal("positive control: a synthetic file importing internal/scheduler was not flagged")
+	}
+
+	// apiPackageImports fails outright on a zero-file scan, so this cannot
+	// pass vacuously.
+	files := apiPackageImports(t)
+	total := 0
+	for name, paths := range files {
+		total += len(paths)
+		for _, path := range paths {
+			if isSchedulerImport(path) {
+				t.Errorf("%s imports %q; the scheduler is reached through internal/application only", name, path)
+			}
+		}
+	}
+	if total == 0 {
+		t.Fatal("scanned zero import paths")
+	}
+	t.Logf("api scheduler-import guard scanned %d non-test files and %d import paths, and found no edge", len(files), total)
+}
+
+// TestTheUntouchablePackagesAreUntouched is V2-068 A7's first proof, and it
+// lives here rather than in internal/application because V2-067's probe guard
+// forbids os/exec in every file of that package, test files included. That
+// guard is correct and is not weakened; this assertion was moved instead.
+//
+// The L3 permit closure cannot have moved if the files that hold it did not
+// change, and git is the authority on that rather than a reading of a diff.
+func TestTheUntouchablePackagesAreUntouched(t *testing.T) {
+	root, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, dir := range []string{"internal/domain", "internal/scheduler", "internal/application/stop_matrix_test.go", "contracts/release-contract"} {
+		// Both the working tree and the index are compared against HEAD, so a
+		// change that was staged is caught as well as one that was not.
+		for _, args := range [][]string{
+			{"diff", "--stat", "HEAD", "--", dir},
+			{"diff", "--stat", "--cached", "HEAD", "--", dir},
+		} {
+			out, err := exec.Command("git", append([]string{"-C", root}, args...)...).CombinedOutput()
+			if err != nil {
+				t.Skipf("git %v over %s could not run (%v); recorded as skipped, never counted as a pass", args, dir, err)
+			}
+			if strings.TrimSpace(string(out)) != "" {
+				t.Fatalf("%s changed (git %v):\n%s", dir, args, out)
+			}
+		}
+		t.Logf("%s: zero changed files in the working tree and in the index", dir)
+	}
+}
+
+// --- the route --------------------------------------------------------------
+
+// TestQueueSummaryRouteAuthorizationIsUnchanged is V2-068 A15's transport half:
+// the three authorization outcomes are exactly what they were before the three
+// objects were added.
+func TestQueueSummaryRouteAuthorizationIsUnchanged(t *testing.T) {
+	h := testHandler(t)
+	if w := call(h, http.MethodGet, "/v1/queue/summary", "", ""); w.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated status=%d body=%s", w.Code, w.Body.String())
+	}
+	if w := call(h, http.MethodGet, "/v1/queue/summary", "", "runner"); w.Code != http.StatusForbidden {
+		t.Fatalf("runner status=%d body=%s", w.Code, w.Body.String())
+	}
+	w := call(h, http.MethodGet, "/v1/queue/summary", "", "owner")
+	if w.Code != http.StatusOK {
+		t.Fatalf("owner status=%d body=%s", w.Code, w.Body.String())
+	}
+	var body map[string]json.RawMessage
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("not json: %s", w.Body.String())
+	}
+	for _, want := range []string{"requirements", "by_requirement_status", "increments", "by_increment_status", "active_executions", "allocation", "waiting", "exhaustion"} {
+		if _, ok := body[want]; !ok {
+			t.Fatalf("the response has no %q key: %s", want, w.Body.String())
+		}
+	}
+	if len(body) != 8 {
+		t.Fatalf("the response has %d keys, want 8: %s", len(body), w.Body.String())
+	}
+	// No placeholder the Snapshot modelling needed may reach the wire. The scan
+	// is verified first against a body that does contain one.
+	raw := w.Body.String()
+	placeholders := application.AllocationSnapshotPlaceholders()
+	if len(placeholders) == 0 {
+		t.Fatal("the placeholder list is empty; the scan would pass vacuously")
+	}
+	for _, placeholder := range placeholders {
+		if placeholder == "" {
+			t.Fatal("a placeholder is the empty string; the scan would match everything")
+		}
+		if !strings.Contains(`{"x":"`+placeholder+`"}`, placeholder) {
+			t.Fatalf("positive control failed for %q", placeholder)
+		}
+		if strings.Contains(raw, placeholder) {
+			t.Fatalf("the response carries the modelling placeholder %q: %s", placeholder, raw)
+		}
+	}
+	t.Logf("401/403/200 unchanged; none of the %d modelling placeholders reaches the response", len(placeholders))
+}
+
+// TestControlAcceptsTheOptionalLimitAndStillRejectsUnknownFields is the rest of
+// A15's request half.
+func TestControlAcceptsTheOptionalLimitAndStillRejectsUnknownFields(t *testing.T) {
+	h := testHandler(t)
+	// The field is optional: a body without it still succeeds.
+	w := call(h, http.MethodPost, "/v1/controls", `{"request_id":"c1","scope_kind":"installation","scope_value":"install","mode":"allow"}`, "owner")
+	if w.Code != http.StatusOK {
+		t.Fatalf("control without the limit: status=%d body=%s", w.Code, w.Body.String())
+	}
+	// And with it.
+	w = call(h, http.MethodPost, "/v1/controls", `{"request_id":"c2","scope_kind":"installation","scope_value":"install","mode":"allow","allocation_limit":{"installation_concurrent_executions":6}}`, "owner")
+	if w.Code != http.StatusOK {
+		t.Fatalf("control with the limit: status=%d body=%s", w.Code, w.Body.String())
+	}
+	// Out of range is a 400 and the response body is an error, not a revision.
+	for _, bad := range []string{"0", "-1", "21"} {
+		w = call(h, http.MethodPost, "/v1/controls", `{"request_id":"c-bad-`+bad+`","scope_kind":"installation","scope_value":"install","mode":"allow","allocation_limit":{"installation_concurrent_executions":`+bad+`}}`, "owner")
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("limit %s: status=%d body=%s", bad, w.Code, w.Body.String())
+		}
+	}
+	// An unknown field inside the new object is still rejected.
+	w = call(h, http.MethodPost, "/v1/controls", `{"request_id":"c3","scope_kind":"installation","scope_value":"install","mode":"allow","allocation_limit":{"installation_concurrent_executions":6,"per_repository":2}}`, "owner")
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("unknown field inside allocation_limit: status=%d body=%s", w.Code, w.Body.String())
+	}
+	// And at the top level.
+	w = call(h, http.MethodPost, "/v1/controls", `{"request_id":"c4","scope_kind":"installation","scope_value":"install","mode":"allow","allocation":{"limit":6}}`, "owner")
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("unknown top-level field: status=%d body=%s", w.Code, w.Body.String())
+	}
+	// A different POST body's unknown-field refusal is unchanged too.
+	w = call(h, http.MethodPost, "/v1/requirements", `{"request_id":"r1","text":"x","allocation_limit":{"installation_concurrent_executions":6}}`, "owner")
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("unknown field on the capture body: status=%d body=%s", w.Code, w.Body.String())
+	}
+}
+
+// TestOpenAPIDeclaresTheAllocationSurfaceExactly is A15's contract half. It
+// compares the openapi document's required lists against the Go structs' own
+// json tags, so the two cannot drift.
+func TestOpenAPIDeclaresTheAllocationSurfaceExactly(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "contracts", "openapi", "openapi-v1.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	document := string(data)
+	for _, want := range []string{
+		"QueueSummaryResponse:",
+		"QueueAllocation:",
+		"QueueWaiting:",
+		"QueueExhaustion:",
+		"AllocationLimitRequest:",
+		"$ref: '#/components/schemas/QueueSummaryResponse'",
+		"allocation_limit: {$ref: '#/components/schemas/AllocationLimitRequest'}",
+	} {
+		if !strings.Contains(document, want) {
+			t.Fatalf("the openapi document does not declare %q", want)
+		}
+	}
+	// additionalProperties:false on every new object.
+	for _, schema := range []string{"QueueSummaryResponse", "QueueAllocation", "QueueWaiting", "QueueExhaustion", "AllocationLimitRequest"} {
+		block := openAPISchemaBlock(t, document, schema)
+		if !strings.Contains(block, "additionalProperties: false") {
+			t.Fatalf("schema %s does not declare additionalProperties: false:\n%s", schema, block)
+		}
+	}
+	// The five pre-existing QueueSummary fields still carry their own names in
+	// the shared schema, which GET /v1/repositories/{id} still points at.
+	shared := openAPISchemaBlock(t, document, "QueueSummary")
+	for _, want := range []string{"requirements", "by_requirement_status", "increments", "by_increment_status", "active_executions"} {
+		if !strings.Contains(shared, want) {
+			t.Fatalf("the shared QueueSummary schema lost %q", want)
+		}
+	}
+	if strings.Contains(shared, "allocation") {
+		t.Fatalf("the shared QueueSummary schema gained an allocation field; installation_scope cannot populate it:\n%s", shared)
+	}
+
+	// Every json tag of the response struct appears in the response schema's
+	// required list, and nothing else does.
+	declared := openAPIRequiredList(t, document, "QueueSummaryResponse")
+	actual := jsonTagsOf(t, application.QueueSummaryResponse{})
+	sort.Strings(declared)
+	sort.Strings(actual)
+	if !reflect.DeepEqual(declared, actual) {
+		t.Fatalf("QueueSummaryResponse required %v, struct emits %v", declared, actual)
+	}
+	for _, pair := range []struct {
+		schema string
+		value  any
+	}{
+		{"QueueAllocation", application.AllocationView{}},
+		{"QueueExhaustion", application.ExhaustionView{}},
+		{"QueueWaiting", application.WaitingView{}},
+		{"AllocationLimitRequest", application.AllocationLimitInput{}},
+	} {
+		want := openAPIRequiredList(t, document, pair.schema)
+		got := jsonTagsOf(t, pair.value)
+		sort.Strings(want)
+		sort.Strings(got)
+		if !reflect.DeepEqual(want, got) {
+			t.Fatalf("%s required %v, struct emits %v", pair.schema, want, got)
+		}
+	}
+	// The waiting buckets published in the contract are exactly the ones the
+	// code reports, so the document cannot promise a reason the scheduler does
+	// not give.
+	waiting := openAPISchemaBlock(t, document, "QueueWaiting")
+	for _, bucket := range application.WaitingReasonBuckets() {
+		if !strings.Contains(waiting, bucket+": {type: integer") {
+			t.Fatalf("the QueueWaiting schema does not declare the bucket %q:\n%s", bucket, waiting)
+		}
+	}
+	t.Logf("openapi declares the allocation surface with %d waiting buckets and additionalProperties:false throughout", len(application.WaitingReasonBuckets()))
+}
+
+// openAPISchemaBlock returns the text of one schema declaration, from its name
+// to the next schema at the same indentation.
+func openAPISchemaBlock(t *testing.T, document, name string) string {
+	t.Helper()
+	start := strings.Index(document, "\n    "+name+":\n")
+	if start < 0 {
+		t.Fatalf("schema %s is not declared", name)
+	}
+	rest := document[start+1:]
+	lines := strings.Split(rest, "\n")
+	out := []string{lines[0]}
+	for _, l := range lines[1:] {
+		if strings.HasPrefix(l, "    ") && !strings.HasPrefix(l, "     ") && strings.HasSuffix(strings.TrimSpace(l), ":") {
+			break
+		}
+		out = append(out, l)
+	}
+	return strings.Join(out, "\n")
+}
+
+// openAPIRequiredList extracts the required list of one schema.
+func openAPIRequiredList(t *testing.T, document, name string) []string {
+	t.Helper()
+	block := openAPISchemaBlock(t, document, name)
+	marker := strings.Index(block, "required: [")
+	if marker < 0 {
+		t.Fatalf("schema %s declares no required list:\n%s", name, block)
+	}
+	rest := block[marker+len("required: ["):]
+	end := strings.Index(rest, "]")
+	if end < 0 {
+		t.Fatalf("schema %s has an unterminated required list", name)
+	}
+	out := []string{}
+	for _, raw := range strings.Split(rest[:end], ",") {
+		if v := strings.TrimSpace(raw); v != "" {
+			out = append(out, v)
+		}
+	}
+	if len(out) == 0 {
+		t.Fatalf("schema %s has an empty required list", name)
+	}
+	return out
+}
+
+// jsonTagsOf returns the json field names a struct actually marshals,
+// flattening one level of embedding exactly as encoding/json does.
+func jsonTagsOf(t *testing.T, value any) []string {
+	t.Helper()
+	out := []string{}
+	var walk func(reflect.Type)
+	walk = func(rt reflect.Type) {
+		for i := 0; i < rt.NumField(); i++ {
+			field := rt.Field(i)
+			if field.Anonymous && field.Type.Kind() == reflect.Struct && field.Tag.Get("json") == "" {
+				walk(field.Type)
+				continue
+			}
+			tag := strings.Split(field.Tag.Get("json"), ",")[0]
+			if tag == "" || tag == "-" {
+				continue
+			}
+			out = append(out, tag)
+		}
+	}
+	walk(reflect.TypeOf(value))
+	if len(out) == 0 {
+		t.Fatalf("no json tags found on %T; the walk is broken", value)
+	}
+	return out
+}
+
+// --- the owner console ------------------------------------------------------
+
+// TestOwnerConsoleExposesTheAllocationSurface is V2-068 A16.
+//
+// RECORDED DEVIATION FROM A16's WORDING. A16 asks for the numeric input "on the
+// control form". The pre-existing Control form's submit handler is part of the
+// first, single-line block of owner.js, and adding a field to that form without
+// rewriting that handler would render an input the page never sends. Every block
+// in owner.js and owner.html is appended and self-contained precisely so that no
+// task rewrites another's, so this task's block carries its own control form,
+// posting to the same POST /v1/controls with the same seven modes. The
+// pre-existing form is unchanged and is asserted below to still submit.
+func TestOwnerConsoleExposesTheAllocationSurface(t *testing.T) {
+	h := testHandler(t)
+	w := call(h, http.MethodGet, "/owner/", "", "owner")
+	if w.Code != 200 {
+		t.Fatalf("owner console status=%d", w.Code)
+	}
+	html := w.Body.String()
+	for _, want := range []string{
+		`id="allocation-title"`, `id="allocation-form"`, `id="allocation-limit"`, `id="allocation-refresh"`,
+		`id="allocation-limit-line"`, `id="allocation-active"`, `id="allocation-exhaustion"`, `id="allocation-waiting-rows"`,
+		"V2-068 shared resource allocation",
+	} {
+		if !strings.Contains(html, want) {
+			t.Fatalf("owner console does not carry %s", want)
+		}
+	}
+	// The limit input is a bounded numeric input, not a free-text field.
+	section := html[strings.Index(html, "V2-068 shared resource allocation"):]
+	for _, want := range []string{`type="number"`, `min="1"`, `max="20"`} {
+		if !strings.Contains(section, want) {
+			t.Fatalf("the allocation section's limit input does not declare %s", want)
+		}
+	}
+	// Additive only: every pre-existing surface, including the sibling tasks'
+	// sections, is still there.
+	for _, want := range []string{`id="capture"`, `id="control"`, `id="queue"`, `id="repository"`, `id="repository-list"`, "Release evidence", `id="release-conditions"`, `id="backlog-rows"`, `id="runners-rows"`, `id="providers-rows"`, `id="captured-rows"`} {
+		if !strings.Contains(html, want) {
+			t.Fatalf("owner console lost the pre-existing surface %s", want)
+		}
+	}
+
+	w = call(h, http.MethodGet, "/owner/assets/owner.js", "", "")
+	if w.Code != 200 {
+		t.Fatalf("owner.js status=%d", w.Code)
+	}
+	js := w.Body.String()
+	marker := strings.Index(js, "// V2-068 shared resource allocation")
+	if marker < 0 {
+		t.Fatal("owner.js does not carry the V2-068 marker comment")
+	}
+	block := js[marker:]
+	for _, want := range []string{"/v1/queue/summary", "/v1/controls", "allocation_limit", "installation_concurrent_executions", "by_reason", "binding_limit", "planned_assignments", "limit_source", "allocation-waiting-rows"} {
+		if !strings.Contains(block, want) {
+			t.Fatalf("the V2-068 owner.js block does not reference %q", want)
+		}
+	}
+	// The reader can see WHY work is waiting without parsing raw JSON: every
+	// scheduler reason has words of its own in the block.
+	for _, reason := range application.WaitingReasonBuckets() {
+		if !strings.Contains(block, `"`+reason+`"`) {
+			t.Fatalf("the V2-068 owner.js block has no words for the waiting reason %q", reason)
+		}
+	}
+	// The sibling blocks are still present in the same single file.
+	for _, want := range []string{"/v1/release/state", "/v1/runners", "/v1/providers", "executability", "requirement_backlog", "captured_at"} {
+		if !strings.Contains(js, want) {
+			t.Fatalf("owner.js lost the pre-existing block reference %q", want)
+		}
+	}
+	// No raw JSON rendering, no timer, no external asset, script or font.
+	for _, forbidden := range []string{"JSON.stringify", "http://", "https://", "//cdn", "importScripts", "setInterval", "setTimeout", "@font-face", "@"} {
+		if strings.Contains(block, forbidden) {
+			t.Fatalf("the V2-068 owner.js block references %q", forbidden)
+		}
+	}
+	if strings.Contains(section, "@") {
+		t.Fatal("the V2-068 owner console section carries an '@'")
+	}
+	lowered := strings.ToLower(section)
+	for _, forbidden := range []string{"password", "secret", "api_key", "apikey", "bearer ", "authorization:", "private_key", "@example.", "@gmail.", "accounts.google.com"} {
+		if strings.Contains(lowered, forbidden) {
+			t.Fatalf("the rendered allocation section carries a credential- or email-shaped value %q", forbidden)
+		}
+	}
+	// The section says the two things a reader must not get wrong.
+	for _, want := range []string{"not a control mode", "revokes nothing"} {
+		if !strings.Contains(lowered, strings.ToLower(want)) {
+			t.Fatalf("the allocation section does not say %q in plain words", want)
+		}
+	}
+}
+
+// TestBothControlFormsStillSubmitWithTheLimitFieldEmpty is the rest of A16: the
+// pre-existing control form is untouched and still works, and this task's own
+// form succeeds with the limit field left empty -- which is the case that must
+// send no allocation_limit key at all.
+func TestBothControlFormsStillSubmitWithTheLimitFieldEmpty(t *testing.T) {
+	h := testHandler(t)
+	// What the pre-existing form sends, byte for byte in shape: no
+	// allocation_limit key.
+	w := call(h, http.MethodPost, "/v1/controls", `{"request_id":"legacy-form","scope_kind":"installation","scope_value":"install","mode":"allow"}`, "owner")
+	if w.Code != http.StatusOK {
+		t.Fatalf("the pre-existing control form no longer submits: status=%d body=%s", w.Code, w.Body.String())
+	}
+	var first map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &first); err != nil {
+		t.Fatal(err)
+	}
+	if first["revision"] == nil {
+		t.Fatalf("the pre-existing form's response carries no revision: %s", w.Body.String())
+	}
+	// What this task's form sends with the field left empty: identical shape.
+	w = call(h, http.MethodPost, "/v1/controls", `{"request_id":"allocation-form-empty","scope_kind":"installation","scope_value":"install","mode":"pause-claim"}`, "owner")
+	if w.Code != http.StatusOK {
+		t.Fatalf("the allocation form with an empty limit field: status=%d body=%s", w.Code, w.Body.String())
+	}
+	// And the effective limit is untouched by that revision, so an empty field
+	// really changed nothing.
+	w = call(h, http.MethodGet, "/v1/queue/summary", "", "owner")
+	if w.Code != http.StatusOK {
+		t.Fatalf("queue summary status=%d", w.Code)
+	}
+	var summary struct {
+		Allocation struct {
+			Limit       int    `json:"limit"`
+			LimitSource string `json:"limit_source"`
+		} `json:"allocation"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &summary); err != nil {
+		t.Fatal(err)
+	}
+	if summary.Allocation.LimitSource != "architecture-design-ceiling" || summary.Allocation.Limit != application.AllocationLimitCeiling {
+		t.Fatalf("two control revisions with no limit field changed the effective limit: %#v", summary.Allocation)
+	}
+	// The owner.js block sends the key only when the field is non-empty, and
+	// that is visible in the block itself rather than only in behaviour.
+	js := call(h, http.MethodGet, "/owner/assets/owner.js", "", "").Body.String()
+	block := js[strings.Index(js, "// V2-068 shared resource allocation"):]
+	if !strings.Contains(block, `if(raw!==""){`) {
+		t.Fatal("the V2-068 owner.js block does not guard the allocation_limit key on a non-empty field")
+	}
 }

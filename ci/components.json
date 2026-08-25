@@ -225,7 +225,8 @@
       "dependencies": [
         "domain",
         "infra",
-        "release"
+        "release",
+        "scheduler"
       ],
       "verification_dependencies": [
         "store-memory"

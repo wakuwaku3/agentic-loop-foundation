@@ -1249,6 +1249,20 @@ type ControlRequest struct {
 	Mode      domain.ControlMode
 	Reason    string
 	At        time.Time
+	// AllocationLimit is the additive optional installation concurrency limit
+	// (V2-068). It is a pointer so "not declared on this revision" and
+	// "declared" stay distinguishable, which is what lets a later revision
+	// carrying no limit leave the effective limit alone instead of clearing it.
+	//
+	// It is NOT a mode and NOT a field on domain.ControlIntent: it is stored in
+	// the AllocationLimitRepository side table keyed by the revision this
+	// request creates, in this same transaction. domain.ControlMode keeps
+	// exactly its seven values.
+	//
+	// Because requestFingerprint marshals this whole struct, a replay of the
+	// same request_id carrying a different limit is an idempotency conflict for
+	// free, exactly as a replay carrying a different mode already is.
+	AllocationLimit *AllocationLimitInput
 }
 type ControlResponse struct {
 	Revision    domain.Revision     `json:"revision"`
@@ -1271,6 +1285,13 @@ func (s *Service) Control(ctx context.Context, req ControlRequest) (out ControlR
 	}
 	if !validControlScope(req.Scope) || !validControlMode(req.Mode) {
 		return out, errors.New("invalid control mode or scope")
+	}
+	// The limit is validated before any transaction opens, so a rejected limit
+	// creates no Control Intent, stores no side-table row and records no event.
+	if req.AllocationLimit != nil {
+		if err = req.AllocationLimit.Validate(); err != nil {
+			return out, err
+		}
 	}
 	if req.At.IsZero() {
 		req.At = s.clock.Now()
@@ -1315,6 +1336,14 @@ func (s *Service) Control(ctx context.Context, req ControlRequest) (out ControlR
 		}
 		if e = u.SaveControlRequestedBy(ctx, revision, reqBy); e != nil {
 			return e
+		}
+		// The limit is stored in the same transaction as the Control Intent and
+		// keyed to the revision this response reports, at most once per
+		// revision -- exactly as SaveControlRequestedBy above.
+		if req.AllocationLimit != nil {
+			if e = u.SaveAllocationLimit(ctx, AllocationLimit{Revision: revision, InstallationConcurrentExecutions: req.AllocationLimit.InstallationConcurrentExecutions}); e != nil {
+				return e
+			}
 		}
 		leases, e := u.ActiveLeases(ctx, 101)
 		if e != nil {

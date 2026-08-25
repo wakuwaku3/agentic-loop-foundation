@@ -188,6 +188,32 @@ type ControlRequestedByRepository interface {
 	SaveControlRequestedBy(ctx context.Context, revision domain.Revision, value domain.RequestedBy) error
 	ControlRequestedBy(ctx context.Context, revision domain.Revision) (domain.RequestedBy, bool, error)
 }
+
+// AllocationLimitRepository is the side table of installation concurrency
+// limits (V2-068), keyed by Control Intent revision. It follows
+// ControlRequestedByRepository's precedent exactly, for the same reason:
+// domain.ControlIntent is immutable, proven-closed M1 surface, and the limit is
+// an attribute of the request rather than of the policy the permit gate
+// evaluates -- domain.ControlMode keeps exactly its seven values and no permit
+// decision ever consults this table.
+//
+// SaveAllocationLimit writes at most one row per revision, in the same
+// transaction as the Control Intent it describes. A second write for the same
+// revision naming a different limit is a conflict (domain.ErrStaleVersion); an
+// identical re-write is an idempotent replay rather than a second record.
+//
+// EffectiveAllocationLimit returns the row with the greatest revision that
+// declared a limit, and false when no revision ever has. That resolution rule is
+// deliberate and belongs to the store contract rather than to a caller: a later
+// revision that declares no limit must not clear the owner's allocation policy,
+// so an unrelated pause-claim intent cannot silently reset it. The read is
+// deterministic and clock-free, and its cost grows with the number of Control
+// Intent revisions that declared a limit -- never with the Requirement count.
+type AllocationLimitRepository interface {
+	SaveAllocationLimit(ctx context.Context, value AllocationLimit) error
+	AllocationLimit(ctx context.Context, revision domain.Revision) (AllocationLimit, bool, error)
+	EffectiveAllocationLimit(ctx context.Context) (AllocationLimit, bool, error)
+}
 type ControlProgressRepository interface {
 	ControlProgress(ctx context.Context, revision domain.Revision) (domain.ControlProgress, bool, error)
 	SaveControlProgress(ctx context.Context, value domain.ControlProgress, expected domain.ControlState) error
@@ -345,6 +371,7 @@ type UnitOfWork interface {
 	TargetRepository
 	ControlRepository
 	ControlRequestedByRepository
+	AllocationLimitRepository
 	ControlProgressRepository
 	RunnerObservationRepository
 	RunnerVersionReportRepository

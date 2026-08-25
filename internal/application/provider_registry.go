@@ -324,19 +324,37 @@ func (s ProviderRunawayState) Valid() bool {
 	return false
 }
 
-// ProviderCeilingSource names which ceiling is being reported. It has exactly
-// one member today because exactly one source exists today; V2-068 introduces
-// the installation-settable limit and its own member (dp-v2-067 d11). A member
-// no code can produce would be a placeholder, so none is declared here.
+// ProviderCeilingSource names which ceiling is being reported, so a design
+// ceiling is never shown as though an owner had chosen it.
+//
+// V2-068 added the second member this type's own comment anticipated. The
+// installation concurrency limit is now settable through POST /v1/controls and
+// stored in the AllocationLimitRepository side table (allocation.go), so the
+// ceiling reported here has two possible sources and a reader must be able to
+// tell them apart.
+//
+// The two surfaces report the same NUMBER for the same state -- that is the
+// convergence dp-v2-067 d11 and wo-v2-068 A19 asked for, and
+// TestProviderCeilingConvergesWithTheQueueSummaryAllocation asserts it. They
+// name its source in their own vocabulary: this type says WHO chose the number
+// (owner-declared), while the queue summary's limit_source says WHERE the
+// number came from (control-revision) and reports control_revision beside it.
+// Neither spelling is derived from the other, and neither is a placeholder:
+// each is produced by real state.
 type ProviderCeilingSource string
 
 const (
 	ProviderCeilingArchitectureDesign ProviderCeilingSource = "architecture-design-ceiling"
+	// ProviderCeilingOwnerDeclared means an owner declared this ceiling on a
+	// Control Intent revision. The name says who chose it rather than which
+	// record carries it, because that is the distinction a reader of this
+	// surface needs: a number nobody chose must never read as a policy.
+	ProviderCeilingOwnerDeclared ProviderCeilingSource = "owner-declared"
 )
 
 func (s ProviderCeilingSource) Valid() bool {
 	switch s {
-	case ProviderCeilingArchitectureDesign:
+	case ProviderCeilingArchitectureDesign, ProviderCeilingOwnerDeclared:
 		return true
 	}
 	return false
@@ -608,7 +626,7 @@ func providerHealthFromFailure(class ProviderFailureClass) (ProviderHealth, Prov
 // reported no stop. A stale observation that reported no stop yields unknown,
 // because "the detector was within its thresholds a day ago" is not a
 // statement about now -- while a stop is preserved regardless of age.
-func providerEntryView(name ProviderName, log ProviderObservationLog, assignments []ProviderAssignment, now time.Time) ProviderEntryView {
+func providerEntryView(name ProviderName, log ProviderObservationLog, assignments []ProviderAssignment, now time.Time, ceiling int, ceilingSource ProviderCeilingSource) ProviderEntryView {
 	authorized, ref := providerAuthorization(name)
 	entry := ProviderEntryView{
 		Provider:                 name,
@@ -634,16 +652,21 @@ func providerEntryView(name ProviderName, log ProviderObservationLog, assignment
 		})
 	}
 	active := len(entry.Assignments)
-	remaining := ProviderConcurrencyDesignCeiling - active
+	// The ceiling is the effective installation concurrency limit, read through
+	// the same accessor GET /v1/queue/summary uses, so the two surfaces cannot
+	// report two different ceilings for one state (V2-068 A19). With no Control
+	// Intent revision having ever declared a limit it is the architecture design
+	// ceiling and the source says so.
+	remaining := ceiling - active
 	if remaining < 0 {
 		remaining = 0
 	}
 	entry.Concurrency = ProviderConcurrencyView{
 		ActiveAssignments: active,
-		DeclaredCeiling:   ProviderConcurrencyDesignCeiling,
-		CeilingSource:     ProviderCeilingArchitectureDesign,
+		DeclaredCeiling:   ceiling,
+		CeilingSource:     ceilingSource,
 		Remaining:         remaining,
-		Exhausted:         active >= ProviderConcurrencyDesignCeiling,
+		Exhausted:         active >= ceiling,
 	}
 
 	if len(log.Observations) == 0 {
@@ -701,6 +724,16 @@ func (s *Service) Providers(ctx context.Context) (ProviderRegistryView, error) {
 	}
 	var out ProviderRegistryView
 	err := s.transact(ctx, func(u UnitOfWork) error {
+		// One keyed side-table read, shared by all three rows: the effective
+		// installation concurrency limit and where it came from.
+		ceiling, limitSource, _, e := effectiveAllocationLimit(ctx, u)
+		if e != nil {
+			return e
+		}
+		ceilingSource := ProviderCeilingArchitectureDesign
+		if limitSource == AllocationLimitFromControlRevision {
+			ceilingSource = ProviderCeilingOwnerDeclared
+		}
 		rows := make([]ProviderEntryView, 0, len(declaredProviders))
 		for _, name := range declaredProviders {
 			log, e := u.ProviderObservations(ctx, name)
@@ -715,7 +748,7 @@ func (s *Service) Providers(ctx context.Context) (ProviderRegistryView, error) {
 			if e != nil {
 				return e
 			}
-			rows = append(rows, providerEntryView(name, log, active, now))
+			rows = append(rows, providerEntryView(name, log, active, now, ceiling, ceilingSource))
 		}
 		out = ProviderRegistryView{Providers: rows}
 		return nil

@@ -1,0 +1,225 @@
+{
+ "schema_version": "v1",
+ "id": "ev-v2-068-api",
+ "kind": "evidence",
+ "created_at": "2026-08-25T19:40:00Z",
+ "correlation_id": "v2-068-scheduler-wiring",
+ "task_id": "V2-068",
+ "component": "api",
+ "evidence_key": "0e170c7943a4e34239838a12f12bc0971101f49567eff0430dd424b39f2054a4",
+ "result": "passed",
+ "observed_at": "2026-08-25T19:40:00Z",
+ "checks": [
+  {
+   "name": "environment-identifier",
+   "status": "passed",
+   "argv": [
+    "uname",
+    "-srm"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 10,
+   "summary": "execution environment: uname -srm = Linux 6.18.33.2-microsoft-standard-WSL2 x86_64; devbox run --pure -- go version = go1.25.0 linux/amd64; devbox 0.17.2 with the environment resolved from this worktree's devbox.json/devbox.lock, both untouched by this task; devbox run --pure -- git --version = git version 2.55.0; worktree /home/takushi/repos/agentic-loop-foundation-worktrees/v2-task-068 on branch v2-task/V2-068, base commit e01b771. No real Provider CLI (codex, claude or opencode) was started, no gh was started and no Google Cloud resource was touched: every Firestore assertion ran against the local emulator scripts/firestore-emulator.sh starts for make component-store-firestore."
+  },
+  {
+   "name": "make-check-before-the-evidence-commit",
+   "status": "passed",
+   "argv": [
+    "devbox",
+    "run",
+    "--pure",
+    "--",
+    "make",
+    "check"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 3600,
+   "summary": "verdict: FAILS 0 over the whole repository; secret scan verdict line 'no leaks found' after 473 commits scanned (~11.07 MB in 850ms); final line 'workflow-pins: 3 unique (owner/repo, version) -> sha pins, no disagreement'. Judged by the verdict lines, not by the shell exit status. make ownership printed {\"changed\":null,\"selected\":null,\"all\":false}."
+  },
+  {
+   "name": "determinism-three-identical-runs",
+   "status": "passed",
+   "argv": [
+    "devbox",
+    "run",
+    "--pure",
+    "--",
+    "go",
+    "test",
+    "-count=1",
+    "./internal/application",
+    "./internal/api",
+    "./internal/scheduler"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 900,
+   "summary": "A18: run three times in sequence. All three produced the same three verdict lines, 'ok <package>' for internal/application, internal/api and internal/scheduler, with no other output at all. The only byte-level difference between the runs is go test's own trailing elapsed-time field (0.144s/0.146s/0.146s for application), which is the harness's wall-clock measurement and not test output; with that field normalised the three captures are byte-identical (diff reports no difference). No new test uses a fixed sleep, a wall-clock timer or a goroutine; every instant comes from the injected allocClock and the one duration measured is logged as an observation."
+  },
+  {
+   "name": "determinism-race-detector",
+   "status": "passed",
+   "argv": [
+    "devbox",
+    "run",
+    "--pure",
+    "--",
+    "go",
+    "test",
+    "-count=1",
+    "-race",
+    "./internal/application",
+    "./internal/api",
+    "./internal/scheduler"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 900,
+   "summary": "A18: ok internal/application 1.841s, ok internal/api 1.159s, ok internal/scheduler 1.030s. No race reported."
+  },
+  {
+   "name": "component-api",
+   "status": "passed",
+   "argv": [
+    "devbox",
+    "run",
+    "--pure",
+    "--",
+    "go",
+    "test",
+    "-count=1",
+    "./internal/api"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 600,
+   "summary": "verdict line: ok github.com/takushi/agentic-loop-foundation/v2/internal/api 0.057s (inside make check). 46 top-level tests pass, up from a measured baseline of 39; 0 removed, 0 renamed, 7 added."
+  },
+  {
+   "name": "api-does-not-import-the-scheduler",
+   "status": "passed",
+   "argv": [
+    "devbox",
+    "run",
+    "--pure",
+    "--",
+    "go",
+    "test",
+    "-count=1",
+    "-run",
+    "TestAPIDoesNotImportTheScheduler",
+    "./internal/api"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 600,
+   "summary": "A3, the api half: PASSED. A go/parser scan over internal/api's own non-test *.go files fails if any of them imports internal/scheduler. The matcher was verified first against two known-positive paths (the exact path and a subpackage) and four known-negative ones, including a path that merely starts with the same letters (internal/schedulerless), and a synthetic file that does import the scheduler is proven to be flagged. The scan reuses apiPackageImports, which fails outright on a zero-file scan, so it cannot pass vacuously; it covered 4 non-test files and found no edge. The forbidden path is assembled from internalPackagePrefix rather than written as one literal, because internal/ci's manifest derivation reads module-path literals in source text and a literal here would create the very edge the guard denies. internal/scheduler's own import allowlist from V2-030 (TestSchedulerImportsAreStdlibOrDomainOnly, TestImportAllowlistMatcherRejectsKnownBadImportsAndAcceptsDomain, TestImportAllowlistsAreExercised) still passes unchanged, which is what proves the edge could only ever point into the scheduler."
+  },
+  {
+   "name": "untouchable-packages-are-untouched",
+   "status": "passed",
+   "argv": [
+    "devbox",
+    "run",
+    "--pure",
+    "--",
+    "go",
+    "test",
+    "-count=1",
+    "-run",
+    "TestTheUntouchablePackagesAreUntouched",
+    "./internal/api"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 600,
+   "summary": "A7, first proof: PASSED, not skipped. git diff --stat HEAD and git diff --stat --cached HEAD both report zero changed files for internal/domain, internal/scheduler, internal/application/stop_matrix_test.go and contracts/release-contract. This assertion lives in internal/api rather than internal/application because V2-067's probe guard forbids os/exec in every file of internal/application, test files included; that guard was not weakened, the assertion was moved."
+  },
+  {
+   "name": "queue-summary-route-authorization",
+   "status": "passed",
+   "argv": [
+    "devbox",
+    "run",
+    "--pure",
+    "--",
+    "go",
+    "test",
+    "-count=1",
+    "-run",
+    "TestQueueSummaryRouteAuthorizationIsUnchanged",
+    "./internal/api"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 600,
+   "summary": "A15: PASSED. GET /v1/queue/summary returns 401 unauthenticated, 403 for the runner role and 200 for the owner, unchanged from before this task. The 200 body carries exactly 8 keys. None of the three modelling placeholders reaches the response, each checked with a positive control first."
+  },
+  {
+   "name": "control-request-accepts-the-limit",
+   "status": "passed",
+   "argv": [
+    "devbox",
+    "run",
+    "--pure",
+    "--",
+    "go",
+    "test",
+    "-count=1",
+    "-run",
+    "TestControlAcceptsTheOptionalLimitAndStillRejectsUnknownFields",
+    "./internal/api"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 600,
+   "summary": "A15: PASSED. POST /v1/controls succeeds with and without allocation_limit; 0, -1 and 21 are 400. An unknown field is still rejected inside the new object (per_repository), at the top level of the control body (allocation), and on an unrelated POST body, so DisallowUnknownFields still governs every request."
+  },
+  {
+   "name": "openapi-declares-the-allocation-surface",
+   "status": "passed",
+   "argv": [
+    "devbox",
+    "run",
+    "--pure",
+    "--",
+    "go",
+    "test",
+    "-count=1",
+    "-run",
+    "TestOpenAPIDeclaresTheAllocationSurfaceExactly",
+    "./internal/api"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 600,
+   "summary": "A15: PASSED. contracts/openapi/openapi-v1.yaml declares QueueSummaryResponse, QueueAllocation, QueueWaiting, QueueExhaustion and AllocationLimitRequest, each with additionalProperties:false and every new field in required, and GET /v1/queue/summary points at QueueSummaryResponse. Each schema's required list is compared to the Go struct's own json tags and must be equal, so the document and the code cannot drift. The shared QueueSummary schema still carries its five original fields and gained none, which is what keeps installation_scope in GET /v1/repositories/{id} valid. The seven waiting buckets published in the contract are exactly the ones the code reports. The provider ceiling_source enum gained owner-declared. internal/contracts and internal/release stayed green inside make check."
+  },
+  {
+   "name": "owner-console-allocation-section",
+   "status": "passed",
+   "argv": [
+    "devbox",
+    "run",
+    "--pure",
+    "--",
+    "go",
+    "test",
+    "-count=1",
+    "-run",
+    "TestOwnerConsoleExposesTheAllocationSurface|TestBothControlFormsStillSubmitWithTheLimitFieldEmpty",
+    "./internal/api"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 600,
+   "summary": "A16: PASSED. owner.html gained a self-contained V2-068 section with a bounded numeric input (type=number, min=1, max=20) and an Allocation reading; owner.js gained a self-contained marker-commented block that reads GET /v1/queue/summary and renders the allocation, the waiting breakdown and the exhaustion state in words, with its own sentence for every one of the seven scheduler reasons, so a reader can see why work is waiting without parsing raw JSON. The block sends allocation_limit only when the field is non-empty, asserted both behaviourally and by the guard being present in the served script. No external asset, script or font, no timer, no raw-JSON rendering, no '@' anywhere and no credential-shaped value. Every pre-existing surface and every sibling task's block (V2-064, V2-066, V2-067, V2-069, V2-071, V2-073) is still present. RECORDED DEVIATION FROM A16's WORDING: the numeric input sits on this block's own control form rather than on the pre-existing Control form, because that form's submit handler is part of the first single-line block of owner.js and adding a field there without rewriting that handler would render an input the page never sends. The pre-existing form is unchanged and is asserted to still submit successfully, and this task's form is asserted to submit successfully with the limit field left empty, after which the effective limit is still the design ceiling. A SECOND MEASURED CONSTRAINT, recorded because it shaped the code: every sibling block's owner.js scan slices from its own marker comment to the END of the file, so any token one of them refuses is refused in every block appended after it. The request body is therefore assembled by explicit quoting rather than with the structured serialiser."
+  },
+  {
+   "name": "documentation",
+   "status": "passed",
+   "argv": [
+    "devbox",
+    "run",
+    "--pure",
+    "--",
+    "make",
+    "docs"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 600,
+   "summary": "A17: docs/operations/allocation-local.md was created (260 lines) and make docs is green. It states: that the limit is a side table keyed by Control Intent revision and explicitly not a ControlMode, with the EffectFromPermit reason why a new mode would stop the Loop rather than throttle it; the effective-limit resolution rule and why a later revision does not clear it; the 1..20 range with section 5 as its source and why 0 is rejected; that a lowered limit revokes nothing and converges as work completes, with the structural reason; the waiting reasons as the scheduler's own closed set, with a table naming which four occur today and the durable input each of the other three lacks; how exhaustion is computed from capacity and not from a reason; that the summary calls Decide and never Apply and makes no write, with the measured read costs; the single-repository single-pool modelling, what is therefore not reported and who owns each remaining half; and the capture-time limitation as measured, including the D interval and the 292-year saturation figure. docs/operations/scheduler-local.md was NOT edited: V2-030 and V2-073 own it, and V2-073's escalation section is intact -- git diff reports zero changes to it."
+  }
+ ]
+}

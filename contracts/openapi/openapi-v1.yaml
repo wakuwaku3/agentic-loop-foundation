@@ -66,7 +66,7 @@ paths:
     get:
       operationId: queueSummary
       security: [{iapOwner: []}]
-      responses: {'200': {description: bounded queue counts, content: {application/json: {schema: {$ref: '#/components/schemas/QueueSummary'}}}}, '401': {$ref: '#/components/responses/Error'}, '403': {$ref: '#/components/responses/Error'}}
+      responses: {'200': {description: bounded queue counts with the scheduler's own allocation, waiting reasons and exhaustion state, content: {application/json: {schema: {$ref: '#/components/schemas/QueueSummaryResponse'}}}}, '401': {$ref: '#/components/responses/Error'}, '403': {$ref: '#/components/responses/Error'}}
   /v1/runners:
     get:
       operationId: listRunners
@@ -343,11 +343,25 @@ components:
       additionalProperties: false
       required: [challenge_id, signature]
       properties: {challenge_id: {type: string}, signature: {type: string, description: base64url Ed25519 signature}}
+    AllocationLimitRequest:
+      type: object
+      additionalProperties: false
+      required: [installation_concurrent_executions]
+      description: |
+        The installation-wide concurrency limit this Control Intent revision
+        declares. It is additive and optional: a request that omits the object
+        stores no limit and leaves the effective limit alone. It is NOT a
+        control mode -- the mode field keeps its existing seven values -- and no
+        permit decision reads it. The range is the docs/architecture/validation.md
+        section 5 concurrent-Execution ceiling; 0 is rejected rather than treated
+        as a stop, because a stop must go through the mode whose blast radius the
+        stop matrix measures.
+      properties: {installation_concurrent_executions: {type: integer, minimum: 1, maximum: 20}}
     ControlRequest:
       type: object
       additionalProperties: false
       required: [request_id, scope_kind, scope_value, mode]
-      properties: {request_id: {type: string}, scope_kind: {type: string}, scope_value: {type: string}, mode: {type: string}, reason: {type: string}}
+      properties: {request_id: {type: string}, scope_kind: {type: string}, scope_value: {type: string}, mode: {type: string}, reason: {type: string}, allocation_limit: {$ref: '#/components/schemas/AllocationLimitRequest'}}
     ClaimRequest:
       type: object
       additionalProperties: false
@@ -420,6 +434,57 @@ components:
       additionalProperties: false
       required: [requirements, by_requirement_status, increments, by_increment_status, active_executions]
       properties: {requirements: {type: integer}, by_requirement_status: {type: object}, increments: {type: integer}, by_increment_status: {type: object}, active_executions: {type: integer}}
+    QueueAllocation:
+      type: object
+      additionalProperties: false
+      required: [limit, limit_source, control_revision, active, remaining, planned_assignments]
+      description: |
+        What the scheduler is allowed to allocate and what it actually planned
+        for this read. limit_source names where the number came from, so a
+        design ceiling is never shown as though an owner had chosen it, and
+        control_revision names the Control Intent revision that declared it (0
+        when none has). planned_assignments is the length of the plan the
+        scheduler returned in this transaction and nothing else: it is never the
+        active Execution count reported as an allocation. The plan is never
+        applied by this read.
+      properties: {limit: {type: integer, minimum: 1}, limit_source: {type: string, enum: [architecture-design-ceiling, control-revision]}, control_revision: {type: integer, minimum: 0}, active: {type: integer, minimum: 0}, remaining: {type: integer, minimum: 0}, planned_assignments: {type: integer, minimum: 0}}
+    QueueWaiting:
+      type: object
+      additionalProperties: false
+      required: [total, by_reason]
+      description: |
+        Why the candidates the scheduler considered are not running. The
+        by_reason keys are the scheduler's own closed reason set, projected
+        without a second vocabulary, and every one of them is reported on every
+        read -- zero included -- so the key order is fixed and the closed set is
+        visible. total is the number of considered candidates that were not
+        assigned and equals the sum of the buckets.
+      properties: {total: {type: integer, minimum: 0}, by_reason: {type: object, additionalProperties: false, required: [not-ready, unmet-dependency, repository-unavailable, already-owned, resource-conflict, no-runner-capacity, not-executable], properties: {not-ready: {type: integer, minimum: 0}, unmet-dependency: {type: integer, minimum: 0}, repository-unavailable: {type: integer, minimum: 0}, already-owned: {type: integer, minimum: 0}, resource-conflict: {type: integer, minimum: 0}, no-runner-capacity: {type: integer, minimum: 0}, not-executable: {type: integer, minimum: 0}}}}
+    QueueExhaustion:
+      type: object
+      additionalProperties: false
+      required: [exhausted, binding_limit]
+      description: |
+        The capacity verdict, computed from the snapshot's own capacity
+        accounting and never by re-reading a candidate's rejection reason: a
+        candidate can be waiting on a resource conflict while capacity remains.
+        binding_limit names installation-concurrency when the number reached was
+        one an owner declared, and runner-capacity when it was the pool's own
+        capacity.
+      properties: {exhausted: {type: boolean}, binding_limit: {type: string, enum: [none, installation-concurrency, runner-capacity]}}
+    QueueSummaryResponse:
+      type: object
+      additionalProperties: false
+      required: [requirements, by_requirement_status, increments, by_increment_status, active_executions, allocation, waiting, exhaustion]
+      description: |
+        The GET /v1/queue/summary body. The five counter fields are the
+        QueueSummary schema's own fields, unchanged in name, type and meaning;
+        they are restated here rather than composed with allOf because
+        QueueSummary is declared with additionalProperties:false and is also
+        published as RepositoryBacklogView.installation_scope, where the three
+        allocation objects are not computed and must not appear as empty
+        placeholders.
+      properties: {requirements: {type: integer}, by_requirement_status: {type: object}, increments: {type: integer}, by_increment_status: {type: object}, active_executions: {type: integer}, allocation: {$ref: '#/components/schemas/QueueAllocation'}, waiting: {$ref: '#/components/schemas/QueueWaiting'}, exhaustion: {$ref: '#/components/schemas/QueueExhaustion'}}
     ExportRecord:
       type: object
       additionalProperties: false
@@ -585,7 +650,7 @@ components:
         not reached a terminal status; the retention bound is larger than the
         ceiling, so exceeding the ceiling is reportable before the bound
         truncates. remaining is never negative.
-      properties: {active_assignments: {type: integer, minimum: 0}, declared_ceiling: {type: integer, minimum: 0}, ceiling_source: {type: string, enum: [architecture-design-ceiling]}, remaining: {type: integer, minimum: 0}, exhausted: {type: boolean}}
+      properties: {active_assignments: {type: integer, minimum: 0}, declared_ceiling: {type: integer, minimum: 0}, ceiling_source: {type: string, enum: [architecture-design-ceiling, owner-declared]}, remaining: {type: integer, minimum: 0}, exhausted: {type: boolean}}
     ProviderRegistryEntry:
       type: object
       additionalProperties: false

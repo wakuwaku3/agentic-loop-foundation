@@ -1212,6 +1212,73 @@ func (u *unit) SaveControlRequestedBy(ctx context.Context, revision domain.Revis
 	return u.stage(ref, "control-requested-by", value, !ok)
 }
 
+// The installation concurrency limit side table (V2-068) lives in its own
+// collection keyed by Control Intent revision, exactly as control_requested_by
+// does. No composite index is required: EffectiveAllocationLimit reads the
+// bounded collection with no ordering and no predicate, exactly as
+// ControlRevision already does, so infra/indexes.tf is untouched.
+func (u *unit) AllocationLimit(ctx context.Context, revision domain.Revision) (application.AllocationLimit, bool, error) {
+	ref, err := u.store.path("allocation_limits", fmt.Sprintf("%d", revision))
+	if err != nil {
+		return application.AllocationLimit{}, false, err
+	}
+	var v application.AllocationLimit
+	ok, err := u.value(ref, "allocation-limit", &v)
+	return v, ok, err
+}
+
+// SaveAllocationLimit writes at most one row per revision: a second write
+// naming a different limit is a conflict, and an identical re-write is an
+// idempotent replay.
+func (u *unit) SaveAllocationLimit(ctx context.Context, value application.AllocationLimit) error {
+	if value.Revision == 0 {
+		return errors.New("allocation limit requires a control revision")
+	}
+	if err := value.Validate(); err != nil {
+		return err
+	}
+	ref, err := u.store.path("allocation_limits", fmt.Sprintf("%d", value.Revision))
+	if err != nil {
+		return err
+	}
+	var old application.AllocationLimit
+	ok, err := u.value(ref, "allocation-limit", &old)
+	if err != nil {
+		return err
+	}
+	if ok {
+		if old.InstallationConcurrentExecutions != value.InstallationConcurrentExecutions {
+			return domain.ErrStaleVersion
+		}
+		return nil
+	}
+	return u.stage(ref, "allocation-limit", value, true)
+}
+
+// EffectiveAllocationLimit is the greatest revision that declared a limit. A
+// revision that declared none has no row here at all, so it cannot clear the
+// owner's allocation policy. Rows staged earlier in this same transaction are
+// considered too, so a limit written and then read back inside one Control
+// request resolves to itself.
+func (u *unit) EffectiveAllocationLimit(ctx context.Context) (application.AllocationLimit, bool, error) {
+	rows, err := u.query(ctx, "allocation_limits", "allocation-limit")
+	if err != nil {
+		return application.AllocationLimit{}, false, err
+	}
+	var best application.AllocationLimit
+	found := false
+	for _, b := range rows {
+		var v application.AllocationLimit
+		if json.Unmarshal(b, &v) != nil {
+			return application.AllocationLimit{}, false, ErrInvalidSchema
+		}
+		if !found || v.Revision > best.Revision {
+			best, found = v, true
+		}
+	}
+	return best, found, nil
+}
+
 // Repository and its bounded forge Observation live in their own
 // collections. SaveRepository uses saveVersion, so the optimistic-concurrency
 // contract is byte-for-byte the one SaveRequirement uses: a create is staged

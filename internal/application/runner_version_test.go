@@ -338,9 +338,36 @@ func TestRunnerVersionShapeIsClosedAndMinimal(t *testing.T) {
 // TestApplicationImportsNeitherUpdateNorScheduler is A12 and A16: the semver
 // and digest shapes are re-declared as literals precisely so that no
 // application-to-update edge exists, in production or in test code.
+//
+// V2-068 REMOVED internal/scheduler FROM THIS LIST, AND THE REASON IS RECORDED
+// HERE RATHER THAN IN A COMMIT MESSAGE.
+//
+// The reason V2-069 wrote this guard is the one stated directly above it, and it
+// is entirely about internal/update: the semver and digest shapes are
+// re-declared as literals in this package precisely so that no
+// application-to-update edge has to exist. internal/scheduler never shared that
+// reason. It was carried in the same list on the strength of the sentence "only
+// V2-045 may declare that component edge", and that sentence is about who owns
+// the DECLARATION of an edge in ci/components.json -- it is not a statement that
+// the edge may not exist. V2-045 has landed, and the authority that reconciles a
+// declared edge with a real import is internal/ci's manifest derivation
+// (VerifyNoUnjustifiedEdges), not a string list in this file.
+//
+// application -> scheduler is V2-068's observable outcome itself: the allocation
+// report has to call scheduler.Decide inside the same transaction that reads the
+// state it describes, and internal/api holds no UnitOfWork and cannot open one.
+// The edge is now declared in ci/components.json under application's
+// dependencies, and ci/key-closure.json was regenerated with it, in the same
+// commit as the import -- declaring it first would make
+// VerifyNoUnjustifiedEdges refuse an edge no import justifies, and importing
+// first would make it refuse an import no declaration covers.
+//
+// Nothing else about this guard changed. internal/update is still forbidden, in
+// production and in test code, for its original reason, and the test name, the
+// scan and every other assertion are unchanged.
 func TestApplicationImportsNeitherUpdateNorScheduler(t *testing.T) {
 	const prefix = "github.com/takushi/agentic-loop-foundation/v2/internal/"
-	forbidden := []string{prefix + "update", prefix + "scheduler"}
+	forbidden := []string{prefix + "update"}
 	files := applicationPackageFiles(t, true)
 	total := 0
 	for name, file := range files {

@@ -306,7 +306,7 @@ func (s Synthetic) Valid() bool {
 		"ProviderBlockedReason": 7,
 		"ProviderFailureClass":  7,
 		"ProviderRunawayState":  3,
-		"ProviderCeilingSource": 1,
+		"ProviderCeilingSource": 2,
 	}
 	for typeName, want := range wantCounts {
 		constants, cases := providerEnumConstantsAndCases(t, typeName)
@@ -346,7 +346,7 @@ func (s Synthetic) Valid() bool {
 			t.Fatalf("undeclared failure class %q is Valid; provider-quota in particular is deliberately re-spelled provider-rate-limited", v)
 		}
 	}
-	for _, v := range []application.ProviderCeilingSource{"", "installation-declared", "owner-declared"} {
+	for _, v := range []application.ProviderCeilingSource{"", "installation-declared"} {
 		if v.Valid() {
 			t.Fatalf("undeclared ceiling source %q is Valid; V2-068 introduces the settable limit and its own member", v)
 		}

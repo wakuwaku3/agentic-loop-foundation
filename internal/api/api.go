@@ -815,12 +815,23 @@ func (h *Handler) capture(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, out)
 }
 
+// allocationLimitBody is the additive optional object on the control request
+// (V2-068). It carries exactly one field. The mode field above keeps its
+// existing seven values: the limit is not a mode, and no permit decision ever
+// reads it.
+type allocationLimitBody struct {
+	InstallationConcurrentExecutions int `json:"installation_concurrent_executions"`
+}
 type controlBody struct {
 	RequestID  string                  `json:"request_id"`
 	ScopeKind  domain.ControlScopeKind `json:"scope_kind"`
 	ScopeValue string                  `json:"scope_value"`
 	Mode       domain.ControlMode      `json:"mode"`
 	Reason     string                  `json:"reason,omitempty"`
+	// A body that omits allocation_limit leaves this nil, which is what stores
+	// no limit row at all. An unknown field anywhere in the body is still
+	// rejected: decode uses DisallowUnknownFields.
+	AllocationLimit *allocationLimitBody `json:"allocation_limit,omitempty"`
 }
 type targetDTO struct {
 	InstallationID string `json:"installation_id,omitempty"`
@@ -840,7 +851,11 @@ func (h *Handler) control(w http.ResponseWriter, r *http.Request) {
 	if !h.decode(w, r, &b) {
 		return
 	}
-	out, err := h.config.Service.Control(r.Context(), application.ControlRequest{RequestID: b.RequestID, Scope: domain.ControlScope{Kind: b.ScopeKind, Value: b.ScopeValue}, Mode: b.Mode, Reason: b.Reason})
+	req := application.ControlRequest{RequestID: b.RequestID, Scope: domain.ControlScope{Kind: b.ScopeKind, Value: b.ScopeValue}, Mode: b.Mode, Reason: b.Reason}
+	if b.AllocationLimit != nil {
+		req.AllocationLimit = &application.AllocationLimitInput{InstallationConcurrentExecutions: b.AllocationLimit.InstallationConcurrentExecutions}
+	}
+	out, err := h.config.Service.Control(r.Context(), req)
 	if err != nil {
 		h.domainError(w, r, err)
 		return

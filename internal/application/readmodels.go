@@ -371,27 +371,20 @@ func controlRead(c domain.ControlIntent, p domain.ControlProgress, reqBy domain.
 	return ControlReadModel{Scope: c.Scope, Mode: c.Mode, Revision: c.Revision, Requested: p.State != "", Acknowledged: p.State == domain.ControlAcknowledged || p.State == domain.ControlEffective || p.State == domain.ControlVerified, Effective: p.State == domain.ControlEffective || p.State == domain.ControlVerified, Verified: p.State == domain.ControlVerified, At: f(c.At), RequestedAt: f(p.RequestedAt), AcknowledgedAt: f(p.AcknowledgedAt), EffectiveAt: f(effectiveAt), VerifiedAt: f(p.VerifiedAt), EvidenceRef: p.EvidenceRef, Verification: p.Verification, Reason: c.Reason, RequestedBy: requestedByView(reqBy)}
 }
 
+// QueueSummary is the bounded counter read model. Its five fields keep their
+// names, types and meanings: it is the value QueueSummaryRepository returns and
+// it is also published as RepositoryBacklogView.InstallationScope, so its shape
+// is a contract two responses share.
+//
+// The allocation, waiting and exhaustion objects GET /v1/queue/summary adds
+// (V2-068) live on QueueSummaryResponse in allocation.go, which embeds this
+// type, rather than on this type: see the recorded reason there.
 type QueueSummary struct {
 	Requirements        int            `json:"requirements"`
 	ByRequirementStatus map[string]int `json:"by_requirement_status"`
 	Increments          int            `json:"increments"`
 	ByIncrementStatus   map[string]int `json:"by_increment_status"`
 	ActiveExecutions    int            `json:"active_executions"`
-}
-
-func (s *Service) QueueSummary(ctx context.Context) (QueueSummary, error) {
-	if _, _, err := callerActor(ctx, RoleOwner); err != nil {
-		return QueueSummary{}, err
-	}
-	var out QueueSummary
-	out.ByRequirementStatus = map[string]int{}
-	out.ByIncrementStatus = map[string]int{}
-	err := s.transact(ctx, func(u UnitOfWork) error {
-		var e error
-		out, e = u.QueueSummary(ctx)
-		return e
-	})
-	return out, err
 }
 
 type ExportRecord struct {

@@ -27,6 +27,7 @@ type state struct {
 	controls           []domain.ControlIntent
 	controlProgress    map[domain.Revision]domain.ControlProgress
 	controlRequestedBy map[domain.Revision]domain.RequestedBy
+	allocationLimits   map[domain.Revision]application.AllocationLimit
 	runnerObservations map[string]domain.RunnerObservation
 	runnerVersions     map[string]application.RunnerVersionReport
 	providerLogs       map[application.ProviderName]application.ProviderObservationLog
@@ -44,7 +45,7 @@ type state struct {
 }
 
 func newState() state {
-	return state{requirements: map[string]domain.Requirement{}, increments: map[string]domain.Increment{}, executions: map[string]domain.Execution{}, leases: map[string]domain.Lease{}, requests: map[string]application.IdempotentResponse{}, texts: map[string]string{}, targets: map[string]domain.ControlTarget{}, controlProgress: map[domain.Revision]domain.ControlProgress{}, controlRequestedBy: map[domain.Revision]domain.RequestedBy{}, runnerObservations: map[string]domain.RunnerObservation{}, runnerVersions: map[string]application.RunnerVersionReport{}, providerLogs: map[application.ProviderName]application.ProviderObservationLog{}, providerAssigns: map[string]application.ProviderAssignment{}, providerAssignSeq: map[application.ProviderName][]application.ProviderAssignment{}, repositories: map[string]domain.Repository{}, repositoryObs: map[string]domain.RepositoryObservation{}, requirementRepo: map[string]domain.RequirementRepositoryLink{}}
+	return state{requirements: map[string]domain.Requirement{}, increments: map[string]domain.Increment{}, executions: map[string]domain.Execution{}, leases: map[string]domain.Lease{}, requests: map[string]application.IdempotentResponse{}, texts: map[string]string{}, targets: map[string]domain.ControlTarget{}, controlProgress: map[domain.Revision]domain.ControlProgress{}, controlRequestedBy: map[domain.Revision]domain.RequestedBy{}, allocationLimits: map[domain.Revision]application.AllocationLimit{}, runnerObservations: map[string]domain.RunnerObservation{}, runnerVersions: map[string]application.RunnerVersionReport{}, providerLogs: map[application.ProviderName]application.ProviderObservationLog{}, providerAssigns: map[string]application.ProviderAssignment{}, providerAssignSeq: map[application.ProviderName][]application.ProviderAssignment{}, repositories: map[string]domain.Repository{}, repositoryObs: map[string]domain.RepositoryObservation{}, requirementRepo: map[string]domain.RequirementRepositoryLink{}}
 }
 func (s state) clone() state {
 	n := newState()
@@ -67,6 +68,12 @@ func (s state) clone() state {
 	}
 	for k, v := range s.controlRequestedBy {
 		n.controlRequestedBy[k] = v
+	}
+	// The installation concurrency limit side table is copied on write like
+	// every other record, so a rolled-back transaction cannot leak a limit
+	// into the committed state.
+	for k, v := range s.allocationLimits {
+		n.allocationLimits[k] = v
 	}
 	for k, v := range s.runnerObservations {
 		v.Processes = append([]domain.ProcessObservation(nil), v.Processes...)
@@ -497,6 +504,47 @@ func (u *unit) SaveControlRequestedBy(_ context.Context, revision domain.Revisio
 func (u *unit) ControlRequestedBy(_ context.Context, revision domain.Revision) (domain.RequestedBy, bool, error) {
 	v, ok := u.s.controlRequestedBy[revision]
 	return v, ok, nil
+}
+
+// The installation concurrency limit side table (V2-068). It is keyed by
+// Control Intent revision and written at most once per revision: a second write
+// naming a different limit is a conflict, and an identical re-write is an
+// idempotent replay, exactly as SaveRequirementRepositoryLink treats its
+// write-once record.
+func (u *unit) SaveAllocationLimit(_ context.Context, value application.AllocationLimit) error {
+	if value.Revision == 0 {
+		return errors.New("allocation limit requires a control revision")
+	}
+	if err := value.Validate(); err != nil {
+		return err
+	}
+	if old, ok := u.s.allocationLimits[value.Revision]; ok {
+		if old.InstallationConcurrentExecutions != value.InstallationConcurrentExecutions {
+			return ErrOptimisticConflict
+		}
+		return nil
+	}
+	u.s.allocationLimits[value.Revision] = value
+	return nil
+}
+func (u *unit) AllocationLimit(_ context.Context, revision domain.Revision) (application.AllocationLimit, bool, error) {
+	v, ok := u.s.allocationLimits[revision]
+	return v, ok, nil
+}
+
+// EffectiveAllocationLimit is the greatest revision that declared a limit. A
+// later revision that declared none is simply absent from this table, so it
+// cannot clear the owner's allocation policy. The scan is deterministic and
+// reads no clock.
+func (u *unit) EffectiveAllocationLimit(_ context.Context) (application.AllocationLimit, bool, error) {
+	var best application.AllocationLimit
+	found := false
+	for revision, v := range u.s.allocationLimits {
+		if !found || revision > best.Revision {
+			best, found = v, true
+		}
+	}
+	return best, found, nil
 }
 
 // Repository and its Observation use the same optimistic-concurrency shape
