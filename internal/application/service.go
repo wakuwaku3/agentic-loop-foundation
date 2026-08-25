@@ -45,6 +45,23 @@ func sameTarget(requested, canonical domain.ControlTarget) bool {
 	return true
 }
 
+// executionAlreadyTerminal reports whether an Execution has already reached
+// an outcome that domain.MarkExecutionLost refuses to move away from
+// (ErrInvalidTransition). Used by Claim's reclaim branch (dp-v2-058 d5) to
+// skip terminating a superseded Execution that is already terminal, so an
+// unconditional MarkExecutionLost call can never turn a reclaim into a
+// failed Claim. This mirrors internal/reconciler's own definition of the
+// same set (executionIsTerminal in reconciler.go), duplicated here rather
+// than imported because internal/reconciler already imports
+// internal/application and a reverse import would cycle.
+func executionAlreadyTerminal(status domain.ExecutionStatus) bool {
+	switch status {
+	case domain.ExecutionSucceeded, domain.ExecutionFailed, domain.ExecutionTerminated, domain.ExecutionLost:
+		return true
+	}
+	return false
+}
+
 func canonicalizeTarget(requested, canonical domain.ControlTarget) domain.ControlTarget {
 	if canonical.InstallationID == "" {
 		canonical.InstallationID = requested.InstallationID
@@ -917,6 +934,41 @@ func (s *Service) Claim(ctx context.Context, req ClaimRequest) (out ClaimRespons
 			}
 			claimBase.Status = domain.IncrementReady
 			claimBase.Version++
+
+			// V2-058 (dp-v2-058 d1): terminate the superseded Execution in
+			// the very same transaction that reclaims its expired Lease, so
+			// a reclaim never manufactures a fresh orphan for OrphanSweep
+			// to find later. It is read and written inside this closure
+			// only -- no new UnitOfWork port and no store change.
+			//
+			// It is guarded and must never make the reclaim itself fail
+			// (dp-v2-058 d5): domain.MarkExecutionLost returns
+			// ErrInvalidTransition for an already-terminal Execution and
+			// ErrStaleFence for a LeaseID/ExecutionID/FencingToken linkage
+			// mismatch, and an unconditional call would propagate exactly
+			// those errors out of Claim, turning the recovery path itself
+			// into a new way for a crashed Runner to become unrecoverable
+			// -- strictly worse than the orphan OrphanSweep already
+			// converges. So the termination runs only when the superseded
+			// Execution is found, is not already terminal (using the same
+			// terminal set domain.MarkExecutionLost refuses to move away
+			// from), and its linkage matches the Lease being expired; any
+			// other case is left untouched, Claim proceeds unchanged, and
+			// OrphanSweep remains the fallback for it.
+			if superseded, found, e2 := u.Execution(ctx, expiredLease.ExecutionID.String()); e2 != nil {
+				return e2
+			} else if found && !executionAlreadyTerminal(superseded.Status) &&
+				superseded.LeaseID == expiredLease.ID &&
+				superseded.FencingToken == expiredLease.FencingToken &&
+				superseded.ID == expiredLease.ExecutionID {
+				lost, e2 := domain.MarkExecutionLost(superseded, expiredLease)
+				if e2 != nil {
+					return e2
+				}
+				if e2 = u.SaveExecution(ctx, lost, superseded.Version); e2 != nil {
+					return e2
+				}
+			}
 		}
 		iid, e := domain.NewIncrementID(req.IncrementID)
 		if e != nil {

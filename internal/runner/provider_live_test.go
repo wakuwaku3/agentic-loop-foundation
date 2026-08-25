@@ -758,7 +758,27 @@ func (fx *liveFixture) testI4(t *testing.T) {
 // -invocation before any result is journaled; I6 resumes under a new
 // ExecutionID with a strictly greater fencing token, re-running the
 // provider exactly once, and the crashed attempt's late AcceptResult is
-// rejected with domain.ErrLeaseExpired.
+// rejected.
+//
+// V2-058 (dp-v2-058 d2/d3/d6, acceptance A8): since V2-058, Service.Claim's
+// reclaim branch drives the superseded Execution to ExecutionLost in the
+// same transaction that expires its Lease, and domain.MarkExecutionLost
+// always advances the Execution's Version -- so the crashed attempt's late
+// AcceptResult, replayed with the version it captured before the crash, is
+// now rejected earlier and further out, by AcceptResult's outer
+// optimistic-concurrency guard with domain.ErrStaleVersion, instead of by
+// domain.ValidateExecutionResult's !lease.ActiveAt branch with
+// domain.ErrLeaseExpired (see internal/runner/crash_test.go's identical,
+// locally-executed pin and its doc comment for the exact mechanism). A
+// second probe, re-submitted at the superseded Execution's current version,
+// still proves the lease-expiry guard independently.
+//
+// This revision is source-only: it is not exercised by this task (V2-058
+// must not start a real Provider CLI). It is proven only to compile
+// (go vet + a test build of this package), and recorded in evidence with
+// status skipped, never passed. V2-017's ev-v2-017-provider-live-claude
+// live-suite record needs re-exercise before the next promotion, because
+// internal/application/service.go changed underneath it.
 func (fx *liveFixture) testI5AndI6(t *testing.T) {
 	fx.clock.Advance(25 * time.Hour)
 	owner, runnerCtx := fx.callers(context.Background())
@@ -899,13 +919,44 @@ func (fx *liveFixture) testI5AndI6(t *testing.T) {
 	}
 
 	// The crashed attempt's own late AcceptResult, replayed with its own
-	// (now stale) lease/version/fencing token, is rejected.
+	// (now stale) lease/version/fencing token, is rejected. Since V2-058
+	// this is domain.ErrStaleVersion (the outer optimistic-concurrency
+	// guard), not domain.ErrLeaseExpired: see this function's doc comment
+	// and internal/runner/crash_test.go's identical, locally-executed pin
+	// for the exact mechanism. Not executed in this task (source-only,
+	// dp-v2-058 d6).
 	_, lateErr := fx.service.AcceptResult(runnerCtx, application.AcceptResultRequest{
 		RequestID: "v2017-i56:attempt-1:late-accept", ExecutionID: attempt1Claim.ExecutionID, LeaseID: attempt1Claim.LeaseID,
 		ExpectedExecutionVersion: attempt1Start.Version, FencingToken: attempt1Claim.FencingToken, Succeeded: true, Target: target,
 	})
-	if !errors.Is(lateErr, domain.ErrLeaseExpired) {
-		t.Fatalf("crashed execution's late AcceptResult should be rejected with domain.ErrLeaseExpired, got %v", lateErr)
+	if !errors.Is(lateErr, domain.ErrStaleVersion) {
+		t.Fatalf("crashed execution's late AcceptResult should be rejected with domain.ErrStaleVersion, got %v", lateErr)
+	}
+
+	// Second probe (dp-v2-058 d3): re-read the superseded Execution's
+	// current version and resubmit with it, under its own RequestID, which
+	// still reaches domain.ValidateExecutionResult's !lease.ActiveAt branch
+	// and must still be rejected with domain.ErrLeaseExpired.
+	var attempt1Current domain.Execution
+	if err := fx.store.Transact(context.Background(), func(u application.UnitOfWork) error {
+		v, ok, err := u.Execution(context.Background(), attempt1Claim.ExecutionID)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return fmt.Errorf("superseded execution %s not found", attempt1Claim.ExecutionID)
+		}
+		attempt1Current = v
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	_, secondErr := fx.service.AcceptResult(runnerCtx, application.AcceptResultRequest{
+		RequestID: "v2017-i56:attempt-1:late-accept-current-version", ExecutionID: attempt1Claim.ExecutionID, LeaseID: attempt1Claim.LeaseID,
+		ExpectedExecutionVersion: attempt1Current.Version, FencingToken: attempt1Claim.FencingToken, Succeeded: true, Target: target,
+	})
+	if !errors.Is(secondErr, domain.ErrLeaseExpired) {
+		t.Fatalf("crashed execution's late AcceptResult at the current version should still be rejected with domain.ErrLeaseExpired, got %v", secondErr)
 	}
 }
 

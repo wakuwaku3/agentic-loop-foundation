@@ -112,6 +112,30 @@ func (fx *journey4Fixture) executionSnapshot(t *testing.T, executionID string) d
 // the durable journal, while the crashed Execution's late Result is
 // rejected. Both crash positions (dp-v2-016 d4/A5) are covered as subtests
 // of this one top-level test function.
+//
+// V2-058 (dp-v2-058 d2/d3): each subtest's late-accept probe now pins
+// domain.ErrStaleVersion, not domain.ErrLeaseExpired. Since V2-058, the
+// reclaim branch of Service.Claim drives the superseded Execution to
+// ExecutionLost in the same transaction that expires its Lease, and
+// domain.MarkExecutionLost always advances the Execution's Version. So by
+// the time the crashed attempt's late AcceptResult replays with the
+// Execution version it captured before the crash, that version is already
+// stale: AcceptResult checks exec.Version != req.ExpectedExecutionVersion
+// and returns domain.ErrStaleVersion *before* it ever calls
+// domain.AcceptExecutionResult (and therefore before
+// domain.ValidateExecutionResult's !lease.ActiveAt branch is even reached).
+// This does not weaken safety: the set of submissions AcceptResult accepts
+// from the crashed attempt was empty before this change and is empty after
+// it, no durable effect is constructed on either path, and the rejection
+// now simply happens earlier and further out (the outer optimistic-
+// concurrency guard) rather than being relaxed. Coverage of the
+// lease-expiry guard itself is not dropped: each subtest below adds a
+// second probe that re-reads the superseded Execution's current (now
+// advanced) version and resubmits with it under its own RequestID, which
+// still reaches domain.ValidateExecutionResult and is still rejected with
+// domain.ErrLeaseExpired. So this journey now pins two independent guards
+// (an outer version check and an inner lease-activity check) where it
+// previously pinned one.
 func TestJourneyFourLocalCrashResumeAcrossExecutions(t *testing.T) {
 	t.Run("case A crash before provider result is journaled", func(t *testing.T) {
 		fx := newJourney4Fixture(t, "journey4-caseA")
@@ -157,8 +181,13 @@ func TestJourneyFourLocalCrashResumeAcrossExecutions(t *testing.T) {
 
 		before := fx.executionSnapshot(t, attempt2.claim.ExecutionID)
 		lateErr := attempt1LateAccept(fx, name, attempt1)
-		if !errors.Is(lateErr, domain.ErrLeaseExpired) {
-			t.Fatalf("crashed execution's late AcceptResult should be rejected with a domain error, got %v", lateErr)
+		if !errors.Is(lateErr, domain.ErrStaleVersion) {
+			t.Fatalf("crashed execution's late AcceptResult should be rejected with domain.ErrStaleVersion (outer optimistic-concurrency guard, dp-v2-058 d2), got %v", lateErr)
+		}
+		staleAttempt1 := fx.executionSnapshot(t, attempt1.claim.ExecutionID)
+		secondErr := attempt1LateAcceptAtCurrentVersion(fx, name, attempt1, staleAttempt1.Version)
+		if !errors.Is(secondErr, domain.ErrLeaseExpired) {
+			t.Fatalf("crashed execution's late AcceptResult at the current version should still be rejected with domain.ErrLeaseExpired (inner lease-activity guard, dp-v2-058 d3), got %v", secondErr)
 		}
 		after := fx.executionSnapshot(t, attempt2.claim.ExecutionID)
 		if before != after {
@@ -231,8 +260,13 @@ func TestJourneyFourLocalCrashResumeAcrossExecutions(t *testing.T) {
 
 		before := fx.executionSnapshot(t, attempt2.claim.ExecutionID)
 		lateErr := attempt1LateAccept(fx, name, attempt1)
-		if !errors.Is(lateErr, domain.ErrLeaseExpired) {
-			t.Fatalf("crashed execution's late AcceptResult should be rejected with a domain error, got %v", lateErr)
+		if !errors.Is(lateErr, domain.ErrStaleVersion) {
+			t.Fatalf("crashed execution's late AcceptResult should be rejected with domain.ErrStaleVersion (outer optimistic-concurrency guard, dp-v2-058 d2), got %v", lateErr)
+		}
+		staleAttempt1 := fx.executionSnapshot(t, attempt1.claim.ExecutionID)
+		secondErr := attempt1LateAcceptAtCurrentVersion(fx, name, attempt1, staleAttempt1.Version)
+		if !errors.Is(secondErr, domain.ErrLeaseExpired) {
+			t.Fatalf("crashed execution's late AcceptResult at the current version should still be rejected with domain.ErrLeaseExpired (inner lease-activity guard, dp-v2-058 d3), got %v", secondErr)
 		}
 		after := fx.executionSnapshot(t, attempt2.claim.ExecutionID)
 		if before != after {
@@ -296,8 +330,13 @@ func TestJourneyFourLocalCrashResumeAcrossExecutions(t *testing.T) {
 
 		before := fx.executionSnapshot(t, attempt2.claim.ExecutionID)
 		lateErr := attempt1LateAccept(fx, name, attempt1)
-		if !errors.Is(lateErr, domain.ErrLeaseExpired) {
-			t.Fatalf("crashed execution's late AcceptResult should be rejected with a domain error, got %v", lateErr)
+		if !errors.Is(lateErr, domain.ErrStaleVersion) {
+			t.Fatalf("crashed execution's late AcceptResult should be rejected with domain.ErrStaleVersion (outer optimistic-concurrency guard, dp-v2-058 d2), got %v", lateErr)
+		}
+		staleAttempt1 := fx.executionSnapshot(t, attempt1.claim.ExecutionID)
+		secondErr := attempt1LateAcceptAtCurrentVersion(fx, name, attempt1, staleAttempt1.Version)
+		if !errors.Is(secondErr, domain.ErrLeaseExpired) {
+			t.Fatalf("crashed execution's late AcceptResult at the current version should still be rejected with domain.ErrLeaseExpired (inner lease-activity guard, dp-v2-058 d3), got %v", secondErr)
 		}
 		after := fx.executionSnapshot(t, attempt2.claim.ExecutionID)
 		if before != after {
@@ -343,6 +382,27 @@ func attempt1LateAccept(fx *journey4Fixture, name string, attempt1 attemptClaim)
 		ExecutionID:              attempt1.claim.ExecutionID,
 		LeaseID:                  attempt1.claim.LeaseID,
 		ExpectedExecutionVersion: attempt1.start.Version,
+		FencingToken:             attempt1.claim.FencingToken,
+		Succeeded:                true,
+		Target:                   fx.target,
+	})
+	return err
+}
+
+// attempt1LateAcceptAtCurrentVersion is V2-058's second probe (dp-v2-058
+// d3): it replays the crashed attempt's own AcceptResult using its own (now
+// stale) lease and fencing token, exactly as attempt1LateAccept does, but
+// with the superseded Execution's current version -- so it passes
+// AcceptResult's outer optimistic-concurrency guard and reaches
+// domain.ValidateExecutionResult's !lease.ActiveAt branch, proving that
+// guard independently of the version check. It uses its own distinct
+// RequestID so idempotency cannot short-circuit it against the first probe.
+func attempt1LateAcceptAtCurrentVersion(fx *journey4Fixture, name string, attempt1 attemptClaim, currentVersion domain.Version) error {
+	_, err := fx.service.AcceptResult(fx.runnerCtx, application.AcceptResultRequest{
+		RequestID:                name + ":attempt-1:late-accept-current-version",
+		ExecutionID:              attempt1.claim.ExecutionID,
+		LeaseID:                  attempt1.claim.LeaseID,
+		ExpectedExecutionVersion: currentVersion,
 		FencingToken:             attempt1.claim.FencingToken,
 		Succeeded:                true,
 		Target:                   fx.target,
