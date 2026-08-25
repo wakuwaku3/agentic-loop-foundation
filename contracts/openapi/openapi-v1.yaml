@@ -73,6 +73,22 @@ paths:
       security: [{iapOwner: []}]
       parameters: [{name: format, in: query, schema: {type: string, enum: [json, ndjson], default: json}}, {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 100, default: 100}}]
       responses: {'200': {description: metadata-only export; provider output and secrets are excluded, content: {application/json: {schema: {$ref: '#/components/schemas/ExportResponse'}}, application/x-ndjson: {schema: {$ref: '#/components/schemas/ExportRecord'}}}}, '401': {$ref: '#/components/responses/Error'}, '403': {$ref: '#/components/responses/Error'}}
+  /v1/release/state:
+    get:
+      operationId: getReleaseState
+      security: [{iapOwner: []}]
+      description: |
+        Read-only. Returns the Preview release identity this process was
+        assembled from, the eight promotion conditions of
+        release-contract.md section 4 each as met / unmet /
+        not-observable-here with a reason and the named source that decided
+        it, an aggregate promotable flag that is true only when all eight are
+        met, the rollback target with the recorded rollback history and a
+        bounded retention read, and an explicit list of what this environment
+        class cannot observe. No route promotes, rolls back or changes a
+        route. 503 is returned when the process was not given an explicit
+        release source root, in which case no version is reported at all.
+      responses: {'200': {description: the release surface of this process, content: {application/json: {schema: {$ref: '#/components/schemas/ReleaseStateResponse'}}}}, '401': {$ref: '#/components/responses/Error'}, '403': {$ref: '#/components/responses/Error'}, '405': {$ref: '#/components/responses/Error'}, '500': {$ref: '#/components/responses/Error'}, '503': {$ref: '#/components/responses/Error'}}
   /v1/runner/claims:acquire:
     post:
       operationId: claim
@@ -155,6 +171,92 @@ components:
   responses:
     Error: {description: error, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
   schemas:
+    ReleaseRefusal:
+      type: object
+      additionalProperties: false
+      required: [kind, reason]
+      properties:
+        kind: {type: string, description: one of the twelve promotion refusal classes, kept distinct so an empty capability set is not reported as a missing digest}
+        capability: {type: string, description: present only for the two per-capability refusal classes}
+        reason: {type: string}
+    ReleaseCondition:
+      type: object
+      additionalProperties: false
+      required: [id, contract_text, state, reason, decided_by]
+      properties:
+        id: {type: string, description: the numbered condition id from release-contract.md section 4}
+        contract_text: {type: string, description: the condition's own sentence from the release contract}
+        state: {type: string, enum: [met, unmet, not-observable-here]}
+        reason: {type: string}
+        decided_by: {type: array, items: {type: string}, description: the named sources that decided this condition}
+        refusals: {type: array, items: {$ref: '#/components/schemas/ReleaseRefusal'}}
+    ReleaseCandidateIdentity:
+      type: object
+      additionalProperties: false
+      required: [candidate_id, candidate_digest, bundle_digest, contract_digest, docs_digest, evidence_digest]
+      properties:
+        candidate_id: {type: string}
+        candidate_digest: {type: string}
+        bundle_digest: {type: string}
+        contract_digest: {type: string}
+        docs_digest: {type: string}
+        evidence_digest: {type: string}
+    ReleaseRoute:
+      type: object
+      additionalProperties: false
+      required: [recorded, source, rollback_available, generation]
+      properties:
+        recorded: {type: boolean, description: false when this process has recorded no route; no field is then defaulted or inferred}
+        source: {type: string, description: states that the reported route is this process's own recorded route}
+        note: {type: string, description: present when no route was recorded}
+        repository: {type: string}
+        preview_digest: {type: string}
+        stable_digest: {type: string}
+        rollback_target_digest: {type: string, description: the previous stable route target; empty once a rollback has consumed it}
+        rollback_available: {type: boolean}
+        generation: {type: integer, minimum: 0}
+    ReleaseRollbackRecord:
+      type: object
+      additionalProperties: false
+      required: [repository, from, to, at]
+      properties:
+        repository: {type: string}
+        from: {type: string}
+        to: {type: string}
+        reason: {type: string}
+        at: {type: string}
+    ReleaseRetention:
+      type: object
+      additionalProperties: false
+      required: [requirements_examined, scan_bounded, page_size, more_requirements_exist, rollback_target_referenced, rollback_target_compared_against]
+      properties:
+        requirements_examined: {type: integer, minimum: 0}
+        scan_bounded: {type: boolean}
+        page_size: {type: integer, minimum: 1, maximum: 100}
+        more_requirements_exist: {type: boolean}
+        rollback_target_referenced: {type: boolean}
+        rollback_target_compared_against: {type: array, items: {type: string}}
+        referencing_requirement_ids: {type: array, items: {type: string}}
+    ReleaseStateResponse:
+      type: object
+      additionalProperties: false
+      required: [schema_version, environment_class, release_version, candidate, assembled_at, version_source, conditions, promotable, declared_capabilities, capabilities_without_evidence, route, rollback_history, retention, not_observed, residual_gaps]
+      properties:
+        schema_version: {const: v1}
+        environment_class: {type: string, description: the declared Preview environment grade, e.g. preview-local or preview-gcp}
+        release_version: {type: string}
+        candidate: {$ref: '#/components/schemas/ReleaseCandidateIdentity'}
+        assembled_at: {type: string}
+        version_source: {type: string, description: states that the version comes from the source manifest this process was assembled from, and that no Cloud Run revision, deployed image or update channel pointer is read}
+        conditions: {type: array, items: {$ref: '#/components/schemas/ReleaseCondition'}, minItems: 8, maxItems: 8}
+        promotable: {type: boolean, description: true only when all eight conditions are met, so a not-observable-here condition keeps it false}
+        declared_capabilities: {type: array, items: {type: string}}
+        capabilities_without_evidence: {type: array, items: {type: string}}
+        route: {$ref: '#/components/schemas/ReleaseRoute'}
+        rollback_history: {type: array, items: {$ref: '#/components/schemas/ReleaseRollbackRecord'}}
+        retention: {$ref: '#/components/schemas/ReleaseRetention'}
+        not_observed: {type: array, items: {type: string}, minItems: 1, description: what this environment class cannot observe, including the Cloud Run running revision, the deployed image digest, the deploy path, the IAP authentication boundary and scale-to-zero}
+        residual_gaps: {type: array, items: {type: string}, description: named parts of cap-preview-operation and cap-stable-promotion this surface does not make observable}
     HealthResponse:
       type: object
       additionalProperties: false

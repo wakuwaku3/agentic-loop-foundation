@@ -250,6 +250,27 @@ func (h *Handler) route(w http.ResponseWriter, r *http.Request) {
 		h.export(w, r.WithContext(application.ContextWithCaller(r.Context(), caller)))
 		return
 	}
+	// GET /v1/release/state is the only release route: this surface is
+	// read-only. There is deliberately no promote, no rollback and no
+	// SetPreview route. The method check comes first, following the /healthz
+	// idiom, so a POST to this path is a method error rather than a 404.
+	if r.URL.Path == releaseStatePath {
+		if r.Method != http.MethodGet {
+			h.error(w, r, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
+			return
+		}
+		caller, err := h.config.Authenticator.Authenticate(r)
+		if err != nil {
+			h.error(w, r, 401, "unauthorized", "authentication failed")
+			return
+		}
+		if caller.Role != application.RoleOwner {
+			h.error(w, r, 403, "forbidden", "owner role required")
+			return
+		}
+		h.releaseState(w, r.WithContext(application.ContextWithCaller(r.Context(), caller)))
+		return
+	}
 	if strings.HasPrefix(r.URL.Path, "/v1/requirements/") && r.Method == http.MethodGet {
 		caller, err := h.config.Authenticator.Authenticate(r)
 		if err != nil {
@@ -551,6 +572,30 @@ func (h *Handler) listControls(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, 200, map[string]any{"controls": out})
 }
+
+// releaseStatePath is the single read-only release route. internal/api
+// imports neither internal/release nor internal/update: the release
+// machinery is reached only through the application Service, and the eight
+// promotion conditions are not restated here. A go/ast guard in
+// api_test.go asserts both import paths stay absent.
+const releaseStatePath = "/v1/release/state"
+
+// releaseState delegates to the Service and maps exactly one application
+// error to 503: a process with no explicitly configured release source root
+// reports no version at all rather than a guessed one.
+func (h *Handler) releaseState(w http.ResponseWriter, r *http.Request) {
+	out, err := h.config.Service.ReleaseState(r.Context())
+	if err != nil {
+		if errors.Is(err, application.ErrReleaseObserverNotConfigured) {
+			h.error(w, r, http.StatusServiceUnavailable, "release_observer_not_configured", err.Error())
+			return
+		}
+		h.domainError(w, r, err)
+		return
+	}
+	writeJSON(w, 200, out)
+}
+
 func (h *Handler) queueSummary(w http.ResponseWriter, r *http.Request) {
 	out, err := h.config.Service.QueueSummary(r.Context())
 	if err != nil {

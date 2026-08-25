@@ -1,0 +1,91 @@
+{
+  "schema_version": "v1",
+  "id": "ts-v2-076",
+  "kind": "canonical-task-state",
+  "task_id": "V2-076",
+  "status": "blocked",
+  "dependencies": [
+    "V2-075"
+  ],
+  "outcome": "Judge the M3 gate again under the revised freshness rule, with the live record re-bound and the intersection measured.",
+  "non_goals": [
+    "Do not read the revised rule as a relaxation: an unmeasured intersection fails it",
+    "Do not pass a condition whose evidence was not re-executed or re-observed",
+    "Do not reuse the previous judgment's component re-issues without re-measuring them"
+  ],
+  "actor": "sol",
+  "input_refs": [
+    "V2-018",
+    "V2-075",
+    "V2-076"
+  ],
+  "input_hash": "9d150df0504db24b44a4532530cb5b607f24bd1e151098c07bcaaea7f8c1f3b3",
+  "output_refs": [
+    "V2-076"
+  ],
+  "output_hash": "5118794cd67570846626b5c66417476c36d2450483ea81122eb14b17f494a9c0",
+  "owner": "sol",
+  "next_owner": "sol",
+  "retry_budget": {
+    "max_attempts": 2,
+    "attempts_used": 0,
+    "remaining": 2
+  },
+  "release_eligible": false,
+  "transitions": [
+    {
+      "sequence": 1,
+      "at": "2026-08-25T07:30:00Z",
+      "from_status": null,
+      "to_status": "queued",
+      "actor": "sol",
+      "input_refs": [
+        "V2-018",
+        "V2-075",
+        "V2-076"
+      ],
+      "input_hash": "9d150df0504db24b44a4532530cb5b607f24bd1e151098c07bcaaea7f8c1f3b3",
+      "output_refs": [
+        "V2-076"
+      ],
+      "output_hash": "5118794cd67570846626b5c66417476c36d2450483ea81122eb14b17f494a9c0",
+      "owner": "sol",
+      "next_owner": "sol",
+      "retry_budget": {
+        "max_attempts": 2,
+        "attempts_used": 0,
+        "remaining": 2
+      },
+      "reason": "the previous M3 gate judgment was correct to fail, and the obstacle it named is repaired by the live re-binding plus the rule replacement, so the milestone needs a fresh judgment rather than an extra attempt on a task whose retry budget is spent"
+    },
+    {
+      "sequence": 2,
+      "at": "2026-08-25T07:30:01Z",
+      "from_status": "queued",
+      "to_status": "blocked",
+      "actor": "sol",
+      "input_refs": [
+        "V2-018",
+        "V2-075",
+        "V2-076"
+      ],
+      "input_hash": "9d150df0504db24b44a4532530cb5b607f24bd1e151098c07bcaaea7f8c1f3b3",
+      "output_refs": [
+        "V2-076"
+      ],
+      "output_hash": "5118794cd67570846626b5c66417476c36d2450483ea81122eb14b17f494a9c0",
+      "owner": "sol",
+      "next_owner": "sol",
+      "retry_budget": {
+        "max_attempts": 2,
+        "attempts_used": 0,
+        "remaining": 2
+      },
+      "reason": "the input this task needs is produced by the task it depends on"
+    }
+  ],
+  "repair_of": [
+    "V2-018"
+  ],
+  "block_reason": "V2-075"
+}

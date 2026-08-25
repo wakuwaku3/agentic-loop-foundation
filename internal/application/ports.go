@@ -7,6 +7,7 @@ import (
 
 	"github.com/takushi/agentic-loop-foundation/v2/internal/domain"
 	"github.com/takushi/agentic-loop-foundation/v2/internal/quota"
+	"github.com/takushi/agentic-loop-foundation/v2/internal/release"
 )
 
 var ErrInvalidOutbox = errors.New("invalid outbox item")
@@ -254,4 +255,32 @@ type UnitOfWork interface {
 }
 type Transactor interface {
 	Transact(context.Context, func(UnitOfWork) error) error
+}
+
+// ReleaseObserver is the read-only port over the release machinery
+// (V2-066). It is deliberately not part of UnitOfWork: none of it is
+// canonical state in the store. It is what one running process can say
+// about the Preview release it was itself assembled from.
+//
+// The import direction is internal/application -> internal/release, and it
+// stops here: internal/api imports neither internal/release nor
+// internal/update, which a go/ast guard in internal/api asserts.
+//
+// Every method is a read. Nothing behind this port promotes, rolls back or
+// changes a route.
+type ReleaseObserver interface {
+	// ReleaseSnapshot returns the promotion report assembled once, when the
+	// observer was constructed, together with the instant it was assembled.
+	// Implementations must not walk the source tree per call.
+	ReleaseSnapshot() (release.PromotionReport, time.Time)
+	// ObservedRepository names the repository this observer was configured
+	// for. It is never inferred.
+	ObservedRepository() string
+	// RecordedRoute returns this process's own recorded route and true, or
+	// the zero Route and false when this process has recorded no route. An
+	// implementation must never default or infer a route.
+	RecordedRoute() (release.Route, bool)
+	// RollbackHistory returns every rollback this process recorded for the
+	// observed repository, in the order they were recorded.
+	RollbackHistory() []release.RollbackRecord
 }

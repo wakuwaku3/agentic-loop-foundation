@@ -433,3 +433,109 @@ func (s *Service) Export(ctx context.Context, limit int) ([]ExportRecord, error)
 	})
 	return out, err
 }
+
+// ===========================================================================
+// Release surface read model (V2-066)
+// ===========================================================================
+//
+// These view types are the serialised shape of GET /v1/release/state. They
+// restate nothing: every condition's identity, tri-state, reason and
+// deciding source is copied from release.PromotionReport, whose rules live
+// in internal/release and internal/domain. The eight promotion conditions
+// are not enumerated in this package or in internal/api.
+//
+// Digests appear here and in the API response. They are written into no
+// document under docs/.
+
+// ReleaseRefusalView is one refusal from the promotion authority, kept as its
+// own kind so an owner can tell an empty capability set from a missing
+// DocsDigest from missing rollback evidence.
+type ReleaseRefusalView struct {
+	Kind       string `json:"kind"`
+	Capability string `json:"capability,omitempty"`
+	Reason     string `json:"reason"`
+}
+
+// ReleaseConditionView is one of the eight promotion conditions.
+type ReleaseConditionView struct {
+	ID           string               `json:"id"`
+	ContractText string               `json:"contract_text"`
+	State        string               `json:"state"`
+	Reason       string               `json:"reason"`
+	DecidedBy    []string             `json:"decided_by"`
+	Refusals     []ReleaseRefusalView `json:"refusals,omitempty"`
+}
+
+// ReleaseCandidateIdentityView carries the source-derived identity of the
+// candidate this process was assembled from.
+type ReleaseCandidateIdentityView struct {
+	CandidateID     string `json:"candidate_id"`
+	CandidateDigest string `json:"candidate_digest"`
+	BundleDigest    string `json:"bundle_digest"`
+	ContractDigest  string `json:"contract_digest"`
+	DocsDigest      string `json:"docs_digest"`
+	EvidenceDigest  string `json:"evidence_digest"`
+}
+
+// ReleaseRouteView is this process's own recorded route. Recorded is false
+// and Note explains it when no route was recorded; no field is defaulted or
+// inferred in that case.
+type ReleaseRouteView struct {
+	Recorded             bool   `json:"recorded"`
+	Source               string `json:"source"`
+	Note                 string `json:"note,omitempty"`
+	Repository           string `json:"repository,omitempty"`
+	PreviewDigest        string `json:"preview_digest,omitempty"`
+	StableDigest         string `json:"stable_digest,omitempty"`
+	RollbackTargetDigest string `json:"rollback_target_digest,omitempty"`
+	RollbackAvailable    bool   `json:"rollback_available"`
+	Generation           uint64 `json:"generation"`
+}
+
+// ReleaseRollbackView is one recorded rollback.
+type ReleaseRollbackView struct {
+	Repository string `json:"repository"`
+	From       string `json:"from"`
+	To         string `json:"to"`
+	Reason     string `json:"reason,omitempty"`
+	At         string `json:"at"`
+}
+
+// ReleaseRetentionView is the bounded canonical-state read behind the
+// rollback target: how many Requirements were actually examined, that the
+// scan was bounded, and whether a Requirement's StableSnapshot still
+// references the target.
+//
+// The comparison is over both identifiers a StableSnapshot records (its
+// ReleaseID and its BundleDigest), because the route names a candidate
+// digest while the snapshot records a release id and a bundle digest; a
+// match on either counts as a reference. TargetComparedAgainst names those
+// fields in the payload so the reader is not left guessing what was compared.
+type ReleaseRetentionView struct {
+	RequirementsExamined      int      `json:"requirements_examined"`
+	ScanBounded               bool     `json:"scan_bounded"`
+	PageSize                  int      `json:"page_size"`
+	MoreRequirementsExist     bool     `json:"more_requirements_exist"`
+	TargetReferenced          bool     `json:"rollback_target_referenced"`
+	TargetComparedAgainst     []string `json:"rollback_target_compared_against"`
+	ReferencingRequirementIDs []string `json:"referencing_requirement_ids,omitempty"`
+}
+
+// ReleaseStateView is the whole owner-readable release surface.
+type ReleaseStateView struct {
+	SchemaVersion               string                       `json:"schema_version"`
+	EnvironmentClass            string                       `json:"environment_class"`
+	ReleaseVersion              string                       `json:"release_version"`
+	Candidate                   ReleaseCandidateIdentityView `json:"candidate"`
+	AssembledAt                 string                       `json:"assembled_at"`
+	VersionSource               string                       `json:"version_source"`
+	Conditions                  []ReleaseConditionView       `json:"conditions"`
+	Promotable                  bool                         `json:"promotable"`
+	DeclaredCapabilities        []string                     `json:"declared_capabilities"`
+	CapabilitiesWithoutEvidence []string                     `json:"capabilities_without_evidence"`
+	Route                       ReleaseRouteView             `json:"route"`
+	RollbackHistory             []ReleaseRollbackView        `json:"rollback_history"`
+	Retention                   ReleaseRetentionView         `json:"retention"`
+	NotObserved                 []string                     `json:"not_observed"`
+	ResidualGaps                []string                     `json:"residual_gaps"`
+}

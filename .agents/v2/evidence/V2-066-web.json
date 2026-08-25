@@ -1,0 +1,122 @@
+{
+  "schema_version": "v1",
+  "id": "ev-v2-066-web",
+  "kind": "evidence",
+  "created_at": "2026-08-25T12:55:00Z",
+  "correlation_id": "v2-066-release-surface",
+  "task_id": "V2-066",
+  "component": "web",
+  "evidence_key": "f9784d7d35a3bd9dc1dcf2818e1f615ea4f015f5e33db192c0011bc64fefca37",
+  "result": "passed",
+  "observed_at": "2026-08-25T12:55:00Z",
+  "checks": [
+    {
+      "name": "environment-identifier",
+      "status": "passed",
+      "argv": [
+        "uname",
+        "-srm"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 10,
+      "summary": "execution environment: uname -srm = Linux 6.18.33.2-microsoft-standard-WSL2 x86_64; devbox run --pure -- go version = go1.25.0 linux/amd64; devbox 0.17.2, environment resolved from this worktree's devbox.json/devbox.lock, both untouched by this task; worktree /home/takushi/repos/agentic-loop-foundation-worktrees/v2-task-066 on branch v2-task/V2-066, base commit 695faab, code commit 36353c7. No real Provider CLI was started and no Google Cloud resource was touched."
+    },
+    {
+      "name": "component-web",
+      "status": "passed",
+      "argv": [
+        "devbox",
+        "run",
+        "--pure",
+        "--",
+        "make",
+        "component-web"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 600,
+      "summary": "verdict line: ? github.com/takushi/agentic-loop-foundation/v2/internal/web [no test files]. The target exits 0 but executes ZERO tests, so it is not by itself evidence of anything and is not counted here as a passing suite. internal/web is still left without a test file of its own, following the precedent recorded in ev-v2-064-web: the only deterministic, browser-free assertion available is that the server actually serves the new surface, and that belongs with the transport, so it lives in internal/api as TestOwnerConsoleExposesTheReleaseSurface, recorded in ev-v2-066-api."
+    },
+    {
+      "name": "additive-only-edit",
+      "status": "passed",
+      "argv": [
+        "git",
+        "diff",
+        "--numstat",
+        "695faab..HEAD",
+        "--",
+        "internal/web/"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 30,
+      "summary": "measured: owner.html 1 insertion 1 deletion (the single-line section is rewritten in place with the placeholder paragraph and every pre-existing element preserved, and the new block appended at the end of that same section), owner.js 1 insertion 1 deletion (the pre-existing single line is kept byte-identical and a new self-contained block is appended after it). internal/web/owner.css is NOT in the diff: the new block reuses the existing muted, repositories, repo-id, repo-state, repo-reason and state-* classes. Both files carry a task-named marker: the HTML block is wrapped in '<!-- V2-066 release surface ... -->' and '<!-- /V2-066 release surface -->', the JS block opens with '// V2-066 release surface: self-contained additive block'. The sibling task V2-065's section was neither rewritten nor removed, and no merge conflict arose in either file. The HTML block is appended inside the existing 'Release evidence' section rather than after the document, because A12 names that section as the target and an HTML document has no valid tail after </html>; that section is the last one in <main>, so the block is still at the tail of the rendered page."
+    },
+    {
+      "name": "self-contained-no-sdk-no-external-asset-no-secret-path",
+      "status": "passed",
+      "argv": [
+        "node",
+        "--check",
+        "internal/web/owner.js"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 60,
+      "summary": "JS SYNTAX OK (host node v24.18.0, syntax check only, no execution and no browser). node is not in the devbox --pure environment, so this one check was run with the host node and is recorded as such. The appended block is an IIFE that uses only fetch against this origin's own relative path /v1/release/state, document.getElementById, document.createElement and textContent. It loads no provider SDK, no external asset, no remote font and no remote script, starts no timer and no poll loop, and reads no credential-bearing field. Every value rendered comes from the response; a field the response does not carry is rendered as an explicit 'unreported' or 'no reason was reported' string rather than as a plausible value, and a 503 is rendered as the API's own message."
+    },
+    {
+      "name": "tri-state-is-rendered-as-three-states",
+      "status": "passed",
+      "argv": [
+        "devbox",
+        "run",
+        "--pure",
+        "--",
+        "go",
+        "test",
+        "-count=1",
+        "-v",
+        "-run",
+        "TestOwnerConsoleExposesTheReleaseSurface",
+        "./internal/api"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 600,
+      "summary": "the console lists only the conditions whose state is not met, each with its contract text, its reason, the sources that decided it and every refusal as its own kind, plus the release version and bundle digest, the assembly instant, the environment class, the promotable flag, the rollback target with rollback availability, the not_observed list and the residual gaps. The state is mapped explicitly: met, not-observable-here, and anything else as blocked, so a not-observable-here condition is never displayed as met and an unknown future state fails visible rather than silently green."
+    },
+    {
+      "name": "skips",
+      "status": "skipped",
+      "argv": [
+        "devbox",
+        "run",
+        "--pure",
+        "--",
+        "go",
+        "test",
+        "-count=1",
+        "-v",
+        "-run",
+        "TestControlPlanePreviewLocalLive",
+        "./internal/api"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 600,
+      "summary": "gate rule G7: exactly one test in the touched packages is skipped, the pre-existing internal/api/live_local_test.go TestControlPlanePreviewLocalLive, whose own message is 'set AGENTIC_LOOP_LIVE_LOCAL=1 to run the preview-local live exercise (real control-plane process + real Firestore emulator); not part of make check'. It is recorded here with status skipped and is not counted as a pass. Every other test in internal/domain, internal/release, internal/application, internal/api, internal/contracts and internal/ci ran; measured by go test -v and grepping for SKIP."
+    },
+    {
+      "name": "evidence-key",
+      "status": "passed",
+      "argv": [
+        "devbox",
+        "run",
+        "--pure",
+        "--",
+        "make",
+        "evidence-keys"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 600,
+      "summary": "web component key on the final tree where make check is green, with every touched file git-added and committed: f9784d7d35a3bd9dc1dcf2818e1f615ea4f015f5e33db192c0011bc64fefca37. The same key measured at base commit 695faab was 7f4824e0d856a08ef86897204af6b46757dbd0b25df979099fbe2f4a7bd026a4. Both observations are recorded rather than the first being erased. "
+    }
+  ]
+}

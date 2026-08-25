@@ -1,0 +1,137 @@
+{
+  "schema_version": "v1",
+  "id": "ev-v2-066-docs",
+  "kind": "evidence",
+  "created_at": "2026-08-25T12:55:00Z",
+  "correlation_id": "v2-066-release-surface",
+  "task_id": "V2-066",
+  "component": "docs",
+  "evidence_key": "bfbf17550748a3c1f5390c4c9c5b02a68a939cee0a7a1b62eaf406f36255de71",
+  "result": "passed",
+  "observed_at": "2026-08-25T12:55:00Z",
+  "checks": [
+    {
+      "name": "environment-identifier",
+      "status": "passed",
+      "argv": [
+        "uname",
+        "-srm"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 10,
+      "summary": "execution environment: uname -srm = Linux 6.18.33.2-microsoft-standard-WSL2 x86_64; devbox run --pure -- go version = go1.25.0 linux/amd64; devbox 0.17.2, environment resolved from this worktree's devbox.json/devbox.lock, both untouched by this task; worktree /home/takushi/repos/agentic-loop-foundation-worktrees/v2-task-066 on branch v2-task/V2-066, base commit 695faab, code commit 36353c7. No real Provider CLI was started and no Google Cloud resource was touched."
+    },
+    {
+      "name": "component-docs",
+      "status": "passed",
+      "argv": [
+        "devbox",
+        "run",
+        "--pure",
+        "--",
+        "make",
+        "component-docs"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 600,
+      "summary": "exit 0 with no output: no TODO(ci) marker was introduced under docs or in README.md."
+    },
+    {
+      "name": "no-digest-value-in-any-document",
+      "status": "passed",
+      "argv": [
+        "python3",
+        "-c",
+        "import re;s=open('docs/preview/capabilities.md').read();print(re.findall(r'[a-f0-9]{40,}',s))"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 60,
+      "summary": "measured output: the empty list. No digest value of any length was written into docs/preview/capabilities.md, and it is the only document this task edited. Digests appear only in the API response and in these evidence records. The prose states where a digest can be read, never what it is."
+    },
+    {
+      "name": "anchor-bijection-and-doc-verifiers-preserved",
+      "status": "passed",
+      "argv": [
+        "devbox",
+        "run",
+        "--pure",
+        "--",
+        "go",
+        "test",
+        "-count=1",
+        "-v",
+        "-run",
+        "TestCapabilityAnchorBijectionBothDirections|TestDocSetLinksResolve|TestCodeBlockAllowlistRealDocSetIsEmptyToday|TestFoundationReleaseContractBaseline",
+        "./internal/release",
+        "./internal/contracts"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 600,
+      "summary": "measured on the edited document: 12 anchors, exactly the twelve contract capability ids, so no new <a id=...> anchor was added and the bijection asserted by TestCapabilityAnchorBijectionBothDirections and TestFoundationReleaseContractBaseline is preserved. Zero markdown links were added, which matters because TestDocSetLinksResolve asserts the real doc set contains exactly 5 links; and zero fenced code blocks were added, which TestCodeBlockAllowlistRealDocSetIsEmptyToday requires."
+    },
+    {
+      "name": "release-markers-and-sibling-documents-untouched",
+      "status": "passed",
+      "argv": [
+        "git",
+        "diff",
+        "--numstat",
+        "695faab..HEAD",
+        "--",
+        "docs/"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 30,
+      "summary": "the only document in the diff is docs/preview/capabilities.md. docs/preview/index.md (which carries the fixed-format 'Release: ' marker), docs/stable/index.md (which carries 'Stable release: none'), docs/preview/stable-diff.md and docs/preview/README.md are all unchanged, so both markers are byte-identical and the four required diff sections are intact."
+    },
+    {
+      "name": "what-the-prose-claims-and-does-not-claim",
+      "status": "passed",
+      "argv": [
+        "git",
+        "diff",
+        "695faab..HEAD",
+        "--",
+        "docs/preview/capabilities.md"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 30,
+      "summary": "prose was added under the existing cap-preview-operation and cap-stable-promotion headings only. cap-preview-operation now states what the owner can read (the assembled Preview release version and its provenance, the eight conditions as met/unmet/not-observable-here with reasons and deciding sources, the rollback target and history, the bounded retention scan, and that an unrecorded route answers 'no route recorded'), what is not observed (Cloud Run running revision, deployed image, deploy path, IAP boundary, scale-to-zero, real Firestore permissions and contention, all listed in the response's not_observed), and the named residual gap that the automatic Preview-failure response is not wired. cap-stable-promotion states that the twelve refusal classes are separable, that promotable is true only when all eight conditions are met, that the real tree's condition 2 is unmet for all twelve capabilities so the candidate is not promotable, that conditions 1 and 5 are not observable in-process, and the named residual gap that automatic promotion execution is not wired. residual gaps, stated so nothing here is overclaimed. (1) cap-preview-operation: the automatic Preview-failure response is NOT wired. Nothing stops new claims and returns routing to Stable on a Preview failure; this surface only reports the rollback target and the recorded rollback history, and no route can move a route. (2) cap-stable-promotion: automatic promotion execution is NOT wired. Nothing promotes a candidate when the eight conditions are met; this surface only reports which conditions are still unmet. (3) production wiring: nothing constructs the observer in cmd/control-plane, because cmd/** is outside this task's allowed paths, so a real control plane answers GET /v1/release/state with 503 not-configured until a follow-up task attaches one. The phrases 'capability exercised' and 'preview journey passed' appear nowhere in this task's output, and no capability status in contracts/release-contract/** was changed or weakened."
+    },
+    {
+      "name": "skips",
+      "status": "skipped",
+      "argv": [
+        "devbox",
+        "run",
+        "--pure",
+        "--",
+        "go",
+        "test",
+        "-count=1",
+        "-v",
+        "-run",
+        "TestControlPlanePreviewLocalLive",
+        "./internal/api"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 600,
+      "summary": "gate rule G7: exactly one test in the touched packages is skipped, the pre-existing internal/api/live_local_test.go TestControlPlanePreviewLocalLive, whose own message is 'set AGENTIC_LOOP_LIVE_LOCAL=1 to run the preview-local live exercise (real control-plane process + real Firestore emulator); not part of make check'. It is recorded here with status skipped and is not counted as a pass. Every other test in internal/domain, internal/release, internal/application, internal/api, internal/contracts and internal/ci ran; measured by go test -v and grepping for SKIP."
+    },
+    {
+      "name": "evidence-key",
+      "status": "passed",
+      "argv": [
+        "devbox",
+        "run",
+        "--pure",
+        "--",
+        "make",
+        "evidence-keys"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 600,
+      "summary": "docs component key on the final tree where make check is green, with every touched file git-added and committed: bfbf17550748a3c1f5390c4c9c5b02a68a939cee0a7a1b62eaf406f36255de71. The same key measured at base commit 695faab was 2890549516f8b00ad35f4f9fa2c718d9ca3f76110d49b3b766cdea6220ebf1ff. Both observations are recorded rather than the first being erased. "
+    }
+  ]
+}

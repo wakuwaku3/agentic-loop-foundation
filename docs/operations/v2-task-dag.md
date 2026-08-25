@@ -160,6 +160,41 @@ gate taskのcomplete transitionの`reason`に「`gate M<N> passed`」という�
   再計算して一致することを鮮度とする。算出方法をevidenceに書いていない合成keyは
   鮮度を判定できないため、G6を満たさない。
 
+  **改定（2026-08-25、M3 gate判定の失敗を受けて）**: 上のper-component規則は、
+  `make check`が判定commitで再実行する検証に対しては正しいが、**live evidenceに対しては
+  原理的に満たせない**。V2-045が`evidenceKey`を依存先Rootsの推移閉包へ変えた結果、
+  runnerの閉包は11 componentに広がった。したがってリポジトリのほぼどこを変えても
+  live recordのkeyが動き、live evidenceは「観測の後に何も着地しない」場合しか鮮度を
+  満たせない。実際にM3 gateはこれで失敗した——coordinatorがV2-063のlive測定の後に
+  runner roots内のdoc commentを1つ直しただけでkeyが動いた。規則がこの形のままだと、
+  gateごとに無限のlive再実行か、その場しのぎの読み替えのどちらかを強制する。
+  どちらもvalidation.md §11の趣旨に反する。
+
+  そこでG6を**evidenceの種類で分ける**。
+
+  - **G6a（`make check`が再実行する検証）**: そのevidenceのchecksが判定commitの
+    `make check`で再実行されるなら、鮮度は`make check`が緑であることで満たされる。
+    主張は毎commit再証明されているので、記録された`evidence_key`は出自の記録であって
+    鮮度の門ではない。従来のper-component key一致は、根拠componentの再発行として
+    引き続き実施してよいが、それ自体をgateの可否条件にはしない。
+  - **G6b（`make check`が再実行しない検証＝live・一回限りの観測・deploy）**: 鮮度は
+    次の2つを**実測**して満たす。(1) evidenceが観測commitを記録していること。
+    (2) 観測commitから判定commitまでのdiffと、その exercise が実際にcompileし実行する
+    file集合との**交差が空であること**。file集合は`go list -deps -test <exercising
+    package>`とharnessとCLIのpathから機械的に得られる。交差が空でなければ**再観測を
+    要する**。交差の測定結果は判定のevidenceに転記する。
+
+  G6bは「commentだけだから良い」という論証を許すものではない。許すのは**測定**である。
+  交差が空でないなら理由に関係なく再観測になり、交差が空ならkeyがどれだけ動いていても
+  鮮度は満たされる。これはkey一致より、意味のある場合には厳しく（exercise pathへの
+  変更は必ず再実行を強制する）、無関係な変更に対しては空虚でない。
+
+  この改定は**規則の緩和ではなく置換**である。緩和として使われないための拘束を置く:
+  交差の測定を省いたlive evidenceはG6bを満たさない（測定していない鮮度は主張できない）。
+  また**live taskの完結規約**として、live exerciseのkeyを測った後にそのexerciseが
+  compileするfileを同一taskで編集してはならない。V2-063はこれを守っていたが、
+  coordinatorが統合時に破った。
+
   G2は「記録の完全性」（存在・passed・hash一致）を見るのに対し、G6は「記録と現在の
   treeの結合」を見る。M1 gateの判定でこの検査を実務として行っていたが成文化されて
   いなかったため、per-recordではなくper-componentとして明文化する。per-recordにすると

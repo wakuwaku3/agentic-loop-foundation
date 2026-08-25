@@ -224,7 +224,8 @@
       "contract_dependencies": [],
       "dependencies": [
         "domain",
-        "infra"
+        "infra",
+        "release"
       ],
       "verification_dependencies": [
         "store-memory"
