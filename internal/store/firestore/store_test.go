@@ -796,3 +796,265 @@ func TestRunnersReadCountDoesNotVaryWithRequirementCount(t *testing.T) {
 	}
 	t.Logf("measured reads for one GET /v1/runners at the bound: %d with 3 Requirements, %d with 11 Requirements; declared bound %d; writes %d", lowReads, highReads, bound, lowWrites)
 }
+
+// ===========================================================================
+// V2-067: the Provider registry on Firestore
+// ===========================================================================
+
+// TestProviderRegistryBehaviouralTableOnFirestore runs, by value, the same
+// table internal/application runs against the memory adapter
+// (TestProviderRegistryBehaviouralTableOnMemory). Sharing the table is what
+// stops the memory store passing a retention, an ordering or a stickiness this
+// adapter does not implement.
+func TestProviderRegistryBehaviouralTableOnFirestore(t *testing.T) {
+	cases := application.ProviderRegistryCases()
+	if len(cases) == 0 {
+		t.Fatal("the shared behavioural table is empty")
+	}
+	for _, c := range cases {
+		t.Run(c.Name, func(t *testing.T) {
+			store := emulatorStore(t)
+			ctx := context.Background()
+			for _, o := range c.Observations {
+				value := o
+				if err := store.Transact(ctx, func(u application.UnitOfWork) error {
+					return u.SaveProviderObservation(ctx, value)
+				}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for _, a := range c.Assignments {
+				value := a
+				if err := store.Transact(ctx, func(u application.UnitOfWork) error {
+					return u.SaveProviderAssignment(ctx, value)
+				}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var log application.ProviderObservationLog
+			var assignments []application.ProviderAssignment
+			if err := store.Transact(ctx, func(u application.UnitOfWork) error {
+				var e error
+				if log, e = u.ProviderObservations(ctx, c.Query); e != nil {
+					return e
+				}
+				assignments, e = u.ProviderAssignments(ctx, c.Query)
+				return e
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if len(log.Observations) != len(c.WantObservations) {
+				t.Fatalf("observations=%d want %d", len(log.Observations), len(c.WantObservations))
+			}
+			for i := range c.WantObservations {
+				got, want := log.Observations[i], c.WantObservations[i]
+				if got.Provider != want.Provider || got.FailureClass != want.FailureClass ||
+					got.StoppedForInspection != want.StoppedForInspection || !got.ObservedAt.Equal(want.ObservedAt) {
+					t.Fatalf("observation %d = %#v, want %#v", i, got, want)
+				}
+			}
+			if got := !log.VerifiedAt.IsZero(); got != c.WantVerified {
+				t.Fatalf("verified=%v want %v (VerifiedAt=%s)", got, c.WantVerified, log.VerifiedAt)
+			}
+			if len(assignments) != len(c.WantAssignments) {
+				t.Fatalf("assignments=%d want %d: %#v", len(assignments), len(c.WantAssignments), assignments)
+			}
+			for i := range c.WantAssignments {
+				got, want := assignments[i], c.WantAssignments[i]
+				if got.ExecutionID != want.ExecutionID || got.IncrementID != want.IncrementID ||
+					got.Provider != want.Provider || !got.Since.Equal(want.Since) {
+					t.Fatalf("assignment %d = %#v, want %#v", i, got, want)
+				}
+			}
+			// The side table really is keyed by Execution id on this adapter
+			// too, not only in the per-Provider index.
+			for _, a := range c.WantAssignments {
+				value := a
+				if err := store.Transact(ctx, func(u application.UnitOfWork) error {
+					got, ok, e := u.ProviderAssignment(ctx, value.ExecutionID)
+					if e != nil {
+						return e
+					}
+					if !ok {
+						return fmt.Errorf("no side-table record for execution %s", value.ExecutionID)
+					}
+					if got.Provider != value.Provider {
+						return fmt.Errorf("side-table record for %s names provider %q, want %q", value.ExecutionID, got.Provider, value.Provider)
+					}
+					return nil
+				}); err != nil {
+					t.Fatal(err)
+				}
+			}
+		})
+	}
+}
+
+// TestProviderRegistryRollbackLeaksNothingOnFirestore asserts a failed
+// transaction stages nothing: the observation ring and both halves of the
+// assignment record are absent afterwards.
+func TestProviderRegistryRollbackLeaksNothingOnFirestore(t *testing.T) {
+	store := emulatorStore(t)
+	ctx := context.Background()
+	at := time.Unix(1700000000, 0).UTC()
+	abort := errors.New("abort")
+	err := store.Transact(ctx, func(u application.UnitOfWork) error {
+		if e := u.SaveProviderObservation(ctx, application.ProviderObservation{Provider: application.ProviderClaude, ObservedAt: at}); e != nil {
+			return e
+		}
+		if e := u.SaveProviderAssignment(ctx, application.ProviderAssignment{ExecutionID: "execution-a", IncrementID: "increment-1", Provider: application.ProviderClaude, Since: at}); e != nil {
+			return e
+		}
+		return abort
+	})
+	if !errors.Is(err, abort) {
+		t.Fatalf("expected the rollback error, got %v", err)
+	}
+	if err := store.Transact(ctx, func(u application.UnitOfWork) error {
+		log, e := u.ProviderObservations(ctx, application.ProviderClaude)
+		if e != nil {
+			return e
+		}
+		if len(log.Observations) != 0 || !log.VerifiedAt.IsZero() {
+			return fmt.Errorf("a rolled-back observation leaked: %#v", log)
+		}
+		assignments, e := u.ProviderAssignments(ctx, application.ProviderClaude)
+		if e != nil {
+			return e
+		}
+		if len(assignments) != 0 {
+			return fmt.Errorf("a rolled-back assignment leaked: %#v", assignments)
+		}
+		_, ok, e := u.ProviderAssignment(ctx, "execution-a")
+		if ok {
+			return errors.New("a rolled-back side-table record leaked")
+		}
+		return e
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// An undeclared provider name is refused by the adapter as well as by the
+	// service, so no path can create a fourth registry document.
+	if err := store.Transact(ctx, func(u application.UnitOfWork) error {
+		return u.SaveProviderObservation(ctx, application.ProviderObservation{Provider: "gemini", ObservedAt: at})
+	}); !errors.Is(err, application.ErrProviderUnknown) {
+		t.Fatalf("the adapter accepted an undeclared provider observation: %v", err)
+	}
+	if err := store.Transact(ctx, func(u application.UnitOfWork) error {
+		return u.SaveProviderAssignment(ctx, application.ProviderAssignment{ExecutionID: "execution-z", Provider: "gemini", Since: at})
+	}); !errors.Is(err, application.ErrProviderUnknown) {
+		t.Fatalf("the adapter accepted an undeclared provider assignment: %v", err)
+	}
+	if err := store.Transact(ctx, func(u application.UnitOfWork) error {
+		return u.SaveProviderObservation(ctx, application.ProviderObservation{Provider: application.ProviderClaude})
+	}); err == nil {
+		t.Fatal("the adapter accepted an observation with no observed instant")
+	}
+}
+
+// TestProvidersReadCountDoesNotVaryWithRequirementCount is V2-067 A12's
+// measured half. The trued-up quota total is the adapter's own record of the
+// documents a transaction actually read (trueUpQuota uses len(u.cache)), so the
+// delta across one GET /v1/providers is the measured read count. It is measured
+// twice, with two different Requirement counts, against a fixture at the
+// maximum bounded assignments and observations, and must be the same both
+// times.
+func TestProvidersReadCountDoesNotVaryWithRequirementCount(t *testing.T) {
+	at := time.Unix(1700000000, 0).UTC()
+	measure := func(requirements int) (reads, writes int64, assignments int) {
+		store := emulatorStore(t)
+		svc, err := application.NewServiceWithConfig(store, integrationClock{now: at}, &integrationIDs{}, application.ServiceConfig{InstallationID: "install", LeaseTTL: time.Minute})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ctx := context.Background()
+		// A fixture exactly at both bounds, for every declared Provider: the
+		// full observation ring and the full assignment index, with every
+		// assigned Execution present and non-terminal.
+		for _, name := range application.DeclaredProviders() {
+			provider := name
+			if err := store.Transact(ctx, func(u application.UnitOfWork) error {
+				for i := 0; i < application.MaxProviderObservations; i++ {
+					if e := u.SaveProviderObservation(ctx, application.ProviderObservation{
+						Provider: provider, ObservedAt: at.Add(time.Duration(i) * time.Minute),
+					}); e != nil {
+						return e
+					}
+				}
+				for i := 0; i < application.MaxProviderAssignments; i++ {
+					id := fmt.Sprintf("%s-execution-%03d", provider, i)
+					if e := u.SaveProviderAssignment(ctx, application.ProviderAssignment{
+						ExecutionID: id, IncrementID: "increment-1", Provider: provider, Since: at,
+					}); e != nil {
+						return e
+					}
+					eid, e := domain.NewExecutionID(id)
+					if e != nil {
+						return e
+					}
+					iid, e := domain.NewIncrementID("increment-1")
+					if e != nil {
+						return e
+					}
+					rid, e := domain.NewRunnerID("runner-1")
+					if e != nil {
+						return e
+					}
+					if e = u.SaveExecution(ctx, domain.Execution{ID: eid, IncrementID: iid, RunnerID: rid, Status: domain.ExecutionRunning, Version: 1}, 0); e != nil {
+						return e
+					}
+				}
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		// Captures both vary the Requirement count and create the quota record
+		// the measurement reads.
+		for i := 0; i < requirements; i++ {
+			if _, err := svc.Capture(integrationOwner(ctx), application.CaptureRequest{RequestID: fmt.Sprintf("cap-%d", i), Text: "work"}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		before, err := readQuotaRecord(ctx, store, at)
+		if err != nil {
+			t.Fatal(err)
+		}
+		view, err := svc.Providers(integrationOwner(ctx))
+		if err != nil {
+			t.Fatal(err)
+		}
+		after, err := readQuotaRecord(ctx, store, at)
+		if err != nil {
+			t.Fatal(err)
+		}
+		total := 0
+		for _, e := range view.Providers {
+			total += len(e.Assignments)
+		}
+		return after.Total.Reads - before.Total.Reads, after.Total.Writes - before.Total.Writes, total
+	}
+
+	lowReads, lowWrites, lowAssignments := measure(3)
+	highReads, highWrites, highAssignments := measure(11)
+	wantAssignments := 3 * application.MaxProviderAssignments
+	if lowAssignments != wantAssignments || highAssignments != wantAssignments {
+		t.Fatalf("the fixture is not at the assignment bound: %d and %d assignments, want %d", lowAssignments, highAssignments, wantAssignments)
+	}
+	if lowReads != highReads {
+		t.Fatalf("one GET /v1/providers read %d documents with 3 Requirements and %d with 11; the read count varies with the Requirement count", lowReads, highReads)
+	}
+	// The declared bound: one keyed registry document per declared Provider,
+	// one keyed Execution read per retained assignment, and the quota document.
+	// Nothing in it is a function of the Requirement count.
+	bound := int64(len(application.DeclaredProviders())*(1+application.MaxProviderAssignments) + 1)
+	if lowReads > bound {
+		t.Fatalf("one GET /v1/providers read %d documents, above the declared bound %d", lowReads, bound)
+	}
+	// The only document written is the quota reservation every bounded owner
+	// read already writes: no application record and no outbox item is touched.
+	if lowWrites != 1 || highWrites != 1 {
+		t.Fatalf("one GET /v1/providers wrote %d and %d documents, want exactly the quota record", lowWrites, highWrites)
+	}
+	t.Logf("measured reads for one GET /v1/providers at both bounds: %d with 3 Requirements, %d with 11 Requirements; declared bound %d; writes %d", lowReads, highReads, bound, lowWrites)
+}

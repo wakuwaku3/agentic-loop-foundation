@@ -1480,6 +1480,159 @@ func (u *unit) RunnerVersionReports(ctx context.Context, limit int) ([]applicati
 	}
 	return out, false, nil
 }
+
+// ===========================================================================
+// The Provider registry (V2-067)
+// ===========================================================================
+//
+// Two collections, and neither read grows with the Requirement count.
+//
+//   - provider_registry, keyed by the Provider name: exactly three documents,
+//     each holding that Provider's bounded observation ring, its sticky
+//     verified instant, and its bounded assignment index. Every read the
+//     registry performs against this collection is one keyed document read,
+//     never a collection scan.
+//   - provider_assignments, keyed by the Execution id: the side table
+//     dp-v2-067 d7 describes. domain.Execution gains no Provider field.
+//
+// The index in the registry document duplicates the side table's triples on
+// purpose. It is what turns "enumerate one Provider's assignments" into a
+// single keyed read instead of a scan of one document per Execution ever
+// started, which is exactly the growth rate
+// docs/architecture/validation.md section 5 gates. Both are written inside the
+// same transaction, so they cannot disagree.
+//
+// No composite index is required: every access below is a keyed document read
+// or a keyed write, so firestore.indexes.json is untouched.
+
+// providerRegistryRecord is the per-Provider document. It carries no
+// threshold, no monetary value, no prompt, no provider response and no
+// credential: the observation type it holds has no field that could carry one.
+type providerRegistryRecord struct {
+	Provider     application.ProviderName          `json:"provider"`
+	Observations []application.ProviderObservation `json:"observations"`
+	VerifiedAt   time.Time                         `json:"verified_at"`
+	Assignments  []application.ProviderAssignment  `json:"assignments"`
+}
+
+func (u *unit) providerRegistryDoc(name application.ProviderName) (*cloudfirestore.DocumentRef, providerRegistryRecord, error) {
+	var rec providerRegistryRecord
+	ref, err := u.store.path("provider_registry", string(name))
+	if err != nil {
+		return nil, rec, err
+	}
+	if _, err = u.value(ref, "provider-registry", &rec); err != nil {
+		return nil, rec, err
+	}
+	return ref, rec, nil
+}
+
+func (u *unit) SaveProviderObservation(ctx context.Context, value application.ProviderObservation) error {
+	if !value.Provider.Valid() {
+		return application.ErrProviderUnknown
+	}
+	if value.ObservedAt.IsZero() {
+		return errors.New("provider observation requires an observed instant")
+	}
+	ref, rec, err := u.providerRegistryDoc(value.Provider)
+	if err != nil {
+		return err
+	}
+	// The retention bound and the sticky verified instant are the shared write
+	// rule, so this adapter cannot implement a retention the memory adapter
+	// does not.
+	log := application.ApplyProviderObservation(application.ProviderObservationLog{Provider: rec.Provider, Observations: rec.Observations, VerifiedAt: rec.VerifiedAt}, value)
+	rec.Provider = log.Provider
+	rec.Observations = log.Observations
+	rec.VerifiedAt = log.VerifiedAt
+	return u.stage(ref, "provider-registry", rec, false)
+}
+
+func (u *unit) ProviderObservations(ctx context.Context, name application.ProviderName) (application.ProviderObservationLog, error) {
+	if !name.Valid() {
+		return application.ProviderObservationLog{}, application.ErrProviderUnknown
+	}
+	_, rec, err := u.providerRegistryDoc(name)
+	if err != nil {
+		return application.ProviderObservationLog{}, err
+	}
+	// Nothing is synthesized for a Provider with no document: an empty ring
+	// and a zero VerifiedAt is what "never observed" looks like, and it must
+	// stay distinguishable from healthy.
+	return application.ProviderObservationLog{Provider: name, Observations: rec.Observations, VerifiedAt: rec.VerifiedAt}, nil
+}
+
+func (u *unit) SaveProviderAssignment(ctx context.Context, value application.ProviderAssignment) error {
+	if !value.Provider.Valid() {
+		return application.ErrProviderUnknown
+	}
+	if value.ExecutionID == "" {
+		return errors.New("provider assignment requires an execution id")
+	}
+	ref, err := u.store.path("provider_assignments", value.ExecutionID)
+	if err != nil {
+		return err
+	}
+	var prior application.ProviderAssignment
+	existed, err := u.value(ref, "provider-assignment", &prior)
+	if err != nil {
+		return err
+	}
+	if err = u.stage(ref, "provider-assignment", value, false); err != nil {
+		return err
+	}
+	// A re-assignment to a different Provider leaves the first Provider's
+	// index, so one Execution can never be reported as assigned to two
+	// Providers at once.
+	if existed && prior.Provider != value.Provider && prior.Provider.Valid() {
+		oldRef, oldRec, e := u.providerRegistryDoc(prior.Provider)
+		if e != nil {
+			return e
+		}
+		kept := make([]application.ProviderAssignment, 0, len(oldRec.Assignments))
+		for _, a := range oldRec.Assignments {
+			if a.ExecutionID != value.ExecutionID {
+				kept = append(kept, a)
+			}
+		}
+		oldRec.Provider = prior.Provider
+		oldRec.Assignments = kept
+		if e = u.stage(oldRef, "provider-registry", oldRec, false); e != nil {
+			return e
+		}
+	}
+	idxRef, idxRec, err := u.providerRegistryDoc(value.Provider)
+	if err != nil {
+		return err
+	}
+	idxRec.Provider = value.Provider
+	idxRec.Assignments = application.AppendProviderAssignment(idxRec.Assignments, value)
+	return u.stage(idxRef, "provider-registry", idxRec, false)
+}
+
+func (u *unit) ProviderAssignment(ctx context.Context, executionID string) (application.ProviderAssignment, bool, error) {
+	ref, err := u.store.path("provider_assignments", executionID)
+	if err != nil {
+		return application.ProviderAssignment{}, false, err
+	}
+	var v application.ProviderAssignment
+	ok, err := u.value(ref, "provider-assignment", &v)
+	return v, ok, err
+}
+
+func (u *unit) ProviderAssignments(ctx context.Context, name application.ProviderName) ([]application.ProviderAssignment, error) {
+	if !name.Valid() {
+		return nil, application.ErrProviderUnknown
+	}
+	_, rec, err := u.providerRegistryDoc(name)
+	if err != nil {
+		return nil, err
+	}
+	out := append([]application.ProviderAssignment(nil), rec.Assignments...)
+	application.SortProviderAssignments(out)
+	return out, nil
+}
+
 func (u *unit) Idempotency(ctx context.Context, requestID, operation string) (application.IdempotentResponse, bool, error) {
 	ref, err := u.store.path("idempotency", requestID)
 	if err != nil {

@@ -199,3 +199,87 @@ const id=()=>crypto.randomUUID();const json=v=>({headers:{"Content-Type":"applic
   if(button){button.onclick=load;}
   load();
 })();
+
+// V2-067 Provider registry: self-contained additive block. Reads GET /v1/providers
+// and renders, for each declared Provider, the two separate authorization and
+// verification facts, the closed health value with its blocked reason and staleness,
+// the runaway-detection state and the active assignment count. It renders only what
+// the response carries and never substitutes a plausible value for a missing one, and
+// it renders no raw JSON: the Providers a human must sign in to are listed by name in
+// their own list so a reader sees them without parsing anything.
+(function(){
+  var el=function(i){return document.getElementById(i);};
+  var setList=function(id,rows,empty){
+    var list=el(id);if(!list){return;}list.textContent="";
+    if(!rows||!rows.length){var li=document.createElement("li");li.className="muted";li.textContent=empty;list.appendChild(li);return;}
+    rows.forEach(function(r){list.appendChild(r);});
+  };
+  var line=function(parent,cls,text){
+    var d=document.createElement("div");if(cls){d.className=cls;}d.textContent=text;parent.appendChild(d);return d;
+  };
+  var healthClass=function(h){
+    if(h==="healthy"){return "state-executable";}
+    if(h==="unknown"){return "state-unobserved";}
+    return "state-blocked";
+  };
+  var observedText=function(p){
+    if(!p.last_observed_at){return "never observed by the Loop";}
+    return "newest observation "+p.last_observed_at+" \u2014 "+(p.observation_count!==undefined?p.observation_count:"an unreported number")+
+      " observation(s) inside the declared window"+(p.stale?" \u2014 STALE: the newest observation is older than the declared window, and the value above is the one it was last observed to have":"");
+  };
+  var providerRow=function(p){
+    var li=document.createElement("li");
+    line(li,"repo-id",p.provider||"unnamed provider");
+    line(li,"repo-state "+healthClass(p.health),"health: "+(p.health||"unreported")+
+      (p.blocked_reason?" \u2014 blocked: "+p.blocked_reason:" \u2014 not blocked"));
+    line(li,"repo-reason","owner authorisation: "+(p.authorized?("yes, by record "+(p.authorization_ref||"unreported")):"no record covers this Provider")+
+      " | completed a Loop invocation: "+(p.verified_by_loop_invocation?"yes":"no, the Loop has never completed one"));
+    line(li,"repo-reason",observedText(p));
+    var rd=p.runaway_detection||{};
+    line(li,"repo-reason","runaway detection ["+(rd.scope||"unreported scope")+"]: "+(rd.state||"unreported state")+
+      " \u2014 thresholds declared in "+(rd.thresholds_declared_in||"an unreported record")+", not copied here");
+    var c=p.concurrency||{};
+    line(li,"repo-reason","assignments: "+(c.active_assignments!==undefined?c.active_assignments:"unreported")+
+      " active of a "+(c.declared_ceiling!==undefined?c.declared_ceiling:"unreported")+" ceiling ["+(c.ceiling_source||"unreported source")+"]"+
+      " \u2014 remaining "+(c.remaining!==undefined?c.remaining:"unreported")+(c.exhausted?" \u2014 EXHAUSTED":""));
+    (p.assignments||[]).forEach(function(a){
+      line(li,"repo-reason","assigned execution "+(a.execution_id||"unnamed")+" of increment "+(a.increment_id||"unnamed")+" since "+(a.since||"an unreported time"));
+    });
+    return li;
+  };
+  var waitingRow=function(p){
+    var li=document.createElement("li");
+    line(li,"repo-id",(p.provider||"unnamed provider")+" \u2014 "+(p.blocked_reason||"no reason was reported"));
+    line(li,"repo-reason","The owner has authorised this Provider (record "+(p.authorization_ref||"unreported")+
+      ") but the Loop has never completed an invocation through it. No agent can close this gap: signing in to a CLI uses the owner's own identity, on the Runner machine.");
+    return li;
+  };
+  var stoppedRow=function(p){
+    var li=document.createElement("li");
+    line(li,"repo-id",(p.provider||"unnamed provider")+" \u2014 stopped for inspection");
+    line(li,"repo-reason","This is neither a success nor a failure and it is counted in no failure total. It is cleared only by the owner issuing a new approved record; this page cannot clear it.");
+    return li;
+  };
+  var render=function(v){
+    var rows=(v&&v.providers)||[];
+    setList("providers-rows",rows.map(providerRow),"The response carried no Provider at all.");
+    var waiting=rows.filter(function(p){return p.authorized&&!p.verified_by_loop_invocation;});
+    setList("providers-waiting",waiting.map(waitingRow),"Every authorised Provider has completed at least one Loop invocation.");
+    var stopped=rows.filter(function(p){return (p.runaway_detection||{}).state==="stopped-for-inspection";});
+    setList("providers-stopped",stopped.map(stoppedRow),"No Provider is stopped for inspection.");
+  };
+  var failed=function(m){
+    setList("providers-rows",[],m);
+    setList("providers-waiting",[],m);
+    setList("providers-stopped",[],m);
+  };
+  var load=function(){
+    return fetch("/v1/providers").then(function(r){
+      if(!r.ok){failed("Unable to read the Provider registry.");return;}
+      return r.json().then(render);
+    }).catch(function(){failed("Unable to read the Provider registry.");});
+  };
+  var button=el("providers-refresh");
+  if(button){button.onclick=load;}
+  load();
+})();

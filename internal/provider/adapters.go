@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"regexp"
 	"strconv"
 	"strings"
 )
@@ -160,8 +161,28 @@ func normalize(_ string, err error) Failure {
 		f.Retryable = false
 		f.Message = "provider model failure"
 	}
+	// The unauthenticated test comes last and therefore wins over the two
+	// above: a CLI that has no session on this machine commonly answers with
+	// an authentication phrase that also carries a transport-shaped or
+	// model-shaped word, and reporting that as transport or model is exactly
+	// the misdirection FailureUnauthenticated exists to remove (dp-v2-067
+	// d9). The message is a fixed literal: no provider text is ever copied
+	// into the Failure, so the existing safeMessage redaction path has
+	// nothing new to redact here.
+	if unauthenticated.MatchString(s) {
+		f.Class = FailureUnauthenticated
+		f.Retryable = false
+		f.Ambiguous = false
+		f.Message = "provider cli has no authenticated session on this machine"
+	}
 	return f
 }
+
+// unauthenticated matches the phrases a local AI CLI uses when it is
+// installed and reachable but has no logged-in session. It is matched against
+// the lowercased error text only; nothing it matches is ever copied into the
+// Failure.
+var unauthenticated = regexp.MustCompile(`(not (logged in|authenticated|signed in)|unauthenticated|unauthori[sz]ed|authentication (required|failed)|(please |must )?(log ?in|sign ?in) (required|first|to continue)|no (active )?(session|credentials) found|\bhttp 401\b|\b401\b)`)
 
 // Run is intentionally unavailable in this package: the local process
 // supervisor owns execution. Adapters only build argv and parse fixtures.

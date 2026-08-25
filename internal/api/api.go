@@ -258,6 +258,30 @@ func (h *Handler) route(w http.ResponseWriter, r *http.Request) {
 		h.listRunners(w, r.WithContext(application.ContextWithCaller(r.Context(), caller)))
 		return
 	}
+	// GET /v1/providers is owner-role only and read-only. The method check
+	// comes first, following the /v1/runners idiom, so a POST to this path is a
+	// method error rather than a 404: there is deliberately no reporting and no
+	// mutation endpoint here. A Provider observation rides on the result the
+	// Runner already posts, an assignment rides on start, and nothing on this
+	// surface can clear a runaway stop -- clearing one requires the owner to
+	// issue a new approved record.
+	if r.URL.Path == providersPath {
+		if r.Method != http.MethodGet {
+			h.error(w, r, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
+			return
+		}
+		caller, err := h.config.Authenticator.Authenticate(r)
+		if err != nil {
+			h.error(w, r, 401, "unauthorized", "authentication failed")
+			return
+		}
+		if caller.Role != application.RoleOwner {
+			h.error(w, r, 403, "forbidden", "owner role required")
+			return
+		}
+		h.listProviders(w, r.WithContext(application.ContextWithCaller(r.Context(), caller)))
+		return
+	}
 	if r.URL.Path == "/v1/export" && r.Method == http.MethodGet {
 		caller, err := h.config.Authenticator.Authenticate(r)
 		if err != nil {
@@ -496,11 +520,16 @@ func (h *Handler) start(w http.ResponseWriter, r *http.Request, id string) {
 		RequestID                string          `json:"request_id"`
 		ExpectedExecutionVersion domain.Version  `json:"expected_execution_version"`
 		ControlRevision          domain.Revision `json:"control_revision"`
+		// Provider (V2-067) is one additive optional field naming the Provider
+		// this Execution is about to be driven through. Absent means no
+		// Provider was named and records no assignment; a value outside the
+		// closed set of three is a 400 that records nothing.
+		Provider string `json:"provider"`
 	}
 	if !h.decode(w, r, &b) {
 		return
 	}
-	out, e := h.config.Service.Start(r.Context(), application.StartRequest{RequestID: b.RequestID, ExecutionID: id, ExpectedExecutionVersion: b.ExpectedExecutionVersion, ControlRevision: b.ControlRevision})
+	out, e := h.config.Service.Start(r.Context(), application.StartRequest{RequestID: b.RequestID, ExecutionID: id, ExpectedExecutionVersion: b.ExpectedExecutionVersion, ControlRevision: b.ControlRevision, Provider: application.ProviderName(b.Provider)})
 	if e != nil {
 		h.domainError(w, r, e)
 		return
@@ -567,6 +596,23 @@ func (h *Handler) listRunners(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, 200, out)
 }
+
+// providersPath is the owner-role read of the Provider registry. It is a GET
+// and there is deliberately no mutation verb on it: observations arrive on the
+// result a Runner already posts, assignments arrive on start, and a runaway
+// stop is cleared only by the owner issuing a new approved record -- never by
+// this surface.
+const providersPath = "/v1/providers"
+
+func (h *Handler) listProviders(w http.ResponseWriter, r *http.Request) {
+	out, err := h.config.Service.Providers(r.Context())
+	if err != nil {
+		h.domainError(w, r, err)
+		return
+	}
+	writeJSON(w, 200, out)
+}
+
 func (h *Handler) checkpoint(w http.ResponseWriter, r *http.Request) {
 	var b struct {
 		RequestID       string              `json:"request_id"`
@@ -846,15 +892,34 @@ func (h *Handler) permit(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
+// providerObservationBody is the additive optional object on the result the
+// Runner already posts (V2-067). It carries a Provider name, an optional
+// closed failure class and an optional boolean, and nothing else: there is no
+// message, detail, output, result, session or text field, so provider text and
+// credential material are structurally unrepresentable at the transport rather
+// than filtered out of it. It carries no timestamp either -- observed_at is
+// the transaction's authority time.
+//
+// A pointer field is what distinguishes "the object was absent" from "the
+// object was present": an absent object records nothing and is a 200, while a
+// present object must name one of the three declared Providers and is
+// otherwise a 400 that records nothing.
+type providerObservationBody struct {
+	Name                 string `json:"name"`
+	FailureClass         string `json:"failure_class"`
+	StoppedForInspection bool   `json:"stopped_for_inspection"`
+}
+
 type resultBody struct {
-	RequestID                string              `json:"request_id"`
-	ExecutionID              string              `json:"execution_id"`
-	LeaseID                  string              `json:"lease_id"`
-	ExpectedExecutionVersion domain.Version      `json:"expected_execution_version"`
-	FencingToken             domain.FencingToken `json:"fencing_token"`
-	ControlRevision          domain.Revision     `json:"control_revision"`
-	Succeeded                bool                `json:"succeeded"`
-	Target                   targetDTO           `json:"target,omitempty"`
+	RequestID                string                   `json:"request_id"`
+	ExecutionID              string                   `json:"execution_id"`
+	LeaseID                  string                   `json:"lease_id"`
+	ExpectedExecutionVersion domain.Version           `json:"expected_execution_version"`
+	FencingToken             domain.FencingToken      `json:"fencing_token"`
+	ControlRevision          domain.Revision          `json:"control_revision"`
+	Succeeded                bool                     `json:"succeeded"`
+	Target                   targetDTO                `json:"target,omitempty"`
+	ProviderObservation      *providerObservationBody `json:"provider_observation"`
 }
 
 func (h *Handler) result(w http.ResponseWriter, r *http.Request) {
@@ -862,7 +927,15 @@ func (h *Handler) result(w http.ResponseWriter, r *http.Request) {
 	if !h.decode(w, r, &b) {
 		return
 	}
-	out, err := h.config.Service.AcceptResult(r.Context(), application.AcceptResultRequest{RequestID: b.RequestID, ExecutionID: b.ExecutionID, LeaseID: b.LeaseID, ExpectedExecutionVersion: b.ExpectedExecutionVersion, FencingToken: b.FencingToken, ControlRevision: b.ControlRevision, Succeeded: b.Succeeded, Target: b.Target.domain()})
+	req := application.AcceptResultRequest{RequestID: b.RequestID, ExecutionID: b.ExecutionID, LeaseID: b.LeaseID, ExpectedExecutionVersion: b.ExpectedExecutionVersion, FencingToken: b.FencingToken, ControlRevision: b.ControlRevision, Succeeded: b.Succeeded, Target: b.Target.domain()}
+	if b.ProviderObservation != nil {
+		req.ProviderObservation = &application.ProviderObservationInput{
+			Name:                 application.ProviderName(b.ProviderObservation.Name),
+			FailureClass:         application.ProviderFailureClass(b.ProviderObservation.FailureClass),
+			StoppedForInspection: b.ProviderObservation.StoppedForInspection,
+		}
+	}
+	out, err := h.config.Service.AcceptResult(r.Context(), req)
 	if err != nil {
 		h.domainError(w, r, err)
 		return

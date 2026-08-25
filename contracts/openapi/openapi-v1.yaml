@@ -86,6 +86,39 @@ paths:
         and compared against nothing. There is deliberately no POST: a Runner
         reports through runner_version on POST /v1/runner/heartbeat.
       responses: {'200': {description: what each Runner reports about the version it is running, content: {application/json: {schema: {$ref: '#/components/schemas/RunnerListResponse'}}}}, '401': {$ref: '#/components/responses/Error'}, '403': {$ref: '#/components/responses/Error'}, '405': {$ref: '#/components/responses/Error'}, '500': {$ref: '#/components/responses/Error'}, '503': {$ref: '#/components/responses/Error'}}
+  /v1/providers:
+    get:
+      operationId: listProviders
+      security: [{iapOwner: []}]
+      description: |
+        Read-only. Reports, for each of the three declared Providers (codex,
+        claude, opencode), whether the owner's in-repository standing
+        authorization covers it, whether the Loop has ever completed an
+        invocation through it, a closed health value with the instant of the
+        newest observation and an explicit stale flag, the runner-local
+        runaway detector's state by state alone with the approved record the
+        thresholds live in named rather than copied, the control plane's own
+        concurrency allocation with the source of the ceiling named, and the
+        Executions currently assigned to it.
+        Every value is derived from observations the Loop's own execution path
+        produced. No CLI is started, no socket is opened and no timer polls
+        anything: an active probe would itself be an invocation counted by the
+        runaway detector this surface reports, so the registry could trip the
+        halt it is meant to describe. A go/ast import scan over
+        internal/application proves there is no probe path.
+        authorized and verified_by_loop_invocation are two separately-sourced
+        facts and never one connected flag: today they disagree for two of the
+        three Providers, and a single boolean would have to pick one and be
+        wrong about the other. A Provider with no observation is unknown and
+        stale, never healthy.
+        There is deliberately no cursor and no page_size: the collection is a
+        three-element closed set and cannot grow. There is deliberately no
+        POST, PUT or DELETE: an observation rides on
+        provider_observation of POST /v1/executions/result, an assignment
+        rides on provider of POST /v1/executions/{execution_id}:start, and a
+        stop for inspection is cleared only by the owner issuing a new
+        approved record.
+      responses: {'200': {description: the Provider registry, content: {application/json: {schema: {$ref: '#/components/schemas/ProviderRegistryResponse'}}}}, '401': {$ref: '#/components/responses/Error'}, '403': {$ref: '#/components/responses/Error'}, '405': {$ref: '#/components/responses/Error'}, '500': {$ref: '#/components/responses/Error'}, '503': {$ref: '#/components/responses/Error'}}
   /v1/export:
     get:
       operationId: exportOwnerMetadata
@@ -329,7 +362,14 @@ components:
       type: object
       additionalProperties: false
       required: [request_id, execution_id, lease_id, expected_execution_version, fencing_token, control_revision, succeeded]
-      properties: {request_id: {type: string}, execution_id: {type: string}, lease_id: {type: string}, expected_execution_version: {type: integer}, fencing_token: {type: integer}, control_revision: {type: integer}, succeeded: {type: boolean}, target: {$ref: '#/components/schemas/Target'}}
+      description: |
+        provider_observation is additive and optional (V2-067). The result the
+        Runner already posts is the carrier because the ledger and the CLIs
+        live on the Runner machine while the registry lives in the control
+        plane, so the control plane cannot read the ledger and any design that
+        pretended otherwise would be a fiction. No new endpoint, no new
+        authenticator and no new idempotency story is introduced.
+      properties: {request_id: {type: string}, execution_id: {type: string}, lease_id: {type: string}, expected_execution_version: {type: integer}, fencing_token: {type: integer}, control_revision: {type: integer}, succeeded: {type: boolean}, target: {$ref: '#/components/schemas/Target'}, provider_observation: {$ref: '#/components/schemas/ProviderObservation'}}
     RequestedBy:
       type: object
       description: >-
@@ -479,6 +519,130 @@ components:
         true; the endpoints are present only when the state is non-empty,
         because an empty or unknown intersection is not an interval.
       properties: {runners: {type: array, maxItems: 32, items: {$ref: '#/components/schemas/RunnerVersionRow'}}, runner_count: {type: integer, minimum: 0}, truncated: {type: boolean, description: 'the bounded enumeration hit its limit, so runner_count is a lower bound and the intersection is unknown'}, intersection_state: {type: string, enum: [non-empty, empty, unknown]}, intersection_schema_min: {type: integer}, intersection_schema_max: {type: integer}}
+    ProviderObservation:
+      type: object
+      additionalProperties: false
+      required: [name]
+      description: |
+        What the reporting Runner observed about the Provider it just drove.
+        Exactly three fields exist and no more: a Provider name, an optional
+        closed failure class and an optional boolean. There is no message,
+        detail, output, result, session or text field anywhere on it, so a
+        prompt, a raw provider response and credential material are
+        structurally unrepresentable rather than filtered -- no redaction step
+        can be forgotten, because there is no field to forget. There is no
+        timestamp field either, so a Runner clock cannot enter the record;
+        observed_at is the transaction's authority time.
+        An absent object records nothing. A present object naming anything
+        other than codex, claude or opencode is refused with 400 and records
+        nothing, and so is a failure_class outside the closed enum.
+        stopped_for_inspection true means the runner-local runaway detector
+        stopped this invocation for inspection. That is neither a success nor
+        a failure: it is reported as its own health value and its own
+        detection state, and it is counted in no failure tally.
+      properties:
+        name: {type: string, enum: [codex, claude, opencode]}
+        failure_class: {type: string, enum: [provider-unauthenticated, provider-transport, provider-rate-limited, timeout, provider-model, contract-incompatible, unknown], description: 'the class of a failed invocation; absent means the invocation completed'}
+        stopped_for_inspection: {type: boolean}
+    ProviderAssignment:
+      type: object
+      additionalProperties: false
+      required: [execution_id, increment_id, since]
+      description: |
+        One Execution currently assigned to this Provider. The assignment is a
+        side table keyed by Execution id; the Execution aggregate itself gains
+        no Provider field. An Execution that has reached a terminal status is
+        not reported here.
+      properties: {execution_id: {type: string}, increment_id: {type: string}, since: {type: string, format: date-time, description: server-authoritative instant the assignment was written}}
+    ProviderRunawayDetection:
+      type: object
+      additionalProperties: false
+      required: [scope, state, thresholds_declared_in]
+      description: |
+        The runner-local runaway detector, reported by state alone. There is
+        deliberately no number in this object. The thresholds live in the
+        owner-approved, digest-bound provider-preflight record that
+        thresholds_declared_in names; republishing them here would create a
+        second copy of a safety threshold that can silently disagree with the
+        approved one.
+        state is within-thresholds only when a fresh observation reported no
+        stop. It is unknown when nothing has been observed, and also when the
+        newest observation reporting no stop is older than the declared
+        window, because a detector that was within its thresholds a day ago is
+        not a statement about now. A stop for inspection is reported whatever
+        its age: a stop that aged out into silence would be a stop nobody was
+        told about.
+      properties: {scope: {type: string, description: 'who owns the detector; runner-local, because the ledger and the CLIs are on the Runner machine and the control plane cannot read them'}, state: {type: string, enum: [within-thresholds, stopped-for-inspection, unknown]}, thresholds_declared_in: {type: string, description: 'names the approved record the thresholds live in and copies none of them'}}
+    ProviderConcurrency:
+      type: object
+      additionalProperties: false
+      required: [active_assignments, declared_ceiling, ceiling_source, remaining, exhausted]
+      description: |
+        The concurrent-Execution allocation the control plane genuinely owns.
+        ceiling_source names which ceiling is being reported, so a design
+        ceiling is never shown as though an owner had chosen it.
+        active_assignments counts the retained assignments whose Execution has
+        not reached a terminal status; the retention bound is larger than the
+        ceiling, so exceeding the ceiling is reportable before the bound
+        truncates. remaining is never negative.
+      properties: {active_assignments: {type: integer, minimum: 0}, declared_ceiling: {type: integer, minimum: 0}, ceiling_source: {type: string, enum: [architecture-design-ceiling]}, remaining: {type: integer, minimum: 0}, exhausted: {type: boolean}}
+    ProviderRegistryEntry:
+      type: object
+      additionalProperties: false
+      required: [provider, authorized, authorization_ref, verified_by_loop_invocation, health, blocked_reason, last_observed_at, observation_count, stale, runaway_detection, concurrency, assignments]
+      description: |
+        One Provider's row.
+        authorized and verified_by_loop_invocation are two independent facts.
+        authorized is the owner's in-repository standing authorization, which
+        authorization_ref names by record id; verified_by_loop_invocation is
+        whether the Loop has ever completed an invocation through this
+        Provider. They disagree today for two of the three Providers, and when
+        authorized is true and verified_by_loop_invocation is false the health
+        is unauthenticated or unknown and blocked_reason names the action a
+        human must take. No agent can take it: authenticating a CLI uses the
+        owner's own identity.
+        authorization_ref is a record id and never a person. The approving
+        person's address is not carried by this API, is not carried by the read
+        model behind it, and is not written to any log line.
+        blocked_reason is empty exactly when health is healthy.
+        last_observed_at is the empty string when this Provider has never been
+        observed; no instant is synthesized for an absence. stale is true
+        whenever the newest observation is older than the declared window, and
+        also whenever there is no observation at all. A stale entry keeps the
+        health it was last observed to have and reports its age rather than
+        being silently refreshed or silently downgraded.
+        observation_count counts the retained observations that fall inside the
+        declared window, so it is zero for a Provider that has never been
+        observed and for one whose every retained observation has aged out.
+      properties:
+        provider: {type: string, enum: [codex, claude, opencode]}
+        authorized: {type: boolean, description: 'the owner''s in-repository standing authorization covers this Provider'}
+        authorization_ref: {type: string, description: 'the standing authorization record id, or the empty string when no authorization covers this Provider'}
+        verified_by_loop_invocation: {type: boolean, description: 'the Loop has completed at least one invocation through this Provider; sticky, so a later failure never un-verifies it'}
+        health: {type: string, enum: [unknown, healthy, degraded, unavailable, unauthenticated, stopped-for-inspection]}
+        blocked_reason: {type: string, enum: ['', never-invoked-by-loop, owner-must-authenticate-cli-on-runner-machine, last-invocation-failed-retryably, last-invocation-failed-non-retryably, last-invocation-failed-without-a-classified-reason, owner-must-clear-the-runaway-stop-with-a-new-approved-record]}
+        last_observed_at: {type: string, description: 'RFC3339 instant of the newest retained observation, or the empty string when this Provider has never been observed'}
+        observation_count: {type: integer, minimum: 0}
+        stale: {type: boolean}
+        runaway_detection: {$ref: '#/components/schemas/ProviderRunawayDetection'}
+        concurrency: {$ref: '#/components/schemas/ProviderConcurrency'}
+        assignments: {type: array, maxItems: 24, items: {$ref: '#/components/schemas/ProviderAssignment'}}
+    ProviderRegistryResponse:
+      type: object
+      additionalProperties: false
+      required: [providers]
+      description: |
+        The whole registry. providers has exactly one entry per declared
+        Provider, in the fixed order codex, claude, opencode, so repeated calls
+        against the same stored state produce byte-identical documents.
+        There is deliberately no tally of any kind here -- no failure count, no
+        degraded count, no assignable count, no eligible count. A stop for
+        inspection is neither a success nor a failure, so a failure tally would
+        need a carve-out for it and would eventually forget it; and an
+        assignable count would be a second, derived statement of what each
+        entry's own health and blocked_reason already say exactly, which is how
+        two numbers come to disagree.
+      properties: {providers: {type: array, minItems: 3, maxItems: 3, items: {$ref: '#/components/schemas/ProviderRegistryEntry'}}}
     ProcessObservation:
       type: object
       additionalProperties: false
@@ -563,4 +727,14 @@ components:
       type: object
       additionalProperties: false
       required: [request_id, expected_execution_version, control_revision]
-      properties: {request_id: {type: string}, expected_execution_version: {type: integer}, control_revision: {type: integer}}
+      description: |
+        provider is additive and optional (V2-067). It names the Provider this
+        Execution is about to be driven through, and start is the carrier
+        because the Runner is the only party that knows which Provider it is
+        about to invoke. The assignment it records is a side table keyed by
+        Execution id, written inside start's existing transaction, so it
+        appears and disappears with the Execution it describes. Absent records
+        no assignment and changes no Provider's active_assignments; a value
+        outside the closed set of three is refused with 400 and records
+        nothing.
+      properties: {request_id: {type: string}, expected_execution_version: {type: integer}, control_revision: {type: integer}, provider: {type: string, enum: [codex, claude, opencode]}}

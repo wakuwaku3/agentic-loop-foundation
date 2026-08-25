@@ -111,6 +111,16 @@ const (
 	FailureCancelled    FailureClass = "cancelled"
 	FailureContract     FailureClass = "contract-incompatible"
 	FailureUnknown      FailureClass = "unknown"
+	// FailureUnauthenticated is the class of a CLI that is installed and
+	// reachable but has no authenticated session on this machine (dp-v2-067
+	// d9). Without it the first invocation of an un-logged-in provider is
+	// classified FailureTransport, which reads as an infrastructure fault and
+	// sends the owner looking in the wrong place -- so the one state that
+	// actually blocks the milestone would be invisible in the exact record
+	// meant to reveal it. It is deliberately NOT retryable: retrying cannot
+	// produce a session, because authenticating a CLI uses the owner's own
+	// identity and no agent can perform it.
+	FailureUnauthenticated FailureClass = "provider-unauthenticated"
 )
 
 type Failure struct {

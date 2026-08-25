@@ -29,6 +29,9 @@ type state struct {
 	controlRequestedBy map[domain.Revision]domain.RequestedBy
 	runnerObservations map[string]domain.RunnerObservation
 	runnerVersions     map[string]application.RunnerVersionReport
+	providerLogs       map[application.ProviderName]application.ProviderObservationLog
+	providerAssigns    map[string]application.ProviderAssignment
+	providerAssignSeq  map[application.ProviderName][]application.ProviderAssignment
 	repositories       map[string]domain.Repository
 	repositoryObs      map[string]domain.RepositoryObservation
 	requirementRepo    map[string]domain.RequirementRepositoryLink
@@ -41,7 +44,7 @@ type state struct {
 }
 
 func newState() state {
-	return state{requirements: map[string]domain.Requirement{}, increments: map[string]domain.Increment{}, executions: map[string]domain.Execution{}, leases: map[string]domain.Lease{}, requests: map[string]application.IdempotentResponse{}, texts: map[string]string{}, targets: map[string]domain.ControlTarget{}, controlProgress: map[domain.Revision]domain.ControlProgress{}, controlRequestedBy: map[domain.Revision]domain.RequestedBy{}, runnerObservations: map[string]domain.RunnerObservation{}, runnerVersions: map[string]application.RunnerVersionReport{}, repositories: map[string]domain.Repository{}, repositoryObs: map[string]domain.RepositoryObservation{}, requirementRepo: map[string]domain.RequirementRepositoryLink{}}
+	return state{requirements: map[string]domain.Requirement{}, increments: map[string]domain.Increment{}, executions: map[string]domain.Execution{}, leases: map[string]domain.Lease{}, requests: map[string]application.IdempotentResponse{}, texts: map[string]string{}, targets: map[string]domain.ControlTarget{}, controlProgress: map[domain.Revision]domain.ControlProgress{}, controlRequestedBy: map[domain.Revision]domain.RequestedBy{}, runnerObservations: map[string]domain.RunnerObservation{}, runnerVersions: map[string]application.RunnerVersionReport{}, providerLogs: map[application.ProviderName]application.ProviderObservationLog{}, providerAssigns: map[string]application.ProviderAssignment{}, providerAssignSeq: map[application.ProviderName][]application.ProviderAssignment{}, repositories: map[string]domain.Repository{}, repositoryObs: map[string]domain.RepositoryObservation{}, requirementRepo: map[string]domain.RequirementRepositoryLink{}}
 }
 func (s state) clone() state {
 	n := newState()
@@ -73,6 +76,20 @@ func (s state) clone() state {
 	// so a rolled-back transaction cannot leak a report into committed state.
 	for k, v := range s.runnerVersions {
 		n.runnerVersions[k] = v
+	}
+	// The Provider observation ring and the Provider assignment side table are
+	// copied on write like every other record, including their slices, so a
+	// rolled-back transaction cannot leak an observation or an assignment into
+	// the committed state.
+	for k, v := range s.providerLogs {
+		v.Observations = append([]application.ProviderObservation(nil), v.Observations...)
+		n.providerLogs[k] = v
+	}
+	for k, v := range s.providerAssigns {
+		n.providerAssigns[k] = v
+	}
+	for k, v := range s.providerAssignSeq {
+		n.providerAssignSeq[k] = append([]application.ProviderAssignment(nil), v...)
 	}
 	// Repository and its bounded forge Observation are copied on write like
 	// every other aggregate, so a rolled-back transaction cannot leak a
@@ -623,6 +640,85 @@ func (u *unit) RunnerVersionReports(_ context.Context, limit int) ([]application
 	}
 	return out, false, nil
 }
+
+// ===========================================================================
+// The Provider registry (V2-067)
+// ===========================================================================
+//
+// One document per declared Provider, keyed by the Provider name, holding the
+// bounded observation ring and the sticky verified instant; plus the
+// assignment side table keyed by Execution id, with a per-Provider insertion
+// ordered index the bounded enumeration reads. Neither read touches a
+// collection whose size grows with the Requirement count.
+
+func (u *unit) SaveProviderObservation(_ context.Context, value application.ProviderObservation) error {
+	if !value.Provider.Valid() {
+		return application.ErrProviderUnknown
+	}
+	if value.ObservedAt.IsZero() {
+		return errors.New("provider observation requires an observed instant")
+	}
+	// The retention bound and the sticky verified instant are the shared write
+	// rule, so this adapter cannot implement a retention the Firestore adapter
+	// does not.
+	u.s.providerLogs[value.Provider] = application.ApplyProviderObservation(u.s.providerLogs[value.Provider], value)
+	return nil
+}
+
+func (u *unit) ProviderObservations(_ context.Context, name application.ProviderName) (application.ProviderObservationLog, error) {
+	if !name.Valid() {
+		return application.ProviderObservationLog{}, application.ErrProviderUnknown
+	}
+	log, ok := u.s.providerLogs[name]
+	if !ok {
+		// Nothing is synthesized for a Provider with no record: an empty ring
+		// and a zero VerifiedAt is what "never observed" looks like.
+		return application.ProviderObservationLog{Provider: name}, nil
+	}
+	out := application.ProviderObservationLog{Provider: name, VerifiedAt: log.VerifiedAt}
+	out.Observations = append([]application.ProviderObservation(nil), log.Observations...)
+	return out, nil
+}
+
+func (u *unit) SaveProviderAssignment(_ context.Context, value application.ProviderAssignment) error {
+	if !value.Provider.Valid() {
+		return application.ErrProviderUnknown
+	}
+	if value.ExecutionID == "" {
+		return errors.New("provider assignment requires an execution id")
+	}
+	prior, existed := u.s.providerAssigns[value.ExecutionID]
+	// The keyed side table is the record of which Provider an Execution was
+	// started against; the per-Provider index below is what makes the bounded
+	// enumeration a single keyed read.
+	u.s.providerAssigns[value.ExecutionID] = value
+	if existed && prior.Provider != value.Provider {
+		kept := make([]application.ProviderAssignment, 0, len(u.s.providerAssignSeq[prior.Provider]))
+		for _, a := range u.s.providerAssignSeq[prior.Provider] {
+			if a.ExecutionID != value.ExecutionID {
+				kept = append(kept, a)
+			}
+		}
+		u.s.providerAssignSeq[prior.Provider] = kept
+	}
+	u.s.providerAssignSeq[value.Provider] = application.AppendProviderAssignment(u.s.providerAssignSeq[value.Provider], value)
+	return nil
+}
+
+func (u *unit) ProviderAssignment(_ context.Context, executionID string) (application.ProviderAssignment, bool, error) {
+	v, ok := u.s.providerAssigns[executionID]
+	return v, ok, nil
+}
+
+func (u *unit) ProviderAssignments(_ context.Context, name application.ProviderName) ([]application.ProviderAssignment, error) {
+	if !name.Valid() {
+		return nil, application.ErrProviderUnknown
+	}
+	out := append([]application.ProviderAssignment(nil), u.s.providerAssignSeq[name]...)
+	application.SortProviderAssignments(out)
+	return out, nil
+}
+
 func (u *unit) Idempotency(_ context.Context, id, op string) (application.IdempotentResponse, bool, error) {
 	v, ok := u.s.requests[id]
 	if ok && v.Operation != op {

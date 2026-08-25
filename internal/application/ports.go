@@ -265,6 +265,60 @@ type RequirementRepositoryLinkRepository interface {
 	RequirementIDsForRepository(ctx context.Context, repositoryID string, limit int) ([]string, bool, error)
 }
 
+// ProviderObservationRepository is the persistence contract of the Provider
+// observation ring (V2-067). It is keyed by the Provider name -- one document
+// per declared Provider, three in total -- and never by Execution or
+// Requirement, so the read cost of GET /v1/providers is a constant that does
+// not grow with the Requirement count (docs/architecture/validation.md section
+// 5). It follows ControlRequestedByRepository's precedent: the value is not an
+// aggregate, has no state transition and no Version, and no domain rule
+// consults it.
+//
+// SaveProviderObservation appends one observation and enforces two rules that
+// belong to the record rather than to a caller:
+//
+//   - the ring keeps at most MaxProviderObservations entries per Provider,
+//     newest first, dropping the oldest (TrimProviderObservations), and
+//   - VerifiedAt is sticky: the first observation that Completed() sets it, and
+//     nothing ever clears it. "Has the Loop ever completed an invocation
+//     through this Provider" is a monotone historical fact, and deriving it
+//     from a bounded ring would let later failures silently un-verify a
+//     Provider that really was exercised.
+//
+// ProviderObservations returns the ring newest-first for one Provider, at most
+// MaxProviderObservations entries, and the zero VerifiedAt when the Loop has
+// never completed an invocation. An implementation must never synthesize an
+// observation or an instant for a Provider it holds no record for: "not
+// observed" and "healthy" must stay distinguishable, which is the whole reason
+// this surface exists.
+type ProviderObservationRepository interface {
+	SaveProviderObservation(ctx context.Context, value ProviderObservation) error
+	ProviderObservations(ctx context.Context, name ProviderName) (ProviderObservationLog, error)
+}
+
+// ProviderAssignmentRepository is the side table of Provider assignments
+// (V2-067), keyed by Execution id. domain.Execution gains no Provider field:
+// it sits inside the transition functions the M1 gate proved, and widening it
+// would put a label with no transition semantics inside the structure every
+// state assertion reads, for no gain -- the join Execution id -> Provider name
+// is all the read model needs (dp-v2-067 d7).
+//
+// SaveProviderAssignment writes the keyed record and updates the per-Provider
+// index the bounded enumeration reads. Re-writing the same Execution id
+// replaces the record rather than adding a second one.
+//
+// ProviderAssignments enumerates one Provider's retained assignments, at most
+// MaxProviderAssignments of them, in Execution-id ascending order
+// (SortProviderAssignments). The bound is applied in the storage layer, not by
+// slicing a full scan. Terminal filtering is deliberately NOT done here: the
+// terminal rule is stated once in internal/application, by the same predicate
+// the Claim reclaim path uses, rather than once per adapter.
+type ProviderAssignmentRepository interface {
+	SaveProviderAssignment(ctx context.Context, value ProviderAssignment) error
+	ProviderAssignment(ctx context.Context, executionID string) (ProviderAssignment, bool, error)
+	ProviderAssignments(ctx context.Context, name ProviderName) ([]ProviderAssignment, error)
+}
+
 type IdempotencyRepository interface {
 	Idempotency(ctx context.Context, requestID string, operation string) (IdempotentResponse, bool, error)
 	SaveIdempotency(ctx context.Context, value IdempotentResponse) error
@@ -294,6 +348,8 @@ type UnitOfWork interface {
 	ControlProgressRepository
 	RunnerObservationRepository
 	RunnerVersionReportRepository
+	ProviderObservationRepository
+	ProviderAssignmentRepository
 	RepositoryRepository
 	RequirementRepositoryLinkRepository
 	RequirementReadRepository

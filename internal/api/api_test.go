@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -1235,5 +1236,308 @@ func TestOwnerConsoleExposesTheRunnerVersionReports(t *testing.T) {
 		if strings.Contains(lowered, forbidden) || strings.Contains(strings.ToLower(js), forbidden) {
 			t.Fatalf("owner console claims %q", forbidden)
 		}
+	}
+}
+
+// ===========================================================================
+// V2-067: the Provider registry at the transport boundary
+// ===========================================================================
+
+// providerRegistryDoc reads GET /v1/providers as the owner and returns the
+// decoded document, the provider rows and the raw body.
+func providerRegistryDoc(t *testing.T, h http.Handler) (map[string]any, []map[string]any, string) {
+	t.Helper()
+	w := call(h, http.MethodGet, "/v1/providers", "", "owner")
+	if w.Code != 200 {
+		t.Fatalf("GET /v1/providers status=%d body=%s", w.Code, w.Body.String())
+	}
+	doc := decodeBody(t, w.Body.Bytes())
+	raw, ok := doc["providers"].([]any)
+	if !ok {
+		t.Fatalf("no providers array in %s", w.Body.String())
+	}
+	rows := make([]map[string]any, 0, len(raw))
+	for _, r := range raw {
+		row, ok := r.(map[string]any)
+		if !ok {
+			t.Fatalf("a provider row is not an object: %v", r)
+		}
+		rows = append(rows, row)
+	}
+	return doc, rows, w.Body.String()
+}
+
+// TestProvidersRouteIsOwnerOnlyGetWithAClosedResponse is V2-067 A13.
+func TestProvidersRouteIsOwnerOnlyGetWithAClosedResponse(t *testing.T) {
+	h, _ := runnerVersionHandler(t)
+	const path = "/v1/providers"
+	if w := call(h, http.MethodGet, path, "", ""); w.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated status=%d body=%s", w.Code, w.Body.String())
+	}
+	if w := call(h, http.MethodGet, path, "", "runner"); w.Code != http.StatusForbidden {
+		t.Fatalf("runner role status=%d body=%s", w.Code, w.Body.String())
+	}
+	for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodDelete, http.MethodPatch} {
+		if w := call(h, method, path, `{}`, "owner"); w.Code != http.StatusMethodNotAllowed {
+			t.Fatalf("%s status=%d body=%s; there is deliberately no mutation verb on this path", method, w.Code, w.Body.String())
+		}
+	}
+	if w := call(h, http.MethodGet, path, "", "owner"); w.Code != 200 {
+		t.Fatalf("owner status=%d body=%s", w.Code, w.Body.String())
+	}
+
+	doc, rows, raw := providerRegistryDoc(t, h)
+	// The response carries no field this Work Order did not name.
+	topLevel := map[string]bool{"providers": true}
+	for key := range doc {
+		if !topLevel[key] {
+			t.Fatalf("the response carries an unnamed top-level field %q", key)
+		}
+	}
+	rowFields := map[string]bool{
+		"provider": true, "authorized": true, "authorization_ref": true,
+		"verified_by_loop_invocation": true, "health": true, "blocked_reason": true,
+		"last_observed_at": true, "observation_count": true, "stale": true,
+		"runaway_detection": true, "concurrency": true, "assignments": true,
+	}
+	runawayFields := map[string]bool{"scope": true, "state": true, "thresholds_declared_in": true}
+	concurrencyFields := map[string]bool{"active_assignments": true, "declared_ceiling": true, "ceiling_source": true, "remaining": true, "exhausted": true}
+	if len(rows) != 3 {
+		t.Fatalf("the response carries %d providers, want exactly 3", len(rows))
+	}
+	names := []string{}
+	for _, row := range rows {
+		for key := range row {
+			if !rowFields[key] {
+				t.Fatalf("a provider row carries an unnamed field %q", key)
+			}
+		}
+		for _, named := range []string{"provider", "authorized", "authorization_ref", "verified_by_loop_invocation", "health", "blocked_reason", "last_observed_at", "observation_count", "stale", "runaway_detection", "concurrency", "assignments"} {
+			if _, ok := row[named]; !ok {
+				t.Fatalf("a provider row omits the required field %q: %v", named, row)
+			}
+		}
+		runaway, ok := row["runaway_detection"].(map[string]any)
+		if !ok {
+			t.Fatalf("runaway_detection is not an object: %v", row["runaway_detection"])
+		}
+		for key := range runaway {
+			if !runawayFields[key] {
+				t.Fatalf("runaway_detection carries an unnamed field %q", key)
+			}
+		}
+		concurrency, ok := row["concurrency"].(map[string]any)
+		if !ok {
+			t.Fatalf("concurrency is not an object: %v", row["concurrency"])
+		}
+		for key := range concurrency {
+			if !concurrencyFields[key] {
+				t.Fatalf("concurrency carries an unnamed field %q", key)
+			}
+		}
+		name, _ := row["provider"].(string)
+		names = append(names, name)
+	}
+	if !reflect.DeepEqual(names, []string{"codex", "claude", "opencode"}) {
+		t.Fatalf("provider order = %v, want the fixed declared order", names)
+	}
+
+	// No synthetic or placeholder value anywhere in the document, and no
+	// monetary vocabulary and no threshold number either.
+	for _, forbidden := range []string{
+		"TODO", "placeholder", "unknown-provider", "example.com", "@",
+		"budget", "quota", "billing", "spend", "cost", "credit",
+		"USD", "usd", "16", "10.0", "2.0",
+	} {
+		if strings.Contains(raw, forbidden) {
+			t.Fatalf("the response contains %q: %s", forbidden, raw)
+		}
+	}
+	// A Provider the Loop has never driven reports unknown and stale, not a
+	// reassuring default.
+	for _, row := range rows {
+		if row["health"] != "unknown" {
+			t.Fatalf("provider %v health=%v with no observation at all, want unknown", row["provider"], row["health"])
+		}
+		if row["stale"] != true {
+			t.Fatalf("provider %v stale=%v with no observation at all", row["provider"], row["stale"])
+		}
+		if row["blocked_reason"] != "never-invoked-by-loop" {
+			t.Fatalf("provider %v blocked_reason=%v", row["provider"], row["blocked_reason"])
+		}
+		if row["authorized"] != true || row["authorization_ref"] != "psa-foundation-001" {
+			t.Fatalf("provider %v authorization = %v / %v", row["provider"], row["authorized"], row["authorization_ref"])
+		}
+		if row["verified_by_loop_invocation"] != false {
+			t.Fatalf("provider %v is verified with no observation", row["provider"])
+		}
+	}
+}
+
+// TestProviderObservationShapeIsClosedAtTheTransport is V2-067 A10 and A13 at
+// the transport boundary: the additive request objects carry exactly the named
+// fields, an unknown field is refused, and a value outside a closed enum is a
+// 400 that records nothing.
+func TestProviderObservationShapeIsClosedAtTheTransport(t *testing.T) {
+	// The DTO the api package declares carries exactly three fields and none of
+	// them can hold text.
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "api.go", nil, parser.AllErrors)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fields := map[string][]string{}
+	ast.Inspect(file, func(n ast.Node) bool {
+		spec, ok := n.(*ast.TypeSpec)
+		if !ok || spec.Name == nil || spec.Name.Name != "providerObservationBody" {
+			return true
+		}
+		st, ok := spec.Type.(*ast.StructType)
+		if !ok {
+			return true
+		}
+		for _, f := range st.Fields.List {
+			for _, name := range f.Names {
+				fields["providerObservationBody"] = append(fields["providerObservationBody"], name.Name)
+			}
+		}
+		return true
+	})
+	got := fields["providerObservationBody"]
+	if !reflect.DeepEqual(got, []string{"Name", "FailureClass", "StoppedForInspection"}) {
+		t.Fatalf("providerObservationBody fields = %v, want exactly [Name FailureClass StoppedForInspection]", got)
+	}
+	for _, forbidden := range []string{"Message", "Detail", "Output", "Result", "Session", "Text", "At", "ObservedAt", "Prompt", "Response"} {
+		for _, name := range got {
+			if name == forbidden {
+				t.Fatalf("providerObservationBody declares %q", forbidden)
+			}
+		}
+	}
+
+	h, _ := runnerVersionHandler(t)
+	// An unknown field anywhere in the additive objects is refused by the
+	// existing strict decoder, which is what additionalProperties:false
+	// declares in the contract.
+	unknown := []string{
+		`{"request_id":"r-1","execution_id":"e-1","lease_id":"l-1","expected_execution_version":1,"fencing_token":1,"control_revision":0,"succeeded":true,"provider_observation":{"name":"claude","message":"hello"}}`,
+		`{"request_id":"r-2","execution_id":"e-1","lease_id":"l-1","expected_execution_version":1,"fencing_token":1,"control_revision":0,"succeeded":true,"provider_observation":{"name":"claude","output":"raw provider text"}}`,
+		`{"request_id":"r-3","execution_id":"e-1","lease_id":"l-1","expected_execution_version":1,"fencing_token":1,"control_revision":0,"succeeded":true,"provider_observation":{"name":"claude","session_id":"s-1"}}`,
+	}
+	for _, body := range unknown {
+		w := call(h, http.MethodPost, "/v1/executions/result", body, "runner")
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("an unknown provider_observation field was accepted: status=%d body=%s", w.Code, w.Body.String())
+		}
+		if !strings.Contains(w.Body.String(), "invalid_json") {
+			t.Fatalf("unexpected refusal for an unknown field: %s", w.Body.String())
+		}
+	}
+	// A failure_class outside the closed enum is a 400, and so is an
+	// unrecognised provider name, and neither records anything: the registry
+	// still reports every Provider as never invoked.
+	badEnum := []string{
+		`{"request_id":"r-4","execution_id":"e-1","lease_id":"l-1","expected_execution_version":1,"fencing_token":1,"control_revision":0,"succeeded":true,"provider_observation":{"name":"claude","failure_class":"provider-quota"}}`,
+		`{"request_id":"r-5","execution_id":"e-1","lease_id":"l-1","expected_execution_version":1,"fencing_token":1,"control_revision":0,"succeeded":true,"provider_observation":{"name":"gemini"}}`,
+		`{"request_id":"r-6","execution_id":"e-1","lease_id":"l-1","expected_execution_version":1,"fencing_token":1,"control_revision":0,"succeeded":true,"provider_observation":{"name":""}}`,
+	}
+	for _, body := range badEnum {
+		w := call(h, http.MethodPost, "/v1/executions/result", body, "runner")
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("a value outside a closed enum was accepted: status=%d body=%s", w.Code, w.Body.String())
+		}
+	}
+	// An unrecognised provider on start is a 400 too.
+	if w := call(h, http.MethodPost, "/v1/executions/e-1:start", `{"request_id":"s-1","expected_execution_version":1,"control_revision":0,"provider":"gemini"}`, "runner"); w.Code != http.StatusBadRequest {
+		t.Fatalf("start accepted an undeclared provider: status=%d body=%s", w.Code, w.Body.String())
+	}
+	// And nothing was recorded by any of the refusals.
+	_, rows, _ := providerRegistryDoc(t, h)
+	for _, row := range rows {
+		if row["observation_count"] != float64(0) || row["health"] != "unknown" {
+			t.Fatalf("a refused request recorded state: %v", row)
+		}
+		assignments, _ := row["assignments"].([]any)
+		if len(assignments) != 0 {
+			t.Fatalf("a refused request recorded an assignment: %v", row)
+		}
+	}
+}
+
+// TestOwnerConsoleExposesTheProviderRegistry is V2-067 A14.
+func TestOwnerConsoleExposesTheProviderRegistry(t *testing.T) {
+	h, _ := runnerVersionHandler(t)
+	w := call(h, http.MethodGet, "/owner/", "", "owner")
+	if w.Code != 200 {
+		t.Fatalf("owner console status=%d", w.Code)
+	}
+	html := w.Body.String()
+	for _, want := range []string{`id="providers-title"`, `id="providers-refresh"`, `id="providers-waiting"`, `id="providers-stopped"`, `id="providers-rows"`, "V2-067 Provider registry"} {
+		if !strings.Contains(html, want) {
+			t.Fatalf("owner console does not carry %s", want)
+		}
+	}
+	// Additive only: every pre-existing surface, including the sibling tasks'
+	// sections, is still there.
+	for _, want := range []string{`id="capture"`, `id="control"`, `id="queue"`, `id="repository"`, `id="repository-list"`, "Release evidence", `id="release-conditions"`, `id="backlog-rows"`, `id="runners-rows"`} {
+		if !strings.Contains(html, want) {
+			t.Fatalf("owner console lost the pre-existing surface %s", want)
+		}
+	}
+	w = call(h, http.MethodGet, "/owner/assets/owner.js", "", "")
+	if w.Code != 200 {
+		t.Fatalf("owner.js status=%d", w.Code)
+	}
+	js := w.Body.String()
+	marker := strings.Index(js, "// V2-067 Provider registry")
+	if marker < 0 {
+		t.Fatal("owner.js does not carry the V2-067 marker comment")
+	}
+	block := js[marker:]
+	// The block reads the registry and renders each declared observable.
+	for _, want := range []string{"/v1/providers", "health", "blocked", "stale", "runaway_detection", "active_assignments", "verified_by_loop_invocation", "authorization", "providers-waiting", "providers-stopped"} {
+		if !strings.Contains(block, want) {
+			t.Fatalf("the V2-067 owner.js block does not reference %q", want)
+		}
+	}
+	// The sibling blocks are still present in the same single file.
+	for _, want := range []string{"/v1/release/state", "/v1/runners", "executability", "requirement_backlog"} {
+		if !strings.Contains(js, want) {
+			t.Fatalf("owner.js lost the pre-existing block reference %q", want)
+		}
+	}
+	// The block renders named rows, not raw JSON, and adds no timer, no
+	// external asset, script or font: internal/web is embedded and stays
+	// self-contained.
+	for _, forbidden := range []string{"JSON.stringify", "http://", "https://", "//cdn", "importScripts", "setInterval", "setTimeout", "@font-face"} {
+		if strings.Contains(block, forbidden) {
+			t.Fatalf("the V2-067 owner.js block references %q", forbidden)
+		}
+	}
+	// No credential-shaped and no email-shaped value in the block or in the
+	// rendered markup of the section. The matcher is verified first: the
+	// pre-existing repository-locator block does contain an '@', so a scan
+	// over the whole file would not be evidence about this block.
+	if !strings.Contains(js, `"@"`) {
+		t.Fatal("the pre-existing owner.js locator block no longer contains an '@'; this scan's control is stale")
+	}
+	if strings.Contains(block, "@") {
+		t.Fatalf("the V2-067 owner.js block carries an '@'")
+	}
+	htmlMarker := strings.Index(html, "V2-067 Provider registry")
+	section := html[htmlMarker:]
+	if strings.Contains(section, "@") {
+		t.Fatal("the V2-067 owner console section carries an '@'")
+	}
+	lowered := strings.ToLower(section)
+	for _, forbidden := range []string{"password", "secret", "api_key", "apikey", "bearer ", "authorization:", "private_key", "budget", "billing", "quota", "spend", "credit"} {
+		if strings.Contains(lowered, forbidden) {
+			t.Fatalf("the rendered Providers section carries a forbidden value %q", forbidden)
+		}
+	}
+	// A reader can see which Providers are waiting for the owner without
+	// parsing anything: the waiting list is a named heading with its own list.
+	if !strings.Contains(section, "Waiting for the owner to sign in to a CLI") {
+		t.Fatal("the Providers section does not name the authentication wait in plain words")
 	}
 }

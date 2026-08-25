@@ -296,10 +296,27 @@ func (s *Service) Renew(ctx context.Context, req RenewRequest) (out RenewRespons
 	return out, err
 }
 
+// StartRequest gains Provider (V2-067): one additive optional field naming
+// the Provider this Execution is about to be driven through. Start is the
+// natural carrier because the Runner is the only party that knows which
+// Provider it is about to invoke, and the assignment is written inside Start's
+// existing transaction so it appears and disappears with the Execution it
+// describes.
+//
+// The empty value means "no Provider was named", records no assignment and
+// changes no Provider's active_assignments. An unrecognised value is a
+// malformed request, refused before the transaction opens, so it records
+// nothing at all.
+//
+// Consequence, recorded rather than hidden: requestFingerprint("start", req)
+// below covers the whole request, so replaying one request_id with a different
+// provider is ErrIdempotencyConflict. That is existing semantics, not new
+// behaviour.
 type StartRequest struct {
 	RequestID, ExecutionID   string
 	ExpectedExecutionVersion domain.Version
 	ControlRevision          domain.Revision
+	Provider                 ProviderName
 }
 type StartResponse struct {
 	ExecutionID string                 `json:"execution_id"`
@@ -314,6 +331,12 @@ func (s *Service) Start(ctx context.Context, req StartRequest) (out StartRespons
 	}
 	if e = requireRequest(req.RequestID); e != nil {
 		return out, e
+	}
+	// The Provider name is checked against the closed set before the
+	// transaction opens, so an unrecognised name records nothing at all --
+	// not the assignment, not the Execution transition, not the event.
+	if req.Provider != "" && !req.Provider.Valid() {
+		return out, fmt.Errorf("%w: provider must be one of codex, claude, opencode", ErrProviderUnknown)
 	}
 	now := s.clock.Now()
 	if now.IsZero() {
@@ -384,6 +407,18 @@ func (s *Service) Start(ctx context.Context, req StartRequest) (out StartRespons
 		}
 		if x = u.SaveExecution(ctx, next, exec.Version); x != nil {
 			return x
+		}
+		// The Provider assignment is a side table keyed by Execution id
+		// (dp-v2-067 d7): domain.Execution gains no Provider field. Since is
+		// the transaction's authority time, never a Runner clock.
+		if req.Provider != "" {
+			at, x := transactionAuthorityTime(ctx, u)
+			if x != nil {
+				return x
+			}
+			if x = u.SaveProviderAssignment(ctx, ProviderAssignment{ExecutionID: req.ExecutionID, IncrementID: exec.IncrementID.String(), Provider: req.Provider, Since: at}); x != nil {
+				return x
+			}
 		}
 		out = StartResponse{ExecutionID: req.ExecutionID, Status: next.Status, Version: next.Version}
 		return s.record(ctx, u, eid, oid, fp, req.RequestID, "start", "execution", req.ExecutionID, next.Version, "execution.started", actor.String(), nil, out)
@@ -1370,6 +1405,18 @@ func (s *Service) EvaluatePermit(ctx context.Context, req PermitRequest) (Permit
 	return s.Permit(ctx, req)
 }
 
+// AcceptResultRequest gains ProviderObservation (V2-067): one additive
+// optional object carrying what the Runner observed about the Provider it just
+// drove. The result the Runner already posts is the carrier because the cost
+// ledger and the CLIs live on the Runner machine while the registry lives in
+// the control plane, so the control plane cannot read the ledger and any
+// design that pretended otherwise would be a fiction. Extending a request
+// that already exists, under the existing runner session and the existing
+// idempotency path, is the smallest surface that makes the observation
+// durable: no new endpoint, no new authenticator, no new idempotency story.
+//
+// It is optional, so every existing caller and every existing test keeps
+// working unchanged.
 type AcceptResultRequest struct {
 	RequestID, ExecutionID, LeaseID string
 	ExpectedExecutionVersion        domain.Version
@@ -1377,6 +1424,7 @@ type AcceptResultRequest struct {
 	ControlRevision                 domain.Revision
 	Succeeded                       bool
 	Target                          domain.ControlTarget
+	ProviderObservation             *ProviderObservationInput
 }
 type AcceptResultResponse struct {
 	ExecutionID string                 `json:"execution_id"`
@@ -1391,6 +1439,14 @@ func (s *Service) AcceptResult(ctx context.Context, req AcceptResultRequest) (ou
 	}
 	if err = requireRequest(req.RequestID); err != nil {
 		return out, err
+	}
+	// The observation is validated on shape before the transaction opens, so a
+	// malformed one records nothing at all rather than recording the fields
+	// that happened to parse.
+	if req.ProviderObservation != nil {
+		if err = req.ProviderObservation.Validate(); err != nil {
+			return out, err
+		}
 	}
 	now := s.clock.Now()
 	if now.IsZero() {
@@ -1465,6 +1521,23 @@ func (s *Service) AcceptResult(ctx context.Context, req AcceptResultRequest) (ou
 		}
 		if e = u.SaveExecution(ctx, next, exec.Version); e != nil {
 			return e
+		}
+		// ObservedAt is the transaction's authority time. The observation
+		// object carries no timestamp field at all, so a Runner clock is
+		// structurally unable to reach the record.
+		if req.ProviderObservation != nil {
+			at, x := transactionAuthorityTime(ctx, u)
+			if x != nil {
+				return x
+			}
+			if x = u.SaveProviderObservation(ctx, ProviderObservation{
+				Provider:             req.ProviderObservation.Name,
+				FailureClass:         req.ProviderObservation.FailureClass,
+				StoppedForInspection: req.ProviderObservation.StoppedForInspection,
+				ObservedAt:           at,
+			}); x != nil {
+				return x
+			}
 		}
 		out = AcceptResultResponse{ExecutionID: req.ExecutionID, Status: next.Status, Version: next.Version}
 		effectOutbox, e := s.effectOutbox(ctx, u, outboxID, operationID, req.RequestID, domain.PermitExternalEffect, canonical, next.Version, req.FencingToken, req.ControlRevision, "result-accepted", req.ExecutionID)
