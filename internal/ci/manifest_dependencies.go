@@ -64,13 +64,16 @@ type LiteralFalsePositive struct {
 }
 
 // LiteralFalsePositives holds every module-path literal that must not be read
-// as an edge. Both entries are the dp-v2-021 d12 import guard's own test
-// data: internal/release/source_guard_test.go names the two packages
-// internal/release is forbidden to import, so counting them as dependencies
-// would invert the guard.
+// as an edge. Every entry is an import guard's own test data: a source guard
+// names the packages its package is forbidden to import, so counting those
+// names as dependencies would invert the very guard they belong to. An entry
+// is only ever justified this way; a literal that is actually reached at run
+// time belongs in verification_dependencies instead.
 var LiteralFalsePositives = []LiteralFalsePositive{
 	{File: "internal/release/source_guard_test.go", Component: "ci", Reason: "assertion data for the dp-v2-021 d12 import guard: the literal names the package internal/release must not import"},
 	{File: "internal/release/source_guard_test.go", Component: "update", Reason: "assertion data for the dp-v2-021 d12 import guard: the literal names the package internal/release must not import"},
+	{File: "internal/scheduler/source_guard_test.go", Component: "reconciler", Reason: "assertion data for the dp-v2-030 A9 import guard: the literal names a package internal/scheduler must not import, and the guard's own positive control asserts it is rejected"},
+	{File: "internal/scheduler/source_guard_test.go", Component: "store-memory", Reason: "assertion data for the dp-v2-030 A9 import guard: the literal names a package internal/scheduler must not import, and the guard's own positive control asserts it is rejected"},
 }
 
 // FileImports is everything the AST extractor reads out of one Go file:

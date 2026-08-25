@@ -362,9 +362,11 @@
     {
       "component": "scheduler",
       "closure": [
+        "domain",
         "scheduler"
       ],
       "patterns": [
+        "internal/domain/**",
         "internal/scheduler/**"
       ]
     },
