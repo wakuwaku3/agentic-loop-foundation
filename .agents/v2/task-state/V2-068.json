@@ -1,0 +1,60 @@
+{
+  "schema_version": "v1",
+  "id": "ts-v2-068",
+  "kind": "canonical-task-state",
+  "task_id": "V2-068",
+  "status": "queued",
+  "dependencies": [
+    "V2-030"
+  ],
+  "outcome": "Connect the scheduler to the running system: a control mode that sets a concurrency limit, and a queue summary that reports allocation, waiting reason and exhaustion, so shared resource allocation becomes observable.",
+  "non_goals": [
+    "Do not re-design the scheduler's decision rules here",
+    "Do not report an allocation the scheduler did not decide",
+    "Do not let a limit change retroactively invalidate a granted claim"
+  ],
+  "actor": "sol",
+  "input_refs": [
+    "V2-030",
+    "V2-068"
+  ],
+  "input_hash": "7676e22654007c718f95812cdf8be42930fc80d9da5bdbe17239500bd84a1c98",
+  "output_refs": [
+    "V2-068"
+  ],
+  "output_hash": "231e4dfac384fd36f84a35242963a3bc3e6592d7543ecc5803948f071cf3bbd9",
+  "owner": "terra",
+  "next_owner": "terra",
+  "retry_budget": {
+    "max_attempts": 2,
+    "attempts_used": 0,
+    "remaining": 2
+  },
+  "release_eligible": false,
+  "transitions": [
+    {
+      "sequence": 1,
+      "at": "2026-08-25T02:20:00Z",
+      "from_status": null,
+      "to_status": "queued",
+      "actor": "sol",
+      "input_refs": [
+        "V2-030",
+        "V2-068"
+      ],
+      "input_hash": "7676e22654007c718f95812cdf8be42930fc80d9da5bdbe17239500bd84a1c98",
+      "output_refs": [
+        "V2-068"
+      ],
+      "output_hash": "231e4dfac384fd36f84a35242963a3bc3e6592d7543ecc5803948f071cf3bbd9",
+      "owner": "terra",
+      "next_owner": "terra",
+      "retry_budget": {
+        "max_attempts": 2,
+        "attempts_used": 0,
+        "remaining": 2
+      },
+      "reason": "the M5 dogfood design measured that nine of the twelve declared capabilities cannot be exercised and that five of them have no implementation at all; this task owns escalation E22-5, where internal/scheduler is imported by no package outside itself, no control mode sets a concurrency limit, and the queue summary reports no allocation, waiting reason or exhaustion, so the declared capability cannot be observed"
+    }
+  ]
+}

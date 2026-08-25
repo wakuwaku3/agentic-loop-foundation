@@ -1,0 +1,60 @@
+{
+  "schema_version": "v1",
+  "id": "ts-v2-067",
+  "kind": "canonical-task-state",
+  "task_id": "V2-067",
+  "status": "queued",
+  "dependencies": [
+    "V2-017"
+  ],
+  "outcome": "Make Provider operation observable inside the system: a registry with health, limits and current assignment, so Provider state stops living only in a cost ledger outside the repository.",
+  "non_goals": [
+    "Do not record a prompt or a raw provider response",
+    "Do not make the usage ledger the authority for anything other than the Loop's own execution path",
+    "Do not treat a runaway threshold as a billing budget"
+  ],
+  "actor": "sol",
+  "input_refs": [
+    "V2-017",
+    "V2-067"
+  ],
+  "input_hash": "0cfa2cc5d8c9843df7a1047e1fb2d862bdd4eb98df8d4725b24b52a3a80e1730",
+  "output_refs": [
+    "V2-067"
+  ],
+  "output_hash": "cb7ae866e8762fc1bba8dc410d2c44d89b4abc8c263316c3cb0fd1cc0a0d800c",
+  "owner": "terra",
+  "next_owner": "terra",
+  "retry_budget": {
+    "max_attempts": 2,
+    "attempts_used": 0,
+    "remaining": 2
+  },
+  "release_eligible": false,
+  "transitions": [
+    {
+      "sequence": 1,
+      "at": "2026-08-25T02:20:00Z",
+      "from_status": null,
+      "to_status": "queued",
+      "actor": "sol",
+      "input_refs": [
+        "V2-017",
+        "V2-067"
+      ],
+      "input_hash": "0cfa2cc5d8c9843df7a1047e1fb2d862bdd4eb98df8d4725b24b52a3a80e1730",
+      "output_refs": [
+        "V2-067"
+      ],
+      "output_hash": "cb7ae866e8762fc1bba8dc410d2c44d89b4abc8c263316c3cb0fd1cc0a0d800c",
+      "owner": "terra",
+      "next_owner": "terra",
+      "retry_budget": {
+        "max_attempts": 2,
+        "attempts_used": 0,
+        "remaining": 2
+      },
+      "reason": "the M5 dogfood design measured that nine of the twelve declared capabilities cannot be exercised and that five of them have no implementation at all; this task owns escalation E22-4, where there is no Provider registry, health, limit or assignment surface anywhere in the api or application layer, so provider state is observable only in the out-of-repository cost ledger and the declared capability cannot be observed"
+    }
+  ]
+}

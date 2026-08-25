@@ -1,0 +1,60 @@
+{
+  "schema_version": "v1",
+  "id": "ts-v2-066",
+  "kind": "canonical-task-state",
+  "task_id": "V2-066",
+  "status": "queued",
+  "dependencies": [
+    "V2-021"
+  ],
+  "outcome": "Wire the release machinery into an observable surface: the running Preview version, the promotion conditions still unmet, and the rollback target, read through the API rather than inferred from the repository tree.",
+  "non_goals": [
+    "Do not promote a capability to stable to make the surface look complete",
+    "Do not duplicate the release contract's rules in the API layer",
+    "Do not place a digest inside a document that reports that digest"
+  ],
+  "actor": "sol",
+  "input_refs": [
+    "V2-021",
+    "V2-066"
+  ],
+  "input_hash": "903351ef59cc12dd85570bbcc937996f5abe73ee7366d6a77de58ab42dfdf619",
+  "output_refs": [
+    "V2-066"
+  ],
+  "output_hash": "28cdf21cb8deff8911e5871fb05fe81fd7133beaffa1ba40a1ca40b0b7336ee8",
+  "owner": "terra",
+  "next_owner": "terra",
+  "retry_budget": {
+    "max_attempts": 2,
+    "attempts_used": 0,
+    "remaining": 2
+  },
+  "release_eligible": false,
+  "transitions": [
+    {
+      "sequence": 1,
+      "at": "2026-08-25T02:20:00Z",
+      "from_status": null,
+      "to_status": "queued",
+      "actor": "sol",
+      "input_refs": [
+        "V2-021",
+        "V2-066"
+      ],
+      "input_hash": "903351ef59cc12dd85570bbcc937996f5abe73ee7366d6a77de58ab42dfdf619",
+      "output_refs": [
+        "V2-066"
+      ],
+      "output_hash": "28cdf21cb8deff8911e5871fb05fe81fd7133beaffa1ba40a1ca40b0b7336ee8",
+      "owner": "terra",
+      "next_owner": "terra",
+      "retry_budget": {
+        "max_attempts": 2,
+        "attempts_used": 0,
+        "remaining": 2
+      },
+      "reason": "the M5 dogfood design measured that nine of the twelve declared capabilities cannot be exercised and that five of them have no implementation at all; this task owns escalation E22-3, where internal/release is imported by no package outside itself and its own tests, so no Preview version, no unmet promotion condition and no rollback target is observable through any surface, which makes two declared capabilities unexercisable"
+    }
+  ]
+}

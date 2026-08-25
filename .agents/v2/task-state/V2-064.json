@@ -1,0 +1,60 @@
+{
+  "schema_version": "v1",
+  "id": "ts-v2-064",
+  "kind": "canonical-task-state",
+  "task_id": "V2-064",
+  "status": "queued",
+  "dependencies": [
+    "V2-016"
+  ],
+  "outcome": "Give the Loop the surface it is missing at its centre: register a Repository through the API, operate a real Git working copy, and reach real GitHub, so a Requirement can produce a reviewable change instead of stopping at an Execution record.",
+  "non_goals": [
+    "Do not add a second source-forge abstraction before one real forge works",
+    "Do not push to a repository the owner did not register",
+    "Do not put a credential value into any record, document or log"
+  ],
+  "actor": "sol",
+  "input_refs": [
+    "V2-016",
+    "V2-064"
+  ],
+  "input_hash": "929094f1da955802f3cd7bcbb37979f2790a0aa187250b83067e0c9053667f87",
+  "output_refs": [
+    "V2-064"
+  ],
+  "output_hash": "3114ee83c41ae951a64c8ccdcd0efe33b0620fb063b9ecf4d7cddbd5cfcfc67c",
+  "owner": "terra",
+  "next_owner": "terra",
+  "retry_budget": {
+    "max_attempts": 2,
+    "attempts_used": 0,
+    "remaining": 2
+  },
+  "release_eligible": false,
+  "transitions": [
+    {
+      "sequence": 1,
+      "at": "2026-08-25T02:20:00Z",
+      "from_status": null,
+      "to_status": "queued",
+      "actor": "sol",
+      "input_refs": [
+        "V2-016",
+        "V2-064"
+      ],
+      "input_hash": "929094f1da955802f3cd7bcbb37979f2790a0aa187250b83067e0c9053667f87",
+      "output_refs": [
+        "V2-064"
+      ],
+      "output_hash": "3114ee83c41ae951a64c8ccdcd0efe33b0620fb063b9ecf4d7cddbd5cfcfc67c",
+      "owner": "terra",
+      "next_owner": "terra",
+      "retry_budget": {
+        "max_attempts": 2,
+        "attempts_used": 0,
+        "remaining": 2
+      },
+      "reason": "the M5 dogfood design measured that nine of the twelve declared capabilities cannot be exercised and that five of them have no implementation at all; this task owns escalation E22-1, where the twelve declared capabilities include registering a Repository and resolving a Requirement autonomously, and the measurement at this commit is that no registration route exists, no Go file operates a Git working copy, and no Go file reaches GitHub, so the capability's observable result has no implementation and no deploy would create it"
+    }
+  ]
+}
