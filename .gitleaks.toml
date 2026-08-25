@@ -51,7 +51,26 @@ id = "generic-api-key"
 # very often exactly 64 hex digits, so OR would be a silent hole.
 condition = "AND"
 paths = ['''\.agents/v2/.*''', '''\.agents/v2/preflight/.*''']
-regexes = ['''^[a-f0-9]{64}$''']
+# Two widenings, both measured, neither loosening the path guard:
+#
+#   * 40 hex digits as well as 64. A ledger record legitimately cites the git
+#     commit it was measured at (base_commit, and the commit named in a
+#     freshness statement). Measured with `gitleaks git -v`: the aggregate
+#     record for the evidence-key redesign was flagged on
+#     "...component key at base_commit=e37a2456ca386a062cff96441d79a7678a143b6c",
+#     which the 64-only shape could not match.
+#
+#   * One optional trailing punctuation character. generic-api-key's capture
+#     does not stop at the digest when the digest ends a sentence: measured
+#     findings captured "cc6cd25c...411707." and "9defb554...b07aa5." with the
+#     full stop included, so an anchored digest-only shape rejected a value
+#     that is a digest followed by prose punctuation. Allowing exactly one
+#     trailing punctuation character keeps the shape a single hash and does
+#     not admit a longer string.
+#
+# The guard remains the AND with the .agents/v2/ path prefix. A hash-shaped
+# value anywhere else in the repository is still reported.
+regexes = ['''^[a-f0-9]{40}[[:punct:]]?$''', '''^[a-f0-9]{64}[[:punct:]]?$''']
 
 [[rules.allowlists]]
 # Same AND discipline as above, applied to the second shape. Anchored so it
