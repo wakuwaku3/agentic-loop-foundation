@@ -1,0 +1,105 @@
+{
+ "schema_version": "v1",
+ "id": "dp-v2-073",
+ "kind": "design-packet",
+ "created_at": "2026-08-25T05:40:00Z",
+ "correlation_id": "v2-073-requirement-capture-time",
+ "problem_brief_id": "pb-v2-073",
+ "decisions": [
+  {
+   "id": "d1",
+   "decision": "internal/domain IS edited: domain.Requirement gains one field, CapturedAt time.Time, plus one predicate, CaptureRecorded() bool. No side table is used. This is the one of the three tasks in this batch that touches internal/domain, and the reason is measured rather than stylistic.",
+   "rationale": "V2-052 set the precedent on this exact struct and wrote its own closure argument into the source: RequestedBy sits on domain.Requirement with the comment 'It is a value addition only; every RequirementCommand still carries state forward with next := current, so no transition function inspects or rewrites it. A record captured before this field existed simply carries the zero value (ActorType == \"\"), which Validate treats as legitimate and unknown rather than invalid: past records are never retrofitted.' All three properties hold identically for a capture time and all three are checkable: DecideRequirement opens with next := current and every branch assigns only Status and Version, CompleteRequirementFromRelease assigns only Status, Version and StableSnapshot, and Validate's Requirement case gains no clause. The source guard's constraints are untouched: internal/domain/source_guard_test.go already lists time in the five-entry non-test import allowlist, time.Time fields already exist on domain.Lease (IssuedAt, ExpiresAt) and domain.RunnerObservation (ObservedAt), the field name normalizes to capturedat which matches no credential deny-list entry, no time.Now, time.Since or time.Until selector is introduced -- that selector scan, not the presence of a time value, is what the real-clock guard actually enforces -- and the file count stays at or above the guard's minimum of nine. The side table was measured and rejected for a concrete cost: the ordering rule reads the capture time for every candidate in one Decide call, so a side table turns one bounded Requirement read into a second per-candidate lookup, which is exactly the growth rate docs/architecture/validation.md section 5 gates. V2-052 chose a side table for Control Intent attribution because domain.ControlIntent is proven-closed M1 surface with no room for a value addition; it chose the in-struct field for Requirement, and this task follows the half of that precedent that applies."
+  },
+  {
+   "id": "d2",
+   "decision": "The field carries no json tag, so the persisted key is CapturedAt.",
+   "rationale": "Measured: no field on domain.Requirement carries a json tag -- ID, Status, Version, Increments, StableSnapshot and RequestedBy are all serialized under their Go names by internal/store/firestore/encodeDocument's plain json.Marshal (store.go:120-127). Adding a tag to one field only would make the persisted document inconsistent with itself for no benefit, and omitempty does not suppress a zero time.Time in any case. The credential-shape scan in internal/domain/source_guard_test.go inspects json tag names when present, so adding none also adds nothing for it to inspect."
+  },
+  {
+   "id": "d3",
+   "decision": "CapturedAt is set exactly once, at intake, from the transaction's authority time -- the same value the requirement.captured event carries -- and is never rewritten afterwards. Capture reads it inside the mutate closure through the same authority-context accessor Service.record uses (service.go:1386-1393), not by calling s.clock.Now() a second time.",
+   "rationale": "Service.transact and Service.mutate capture the authority time once outside the transaction callback with the comment 'Firestore may retry the callback; authority time must not change between attempts' (service.go:118-124, :137-148). Reusing that value makes CapturedAt retry-stable by construction and byte-identical to the event's At, so the record and its event can never disagree about when the Requirement was captured -- which matters because the event log is the only independent witness. Calling the clock again would produce a value that differs by a tick on the first attempt and differs unpredictably on a retry, reintroducing exactly the class of drift the authority-time mechanism exists to remove. CaptureRequest gains no field, so a caller cannot supply the value at all, in keeping with service.go:426-427's rule that 'Runner clocks and caller-provided timestamps are not authoritative'."
+  },
+  {
+   "id": "d4",
+   "decision": "A read time and an event scan are both structurally excluded, and that is asserted rather than promised. Two reads of the same Requirement at two different injected clock values produce byte-identical capture times; the read helper's only source is the Requirement record, asserted by an AST scan over the new helper; and a behavioural test empties the event log and shows the capture time still reports unchanged.",
+   "rationale": "non_goal 1 and non_goal 2. A read-time substitute is not a hypothetical mistake: the natural shortcut when a legacy record has no capture time is to fall back to now, and that fallback makes the ordering depend on when somebody refreshed a view, which is precisely what non_goal 2 forbids. The event-log emptying test is the cheap decisive check, because a derivation from events would fail it immediately while any amount of code review might miss the derivation."
+  },
+  {
+   "id": "d5",
+   "decision": "A Requirement whose CapturedAt is zero is a legacy record: Validate accepts it, and the read view omits captured_at entirely rather than emitting the zero instant. capturedAtView returns a *time.Time that is nil when CaptureRecorded() is false, mirroring requestedByView (readmodels.go:109-115) and its stated reason.",
+   "rationale": "V2-052's exact precedent, and the concrete reason it matters more here than it did there. A zero time.Time marshals to 0001-01-01T00:00:00Z, which reads as a real instant in the year 1. For an attribution field that is merely ugly; for a value an ordering rule consumes it is the worst representation available, because it makes every legacy record maximally old and therefore maximally privileged by the aging term. Omitting the field forces every consumer to decide what to do about its absence instead of silently inheriting an unbounded age."
+  },
+  {
+   "id": "d6",
+   "decision": "The mapping rule for a Requirement with no recorded capture time is declared here and proven here, but applied by the task that builds the Snapshot: such a candidate is ordered as if captured at the snapshot's Now, giving age zero, and never as an unbounded age. The rule is stated in the documentation and asserted in a test that computes the resulting order for a mixed set of recorded and legacy candidates.",
+   "rationale": "This follows from d5 plus the measured aging term: internal/scheduler/priority.go's ageSeconds clamps only the negative side, so a zero CreatedAt yields an age of roughly two thousand years expressed in seconds, which in legacyScore -- legacyPriority(p)*300 + age (priority.go:63-65) -- overwhelms every priority difference and every StarvationRisk increment. A legacy Requirement would therefore win every comparison forever, converting a missing value into absolute precedence. Choosing age zero is the conservative direction: it makes a legacy record the least privileged rather than the most, so the failure mode of a missing value is a delayed Requirement rather than a starved queue, and it is a mapping choice at the boundary rather than a change to any decision rule (non_goal 3)."
+  },
+  {
+   "id": "d7",
+   "decision": "V2-030's starvation proof holds only inside a bounded capture-time spread, and this task measures the bound instead of changing anything to hide it. Let D be the number of seconds by which the flood candidates' capture time precedes the waiter's. Derived from the declared weights: the flood scores 30000 + age, the waiter scores 23500 + 2500*(tick-1) + age, the sort is 'a > b or (a == b and lower id first)' (scheduler.go:154-157) and flood ids sort before 'important', so the waiter must be strictly greater. Convergence at tick k therefore requires 2500*(k-1) > 6500 + D. With StarvationBoundTicks = 5 (scheduler.go:32) that means D at most 3499 seconds. The negative control -- the same scenario with the StarvationRisk term neutralised -- stays non-convergent only while 23500 + age_waiter is at most 30000 + age_flood, that is D at least -6500 seconds. V2-030's two starvation tests are therefore true statements exactly for D in [-6500, +3499] seconds; at D = 3500 the waiter is not assigned within the declared bound, and at D = -6501 the negative control converges without the StarvationRisk term, so the proof stops attributing convergence to that term.",
+   "rationale": "V2-030 proved the bound with every candidate sharing one CreatedAt, and its own comments say so three times: 'every candidate in one Decide call is scored against the same s.Now, and every one of these Requirements shares the same CreatedAt, the age term is identical across the whole scenario and cancels out of every comparison', and the negative control's closing comment 'the deficit (6500) can only be closed by age, which is a no-op here'. Feeding real capture times removes the cancellation, and the cancellation is what the proof rested on. The interval above is arithmetic from the numbers already declared in priority.go and starvation_test.go, not a new judgement: 6500 is the waiter's fixed deficit (30000 minus 23500), 2500 is one StarvationRisk step of 5 at weight 500, and 5 is the declared bound. The one-tick margin V2-030 recorded exists only while D is under 1000 seconds; from 1000 to 3499 seconds convergence lands on the bound itself with no margin at all. This is the finding this task exists to surface, and surfacing it is worth more than the field."
+  },
+  {
+   "id": "d8",
+   "decision": "No decision rule, weight, or bound is changed, and V2-030's tests are not touched. This task adds a new test file in internal/scheduler that parameterizes D, asserts convergence within StarvationBoundTicks across the derived interval including both endpoints, and asserts as positive controls that at D = 3500 the waiter is not assigned within the bound and at D = -6501 the negative control converges. The interval is declared as a documented constant with the derivation in a comment. starvation_test.go, starvationScenario, priority.go's weights and StarvationBoundTicks are all unchanged, and the fact that nothing in production bounds D is recorded as an escalation with a named owner.",
+   "rationale": "non_goal 3 forbids changing the scheduler's decision rules, and every available fix -- raising the StarvationRisk step, normalizing age, capping the age term -- is a decision rule change. Editing starvation_test.go to feed it real capture times would break the existing tests, violating the requirement that every pre-existing test keeps passing under its own name with its own assertions unchanged, and would also destroy the byte-identical legacy-ordering guarantee V2-030's A3 established. Adding a separate parameterized test states the true, narrower claim without weakening the existing one, and asserting the two failure endpoints as positive controls turns a hidden limit into a named, executable fact. Recording rather than fixing is the correct move because the fix requires deciding what production should guarantee about capture-time spread, which is a scheduling policy question this task has no mandate to answer."
+  },
+  {
+   "id": "d9",
+   "decision": "The value does not reach a Snapshot in this task, because no Snapshot builder exists. Measured: internal/scheduler may import only internal/domain, pinned by a single-entry allowlist in internal/scheduler/source_guard_test.go, and a search for internal/scheduler across every *.go file outside the package returns exactly two hits, both string literals used as assertion data in internal/ci/manifest_dependencies.go and internal/ci/key_closure_test.go. No production code constructs a scheduler.Snapshot anywhere. V2-068, whose outcome is to connect the scheduler to the running system, is the task that creates the builder. V2-073 delivers the recorded value, the read-model exposure with the legacy omission, the declared mapping rule from d6, and the measured validity interval from d7; V2-068 applies them.",
+   "rationale": "Writing a mapper in internal/application would require importing internal/scheduler, creating an application-to-scheduler edge that only V2-045 may declare and that internal/ci's manifest check now turns into a red make check; writing it in internal/scheduler is impossible because domain.Requirement carries neither Priority nor RepositoryIDs, so a complete mapping cannot be expressed there. The honest split is therefore the same one dp-v2-067 d11 used for the concurrency ceiling: the task that can land first lands the value with its rule stated, and the task that owns the consuming surface wires it, with the hand-off named in writing rather than left implicit. Because V2-068 depends on the value and V2-073 does not depend on V2-068, the recommendation is that V2-073 lands first and the coordinator adds the wiring item to V2-068's acceptance."
+  },
+  {
+   "id": "d10",
+   "decision": "Read surface: RequirementDetailView and RequirementView gain captured_at as an optional pointer, and the corresponding openapi response schemas gain the field. The export record is deliberately left unchanged.",
+   "rationale": "contracts/openapi/openapi-v1.yaml:242-246 sets additionalProperties:false on RequirementDetailResponse, so exposing the field requires declaring it -- the addition is forced, not chosen. The export record is excluded because makeExportRecord (readmodels.go:356-362) computes a sha256 digest over the marshalled value, so adding a field silently changes the digest of every exported requirement record; nothing in the outcome needs the capture time in the export, and changing a digest that other tooling may compare is a cost with no matching benefit. Both stores persist the field with no envelope work: Firestore serializes it through the existing plain json.Marshal, and the memory adapter copies it with the rest of the value in state.clone() (store/memory/store.go:44-48), which the existing rollback test already covers once the field is asserted."
+  },
+  {
+   "id": "d11",
+   "decision": "ci/components.json is not edited. This task moves the domain, application, store-memory, store-firestore, scheduler, api, web, contracts and docs component keys and creates no new import edge: internal/domain gains no import, internal/scheduler's new test imports only internal/domain which it already imports, and application, api and both stores already declare their dependencies.",
+   "rationale": "The domain key movement is the notable one: internal/domain is the root of the declared DAG, so a change there moves every downstream key and makes this a wide-fan-out change. That is a scheduling fact the coordinator needs, not a reason to avoid the field -- the alternative side table would move the same application and store keys plus add a port, and would still not satisfy the growth rule from d1. V2-045 has landed, so a divergence between the declared dependencies and the derived import graph turns make check red rather than drifting silently; because this design creates no edge, a red manifest check means the design was departed from."
+  },
+  {
+   "id": "d12",
+   "decision": "V2-073 belongs to the surface-widening serialization chain and should be inserted immediately before V2-068, giving V2-064 (complete) to V2-066 to V2-069 to V2-067 to V2-073 to V2-068 to V2-065. Issuing the id and recording the position is the coordinator's.",
+   "rationale": "The task touches four of the six chain files -- internal/application/{service,readmodels}.go, contracts/openapi/openapi-v1.yaml, internal/web/owner.{html,js} and both store adapters -- so it cannot avoid the chain. Position is determined by the consumer: V2-068 is the task that builds the Snapshot and therefore the task that needs the value, so placing V2-073 immediately before it lets V2-068 wire CapturedAt into the Snapshot in the same pass, with the mapping rule from d6 and the validity interval from d7 already recorded and tested. Placing it after V2-068 would mean V2-068 ships a Snapshot builder with a uniformly zero capture time -- the exact defect this task exists to remove -- and would require a third task to connect them."
+  }
+ ],
+ "components": [
+  "domain",
+  "application",
+  "scheduler",
+  "store-memory",
+  "store-firestore",
+  "api",
+  "web",
+  "contracts",
+  "docs"
+ ],
+ "verification": [
+  "devbox run --pure -- go test -count=1 ./internal/domain",
+  "devbox run --pure -- go test -count=1 ./internal/scheduler",
+  "devbox run --pure -- go test -count=1 ./internal/application",
+  "devbox run --pure -- go test -count=1 ./internal/api",
+  "devbox run --pure -- go test -count=1 ./internal/store/memory",
+  "devbox run --pure -- go test -count=1 -race ./internal/application ./internal/scheduler",
+  "devbox run --pure -- go test -count=1 ./internal/contracts",
+  "devbox run --pure -- make component-domain",
+  "devbox run --pure -- make component-scheduler",
+  "devbox run --pure -- make component-application",
+  "devbox run --pure -- make component-api",
+  "devbox run --pure -- make component-store-memory",
+  "devbox run --pure -- make component-store-firestore",
+  "devbox run --pure -- make check",
+  "devbox run --pure -- make evidence-keys"
+ ],
+ "risks": [
+  "This is the only task in the batch that edits internal/domain, the root of the declared component DAG, so it moves every downstream component key and is a wide-fan-out change. The mitigation is that the edit is one field plus one predicate with no import change and no transition change, and that the guard tests in internal/domain are asserted to still pass under their own names.",
+  "The capture-time spread finding in d7 means V2-030's starvation bound is a narrower statement than it reads as. Landing this field makes the narrowness reachable in production without fixing it, because nothing in production bounds the spread. That is recorded as an escalation with a named owner rather than closed here, and the evidence must state plainly that a production flood whose candidates were captured more than 3499 seconds before the waiter can exceed the declared bound.",
+  "The legacy mapping rule in d6 is declared and tested here but applied in V2-068. Between the two landings a Snapshot builder written from the read model alone could still inherit an unbounded age from an absent value. The mitigation is that the read view omits the field entirely rather than emitting a zero instant, so a builder has no value to inherit and must decide explicitly.",
+  "Adding a field to domain.Requirement changes the persisted document shape. Records written before the field exists decode with the zero value, which is the legacy case, so no migration is needed -- but this is the unknown-field and absent-field tolerance V2-070's design records as the same property that makes silent acceptance possible. The two tasks must not be read as contradicting each other: here the absent value is given an explicit, tested meaning, which is exactly what V2-070 asks of a widened envelope.",
+  "The export record is left unchanged on purpose, so an exported requirement record does not carry the value the ordering rule uses. If a later task needs it in the export, the digest change must be a deliberate, recorded decision rather than a side effect."
+ ]
+}

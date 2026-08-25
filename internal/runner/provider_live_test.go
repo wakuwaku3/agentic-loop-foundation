@@ -22,9 +22,15 @@ import (
 )
 
 // liveRecordRelPath is the approved provider-preflight record's path
-// relative to the repository root (dp-v2-017 B1).
-const liveRecordRelPath = ".agents/v2/provider-preflight/V2-017-provider-live-claude.json"
-const liveTaskID = "V2-017"
+// relative to the repository root (dp-v2-017 B1). It names V2-063's
+// re-observation record, which carries its own limits.ledger_path: the gate
+// therefore admits this suite against a ledger of its own and never spends,
+// or exhausts, the headroom of the record V2-017 was first exercised under
+// (whose bytes are unchanged). liveTaskID must stay equal to that record's
+// task_id, because CostLedger.Reserve refuses a ledger whose recorded
+// task_id disagrees with the run's.
+const liveRecordRelPath = ".agents/v2/provider-preflight/V2-063-provider-live-claude-refresh.json"
+const liveTaskID = "V2-063"
 const liveRepositoryID = "agentic-loop-foundation"
 
 // requireLiveProvider is dp-v2-017 d11's three-condition gate. Every live
@@ -773,12 +779,14 @@ func (fx *liveFixture) testI4(t *testing.T) {
 // second probe, re-submitted at the superseded Execution's current version,
 // still proves the lease-expiry guard independently.
 //
-// This revision is source-only: it is not exercised by this task (V2-058
-// must not start a real Provider CLI). It is proven only to compile
-// (go vet + a test build of this package), and recorded in evidence with
-// status skipped, never passed. V2-017's ev-v2-017-provider-live-claude
-// live-suite record needs re-exercise before the next promotion, because
-// internal/application/service.go changed underneath it.
+// V2-058 could only change this at the source: it must not start a real
+// Provider CLI, so it proved the revision compiled (go vet plus a test
+// build of this package) and recorded that in evidence with status
+// skipped, never passed. V2-063 then ran this journey for real against
+// the live CLI and both probes passed, so the skip is closed: see
+// ev-v2-063-provider-live-claude-refresh. That run also re-measured the
+// live record's declared key, which V2-045's evidence-key redesign had
+// made stale by the record's own declared method.
 func (fx *liveFixture) testI5AndI6(t *testing.T) {
 	fx.clock.Advance(25 * time.Hour)
 	owner, runnerCtx := fx.callers(context.Background())
@@ -923,8 +931,8 @@ func (fx *liveFixture) testI5AndI6(t *testing.T) {
 	// this is domain.ErrStaleVersion (the outer optimistic-concurrency
 	// guard), not domain.ErrLeaseExpired: see this function's doc comment
 	// and internal/runner/crash_test.go's identical, locally-executed pin
-	// for the exact mechanism. Not executed in this task (source-only,
-	// dp-v2-058 d6).
+	// for the exact mechanism. Exercised for real by V2-063 against the
+	// live CLI; the second probe below pins the lease-expiry guard.
 	_, lateErr := fx.service.AcceptResult(runnerCtx, application.AcceptResultRequest{
 		RequestID: "v2017-i56:attempt-1:late-accept", ExecutionID: attempt1Claim.ExecutionID, LeaseID: attempt1Claim.LeaseID,
 		ExpectedExecutionVersion: attempt1Start.Version, FencingToken: attempt1Claim.FencingToken, Succeeded: true, Target: target,

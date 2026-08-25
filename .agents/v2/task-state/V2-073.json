@@ -3,9 +3,10 @@
   "id": "ts-v2-073",
   "kind": "canonical-task-state",
   "task_id": "V2-073",
-  "status": "queued",
+  "status": "blocked",
   "dependencies": [
-    "V2-030"
+    "V2-030",
+    "V2-067"
   ],
   "outcome": "Give a Requirement a recorded capture time, so the ordering rule that prevents starvation has a real input in production instead of a value that is identical for every candidate.",
   "non_goals": [
@@ -23,8 +24,8 @@
     "V2-073"
   ],
   "output_hash": "83e355acb119cefb1e021bea988fa6649a6055116c56581bd06165767ded6290",
-  "owner": "terra",
-  "next_owner": "terra",
+  "owner": "luna",
+  "next_owner": "luna",
   "retry_budget": {
     "max_attempts": 2,
     "attempts_used": 0,
@@ -103,6 +104,31 @@
         "remaining": 2
       },
       "reason": "every task this one depends on is complete, so the block has cleared"
+    },
+    {
+      "sequence": 4,
+      "at": "2026-08-25T06:10:00Z",
+      "from_status": "queued",
+      "to_status": "blocked",
+      "actor": "sol",
+      "input_refs": [
+        "V2-030",
+        "V2-073"
+      ],
+      "input_hash": "73e0d5c0e80fb80706594f2b25e5d194c2a5ccc9fead6c8abab0afa5ddb3b313",
+      "output_refs": [
+        "V2-073"
+      ],
+      "output_hash": "83e355acb119cefb1e021bea988fa6649a6055116c56581bd06165767ded6290",
+      "owner": "luna",
+      "next_owner": "luna",
+      "retry_budget": {
+        "max_attempts": 2,
+        "attempts_used": 0,
+        "remaining": 2
+      },
+      "reason": "the surface tasks all widen the same six files, so they run one at a time, each branching from the tip the previous one landed on; the order was revised so that the version report lands right after the release surface and the capture time lands right before the scheduler wiring that consumes it, which avoids shipping a snapshot builder whose every candidate carries a zero capture time"
     }
-  ]
+  ],
+  "block_reason": "V2-067"
 }

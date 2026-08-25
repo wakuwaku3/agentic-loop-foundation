@@ -63,3 +63,21 @@ ledger は承認済み record の `limits.ledger_path` にあり、本タスク�
 - したがって、subscription の枠の実際の残量を知りたい場合、この台帳を見ても分からない。台帳はそのための代替にはならず、Provider 側の使用量表示を直接確認する必要がある。
 - `halted` フラグや `max_invocations` / `max_total_cost_usd` といった暴走検知のしきい値も、同じ境界の内側でしか機能しない。Loop の実行経路を通らずに動くループ（人や別プロセスが `claude` を直接繰り返し呼ぶ場合など）を、この台帳は検知することも止めることもできない。
 - 具体例: V2-017 の実装時、ハーネス配線前の検証として bash 経由で `claude` CLI に対し2回（HOME/PATH 最小構成の確認、各 約$0.08相当）、加えて到達不能 URL への挙動確認を4回（いずれも API 到達前に hang したため $0）、計6回の invocation が実行されたことが実装者本人により開示されている。これらは `CostLedger.Reserve` を経由していないため、**台帳には一切記録されていない**。台帳に残っているのは、ハーネス配線後に `CostLedger` 経由で実行された8 invocation・11 entry のみである。
+
+## 再観測（V2-063）と、いま有効な record
+
+V2-045 が evidence key の算法を「依存先 Roots の推移閉包」へ変えたため、`ev-v2-017-provider-live-claude` は自身の宣言算法（evidence_key は runner component の key）によって stale になった。V2-063 は同じ9 subtest を実 `claude` CLI に対して再実行し、`ev-v2-063-provider-live-claude-refresh` として記録した。V2-017 の record・evidence の bytes は書き換えていない。
+
+このため、上の「live suite の実行方法」の条件2で名指している record と、「ledger の場所と読み方」の絶対パスは、**現在は次の値である**（上の記述は V2-017 実施時点の記録として残している）。
+
+- 承認済み record: `.agents/v2/provider-preflight/V2-063-provider-live-claude-refresh.json`（`internal/runner/provider_live_test.go` の `liveRecordRelPath`／`liveTaskID` が指す先）
+- ledger: `/home/takushi/.local/state/agentic-loop/v2/V2-063-provider-live-claude-refresh-cost.json`（V2-017 の台帳とは別ファイル。再観測は旧台帳の残枠を借りない）
+- 暴走検知しきい値: `max_invocations` 12・`max_total_cost_usd` 8.00 USD（V2-017 は 16・10.00 USD）。再観測は既存範囲を超えないため、必要な8 invocation と名前付き retry 数回分に合わせて小さくした
+- `approval.subject_path`: `.agents/v2/packets/provider-standing-authorization.json`。したがって「再承認の手順」節の work order 束縛は V2-017 の record に固有の話であり、現行 record は standing authorization packet の bytes に束縛されている。この packet を1バイト編集すれば同じ理由で `subject_digest` が一致しなくなる
+
+record を新しく発行するときの注意（V2-063 で実測した順序）:
+
+1. record を先に置き、`go test -run TestProviderPreflightLedger ./internal/contracts` で schema と束縛を通す（この時点では invocation 0）
+2. `-run 'TestProviderLiveVerticalSlice/<存在しない subtest 名>'` で gate だけを踏む。gate が通れば skip log が出ず `--- PASS` になり、台帳ファイルはまだ生成されない。ここで gate の誤りを invocation 0 で検出できる
+3. phase ごとに別 process で走らせる。`caseB_reuses_I1_journal_zero_invocations` は I1 の in-process の journal を再利用するので、単独で走らせると `t.Skip` になる（skip は pass に数えない）。I1 と同じ process で走らせること
+4. 失敗した試行の台帳 entry も消さない。V2-063 では I1..I4 と同一 process で走らせた I5/I6 の第1試行が I6 で失敗し（`actual_usd` 0.00・`session_id` 無し＝API 未到達の transport 失敗）、seq 5/6 を消費した。source を変えずに単独 process で再実行して PASS したが、失敗試行の2 entry は台帳に残したままである

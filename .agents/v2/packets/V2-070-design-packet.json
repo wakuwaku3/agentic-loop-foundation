@@ -1,0 +1,86 @@
+{
+ "schema_version": "v1",
+ "id": "dp-v2-070",
+ "kind": "design-packet",
+ "created_at": "2026-08-25T05:35:00Z",
+ "correlation_id": "v2-070-envelope-expand",
+ "problem_brief_id": "pb-v2-070",
+ "decisions": [
+  {
+   "id": "d1",
+   "decision": "One accepted set, one predicate, every read site routed through it. internal/store/firestore gains AcceptedRecordSchemas (an ordered, closed slice) and RecordSchemaAccepted(string) bool, and every read-side envelope comparison calls the predicate. There are five read-side refusal sites, not the two the design document names: store.go:79 in DecodeRecord, store.go:173 in decodeDocument, store.go:1230 in the outbox scan, store.go:1348 and store.go:1484 in the two bounded collection scans. All five are converted. The write sites keep writing RecordSchema unchanged: store.go:68 in EncodeRecord, store.go:127 in encodeDocument, and client.go:59 for the installation record.",
+   "rationale": "docs/operations/self-update.md section 7.3 names store.go:79 and store.go:173 only, and that is the measured gap this decision closes. Widening two of five sites would produce a store that accepts a widened envelope for a Requirement and refuses it for the outbox record written in the same transaction, and refuses it again on the two bounded scans -- a partially widened envelope is strictly worse than an un-widened one, because the failure is per-collection, appears only on the paths that scan rather than fetch, and therefore surfaces under load rather than in the first test. A single predicate is also the only form in which the requirement that both readers obey the same rule is checkable at all; five copies of a set are five things that can disagree."
+  },
+  {
+   "id": "d2",
+   "decision": "The accepted set this task ships is exactly one member, the value this binary writes. The task widens the mechanism, not the set, and the evidence says so in those words.",
+   "rationale": "This is the envelope's expand stage, and expand's defining property in section 7.1 is that no reader change is needed and the step is fully reversible. Shipping a second member before any writer emits it would make the store accept a document shape no code in the repository can produce, which is exactly non_goal 2 -- silently accepting a record whose payload the running code cannot interpret -- and it would make the refusal test vacuous, since nothing would ever exercise the second branch. It would also collapse expand and bump into one change, which non_goal 1 forbids and which section 7.1 calls out as the violation that destroys the rollback path. The member that admits a second envelope id is added by the task that introduces the second writer; what this task owes is the proof that adding one is a small, test-covered change rather than a rewrite of five call sites."
+  },
+  {
+   "id": "d3",
+   "decision": "The mechanism is proven by substituting the accepted set in tests only, using a package-level variable restored with defer, and driving all five read paths against a second and a third envelope id. With the set overridden to two members, a document written under the second id is read successfully by DecodeRecord, decodeDocument, the outbox scan and both bounded collection scans; with the same override, a document under a third id is refused by all five with ErrInvalidSchema. The production set is never widened to make this pass.",
+   "rationale": "internal/scheduler already establishes this technique in this repository: scoreFn is a package-level variable rather than a direct call solely so a test can substitute a variant and prove a negative control, with every test restoring the original via defer (internal/scheduler/priority.go, and the negative control in starvation_test.go). Reusing it means the expand mechanism gets a real positive and a real negative without shipping a set the code cannot honour. Driving all five paths, not one, is what turns d1 from a refactor into a verified property: the outbox scan and the two collection scans are the sites the design document never measured, so they are the ones most likely to be missed."
+  },
+  {
+   "id": "d4",
+   "decision": "The written value and the accepted set are separate declarations, and a bump is made to announce itself. A test pins RecordSchema as a literal string in the test body, asserts AcceptedRecordSchemas contains RecordSchema, asserts every member matches a declared id shape, and asserts the set is non-empty and free of duplicates. The test's name states that it pins the written envelope value, so changing that value fails a test whose name explains why.",
+   "rationale": "non_goal 1 is a sequencing rule, and a sequencing rule that lives only in a Work Order is unenforceable in the next Increment. Section 7.1 requires that contract is always a separate Increment from its expand; the literal pin is the smallest artifact that makes the second Increment announce itself in CI rather than in an outage. Asserting that the written value is a member of the accepted set is the other half: a store that writes a value it would refuse to read is broken in a way no single-direction test catches."
+  },
+  {
+   "id": "d5",
+   "decision": "Payload interpretability is checked at the payload, for non-native envelope ids only. For any accepted id other than the one this binary writes, the decode additionally requires that the payload decodes and that the decoded value passes the domain's own validity predicate where one exists (domain.Validate for Requirement, Increment, Execution and Lease), refusing with ErrInvalidSchema otherwise. For the id this binary writes, the decode path is unchanged byte for byte.",
+   "rationale": "Measured: the payload decode is a plain json.Unmarshal at store.go:81-83 and store.go:175-177, and the store calls no validity predicate on read today. Unknown-field tolerance is precisely what makes expand reversible under section 7.1 and precisely what makes silent acceptance possible: a payload written under a later envelope that renamed a field decodes into a zero-valued struct and looks like a legitimate record rather than an error. Gating non-native ids on the predicate that already exists uses the repository's one description of validity instead of inventing a second, and confining the gate to non-native ids is what keeps today's read path provably unchanged -- which is the only way every existing store test keeps passing under its own name with its own assertions. Applying the predicate to the native id was considered and rejected: it would change behaviour for records the store reads correctly today, turning an expand stage into a compatibility break."
+  },
+  {
+   "id": "d6",
+   "decision": "No refusal gets weaker, and exact membership is required. Each of the four refusal reasons ErrInvalidSchema covers at each site keeps refusing: malformed JSON or a DataTo failure, an envelope id outside the accepted set, a kind mismatch, and an empty payload or value. Membership is exact string equality against the set -- never a prefix, suffix, case-insensitive or trimmed match -- and a table asserts that ids which are a prefix, a suffix, a case variant or a whitespace variant of an accepted id are all refused. TestCodecRejectsCorruption keeps its three existing inputs (store_test.go:70) unchanged and passing under its own name.",
+   "rationale": "non_goal 3. A predicate is the natural place for a well-meant later contributor to add a normalization step, and every normalization widens the accepted set invisibly. Writing the near-miss table now is cheaper than discovering later that a document written with a stray space was accepted. Keeping the existing corruption table untouched is what proves the refactor did not move the boundary while claiming to widen the mechanism."
+  },
+  {
+   "id": "d7",
+   "decision": "The five sites are proven to be the complete set by a source scan, not by a grep. A test parses internal/store/firestore's own *.go files with go/parser, fails outright on a zero-file scan, and asserts that the identifier RecordSchema appears in a non-test file only in its own declaration, in the accepted-set declaration, in the predicate, and in the three write sites -- and that no read-side comparison of an envelope value against RecordSchema exists outside the predicate. The matcher is verified first against a known-positive fixture source containing a synthesized comparison and a known-negative fixture without one.",
+   "rationale": "Five sites were found by grep, and a grep is not a guard: the sixth site added next year silently reinstates the split this task exists to remove, and it will be added on a scan path, because that is where the pattern is already duplicated three times. internal/domain/source_guard_test.go is the model, including its refusal to pass on a zero-file scan, which is what stops a mis-written glob from making the assertion vacuous."
+  },
+  {
+   "id": "d8",
+   "decision": "The memory adapter has no envelope, and the checkable form of the both-stores requirement is that it stays that way. Measured: internal/store/memory holds typed Go values in maps (store.go:22-38) with no serialization boundary, so it has no record_schema field, no envelope constant and no comparison to widen. A guard test in internal/store/memory asserts by AST and literal scan that no struct field, constant or string literal named or valued record_schema exists in the package. Nothing else in internal/store/memory is edited.",
+   "rationale": "The same rule effective in both stores cannot mean copying the predicate into a store that has no envelope; duplication is exactly how two adapters come to disagree, and the memory adapter would then carry a rule with no data to apply it to. The requirement's real content is that there is exactly one envelope implementation in the repository, and the way to keep that true is to assert that the second adapter has none. If the memory adapter ever gains a serialization boundary, this test fails and forces the author to route it through the one predicate rather than write a second one."
+  },
+  {
+   "id": "d9",
+   "decision": "Correspondence to section 7's four stages is stated as one row each, and only expand is claimed. This task is the envelope's EXPAND stage. COEXIST is the mixed-version window of section 6 and depends on V2-069's report to be observable at all. MIGRATE is not started and no backfill, cursor or tick is added. CONTRACT is not started, and its predicate -- the same predicate as GC eligibility in section 8 -- is not implemented. The claim the evidence is entitled to is exactly: one accepted set, one predicate, five converted read sites, a pinned written value, a proof that a second member is read by all five paths and a third is refused by all five, and a payload-interpretability gate for non-native ids. Nothing about M8 completion condition 3.",
+   "rationale": "Section 7.3 assigns the envelope expand stage to this task and states that it blocks M8 completion condition 3; blocking a condition is not satisfying it, and the record must not blur the two. Naming the three stages this task does not perform, with the artifacts each would need, is also what stops the next task from assuming any of them is already in place."
+  },
+  {
+   "id": "d10",
+   "decision": "No endpoint, no read model, no openapi change, no owner console change, no application edit. Therefore V2-070 is not in the surface-widening serialization chain and must not be scheduled behind it. All six files that chain exists to serialize -- internal/api/api.go, internal/application/{ports,service,readmodels}.go, contracts/openapi/openapi-v1.yaml and internal/web/owner.{html,js} -- are outside this task's allowed_paths.",
+   "rationale": "V2-070 is a declared dependency of V2-034 and of V2-035 and blocks M8 completion condition 3, so a scheduling decision that put it behind five surface tasks would delay a milestone for a conflict that does not exist. The disjointness is not an assertion of intent but a property of the allowed_paths list, which is checkable before the task starts."
+  },
+  {
+   "id": "d11",
+   "decision": "ci/components.json is not edited and no new import edge is created. Measured: store-firestore declares dependencies [application, domain, infra, runner] and already imports internal/domain (store.go), so domain.Validate is reachable without a new edge; store-memory declares [application, domain, infra] and gains only a test file. Recorded note for V2-045: this task moves the store-firestore, store-memory and docs component keys.",
+   "rationale": "V2-045 has landed and internal/ci now derives the import graph from the AST and fails make check when the declaration and the graph diverge, so an accidental new edge is a red check rather than a silent drift. Since this design deliberately creates none, a red manifest check would mean the design was departed from, which is why the Work Order requires stopping and escalating rather than editing the manifest."
+  }
+ ],
+ "components": [
+  "store-firestore",
+  "store-memory",
+  "docs"
+ ],
+ "verification": [
+  "devbox run --pure -- go test -count=1 ./internal/store/memory",
+  "devbox run --pure -- go test -count=1 ./internal/store/firestore",
+  "devbox run --pure -- make component-store-firestore",
+  "devbox run --pure -- make component-store-memory",
+  "devbox run --pure -- go test -count=1 ./internal/contracts",
+  "devbox run --pure -- make check",
+  "devbox run --pure -- make evidence-keys"
+ ],
+ "risks": [
+  "With one member in the accepted set the observable behaviour of the store is unchanged. The temptation is to make the change look bigger by shipping a second member; that is the failure non_goal 2 names, and the design's answer is that the proof lives in the test-only set substitution, not in the shipped set. The evidence must state plainly that behaviour is unchanged today and that this is what an expand stage is.",
+  "The payload-interpretability gate for non-native ids has no production input yet, because there are no non-native ids. It is exercised only through the test-only set substitution, so its coverage is real but its production exposure is zero until a second writer exists. That must be recorded rather than presented as a live guard.",
+  "Three of the five refusal sites -- store.go:1230, :1348 and :1484 -- are inside bounded scan loops whose failure mode is a whole-scan error rather than a single-document error. Converting them changes nothing today but means a future non-native document that fails the payload gate fails the entire scan. That behaviour must be asserted deliberately and recorded, because a partial-scan alternative would be a new failure semantics this task has no mandate to introduce.",
+  "make component-store-firestore runs scripts/firestore-emulator.sh, which starts a local emulator and refuses to overwrite an existing FIRESTORE_EMULATOR_HOST. Measured on this machine: devbox run --pure -- make component-store-firestore completes green in about seven seconds, so the decodeDocument and scan assertions can be real rather than skipped. If the emulator is unavailable in the execution environment the affected assertions must be recorded as skipped with their reason and never counted as passes.",
+  "The source scan in d7 asserts a property about where an identifier may appear. A refactor that renames RecordSchema would silently make the scan vacuous, so the scan must also assert that the identifier exists at all and that its declaration was found."
+ ]
+}

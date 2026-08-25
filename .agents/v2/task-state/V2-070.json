@@ -3,7 +3,7 @@
   "id": "ts-v2-070",
   "kind": "canonical-task-state",
   "task_id": "V2-070",
-  "status": "queued",
+  "status": "running",
   "dependencies": [
     "V2-016"
   ],
@@ -13,22 +13,24 @@
     "Do not silently accept a record whose payload the running code cannot interpret",
     "Do not weaken the refusal for a record outside the accepted set"
   ],
-  "actor": "sol",
+  "actor": "luna",
   "input_refs": [
     "V2-016",
-    "V2-070"
+    "V2-070",
+    "dp-v2-070",
+    "wo-v2-070"
   ],
-  "input_hash": "e05fd04e2946106645f1cd5a30e3e0e170c04ff2c33d08d1241b1110980eaa7a",
+  "input_hash": "eea9b9dcf9f2f4cd5bf83c38d955ac316f0635880d6e7c10f5a59c0d0e8d30d5",
   "output_refs": [
     "V2-070"
   ],
   "output_hash": "fd8844d6cb7ac725f566e561962a31e12bc96020261d041af1491cd2f179dd74",
-  "owner": "terra",
-  "next_owner": "terra",
+  "owner": "luna",
+  "next_owner": "luna",
   "retry_budget": {
     "max_attempts": 2,
-    "attempts_used": 0,
-    "remaining": 2
+    "attempts_used": 1,
+    "remaining": 1
   },
   "release_eligible": false,
   "transitions": [
@@ -55,6 +57,32 @@
         "remaining": 2
       },
       "reason": "both persisted-record readers compare record_schema with an exact inequality, so bumping the envelope severs the old readers immediately; widening the accepted set is the envelope's own expand stage and without it the shared state cannot survive the rollback that the self-update live milestone must demonstrate"
+    },
+    {
+      "sequence": 2,
+      "at": "2026-08-25T06:10:01Z",
+      "from_status": "queued",
+      "to_status": "running",
+      "actor": "luna",
+      "input_refs": [
+        "V2-016",
+        "V2-070",
+        "dp-v2-070",
+        "wo-v2-070"
+      ],
+      "input_hash": "eea9b9dcf9f2f4cd5bf83c38d955ac316f0635880d6e7c10f5a59c0d0e8d30d5",
+      "output_refs": [
+        "V2-070"
+      ],
+      "output_hash": "fd8844d6cb7ac725f566e561962a31e12bc96020261d041af1491cd2f179dd74",
+      "owner": "luna",
+      "next_owner": "luna",
+      "retry_budget": {
+        "max_attempts": 2,
+        "attempts_used": 1,
+        "remaining": 1
+      },
+      "reason": "wo-v2-070に基づき着手。surface直列鎖には入れない（api/application/openapi/owner consoleのいずれにも触らず、V2-034とV2-035の依存としてM8完了条件3を塞いでいるため後ろに直列化してはならない）"
     }
   ]
 }

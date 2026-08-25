@@ -6,7 +6,6 @@
   "status": "blocked",
   "dependencies": [
     "V2-016",
-    "V2-064",
     "V2-068"
   ],
   "outcome": "Expose the human-input request the domain already models: an application command, an API route and a Requirement detail field that carry the question, its options, its impact and the scope that stops while it waits.",
