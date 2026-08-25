@@ -1503,21 +1503,21 @@ func TestQueueSummaryReadCostAtTenFiftyAndOneHundredCandidates(t *testing.T) {
 	}
 	t.Logf("observation: %d and %d candidates both read %d documents -- one more than the %d read at exactly the bound, which is the single more-rows probe -- so the cost is bounded by a constant beyond the scheduler's own candidate bound",
 		application.MaxPageSize+50, application.MaxPageSize+200, first, observations[100])
-// V2-065 A2: the needs-input question row, one behavioural table.
-// ===========================================================================
-//
-// The rules are the port's: the question half of a row can never be changed
-// by a later save, the answer is written by a second transaction and never
-// erases the question, an answer already recorded can never be cleared, and a
-// Requirement with no row reads as an absence rather than as an empty
-// question. internal/store/memory applies the identical rules through the
-// identical port, and the application-level table
-// TestTheQuestionRowIsWriteOnceAndTheAnswerNeverErasesIt in
-// internal/application drives them there.
-//
-// Every instant is a literal. No sleep, no timer, no goroutine. These cases
-// run against the local emulator scripts/firestore-emulator.sh provides for
-// make component-store-firestore and are SKIPPED -- never counted as a pass --
+	// V2-065 A2: the needs-input question row, one behavioural table.
+	// ===========================================================================
+	//
+	// The rules are the port's: the question half of a row can never be changed
+	// by a later save, the answer is written by a second transaction and never
+	// erases the question, an answer already recorded can never be cleared, and a
+	// Requirement with no row reads as an absence rather than as an empty
+	// question. internal/store/memory applies the identical rules through the
+	// identical port, and the application-level table
+	// TestTheQuestionRowIsWriteOnceAndTheAnswerNeverErasesIt in
+	// internal/application drives them there.
+	//
+	// Every instant is a literal. No sleep, no timer, no goroutine. These cases
+	// run against the local emulator scripts/firestore-emulator.sh provides for
+	// make component-store-firestore and are SKIPPED -- never counted as a pass --
 }
 
 // when FIRESTORE_EMULATOR_HOST is unset.
