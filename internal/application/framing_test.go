@@ -1351,3 +1351,84 @@ func TestCompleteFramingRefusesEverySourceButFraming(t *testing.T) {
 		t.Fatalf("a refused start-framing changed the Requirement: %+v", afterThird)
 	}
 }
+
+// mutationCeilingReads and mutationCeilingWrites are quota.MutationUsage's two
+// components, restated here as plain numbers rather than imported, so this test
+// file adds no import to the package. They are 32 and 16 on this tree.
+const (
+	mutationCeilingReads  = 32
+	mutationCeilingWrites = 16
+)
+
+// TestBothNewWritePathsFitInsideTheMutationCeiling is V2-084 A15's quota half,
+// and it MEASURES rather than reasons: the in-memory adapter settles its quota
+// reservation to the transaction's actual distinct-document cost (V2-087 landed
+// that true-up, so the Work Order's premise that this adapter "does NOT call
+// quota.Counter.TrueUp" is stale), which means the day's settled total moves by
+// exactly what each transaction really cost. Taking the total before and after
+// one transaction therefore yields that transaction's own reads and writes.
+//
+// Both new write paths must fit inside quota.MutationUsage (Reads 32 / Writes
+// 16): CompleteFraming, and the Claim whose transaction now also carries its
+// parent Requirement.
+func TestBothNewWritePathsFitInsideTheMutationCeiling(t *testing.T) {
+	svc, st := service()
+	ctx := owner(context.Background())
+	runnerCtx := runner(context.Background(), "runner-1")
+	at := (clock{}).Now()
+
+	captured, err := svc.Capture(ctx, application.CaptureRequest{RequestID: "a15:capture", Text: "measure the two new write paths"})
+	if err != nil {
+		t.Fatalf("capture: %v", err)
+	}
+	framed, err := svc.StartFraming(ctx, application.StartFramingRequest{RequestID: "a15:frame", RequirementID: captured.RequirementID, ExpectedVersion: captured.Version})
+	if err != nil {
+		t.Fatalf("start-framing: %v", err)
+	}
+
+	// Path one: CompleteFraming.
+	beforeComplete, ok := st.QuotaTotal(at)
+	if !ok {
+		t.Fatal("the store holds no settled quota total for the fixture day; the measurement below would be meaningless")
+	}
+	ready, err := svc.CompleteFraming(ctx, application.CompleteFramingRequest{RequestID: "a15:complete", RequirementID: captured.RequirementID, ExpectedVersion: framed.Version})
+	if err != nil {
+		t.Fatalf("complete-framing: %v", err)
+	}
+	afterComplete, _ := st.QuotaTotal(at)
+	completeReads := afterComplete.Reads - beforeComplete.Reads
+	completeWrites := afterComplete.Writes - beforeComplete.Writes
+	if completeReads <= 0 || completeWrites <= 0 {
+		t.Fatalf("complete-framing settled to %d reads and %d writes; a transaction that costs nothing is not a measurement", completeReads, completeWrites)
+	}
+	if completeReads > mutationCeilingReads || completeWrites > mutationCeilingWrites {
+		t.Fatalf("complete-framing cost %d reads and %d writes, outside the mutation ceiling of %d/%d", completeReads, completeWrites, mutationCeilingReads, mutationCeilingWrites)
+	}
+
+	// Path two: the Claim that now carries its ready parent into active.
+	planned, err := svc.Plan(ctx, application.PlanRequest{RequestID: "a15:plan", RequirementID: captured.RequirementID, ExpectedRequirementVersion: ready.Version})
+	if err != nil {
+		t.Fatalf("plan: %v", err)
+	}
+	if _, err = svc.Prepare(ctx, application.PrepareRequest{RequestID: "a15:prepare", IncrementID: planned.IncrementID, ExpectedVersion: planned.Version}); err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	beforeClaim, _ := st.QuotaTotal(at)
+	if _, err = svc.Claim(runnerCtx, application.ClaimRequest{RequestID: "a15:claim", IncrementID: planned.IncrementID, ExpectedIncrementVersion: 2}); err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	afterClaim, _ := st.QuotaTotal(at)
+	if parent, _ := st.Requirement(captured.RequirementID); parent.Status != domain.RequirementActive {
+		t.Fatalf("the measured claim did not carry its parent into active: %+v", parent)
+	}
+	claimReads := afterClaim.Reads - beforeClaim.Reads
+	claimWrites := afterClaim.Writes - beforeClaim.Writes
+	if claimReads <= 0 || claimWrites <= 0 {
+		t.Fatalf("the claim settled to %d reads and %d writes; a transaction that costs nothing is not a measurement", claimReads, claimWrites)
+	}
+	if claimReads > mutationCeilingReads || claimWrites > mutationCeilingWrites {
+		t.Fatalf("the claim carrying its parent cost %d reads and %d writes, outside the mutation ceiling of %d/%d", claimReads, claimWrites, mutationCeilingReads, mutationCeilingWrites)
+	}
+	t.Logf("A15 measurement: complete-framing settled to %d reads and %d writes; the claim that carries its ready parent into active settled to %d reads and %d writes; the mutation ceiling is %d reads and %d writes and both fit inside it",
+		completeReads, completeWrites, claimReads, claimWrites, mutationCeilingReads, mutationCeilingWrites)
+}
