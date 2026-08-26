@@ -3,11 +3,10 @@
   "id": "ts-v2-084",
   "kind": "canonical-task-state",
   "task_id": "V2-084",
-  "status": "blocked",
+  "status": "queued",
   "dependencies": [
     "V2-082"
   ],
-  "block_reason": "V2-082",
   "outcome": "Drive the rest of a Requirement's life: give every transition the domain already models an issuer a caller can reach, and stop an Increment from running to completion while its Requirement is still recorded as merely captured.",
   "non_goals": [
     "Do not add a transition the domain does not already model",
@@ -80,6 +79,30 @@
         "remaining": 2
       },
       "reason": "the first status a caller can move a Requirement out of is the input every one of these needs"
+    },
+    {
+      "sequence": 3,
+      "at": "2026-08-26T10:00:00Z",
+      "from_status": "blocked",
+      "to_status": "queued",
+      "actor": "sol",
+      "input_refs": [
+        "V2-082",
+        "V2-084"
+      ],
+      "input_hash": "be802a401ccb7f95e97aa77ee623d728e29a5082951942eaa892a8eddb05b9e9",
+      "output_refs": [
+        "V2-084"
+      ],
+      "output_hash": "10e7d12522a40dc2f3b97fabfcba3d130723ef76928081bc0abb86ff29116ae4",
+      "owner": "terra",
+      "next_owner": "terra",
+      "retry_budget": {
+        "max_attempts": 2,
+        "attempts_used": 0,
+        "remaining": 2
+      },
+      "reason": "every task this one depends on is complete, so the block has cleared"
     }
   ]
 }

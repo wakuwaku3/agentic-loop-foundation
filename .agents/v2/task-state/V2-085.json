@@ -3,11 +3,10 @@
   "id": "ts-v2-085",
   "kind": "canonical-task-state",
   "task_id": "V2-085",
-  "status": "blocked",
+  "status": "queued",
   "dependencies": [
     "V2-082"
   ],
-  "block_reason": "V2-082",
   "outcome": "Make the two commands that change canonical state without asking for permission ask for it, so an emergency stop actually stops them.",
   "non_goals": [
     "Do not weaken the closure that makes every other command ask",
@@ -80,6 +79,30 @@
         "remaining": 2
       },
       "reason": "the first status a caller can move a Requirement out of is the input every one of these needs"
+    },
+    {
+      "sequence": 3,
+      "at": "2026-08-26T10:00:00Z",
+      "from_status": "blocked",
+      "to_status": "queued",
+      "actor": "sol",
+      "input_refs": [
+        "V2-082",
+        "V2-085"
+      ],
+      "input_hash": "bd746c71bd1dc2cfcecba43b30e96643eb1d32b7d645fdb8618abbf4fb7d4f70",
+      "output_refs": [
+        "V2-085"
+      ],
+      "output_hash": "48461041270692ff88877b40fa737f5c450bec0aab33579371520f45b39e2b32",
+      "owner": "terra",
+      "next_owner": "terra",
+      "retry_budget": {
+        "max_attempts": 2,
+        "attempts_used": 0,
+        "remaining": 2
+      },
+      "reason": "every task this one depends on is complete, so the block has cleared"
     }
   ]
 }

@@ -152,5 +152,5 @@
       "reason": "three more tasks will edit files inside the set the live exercise compiles, so the single pooled observation waits until they land rather than being spent and invalidated again"
     }
   ],
-  "block_reason": "V2-082,V2-083,V2-087,V2-088"
+  "block_reason": "V2-083,V2-087,V2-088"
 }
