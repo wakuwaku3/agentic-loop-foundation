@@ -777,7 +777,30 @@ func TestTheServiceWritesARequirementOnlyFromCaptureAndPlan(t *testing.T) {
 	// writer touches CapturedAt, and the store-adapter tables still drive
 	// Capture and Plan. Nothing else in this guard changes and the set stays
 	// closed: an eighth writer still fails here.
-	want := map[string]bool{"Capture": true, "Plan": true, "RequestHumanInput": true, "AnswerHumanInput": true, "StartFraming": true, "CompleteFraming": true, "Claim": true}
+	// V2-090 widens the closed set from seven to TEN, on the same terms, and
+	// the three added entries share one reason: PauseRequirement,
+	// ResumeRequirement and CancelRequirement each issue exactly one
+	// domain.RequirementCommand -- pause, resume and cancel respectively --
+	// through domain.DecideRequirement, so each necessarily persists a
+	// Requirement. They are the owner triple docs/product/user-facing-spec.md
+	// :201 names, and before them `paused` was a source status in exactly ONE of
+	// DecideRequirement's ten branches, so a pause would have had no exit.
+	//
+	// The property this test makes exhaustive is again unaffected in the sense
+	// that matters here -- domain.DecideRequirement opens with `next := current`,
+	// so no new writer touches CapturedAt -- but ONE thing about it has changed
+	// and is recorded rather than glossed: V2-090's pause, resume and cancel
+	// branches are the FIRST branches in the domain that write a field other
+	// than Status and Version, namely Requirement.PausedFrom.
+	// internal/domain/capture_time_test.go's table over every command kind still
+	// asserts CapturedAt survives all ten, and
+	// internal/domain/invariant_model_test.go's requirementsEqual now compares
+	// PausedFrom so the new field cannot move unobserved.
+	//
+	// The store-adapter tables still drive Capture and Plan. Nothing else in
+	// this guard changes and the set stays CLOSED: an eleventh writer still fails
+	// here.
+	want := map[string]bool{"Capture": true, "Plan": true, "RequestHumanInput": true, "AnswerHumanInput": true, "StartFraming": true, "CompleteFraming": true, "Claim": true, "PauseRequirement": true, "ResumeRequirement": true, "CancelRequirement": true}
 	if len(writers) != len(want) {
 		t.Fatalf("the service writes a Requirement from %v, want exactly %v", keysSorted(writers), keysSorted(want))
 	}

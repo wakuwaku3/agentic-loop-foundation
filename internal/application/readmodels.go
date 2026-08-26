@@ -98,6 +98,23 @@ type RequirementDetailView struct {
 	// inventing question text to fill the field would be a fabricated
 	// observation. Absent means absent.
 	NeedsInput *HumanInputRequest `json:"needs_input,omitempty"`
+	// ResumesTo is the status a resume would restore this Requirement to
+	// (V2-090), read from domain.Requirement.PausedFrom. It is OMITTED
+	// ENTIRELY unless the status is paused, the same discipline repository_id
+	// and captured_at already use: absent means absent, and no status is ever
+	// synthesised for a Requirement that is not paused.
+	//
+	// It is on the detail read model rather than only on the pause response
+	// because a way out visible only in the answer to the pause is still a trap
+	// for anyone who closed the tab. docs/architecture/domain-model.md:269
+	// defines the exit as 直前の安全な非終端状態 -- the status the Requirement
+	// was actually in -- so an owner looking at a paused Requirement cannot
+	// derive it from the status alone; only the record knows.
+	//
+	// A paused Requirement whose PausedFrom is empty -- one stored before the
+	// field existed -- reads with this field ABSENT, which is the honest
+	// report: that record has no origin to restore and is cancel-only.
+	ResumesTo domain.RequirementStatus `json:"resumes_to,omitempty"`
 }
 
 // RequirementView remains compatible with the original v1 response. Text is
@@ -270,6 +287,13 @@ func (s *Service) GetRequirementDetail(ctx context.Context, id string) (Requirem
 			return err
 		}
 		out.NeedsInput = humanInputView(question, hasQuestion)
+		// V2-090: the exit, made visible on the read surface and not only in
+		// the response to the pause. Gated on the status rather than on the
+		// field being non-empty, so a stale memory on a non-paused record could
+		// never be reported as a resumption target.
+		if r.Status == domain.RequirementPaused {
+			out.ResumesTo = r.PausedFrom
+		}
 		incs := make([]domain.Increment, 0, len(r.Increments))
 		incrementIDs := r.Increments
 		if len(incrementIDs) > MaxPageSize {

@@ -234,7 +234,26 @@ func TestRequirementTransitionsInTheApplicationLayerAreExactlyTheTwoNewCommands(
 	// Nothing else in this guard changes, and the set stays CLOSED: a sixth
 	// caller still fails here. internal/domain was not edited -- model.go:480
 	// -484 and :485-489 already admit both transitions.
-	want := map[string]bool{"RequestHumanInput": true, "AnswerHumanInput": true, "StartFraming": true, "CompleteFraming": true, "Claim": true}
+	// V2-090 widens the closed set from five to EIGHT, and the widening is again
+	// the MEASUREMENT rather than a weakening. Three entries are added, and they
+	// are one decision rather than three: docs/product/user-facing-spec.md:201
+	// names "Requirementのpause、resume、cancel" as a single owner-issued triple
+	// under section 4.8, whose subject sentence at :194 is 利用者.
+	//   - PauseRequirement issues domain.RequirementPause, whose two non-test
+	//     occurrences before this task were both inside internal/domain/model.go
+	//     -- the declaration and the switch case -- so the transition had no
+	//     issuer at all.
+	//   - CancelRequirement issues domain.RequirementCancel, which had the same
+	//     two-occurrence shape and the same absent issuer.
+	//   - ResumeRequirement issues domain.RequirementResume, which did not exist
+	//     before this task in ANY file, test files included. It is in the same
+	//     task as the pause because `paused` was a SOURCE status in exactly ONE
+	//     of DecideRequirement's ten branches -- cancel -- so a pause shipped
+	//     without an exit would have been a button whose only sequel is
+	//     destroying the Requirement.
+	// Nothing else in this guard changes, and the set stays CLOSED: a ninth
+	// caller still fails here.
+	want := map[string]bool{"RequestHumanInput": true, "AnswerHumanInput": true, "StartFraming": true, "CompleteFraming": true, "Claim": true, "PauseRequirement": true, "ResumeRequirement": true, "CancelRequirement": true}
 	if !reflect.DeepEqual(callers, want) {
 		t.Fatalf("domain.DecideRequirement is called from %v, want exactly %v", keysSorted(callers), keysSorted(want))
 	}

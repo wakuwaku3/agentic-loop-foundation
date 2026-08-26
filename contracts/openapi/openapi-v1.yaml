@@ -278,6 +278,80 @@ paths:
       parameters: [{name: requirement_id, in: path, required: true, schema: {type: string}}]
       requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/CompleteRequirementFramingRequest'}}}}
       responses: {'200': {description: the Requirement left framing and is in ready, content: {application/json: {schema: {$ref: '#/components/schemas/CompleteRequirementFramingResponse'}}}}, '400': {$ref: '#/components/responses/Error'}, '401': {$ref: '#/components/responses/Error'}, '403': {$ref: '#/components/responses/Error'}, '404': {$ref: '#/components/responses/Error'}, '409': {$ref: '#/components/responses/Error'}, '413': {$ref: '#/components/responses/Error'}, '415': {$ref: '#/components/responses/Error'}, '429': {$ref: '#/components/responses/Error'}, '500': {$ref: '#/components/responses/Error'}, '503': {$ref: '#/components/responses/Error'}}
+  /v1/requirements/{requirement_id}:pause:
+    post:
+      operationId: pauseRequirement
+      security: [{iapOwner: []}]
+      description: |
+        The owner stops further processing of a Requirement, and it moves to
+        paused while remembering which of ready, active, waiting or recovering
+        it came from. Callable by the OWNER ONLY: a Runner and the scheduler are
+        both refused with 403, because stopping a Requirement is the user's
+        decision and not the Loop's.
+
+        WHAT A PAUSE DOES NOT DO, stated plainly because a pause that claimed
+        more than it does would be worse than none. It changes the
+        Requirement's own status and nothing else. It does NOT terminate a
+        running Execution, does NOT release or expire a Lease, does NOT
+        propagate anything to a Runner, and does NOT verify stop completion --
+        acknowledging a stop command is not completing it, and completion
+        requires observing the worker's ack, the process exit and the lease
+        release or expiry. The propagation half of a pause is a Control Intent,
+        which POST /v1/controls already provides, and the two halves are
+        deliberately NOT fused into one request: they have separate lifecycles
+        and separate idempotency stories.
+
+        This route evaluates NO control permit, so it is ALLOWED under all
+        seven control modes including emergency-stop. That is deliberate: a
+        stop the owner cannot issue while a stop is already in force would
+        invert what a control is for.
+      parameters: [{name: requirement_id, in: path, required: true, schema: {type: string}}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/PauseRequirementRequest'}}}}
+      responses: {'200': {description: the Requirement is paused and remembers the status a resume will restore, content: {application/json: {schema: {$ref: '#/components/schemas/PauseRequirementResponse'}}}}, '400': {$ref: '#/components/responses/Error'}, '401': {$ref: '#/components/responses/Error'}, '403': {$ref: '#/components/responses/Error'}, '404': {$ref: '#/components/responses/Error'}, '409': {$ref: '#/components/responses/Error'}, '413': {$ref: '#/components/responses/Error'}, '415': {$ref: '#/components/responses/Error'}, '429': {$ref: '#/components/responses/Error'}, '500': {$ref: '#/components/responses/Error'}, '503': {$ref: '#/components/responses/Error'}}
+  /v1/requirements/{requirement_id}:resume:
+    post:
+      operationId: resumeRequirement
+      security: [{iapOwner: []}]
+      description: |
+        The owner lifts a pause, and the Requirement returns to the EXACT
+        status it was in when it was paused -- not to a status chosen by a
+        rule. Admitted from paused only, and refused with 400 when the paused
+        Requirement carries no remembered origin, which is the shape a record
+        stored before the memory field existed has. Callable by the OWNER ONLY:
+        a pause the Loop could lift on its own would not be a pause.
+
+        This is the ONE of the three verbs that evaluates a control permit, of
+        the claim kind, so it is ALLOWED under allow and pause-intake and
+        DENIED under pause-claim, graceful-stop, immediate-stop, emergency-stop
+        and cancel -- two of seven. Resuming is the moment the Requirement
+        becomes claimable again, which is exactly what pause-claim exists to
+        withhold. The asymmetry with :pause and :cancel is the design: a resume
+        can only increase what the Loop may do, while a pause and a cancel can
+        only reduce it, so under emergency-stop a paused Requirement's resume is
+        denied and its cancel is allowed and the paused state is never a dead
+        end.
+      parameters: [{name: requirement_id, in: path, required: true, schema: {type: string}}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/ResumeRequirementRequest'}}}}
+      responses: {'200': {description: the Requirement returned to the exact status it was paused from, content: {application/json: {schema: {$ref: '#/components/schemas/ResumeRequirementResponse'}}}}, '400': {$ref: '#/components/responses/Error'}, '401': {$ref: '#/components/responses/Error'}, '403': {$ref: '#/components/responses/Error'}, '404': {$ref: '#/components/responses/Error'}, '409': {$ref: '#/components/responses/Error'}, '413': {$ref: '#/components/responses/Error'}, '415': {$ref: '#/components/responses/Error'}, '429': {$ref: '#/components/responses/Error'}, '500': {$ref: '#/components/responses/Error'}, '503': {$ref: '#/components/responses/Error'}}
+  /v1/requirements/{requirement_id}:cancel:
+    post:
+      operationId: cancelRequirement
+      security: [{iapOwner: []}]
+      description: |
+        The owner records that this Requirement will not be solved, and it
+        moves to the terminal cancelled status. Any pause memory is cleared,
+        because a cancelled Requirement is terminal and a remembered origin on
+        it would advertise a resumption the lifecycle does not honour.
+        Admitted from every status except completed and cancelled. Callable by
+        the OWNER ONLY.
+
+        Like :pause this route evaluates NO control permit and is therefore
+        ALLOWED under all seven control modes. That is the property that makes
+        the pause safe to offer at all: a paused Requirement retains at least
+        one exit under every mode.
+      parameters: [{name: requirement_id, in: path, required: true, schema: {type: string}}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/CancelRequirementRequest'}}}}
+      responses: {'200': {description: the Requirement is cancelled, content: {application/json: {schema: {$ref: '#/components/schemas/CancelRequirementResponse'}}}}, '400': {$ref: '#/components/responses/Error'}, '401': {$ref: '#/components/responses/Error'}, '403': {$ref: '#/components/responses/Error'}, '404': {$ref: '#/components/responses/Error'}, '409': {$ref: '#/components/responses/Error'}, '413': {$ref: '#/components/responses/Error'}, '415': {$ref: '#/components/responses/Error'}, '429': {$ref: '#/components/responses/Error'}, '500': {$ref: '#/components/responses/Error'}, '503': {$ref: '#/components/responses/Error'}}
   /v1/repositories:
     get:
       operationId: listRepositories
@@ -511,7 +585,7 @@ components:
       type: object
       additionalProperties: false
       required: [requirement_id, status, version, increments, next_action, page_size, truncated]
-      properties: {requirement_id: {type: string}, original_text: {type: string}, status: {type: string}, version: {type: integer}, increments: {type: array, items: {type: object}}, next_action: {type: string}, page_size: {type: integer, maximum: 100}, truncated: {type: boolean}, requested_by: {$ref: '#/components/schemas/RequestedBy'}, repository_id: {type: string, description: 'the Repository this Requirement is linked to; omitted entirely when no link exists'}, captured_at: {type: string, format: date-time, description: 'the instant this Requirement was captured, taken from the transaction authority time at intake; omitted entirely for a Requirement recorded before the field existed, never reported as the zero instant'}, needs_input: {$ref: '#/components/schemas/NeedsInputQuestion'}}
+      properties: {requirement_id: {type: string}, original_text: {type: string}, status: {type: string}, version: {type: integer}, increments: {type: array, items: {type: object}}, next_action: {type: string}, page_size: {type: integer, maximum: 100}, truncated: {type: boolean}, requested_by: {$ref: '#/components/schemas/RequestedBy'}, repository_id: {type: string, description: 'the Repository this Requirement is linked to; omitted entirely when no link exists'}, captured_at: {type: string, format: date-time, description: 'the instant this Requirement was captured, taken from the transaction authority time at intake; omitted entirely for a Requirement recorded before the field existed, never reported as the zero instant'}, needs_input: {$ref: '#/components/schemas/NeedsInputQuestion'}, resumes_to: {type: string, description: 'the status a resume would restore this Requirement to, read from the paused record itself; OMITTED ENTIRELY unless the status is paused, and omitted for a paused Requirement stored before the field existed, which has no origin to restore and is cancel-only'}}
     HumanInputOption:
       type: object
       additionalProperties: false
@@ -633,6 +707,76 @@ components:
       properties:
         requirement_id: {type: string, description: 'the SAME Requirement; completing framing creates nothing'}
         status: {type: string, description: 'ready, which is the only status the scheduler treats as schedulable'}
+        version: {type: integer}
+    PauseRequirementRequest:
+      type: object
+      additionalProperties: false
+      required: [request_id, expected_requirement_version]
+      description: |
+        The whole request is a request_id and the version the caller believes
+        the Requirement is at. There is deliberately no control_revision, no
+        repository_id and no timestamp field. The control revision is derived
+        from the effective control inside the command's own transaction, the
+        repository comes from the Requirement's own link, and the instant is
+        that transaction's authority time: none of the three can be supplied by
+        a caller.
+      properties:
+        request_id: {type: string}
+        expected_requirement_version: {type: integer}
+    PauseRequirementResponse:
+      type: object
+      additionalProperties: false
+      required: [requirement_id, status, version, resumes_to]
+      properties:
+        requirement_id: {type: string, description: 'the SAME Requirement; pausing creates nothing'}
+        status: {type: string, description: 'paused'}
+        version: {type: integer}
+        resumes_to: {type: string, description: 'the status a resume WILL restore this Requirement to -- the status it was in immediately before the pause, one of ready, active, waiting or recovering. It is read back from the stored record rather than from the request, so it cannot disagree with what a later resume actually does.'}
+    ResumeRequirementRequest:
+      type: object
+      additionalProperties: false
+      required: [request_id, expected_requirement_version]
+      description: |
+        The whole request is a request_id and the version the caller believes
+        the Requirement is at. There is deliberately no control_revision, no
+        repository_id and no timestamp field. The control revision is derived
+        from the effective control inside the command's own transaction, the
+        repository comes from the Requirement's own link, and the instant is
+        that transaction's authority time: none of the three can be supplied by
+        a caller.
+      properties:
+        request_id: {type: string}
+        expected_requirement_version: {type: integer}
+    ResumeRequirementResponse:
+      type: object
+      additionalProperties: false
+      required: [requirement_id, status, version]
+      properties:
+        requirement_id: {type: string, description: 'the SAME Requirement; resuming creates nothing'}
+        status: {type: string, description: 'the status the Requirement was in when it was paused, restored exactly'}
+        version: {type: integer}
+    CancelRequirementRequest:
+      type: object
+      additionalProperties: false
+      required: [request_id, expected_requirement_version]
+      description: |
+        The whole request is a request_id and the version the caller believes
+        the Requirement is at. There is deliberately no control_revision, no
+        repository_id and no timestamp field. The control revision is derived
+        from the effective control inside the command's own transaction, the
+        repository comes from the Requirement's own link, and the instant is
+        that transaction's authority time: none of the three can be supplied by
+        a caller.
+      properties:
+        request_id: {type: string}
+        expected_requirement_version: {type: integer}
+    CancelRequirementResponse:
+      type: object
+      additionalProperties: false
+      required: [requirement_id, status, version]
+      properties:
+        requirement_id: {type: string, description: 'the SAME Requirement; cancelling creates nothing'}
+        status: {type: string, description: 'cancelled, which is terminal'}
         version: {type: integer}
     ControlRead:
       type: object
