@@ -90,7 +90,7 @@
       ],
       "working_directory": ".",
       "timeout_seconds": 900,
-      "summary": "PLACEHOLDER-GITLEAKS"
+      "summary": "A21's secret scan, run AFTER the evidence commit 1dc4e8b and never as `gitleaks dir .` -- that wider scan reports 26 findings from gitignored build/evidence/** paths and is not the check this task is asked for. VERBATIM VERDICT: 'INF no leaks found', preceded by 'INF scanned ~5042026 bytes (5.04 MB) in 391ms'. The byte figure is recorded as provenance for what was scanned, not as a threshold. The scan covered the whole .agents tree including the three records this task issues."
     },
     {
       "name": "a21-verification-contracts",
