@@ -1206,6 +1206,19 @@ func (s *Service) Claim(ctx context.Context, req ClaimRequest) (out ClaimRespons
 		} else if waiting {
 			return fmt.Errorf("%w: increment %q", ErrAwaitingHumanInput, req.IncrementID)
 		}
+		// V2-089: the same question, widened from one status to the complement
+		// of the set that admits work. The four admitting statuses are declared
+		// once, in claimable.go, and are the domain's own RequirementStart
+		// sources plus active. This sits immediately after the V2-065 guard, so
+		// the needs-input refusal keeps its identity, its message and its
+		// position, and BEFORE the canonical-target resolution and
+		// domain.Permit, so a Requirement that admits no work reports that
+		// rather than a control denial.
+		if admits, e := requirementAdmitsClaim(ctx, u, inc); e != nil {
+			return e
+		} else if !admits {
+			return fmt.Errorf("%w: increment %q parentstatus=[%s]", ErrRequirementNotClaimable, req.IncrementID, tmpProbeParentStatus)
+		}
 		if lease, exists, e := u.ActiveLeaseForIncrementAt(ctx, req.IncrementID, issuedAt); e != nil {
 			return e
 		} else if exists && lease.Status == domain.LeaseActive {
