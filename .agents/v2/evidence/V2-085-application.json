@@ -1,0 +1,147 @@
+{
+  "schema_version": "v1",
+  "id": "ev-v2-085-application",
+  "kind": "evidence",
+  "created_at": "2026-08-26T21:00:00Z",
+  "correlation_id": "v2-085-plan-prepare-permit",
+  "task_id": "V2-085",
+  "component": "application",
+  "evidence_key": "90bf5603092b4cc28e3f0ba27c8c89d7c9d0c417a46225b21627a3135990189a",
+  "result": "partial",
+  "observed_at": "2026-08-26T21:00:00Z",
+  "checks": [
+    {
+      "name": "scope-boundary",
+      "status": "passed",
+      "argv": [
+        "git",
+        "rev-parse",
+        "HEAD"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 30,
+      "summary": "Scope boundary for V2-085, recorded against base commit b0b9ffef8c628f8091e5dbfdbedf88736144a62c on branch v2-task/V2-085, BEFORE any source file was edited: this record's first commit contains rows 1-5 and the A1/A2 baseline, and internal/application/service.go was still byte-identical to the base at that commit (verified by git status --porcelain showing only .agents/v2/evidence paths). ROW 1 -- what this task makes true: an emergency stop now stops planning and preparation. Service.Plan and Service.Prepare each evaluate exactly one domain.Permit of kind domain.PermitClaim against a domain.ControlTarget and a control revision resolved INSIDE the same transaction from the Requirement's own Repository link and domain.EffectiveControl, so the set of control modes under which a caller can create an Increment or move one to ready shrinks from all seven to exactly two (allow, pause-intake). The seven-mode outcome for each of the two commands is asserted rather than logged, cross-checked in the same run against the package's permitAllowedTable mirror and against Capture's measured intake behaviour. ROW 2 -- what it deliberately does not do: internal/domain is byte-unchanged (no PermitKind, no ControlMode, no RequirementStatus, no IncrementStatus, no allowed() list change); no field is added to PlanRequest or PlanResponse or PrepareRequest or PrepareResponse, so contracts/openapi/openapi-v1.yaml is byte-unchanged and contracts_changed is empty; nothing is passed to domain.EffectFromPermit and no OutboxItem is staged, because domain.PermitKind.SideEffect() is false for claim and the allow-only closure in EffectFromPermit would wrongly deny both commands under pause-intake; the eight-kind stop matrix (internal/application/stop_matrix_test.go) and docs/product/definition.md are byte-unchanged; no route, no read model field, no owner-console control, no port, no stored field, no document kind and no index is added; the success path under allow is byte-identical. ROW 3 -- what it records but does not fix: (a) Orchestrator.RunFakeJourney reaches Plan and Prepare through a caller the component fabricates for itself (internal/runner/orchestrator.go, application.Caller{Role: RoleOwner, Subject: runner-local-owner}), which is V2-086's defect and is recorded here, not fixed -- internal/runner/** is prohibited and that fixture engages no Control Intent, so this task's guard cannot reach it; (b) the in-memory adapter never calls quota.Counter.TrueUp, so quota.ReadTransactionUsage admits only four READ transactions per budget day -- V2-087's defect, worked around in the new test by reading the store directly rather than through Service, never by weakening an assertion; (c) internal/store/firestore's suite prints ok while producing 49 --- SKIP lines with no emulator (measured: 49), so that package's run measured nothing about this change and is recorded as such under gate rule G7 rather than counted as a pass. ROW 4 -- what only a later task can establish: neither command has an HTTP route, so no live HTTP or dogfood observation of the new refusal is possible here; who may call Plan and Prepare, and whether they should be reachable at all, is V2-086's question. ROW 5 -- this task passes no release gate on its own: exactly one evidence record is issued, release_eligible is false, no capability id is cited, contracts/release-contract/** is untouched, .agents/v2/evidence/V2-022-release-live-dogfood.json is untouched, and no release BundleDigest moves."
+    },
+    {
+      "name": "a1-baseline-plan-prepare-are-permit-free",
+      "status": "passed",
+      "argv": [
+        "sh",
+        "-c",
+        "awk 'NR>=887 && NR<=1046' internal/application/service.go | grep -n 'Permit\\|Controls\\|EffectiveControl\\|EffectFromPermit'"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 60,
+      "summary": "A1(i) MEASURED, and it disagrees with the Work Order's line spans. The Work Order says Plan is internal/application/service.go:882-966 and Prepare is :986-1041 and asks for the window 882-1042. MEASURED at base commit b0b9ffef8c628f8091e5dbfdbedf88736144a62c: func (s *Service) Plan starts at line 887 and its closing brace is line 973 (PlanIncrement starts at 974); func (s *Service) Prepare starts at line 991 and its closing brace is line 1046 (PrepareIncrement starts at 1048). Every span is shifted by +5 lines. Both the Work Order's window (882-1042) and the measured window (887-1046) return NO match for Permit|Controls|EffectiveControl|EffectFromPermit (grep exit status 1 in both cases), so the finding itself holds: Plan and Prepare are permit-free. DISAGREEMENTS RECORDED: Plan expected 882-966, measured 887-973; Prepare expected 986-1041, measured 991-1046."
+    },
+    {
+      "name": "a1-baseline-permit-call-site-census",
+      "status": "passed",
+      "argv": [
+        "sh",
+        "-c",
+        "grep -rn 'domain\\.Permit(\\|domain\\.EffectFromPermit(' --include='*.go' . | grep -v '_test\\.go'"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 60,
+      "summary": "A1(ii) MEASURED. The non-test census count is 11, which AGREES with the Work Order's eleven, but seven of the eleven line numbers disagree. MEASURED list: internal/application/framing.go:183 (PermitClaim) AGREES; internal/application/repository.go:128 AGREES; internal/application/outbox.go:448 AGREES; internal/application/human_input.go:644 (PermitIntake) AGREES; internal/application/service.go:420 (PermitProcess, expected :415, DISAGREES by +5); service.go:669 (PermitCheckpoint, expected :664, DISAGREES by +5); service.go:829 (PermitIntake, Capture, expected :824, DISAGREES by +5); service.go:1233 (PermitClaim, Claim, expected :1228, DISAGREES by +5); service.go:1475 (Service.Permit, expected :1469, DISAGREES by +6); service.go:1675 (effectOutbox's Permit, expected :1669, DISAGREES by +6); service.go:1679 (the EffectFromPermit, expected :1673, DISAGREES by +6). Plan (887-973) and Prepare (991-1046) appear in NONE of the eleven: every service.go call site is outside both spans (420, 669, 829 are before 887; 1233, 1475, 1675, 1679 are after 1046)."
+    },
+    {
+      "name": "a1-baseline-domain-control-gate-lines",
+      "status": "passed",
+      "argv": [
+        "sh",
+        "-c",
+        "grep -n 'func permitAllowed\\|func EffectFromPermit\\|func (k PermitKind) SideEffect' internal/domain/control.go"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 60,
+      "summary": "A1(iii) MEASURED and it AGREES with the Work Order on all three. permitAllowed is internal/domain/control.go:266-281 (expected :266-281, AGREES): allow returns true; pause-intake returns kind != PermitIntake; pause-claim returns kind != PermitClaim; graceful-stop returns kind == PermitCheckpoint; immediate-stop, emergency-stop and cancel return false; default false. EffectFromPermit begins at :297 and its allow-only test is the disjunct current.Mode != ControlAllow at :301 (expected :301, AGREES). PermitKind.SideEffect() is :199-201 (expected :199-201, AGREES) and its body is `return k != PermitClaim && k != PermitCredential && k != PermitProcess`, so SideEffect() is FALSE for PermitClaim as the Work Order states. Also measured, and load-bearing for d5's ordering: domain.Permit defaults an empty control.Mode to ControlAllow and refuses when control.Found is true and the requested revision is not exactly control.Revision, or when control.Found is false and the requested revision is not 0."
+    },
+    {
+      "name": "a1-baseline-quota-mutation-usage",
+      "status": "passed",
+      "argv": [
+        "sh",
+        "-c",
+        "grep -n 'MutationUsage\\|ReadTransactionUsage' internal/quota/quota.go"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 60,
+      "summary": "A1(iv) MEASURED and it AGREES: `var MutationUsage = Usage{Reads: 32, Writes: 16}` is internal/quota/quota.go:62 (expected :62). Also measured: `var ReadTransactionUsage = Usage{Reads: MaxReadBoundaryReads + 1, Writes: 1}` is internal/quota/quota.go:56, which the Work Order does not give a line for."
+    },
+    {
+      "name": "a1-baseline-top-level-test-counts",
+      "status": "passed",
+      "argv": [
+        "devbox",
+        "run",
+        "--pure",
+        "--",
+        "sh",
+        "-c",
+        "go test -list '.*' ./internal/application"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 600,
+      "summary": "A1(v) MEASURED at base commit b0b9ffef8c628f8091e5dbfdbedf88736144a62c by counting lines matching ^Test in `go test -list '.*'` output. BEFORE counts: internal/application = 187, internal/domain = 54, internal/reconciler = 16, internal/store/memory = 16. The Work Order supplies no expected values for these, so there is nothing to disagree with; they are the baseline A11 compares against. The full name lists were captured to a scratchpad file so the AFTER lists can be diffed name-by-name rather than only by count."
+    },
+    {
+      "name": "a1-baseline-untouched-file-hashes",
+      "status": "passed",
+      "argv": [
+        "sh",
+        "-c",
+        "sha256sum internal/application/stop_matrix_test.go docs/product/definition.md contracts/openapi/openapi-v1.yaml"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 60,
+      "summary": "A1/A8/A12 BEFORE hashes, taken before any edit so the AFTER equality is a measurement and not a claim. internal/application/stop_matrix_test.go sha256 834aeb439db5463cbadfc2c9c36441036a8edb1a79ae191c6f27c62ec8b488ca; docs/product/definition.md sha256 9d825e9df66fdaf8bda0160e45671afd890b9a35f283c6507846d2b22236d6b2; contracts/openapi/openapi-v1.yaml sha256 ca62ef4c0e1f7dbe357d03209d68f387581ed53aeaa66b0ea8fc5b8b7eea8cdd. The internal/domain tree digest, taken as sha256 of the sha256 list of every git-tracked file under internal/domain, is a2fd5b2379ba857f84a12691767c74204b8af1709972e1a7f67793b466776818."
+    },
+    {
+      "name": "a1-baseline-full-suite-green-before",
+      "status": "passed",
+      "argv": [
+        "devbox",
+        "run",
+        "--pure",
+        "--",
+        "sh",
+        "-c",
+        "go test -count=1 ./..."
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 2400,
+      "summary": "A1 baseline: the whole suite is green BEFORE any edit, so every later failure is attributable to this task. Verbatim verdict lines for the four packages A11 names, plus the two packages whose journeys reach Plan and Prepare: 'ok  \tgithub.com/takushi/agentic-loop-foundation/v2/internal/application\t0.284s', 'ok  \tgithub.com/takushi/agentic-loop-foundation/v2/internal/domain\t0.671s', 'ok  \tgithub.com/takushi/agentic-loop-foundation/v2/internal/reconciler\t0.081s', 'ok  \tgithub.com/takushi/agentic-loop-foundation/v2/internal/store/memory\t0.164s', 'ok  \tgithub.com/takushi/agentic-loop-foundation/v2/internal/runner\t3.218s', 'ok  \tgithub.com/takushi/agentic-loop-foundation/v2/internal/contracts\t0.192s'. No package reported FAIL. Recorded under gate rule G7: the line 'ok  \tgithub.com/takushi/agentic-loop-foundation/v2/internal/store/firestore\t0.023s' is NOT evidence about this change, because a separate verbose run measured 49 '--- SKIP' lines in that package with no emulator running; that package is prohibited to this task and byte-unchanged, and its run is treated as measuring nothing."
+    },
+    {
+      "name": "a2-defect-reproduced-before-repair",
+      "status": "passed",
+      "argv": [
+        "devbox",
+        "run",
+        "--pure",
+        "--",
+        "sh",
+        "-c",
+        "go test -race -count=1 -run '^TestPlanAndPrepareAreMeasuredUnderEmergencyStop$' -v ./internal/application"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 600,
+      "summary": "A2 MEASURED, by me, before writing any repair. The scenario the Work Order specifies -- an effective control mode of emergency-stop engaged on a ScopeInstallation Control Intent, then Service.Plan and then Service.Prepare -- is exactly what the pre-existing V2-082 probe drives, so it was executed rather than restated. VERBATIM verdict, the log line and the PASS line: '    framing_test.go:610: A6 FINDING (recorded, not fixed; V2-085 owns the repair): under an effective control mode of emergency-stop, Plan err=<nil> (canonical Requirement state moved: true) and Prepare err=<nil> (canonical Increment state moved to ready: true), while Service.StartFraming is denied with control policy denies operation. Plan and Prepare evaluate no domain.Permit at all, so a stop mode does not reach them; StartFraming evaluates domain.Permit with Kind claim and is therefore denied by every stop mode. internal/application/service.go is prohibited to V2-082, so this is escalated rather than changed.' then '--- PASS: TestPlanAndPrepareAreMeasuredUnderEmergencyStop (0.00s)' then 'ok  \tgithub.com/takushi/agentic-loop-foundation/v2/internal/application\t1.011s'. BEFORE ROW of the before/after table: under emergency-stop, Plan returns error nil, the parent Requirement's canonical state MOVED (a new Increment id appended and Version incremented), Prepare returns error nil, and the Increment REACHED domain.IncrementReady -- the only status Claim accepts. Service.StartFraming, which does evaluate domain.Permit with kind claim, was denied with 'control policy denies operation' in the same run, which is the control against which the defect is read. The probe's own line number was re-measured: the function is at internal/application/framing_test.go:565 (AGREES with the Work Order) and the log call is at :610 (AGREES)."
+    },
+    {
+      "name": "a1-ordering-record-precedes-source-edit",
+      "status": "passed",
+      "argv": [
+        "git",
+        "log",
+        "--oneline",
+        "-1"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 30,
+      "summary": "The ordering itself, recorded as A1 and hard rule 2 require. This record, containing the row 1-5 scope boundary and every A1/A2 baseline measurement above, is committed FIRST; internal/application/service.go, internal/application/planning_permit_test.go and internal/application/framing_test.go are edited only in later commits. At the moment of that first commit `git status --porcelain` listed only .agents/v2/evidence/V2-085-application.json and .agents/v2/evidence/index.json, and `git diff b0b9ffef8c628f8091e5dbfdbedf88736144a62c -- internal` was empty. The commit hash of that evidence-first commit is recorded in the final report."
+    }
+  ]
+}
