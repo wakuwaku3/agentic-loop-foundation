@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -188,6 +189,47 @@ func run() error {
 	}
 	leaseReconciler := &reconciler.Reconciler{Tx: store, Clock: clock}
 	verificationReconciler := &reconciler.VerificationReconciler{Tx: store, Clock: clock, Deadline: time.Minute}
+	// V2-091: the release source, and why an ABSENT configuration is a SKIP.
+	//
+	// internal/application/release_surface.go:17-23 already records why there is
+	// no default root: a defaulted root would make this process report a release
+	// version it was not assembled from. So the root, the routing repository and
+	// the declared Preview environment class are all read from explicit
+	// environment variables, and with the root UNSET nothing is attached at all
+	// -- GET /v1/release/state keeps answering 503 release_observer_not_configured
+	// and the Loop pass's promotion stage reports skipped-not-configured.
+	//
+	// This binary does NOT import internal/release. Measured in
+	// ci/components.json, the control-plane component's declared dependencies
+	// are exactly api, application, reconciler, runner and store-firestore;
+	// adding release would be a new component edge, and ci/** is in
+	// all_on_change, so it would move all 23 evidence keys.
+	// application.AttachReleaseSource takes strings and one injected instant and
+	// builds release.NewRouter, release.NewMemoryStore and release.NewPipeline
+	// internally, so the Router the owner's read reports and the Router the
+	// promotion advances are the SAME object by construction.
+	if releaseRoot := strings.TrimSpace(os.Getenv("AGENTIC_LOOP_RELEASE_SOURCE_ROOT")); releaseRoot != "" {
+		releaseRepository, err := requiredEnv("AGENTIC_LOOP_RELEASE_REPOSITORY")
+		if err != nil {
+			return err
+		}
+		releaseEnvironment, err := requiredEnv("AGENTIC_LOOP_RELEASE_ENVIRONMENT_CLASS")
+		if err != nil {
+			return err
+		}
+		if err := service.AttachReleaseSource(application.ReleaseSourceConfig{
+			Root:             releaseRoot,
+			Repository:       releaseRepository,
+			EnvironmentClass: releaseEnvironment,
+			AssembledAt:      clock.Now(),
+			// Candidate is deliberately left ZERO: this process records no
+			// capability evidence, so the candidate it assembles is not
+			// promotable and the promotion stage refuses rather than promotes.
+			// Fabricating evidence here is exactly what this task must not do.
+		}); err != nil {
+			return err
+		}
+	}
 	combined, err := api.NewCombinedAuthenticator(runnerEnrollment, owners, strings.ToLower(reconcileIdentity))
 	if err != nil {
 		return err
@@ -202,7 +244,23 @@ func run() error {
 		if _, _, err := leaseReconciler.Tick(tickCtx, ""); err != nil {
 			return err
 		}
-		_, err := verificationReconciler.Tick(tickCtx)
+		if _, err := verificationReconciler.Tick(tickCtx); err != nil {
+			return err
+		}
+		// V2-091: the Loop's own pass, THIRD and last, inside the SAME 5-second
+		// timeout and on the SAME context. The order is load-bearing rather than
+		// arbitrary: leaseReconciler.Tick is what expires an Active Lease past
+		// its TTL and marks its Execution lost, so running the pass AFTER it
+		// means stage R observes, in this same tick, the artefact this same tick
+		// produced.
+		//
+		// The scheduler identity is ALREADY on callCtx: internal/api/api.go:114
+		// mints it with application.LoopCaller and :119 attaches it before
+		// calling this closure. Nothing is constructed here, and the cursor
+		// starts empty on every tick -- a durable cursor would be process state
+		// this binary has no place to keep, and a pass that starts from the
+		// beginning is correct, merely slower to reach the tail.
+		_, err := service.LoopPass(tickCtx, application.LoopPassRequest{RequestID: "loop-pass:" + strconv.FormatInt(clock.Now().UnixNano(), 36)})
 		return err
 	}})
 	addr := ":8080"
