@@ -22,6 +22,16 @@ var (
 	ErrOutboxLeaseLost = errors.New("outbox delivery lease is no longer owned")
 	ErrOutboxNotReady  = errors.New("outbox is not ready for delivery")
 	ErrOutboxNoSink    = errors.New("outbox effect sink is required")
+	// ErrEffectUndecidable is an EffectSink's way of saying "I cannot decide
+	// what happened", for a reason that has nothing to do with the network
+	// (V2-072 d10). Before it existed, the ambiguous state was reachable only
+	// by inferring ambiguity from the SHAPE of a transport error, so an
+	// adapter that had genuinely observed an undecidable external state had to
+	// either wrap context.DeadlineExceeded -- a lie about what happened -- or
+	// build a second needs-input route beside this protocol. isAmbiguous
+	// recognises it below, so it reaches OutboxAmbiguous and from there
+	// resolveObservation's needs-input, exactly like a timeout does.
+	ErrEffectUndecidable = errors.New("outbox: the external outcome cannot be decided")
 )
 
 // outboxErrorCode is deliberately a closed vocabulary. Provider errors can
@@ -501,6 +511,9 @@ func (d *OutboxDispatcher) fail(ctx context.Context, id string, cause error, cou
 }
 
 func isAmbiguous(err error) bool {
+	if errors.Is(err, ErrEffectUndecidable) {
+		return true
+	}
 	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) || errors.Is(err, net.ErrClosed) {
 		return true
 	}

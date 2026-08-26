@@ -534,3 +534,260 @@ func structFieldsInFile(t *testing.T, fileName, typeName string) []string {
 	}
 	return fields
 }
+
+// --- V2-072: the publication intent and the publication Observation --------
+
+func TestPublicationRefNameIsADeterministicFunctionOfTwoIdentifiers(t *testing.T) {
+	// A19: one pure function is the only producer of a ref name, so the same
+	// operation retried targets one ref and a second Execution gets its own.
+	first, err := PublicationRefName("inc-1", "exe-1")
+	if err != nil {
+		t.Fatalf("PublicationRefName: %v", err)
+	}
+	again, err := PublicationRefName("inc-1", "exe-1")
+	if err != nil {
+		t.Fatalf("PublicationRefName (second call): %v", err)
+	}
+	if first != again {
+		t.Fatalf("the ref name is not a function of its inputs: %q then %q", first, again)
+	}
+	if first != PublicationRefPrefix+"inc-1/exe-1" {
+		t.Fatalf("ref name = %q", first)
+	}
+	second, err := PublicationRefName("inc-1", "exe-2")
+	if err != nil {
+		t.Fatalf("PublicationRefName (second execution): %v", err)
+	}
+	if second == first {
+		t.Fatalf("a second Execution of the same Increment reused the first Execution's ref %q", first)
+	}
+	increment, execution, err := ParsePublicationRef(second)
+	if err != nil {
+		t.Fatalf("ParsePublicationRef(%q): %v", second, err)
+	}
+	if increment != "inc-1" || execution != "exe-2" {
+		t.Fatalf("ParsePublicationRef(%q) = %q, %q", second, increment, execution)
+	}
+}
+
+func TestPublicationRefRefusesAnythingOutsideTheReservedPrefix(t *testing.T) {
+	for _, ref := range []string{
+		"",
+		"refs/heads/main",
+		"refs/heads/v2",
+		"refs/heads/agentic-loop",
+		"refs/heads/agentic-loop/",
+		"refs/heads/agentic-loop/inc-1",
+		"refs/heads/agentic-loop/inc-1/exe-1/extra",
+		"refs/heads/agentic-loop/../inc/exe",
+		"refs/tags/agentic-loop/inc-1/exe-1",
+		"agentic-loop/inc-1/exe-1",
+	} {
+		if _, _, err := ParsePublicationRef(ref); !errors.Is(err, ErrInvalidPublicationRef) {
+			t.Fatalf("ParsePublicationRef(%q) = %v, want ErrInvalidPublicationRef", ref, err)
+		}
+	}
+	for _, pair := range [][2]string{
+		{"", "exe"}, {"inc", ""}, {"inc/extra", "exe"}, {"inc", "exe/extra"},
+		{"-inc", "exe"}, {"inc", "-exe"}, {"..", "exe"}, {"inc", "."},
+		{"inc name", "exe"}, {"inc", "exe\ttab"}, {"in..c", "exe"},
+	} {
+		if _, err := PublicationRefName(IncrementID(pair[0]), ExecutionID(pair[1])); !errors.Is(err, ErrInvalidPublicationRef) {
+			t.Fatalf("PublicationRefName(%q, %q) = %v, want ErrInvalidPublicationRef", pair[0], pair[1], err)
+		}
+	}
+}
+
+func TestPublicationStateVocabularyIsClosedAndCannotSayCompleted(t *testing.T) {
+	// A14 and A21(iii): the vocabulary itself is the guard. A reader cannot
+	// conclude "the Requirement is done" from a record whose state set has no
+	// value that means it.
+	states := PublicationStates()
+	if len(states) != 5 {
+		t.Fatalf("the closed state set has %d values: %v", len(states), states)
+	}
+	seen := map[PublicationState]bool{}
+	for _, state := range states {
+		if seen[state] {
+			t.Fatalf("state %q appears twice in the closed set", state)
+		}
+		seen[state] = true
+		if !ValidPublicationState(state) {
+			t.Fatalf("state %q is in the closed set but is not valid", state)
+		}
+		for _, forbidden := range []string{"complete", "resolv", "accept", "done", "finish", "success"} {
+			if strings.Contains(strings.ToLower(string(state)), forbidden) {
+				t.Fatalf("state %q contains %q: no publication state may mean the Requirement is finished", state, forbidden)
+			}
+		}
+	}
+	if !seen[PublicationUnobserved] {
+		t.Fatal("unobserved is not a first-class state; nothing measured must be reportable as such")
+	}
+	if !seen[PublicationPublishedAndObserved] {
+		t.Fatal("there is no terminal success state")
+	}
+	for _, unknown := range []PublicationState{"", "completed", "done", "accepted", "resolved", "published"} {
+		if ValidPublicationState(unknown) {
+			t.Fatalf("ValidPublicationState(%q) = true, want false", unknown)
+		}
+	}
+}
+
+func mustPublicationIntent(t *testing.T) PublicationIntent {
+	t.Helper()
+	ref, err := PublicationRefName("inc-1", "exe-1")
+	if err != nil {
+		t.Fatalf("PublicationRefName: %v", err)
+	}
+	return PublicationIntent{
+		RepositoryID: "repo-1",
+		Locator:      mustLocator(t, "https://github.com/Owner/Name.git"),
+		Ref:          ref,
+		BaseBranch:   "v2",
+		BaseCommit:   strings.Repeat("a", 40),
+		HeadCommit:   strings.Repeat("b", 40),
+		HeadTree:     strings.Repeat("c", 40),
+		ChangedPaths: 2,
+	}
+}
+
+func TestValidatePublicationIntentRefusals(t *testing.T) {
+	base := mustPublicationIntent(t)
+	if err := ValidatePublicationIntent(base); err != nil {
+		t.Fatalf("the well-formed intent was refused: %v", err)
+	}
+	if !base.Recorded() {
+		t.Fatal("a well-formed intent reports itself unrecorded")
+	}
+	if (PublicationIntent{}).Recorded() {
+		t.Fatal("a zero intent reports itself recorded")
+	}
+	mutate := map[string]func(*PublicationIntent){
+		"no repository":       func(i *PublicationIntent) { i.RepositoryID = "" },
+		"unnormalised":        func(i *PublicationIntent) { i.Locator.Owner = "Owner" },
+		"ref outside prefix":  func(i *PublicationIntent) { i.Ref = "refs/heads/main" },
+		"no base branch":      func(i *PublicationIntent) { i.BaseBranch = " " },
+		"base not an object":  func(i *PublicationIntent) { i.BaseCommit = "not-an-object" },
+		"head not an object":  func(i *PublicationIntent) { i.HeadCommit = "" },
+		"tree not an object":  func(i *PublicationIntent) { i.HeadTree = strings.Repeat("z", 40) },
+		"nothing to publish":  func(i *PublicationIntent) { i.HeadCommit = i.BaseCommit },
+		"no changed path":     func(i *PublicationIntent) { i.ChangedPaths = 0 },
+		"negative path count": func(i *PublicationIntent) { i.ChangedPaths = -1 },
+	}
+	for name, apply := range mutate {
+		candidate := base
+		apply(&candidate)
+		if err := ValidatePublicationIntent(candidate); err == nil {
+			t.Fatalf("%s was accepted", name)
+		}
+	}
+}
+
+func TestPublicationObservationIsWriteOnceShapedAndRefusesUnmeasuredSuccess(t *testing.T) {
+	tree := strings.Repeat("c", 40)
+	at := time.Date(2026, 8, 26, 10, 0, 0, 0, time.UTC)
+	ref, err := PublicationRefName("inc-1", "exe-1")
+	if err != nil {
+		t.Fatalf("PublicationRefName: %v", err)
+	}
+	good := PublicationObservation{
+		OperationID:     "op-1",
+		RepositoryID:    "repo-1",
+		Ref:             ref,
+		PublishedCommit: strings.Repeat("d", 40),
+		PublishedTree:   tree,
+		LocalCommit:     strings.Repeat("b", 40),
+		LocalTree:       tree,
+		TreesAgree:      true,
+		State:           PublicationPublishedAndObserved,
+		Reason:          "the ref was created and all four content-addressed equalities held",
+		ObservedAt:      at,
+	}
+	if err := ValidatePublicationObservation(good); err != nil {
+		t.Fatalf("the well-formed Observation was refused: %v", err)
+	}
+	if !good.Recorded() {
+		t.Fatal("a well-formed Observation reports itself unrecorded")
+	}
+	increment, err := good.IncrementID()
+	if err != nil || increment != "inc-1" {
+		t.Fatalf("IncrementID() = %q, %v", increment, err)
+	}
+	// The published and the local commit object name are recorded and are
+	// deliberately allowed to differ: the forge constructs the commit object.
+	if good.PublishedCommit == good.LocalCommit {
+		t.Fatal("this fixture is meant to exercise a differing commit object name")
+	}
+	mutate := map[string]func(*PublicationObservation){
+		"no operation":       func(o *PublicationObservation) { o.OperationID = "" },
+		"no repository":      func(o *PublicationObservation) { o.RepositoryID = "" },
+		"ref outside prefix": func(o *PublicationObservation) { o.Ref = "refs/heads/main" },
+		"unknown state":      func(o *PublicationObservation) { o.State = "completed" },
+		"empty state":        func(o *PublicationObservation) { o.State = "" },
+		"no reason":          func(o *PublicationObservation) { o.Reason = " " },
+		"no instant":         func(o *PublicationObservation) { o.ObservedAt = time.Time{} },
+		"bad object name":    func(o *PublicationObservation) { o.PublishedTree = "xyz" },
+		"success with no published object": func(o *PublicationObservation) {
+			o.PublishedCommit = ""
+		},
+		"success with disagreeing trees": func(o *PublicationObservation) {
+			o.PublishedTree = strings.Repeat("e", 40)
+		},
+		"success with the flag cleared": func(o *PublicationObservation) { o.TreesAgree = false },
+	}
+	for name, apply := range mutate {
+		candidate := good
+		apply(&candidate)
+		if err := ValidatePublicationObservation(candidate); err == nil {
+			t.Fatalf("%s was accepted", name)
+		}
+	}
+	// An unobserved Observation is a first-class record and must carry no
+	// published object name at all.
+	unobserved := PublicationObservation{OperationID: "op-2", RepositoryID: "repo-1", Ref: ref, State: PublicationUnobserved, Reason: "no publication has been attempted for this operation yet", ObservedAt: at}
+	if err := ValidatePublicationObservation(unobserved); err != nil {
+		t.Fatalf("the unobserved Observation was refused: %v", err)
+	}
+	unobserved.PublishedTree = tree
+	if err := ValidatePublicationObservation(unobserved); err == nil {
+		t.Fatal("an unobserved Observation carrying a published tree was accepted")
+	}
+}
+
+func TestPublicationRecordsAddNoFieldToAnyExistingAggregate(t *testing.T) {
+	// A13: the two new records are additive. No existing aggregate grows a
+	// publication field, and neither new record stores a URL.
+	for _, spec := range []struct{ file, typeName string }{
+		{"model.go", "Requirement"}, {"model.go", "Increment"}, {"model.go", "Execution"},
+		{"model.go", "Lease"}, {"control.go", "ControlIntent"}, {"repository.go", "Repository"},
+	} {
+		for _, field := range structFieldsInFile(t, spec.file, spec.typeName) {
+			lowered := strings.ToLower(field)
+			if strings.Contains(lowered, "publication") || strings.Contains(lowered, "publish") {
+				t.Fatalf("%s %s carries %q; a publication is its own keyed record", spec.file, spec.typeName, field)
+			}
+		}
+	}
+	for _, typeName := range []string{"PublicationIntent", "PublicationObservation"} {
+		fields := structFieldsInFile(t, "repository.go", typeName)
+		if len(fields) == 0 {
+			t.Fatalf("%s has no fields", typeName)
+		}
+		for _, field := range fields {
+			if strings.Contains(strings.ToLower(field), "url") {
+				t.Fatalf("%s carries %q; a URL is never identity and can carry credential material", typeName, field)
+			}
+		}
+	}
+	intent := structFieldsInFile(t, "repository.go", "PublicationIntent")
+	wantIntent := []string{"RepositoryID", "Locator", "Ref", "BaseBranch", "BaseCommit", "HeadCommit", "HeadTree", "ChangedPaths"}
+	if strings.Join(intent, ",") != strings.Join(wantIntent, ",") {
+		t.Fatalf("PublicationIntent fields = %v, want exactly %v", intent, wantIntent)
+	}
+	observation := structFieldsInFile(t, "repository.go", "PublicationObservation")
+	wantObservation := []string{"OperationID", "RepositoryID", "Ref", "PublishedCommit", "PublishedTree", "LocalCommit", "LocalTree", "TreesAgree", "State", "Reason", "ObservedAt"}
+	if strings.Join(observation, ",") != strings.Join(wantObservation, ",") {
+		t.Fatalf("PublicationObservation fields = %v, want exactly %v", observation, wantObservation)
+	}
+}

@@ -36,6 +36,7 @@ type state struct {
 	repositories       map[string]domain.Repository
 	repositoryObs      map[string]domain.RepositoryObservation
 	requirementRepo    map[string]domain.RequirementRepositoryLink
+	publications       map[string]domain.PublicationObservation
 	humanInput         map[string]application.HumanInputRequest
 	requests           map[string]application.IdempotentResponse
 	texts              map[string]string
@@ -46,7 +47,7 @@ type state struct {
 }
 
 func newState() state {
-	return state{requirements: map[string]domain.Requirement{}, increments: map[string]domain.Increment{}, executions: map[string]domain.Execution{}, leases: map[string]domain.Lease{}, requests: map[string]application.IdempotentResponse{}, texts: map[string]string{}, targets: map[string]domain.ControlTarget{}, controlProgress: map[domain.Revision]domain.ControlProgress{}, controlRequestedBy: map[domain.Revision]domain.RequestedBy{}, allocationLimits: map[domain.Revision]application.AllocationLimit{}, runnerObservations: map[string]domain.RunnerObservation{}, runnerVersions: map[string]application.RunnerVersionReport{}, providerLogs: map[application.ProviderName]application.ProviderObservationLog{}, providerAssigns: map[string]application.ProviderAssignment{}, providerAssignSeq: map[application.ProviderName][]application.ProviderAssignment{}, repositories: map[string]domain.Repository{}, repositoryObs: map[string]domain.RepositoryObservation{}, requirementRepo: map[string]domain.RequirementRepositoryLink{}, humanInput: map[string]application.HumanInputRequest{}}
+	return state{requirements: map[string]domain.Requirement{}, increments: map[string]domain.Increment{}, executions: map[string]domain.Execution{}, leases: map[string]domain.Lease{}, requests: map[string]application.IdempotentResponse{}, texts: map[string]string{}, targets: map[string]domain.ControlTarget{}, controlProgress: map[domain.Revision]domain.ControlProgress{}, controlRequestedBy: map[domain.Revision]domain.RequestedBy{}, allocationLimits: map[domain.Revision]application.AllocationLimit{}, runnerObservations: map[string]domain.RunnerObservation{}, runnerVersions: map[string]application.RunnerVersionReport{}, providerLogs: map[application.ProviderName]application.ProviderObservationLog{}, providerAssigns: map[string]application.ProviderAssignment{}, providerAssignSeq: map[application.ProviderName][]application.ProviderAssignment{}, repositories: map[string]domain.Repository{}, repositoryObs: map[string]domain.RepositoryObservation{}, requirementRepo: map[string]domain.RequirementRepositoryLink{}, publications: map[string]domain.PublicationObservation{}, humanInput: map[string]application.HumanInputRequest{}}
 }
 func (s state) clone() state {
 	n := newState()
@@ -119,6 +120,12 @@ func (s state) clone() state {
 	// the committed state.
 	for k, v := range s.requirementRepo {
 		n.requirementRepo[k] = v
+	}
+	// The publication Observation is copied on write like every other record,
+	// so a rolled-back transaction cannot leak an Observation of an external
+	// effect that never happened into the committed state.
+	for k, v := range s.publications {
+		n.publications[k] = v
 	}
 	for k, v := range s.requests {
 		n.requests[k] = v
@@ -659,6 +666,59 @@ func (u *unit) RequirementIDsForRepository(_ context.Context, repositoryID strin
 		}
 	}
 	sort.Strings(all)
+	if len(all) > limit {
+		return all[:limit], true, nil
+	}
+	return all, false, nil
+}
+
+// The publication Observation (V2-072) is write-once, keyed by the operation
+// identifier. An identical re-write is an idempotent replay and leaves exactly
+// one record; a write that would change any recorded field is a conflict,
+// reported with the same ErrOptimisticConflict every other save in this
+// adapter uses. There is no update path at all: an external effect that was
+// observed once is not re-observed into a different answer.
+func (u *unit) SavePublicationObservation(_ context.Context, value domain.PublicationObservation) error {
+	if err := domain.ValidatePublicationObservation(value); err != nil {
+		return err
+	}
+	key := value.OperationID.String()
+	if old, ok := u.s.publications[key]; ok {
+		if old != value {
+			return ErrOptimisticConflict
+		}
+		return nil
+	}
+	u.s.publications[key] = value
+	return nil
+}
+func (u *unit) PublicationObservation(_ context.Context, operationID string) (domain.PublicationObservation, bool, error) {
+	v, ok := u.s.publications[operationID]
+	return v, ok, nil
+}
+
+// PublicationObservationsForIncrement applies its bound to the answer and
+// reports truncation, matching RequirementIDsForRepository above. The
+// Increment an Observation belongs to is read out of its ref rather than out
+// of a stored field, so the ref stays the single source of that association.
+func (u *unit) PublicationObservationsForIncrement(_ context.Context, incrementID string, limit int) ([]domain.PublicationObservation, bool, error) {
+	if incrementID == "" {
+		return nil, false, errors.New("increment id is required")
+	}
+	if limit <= 0 {
+		return nil, false, nil
+	}
+	all := make([]domain.PublicationObservation, 0, len(u.s.publications))
+	for _, observation := range u.s.publications {
+		increment, err := observation.IncrementID()
+		if err != nil {
+			return nil, false, err
+		}
+		if increment.String() == incrementID {
+			all = append(all, observation)
+		}
+	}
+	sort.Slice(all, func(i, j int) bool { return all[i].OperationID < all[j].OperationID })
 	if len(all) > limit {
 		return all[:limit], true, nil
 	}

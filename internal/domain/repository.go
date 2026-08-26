@@ -526,3 +526,298 @@ func ValidateRequirementRepositoryLink(value RequirementRepositoryLink) error {
 	}
 	return nil
 }
+
+// --- V2-072: publishing one verified commit as a reviewable branch --------
+//
+// Two additive records live here, beside the Repository aggregate and the
+// RepositoryObservation and RequirementRepositoryLink precedents above, for
+// the reason those precedents already record (dp-v2-072 d11): a publication
+// is keyed by its own identifier rather than held as a growing slice on a
+// shared aggregate document, and internal/domain/model.go stays the closed M1
+// surface it is. Neither record stores a URL: dp-v2-064 d2 already ruled that
+// a URL is never identity and that some URL forms can carry credential
+// material, so the human-readable link is derived from the locator, the ref
+// and the commit at the moment it is displayed.
+
+// PublicationRefPrefix is the reserved namespace every published ref lives
+// under. It is reserved rather than incidental: measured on this repository,
+// the only two push-triggered workflows filter branches [v2] and [main]
+// respectively (.github/workflows/ci.yml and .github/workflows/deploy.yml),
+// so a ref under this prefix matches neither trigger.
+const PublicationRefPrefix = "refs/heads/agentic-loop/"
+
+var (
+	// ErrInvalidPublicationRef refuses a ref that is not one this Loop
+	// produces: outside the reserved prefix, or with a remainder that is not
+	// exactly one increment segment and one execution segment.
+	ErrInvalidPublicationRef = errors.New("invalid publication ref")
+	// ErrInvalidPublicationIntent refuses a publication intent that does not
+	// name everything a reviewable branch needs.
+	ErrInvalidPublicationIntent = errors.New("invalid publication intent")
+	// ErrInvalidPublicationObservation refuses an Observation that does not
+	// carry a measured outcome.
+	ErrInvalidPublicationObservation = errors.New("invalid publication observation")
+)
+
+// validRefSegment reports whether value is one ordinary ref path segment. It
+// is deliberately stricter than the forge's own rules: no separator, no
+// traversal, no leading dash (which a CLI would read as a flag), no
+// whitespace and none of git's own ref metacharacters.
+func validRefSegment(value string) bool {
+	if value == "" || value == "." || value == ".." {
+		return false
+	}
+	if strings.ContainsAny(value, "/\\ \t\r\n:?*[~^") || strings.Contains(value, "..") {
+		return false
+	}
+	return !strings.HasPrefix(value, "-")
+}
+
+// PublicationRefName is the ONLY producer of a published ref name anywhere in
+// this repository (wo-v2-072 A19). It is a pure, total function of the two
+// identifiers that own the publication, which is what makes two facts
+// structural rather than promised: retrying one Execution's publication
+// targets exactly one ref, and a second Execution of the same Increment gets
+// its own ref instead of moving the first one.
+func PublicationRefName(incrementID IncrementID, executionID ExecutionID) (string, error) {
+	increment := strings.TrimSpace(incrementID.String())
+	execution := strings.TrimSpace(executionID.String())
+	if !validRefSegment(increment) || !validRefSegment(execution) {
+		return "", fmt.Errorf("%w: the increment and execution identifiers must each be one ordinary ref segment", ErrInvalidPublicationRef)
+	}
+	return PublicationRefPrefix + increment + "/" + execution, nil
+}
+
+// ParsePublicationRef is the inverse read, not a second producer: it reports
+// which Increment and Execution a ref names, and refuses anything the
+// producer above could not have emitted. A store projects the increment
+// identifier out of a recorded ref with this function, so the Observation
+// record itself carries no field the producer does not already determine.
+func ParsePublicationRef(ref string) (IncrementID, ExecutionID, error) {
+	if !strings.HasPrefix(ref, PublicationRefPrefix) {
+		return "", "", fmt.Errorf("%w: %q is not under the reserved prefix", ErrInvalidPublicationRef, ref)
+	}
+	remainder := strings.TrimPrefix(ref, PublicationRefPrefix)
+	increment, execution, found := strings.Cut(remainder, "/")
+	if !found || !validRefSegment(increment) || !validRefSegment(execution) {
+		return "", "", fmt.Errorf("%w: the remainder must be one increment segment and one execution segment", ErrInvalidPublicationRef)
+	}
+	return IncrementID(increment), ExecutionID(execution), nil
+}
+
+// validObjectName reports whether value looks like a Git object name in
+// either of the two widths this Loop sees (SHA-1 and SHA-256). It checks the
+// shape only: the domain never computes or verifies a digest.
+func validObjectName(value string) bool {
+	if len(value) != 40 && len(value) != 64 {
+		return false
+	}
+	for _, r := range value {
+		switch {
+		case r >= '0' && r <= '9':
+		case r >= 'a' && r <= 'f':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// PublicationIntent is the bounded description of one publication, serialised
+// as the Outbox Item's Payload. It carries the coordinate that was resolved
+// from a registered Repository inside the command's own transaction, the ref
+// PublicationRefName produced, and the four Git facts a content-addressed
+// read-after-write compares against. It carries no URL and no credential.
+type PublicationIntent struct {
+	RepositoryID RepositoryID  `json:"repository_id"`
+	Locator      SourceLocator `json:"locator"`
+	Ref          string        `json:"ref"`
+	BaseBranch   string        `json:"base_branch"`
+	BaseCommit   string        `json:"base_commit"`
+	HeadCommit   string        `json:"head_commit"`
+	HeadTree     string        `json:"head_tree"`
+	ChangedPaths int           `json:"changed_paths"`
+}
+
+// Recorded distinguishes a real intent from a zero value.
+func (i PublicationIntent) Recorded() bool { return i.RepositoryID != "" && i.Ref != "" }
+
+// ValidatePublicationIntent is this value object's own invariant check, the
+// analogue of ValidateRepository above.
+func ValidatePublicationIntent(value PublicationIntent) error {
+	if _, err := NewRepositoryID(value.RepositoryID.String()); err != nil {
+		return err
+	}
+	normalized, err := NormalizeSourceLocator(value.Locator)
+	if err != nil {
+		return err
+	}
+	if normalized != value.Locator {
+		return fmt.Errorf("%w: locator is not in normalised form", ErrInvalidSourceLocator)
+	}
+	if _, _, err = ParsePublicationRef(value.Ref); err != nil {
+		return err
+	}
+	if strings.TrimSpace(value.BaseBranch) == "" {
+		return fmt.Errorf("%w: the base branch is required", ErrInvalidPublicationIntent)
+	}
+	if !validObjectName(value.BaseCommit) || !validObjectName(value.HeadCommit) || !validObjectName(value.HeadTree) {
+		return fmt.Errorf("%w: the base commit, head commit and head tree must each be an object name", ErrInvalidPublicationIntent)
+	}
+	if value.BaseCommit == value.HeadCommit {
+		return fmt.Errorf("%w: the head commit is the base commit, so there is nothing to publish", ErrInvalidPublicationIntent)
+	}
+	if value.ChangedPaths <= 0 {
+		return fmt.Errorf("%w: a publication with no changed path is not a reviewable change", ErrInvalidPublicationIntent)
+	}
+	return nil
+}
+
+// PublicationState is the closed set of states a publication Observation may
+// carry (wo-v2-072 A14). Two properties of this vocabulary are load-bearing
+// rather than stylistic.
+//
+// First, "unobserved" is a first-class value: it is what must be recorded
+// when nothing has been measured, in place of a plausible-looking value that
+// was never measured, exactly as RepositoryUnobserved above is.
+//
+// Second, no value in this set means completed, resolved, accepted or done.
+// A published branch is not a finished Requirement, and the cheapest durable
+// guard against a reader concluding otherwise is that the record's own
+// vocabulary cannot say it (dp-v2-072 d16, non_goal 2). The terminal success
+// value means published and observed, and nothing more.
+type PublicationState string
+
+const (
+	// PublicationUnobserved is the state of a publication nothing has
+	// measured yet.
+	PublicationUnobserved PublicationState = "unobserved"
+	// PublicationPublishedAndObserved is the terminal success value: the ref
+	// was created by this operation and every content-addressed equality was
+	// measured to hold.
+	PublicationPublishedAndObserved PublicationState = "published-and-observed"
+	// PublicationConvergedOnExistingRef is the idempotent-replay outcome: the
+	// ref was already present carrying the intended tree, so this attempt
+	// created nothing and the earlier attempt's result stands.
+	PublicationConvergedOnExistingRef PublicationState = "converged-on-existing-ref"
+	// PublicationRefDisagrees is the undecidable outcome: the ref exists and
+	// carries a different tree. Nothing is guessed and nothing is forced; the
+	// Outbox Item reaches needs-input.
+	PublicationRefDisagrees PublicationState = "ref-disagrees"
+	// PublicationRefusedBeforeWrite is the outcome of a publication refused
+	// before any forge call could exist.
+	PublicationRefusedBeforeWrite PublicationState = "refused-before-write"
+)
+
+// PublicationStates returns the closed set, in declaration order. It is the
+// one enumeration a caller or a test may read, so "closed" is checkable
+// rather than asserted.
+func PublicationStates() []PublicationState {
+	return []PublicationState{
+		PublicationUnobserved,
+		PublicationPublishedAndObserved,
+		PublicationConvergedOnExistingRef,
+		PublicationRefDisagrees,
+		PublicationRefusedBeforeWrite,
+	}
+}
+
+// ValidPublicationState reports membership of the closed set above. An
+// unknown value is refused rather than tolerated.
+func ValidPublicationState(state PublicationState) bool {
+	for _, candidate := range PublicationStates() {
+		if candidate == state {
+			return true
+		}
+	}
+	return false
+}
+
+// PublicationObservation is bounded forge evidence about one publication,
+// keyed by the operation identifier and written at most once. It is never
+// canonical state and never a command, exactly as RepositoryObservation above
+// is not: it carries no raw process output, no response body, no status text
+// and no credential.
+//
+// LocalCommit and PublishedCommit are BOTH recorded and their agreement is
+// deliberately NOT required. A commit object is constructed by the forge, so
+// a difference in how the author or committer fields are serialised changes
+// its object name; requiring equality would assert an unmeasured fact about
+// another system's encoding (dp-v2-072 d5, R2). TreesAgree is the equality
+// that is required, because a tree object name is a content address computed
+// the same way on both sides.
+type PublicationObservation struct {
+	OperationID     OperationID      `json:"operation_id"`
+	RepositoryID    RepositoryID     `json:"repository_id"`
+	Ref             string           `json:"ref"`
+	PublishedCommit string           `json:"published_commit,omitempty"`
+	PublishedTree   string           `json:"published_tree,omitempty"`
+	LocalCommit     string           `json:"local_commit,omitempty"`
+	LocalTree       string           `json:"local_tree,omitempty"`
+	TreesAgree      bool             `json:"trees_agree"`
+	State           PublicationState `json:"state"`
+	Reason          string           `json:"reason"`
+	ObservedAt      time.Time        `json:"observed_at"`
+}
+
+// Recorded distinguishes a real Observation from a zero value.
+func (o PublicationObservation) Recorded() bool {
+	return o.OperationID != "" && !o.ObservedAt.IsZero()
+}
+
+// IncrementID reports which Increment this Observation's ref names. It is a
+// read of the ref through ParsePublicationRef, not a stored field, so the ref
+// stays the single source of that association.
+func (o PublicationObservation) IncrementID() (IncrementID, error) {
+	increment, _, err := ParsePublicationRef(o.Ref)
+	return increment, err
+}
+
+// ValidatePublicationObservation is this value object's own invariant check.
+// A publication that measured nothing must say so with the unobserved state
+// rather than with empty success fields, and a terminal success must actually
+// carry the two published object names and an agreeing tree.
+func ValidatePublicationObservation(value PublicationObservation) error {
+	if _, err := NewOperationID(value.OperationID.String()); err != nil {
+		return err
+	}
+	if _, err := NewRepositoryID(value.RepositoryID.String()); err != nil {
+		return err
+	}
+	if _, _, err := ParsePublicationRef(value.Ref); err != nil {
+		return err
+	}
+	if !ValidPublicationState(value.State) {
+		return fmt.Errorf("%w: unknown state %q", ErrInvalidPublicationObservation, value.State)
+	}
+	if strings.TrimSpace(value.Reason) == "" {
+		return fmt.Errorf("%w: a measured outcome states its reason", ErrInvalidPublicationObservation)
+	}
+	if value.ObservedAt.IsZero() {
+		return fmt.Errorf("%w: an Observation with no instant is not a record of anything", ErrInvalidPublicationObservation)
+	}
+	for name, object := range map[string]string{
+		"published_commit": value.PublishedCommit,
+		"published_tree":   value.PublishedTree,
+		"local_commit":     value.LocalCommit,
+		"local_tree":       value.LocalTree,
+	} {
+		if object != "" && !validObjectName(object) {
+			return fmt.Errorf("%w: %s is not an object name", ErrInvalidPublicationObservation, name)
+		}
+	}
+	switch value.State {
+	case PublicationPublishedAndObserved, PublicationConvergedOnExistingRef:
+		if value.PublishedCommit == "" || value.PublishedTree == "" || value.LocalCommit == "" || value.LocalTree == "" {
+			return fmt.Errorf("%w: a successful publication records both the published and the local object names", ErrInvalidPublicationObservation)
+		}
+		if !value.TreesAgree || value.PublishedTree != value.LocalTree {
+			return fmt.Errorf("%w: a successful publication requires the published tree to equal the locally verified tree", ErrInvalidPublicationObservation)
+		}
+	case PublicationUnobserved, PublicationRefusedBeforeWrite:
+		if value.PublishedCommit != "" || value.PublishedTree != "" {
+			return fmt.Errorf("%w: state %q may carry no published object name", ErrInvalidPublicationObservation, value.State)
+		}
+	}
+	return nil
+}

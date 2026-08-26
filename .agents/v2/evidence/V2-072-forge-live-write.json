@@ -1,0 +1,118 @@
+{
+ "schema_version": "v1",
+ "id": "ev-v2-072-forge-live-write",
+ "kind": "evidence",
+ "created_at": "2026-08-26T09:00:00Z",
+ "correlation_id": "v2-072-forge-write",
+ "task_id": "V2-072",
+ "component": "forge-live-write",
+ "evidence_key": "fc8c21a94aa0613c239660958c73d40756ef93ccc6788a31a879824ecd6d569b",
+ "result": "partial",
+ "observed_at": "2026-08-26T09:00:00Z",
+ "checks": [
+  {
+   "name": "environment-identifier",
+   "status": "passed",
+   "argv": [
+    "uname",
+    "-srm"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 10,
+   "summary": "execution environment: uname -srm = Linux 6.18.33.2-microsoft-standard-WSL2 x86_64; devbox run --pure -- go version = go1.25.0 linux/amd64; devbox 0.17.2, environment resolved from this worktree's devbox.json/devbox.lock, both untouched by this task; resolved absolute git path = /home/takushi/repos/agentic-loop-foundation-worktrees/v2-task-072/.devbox/nix/profile/default/bin/git, git version 2.55.0; resolved absolute unshare path = /home/takushi/repos/agentic-loop-foundation-worktrees/v2-task-072/.devbox/nix/profile/default/bin/unshare, unshare from util-linux 2.42.2; gh is ABSENT from the validated devbox --pure PATH and present at /usr/bin/gh, gh version 2.92.0 (2026-04-28), which is why absolute path resolution is required rather than defensive; worktree /home/takushi/repos/agentic-loop-foundation-worktrees/v2-task-072 on branch v2-task/V2-072, base commit 47b53c9, code commit 67d2543. No real Provider CLI was started, NO gh child was started at any point, and no Google Cloud resource was touched. The only external process any check started is the real git binary and the real unshare, both inside the rootless user+mount namespace, plus the local Firestore emulator scripts/firestore-emulator.sh starts for make component-store-firestore."
+  },
+  {
+   "name": "live-publication-to-an-owner-designated-repository",
+   "status": "skipped",
+   "argv": [
+    "devbox",
+    "run",
+    "--pure",
+    "-e",
+    "AGENTIC_LOOP_LIVE_FORGE_WRITE=1",
+    "-e",
+    "AGENTIC_LOOP_LIVE_FORGE_WRITE_REPOSITORY=<owner>/<name>",
+    "--",
+    "go",
+    "test",
+    "-count=1",
+    "-run",
+    "TestForgePublicationLive",
+    "-v",
+    "./internal/runner"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 1800,
+   "summary": "A24: NOT EXECUTED. status skipped, and it is NOT counted as a pass anywhere in this record or in any summary. REASON: external-unavailable: an owner-designated forge repository that may receive a reversible agent-written branch; needs: designate <owner>/<name> for the forge-write gate, or create a dedicated sandbox repository. No write target was supplied. The task was given a read-only clone URL only, the design forbids any default and in particular a default to the Loop's own release-bearing repository, and the operation leaves two IRREVERSIBLE residues the owner must accept before it happens: the blob, tree and commit objects created remain reachable by object name after the ref is deleted, and the ref-creation entry in the repository's own activity record cannot be deleted at all. NOTHING was fabricated in its place: no local, emulated or faked result is registered as satisfying this condition, no gh child was started at any point by any check in this task, and no branch exists on any real forge as a result of this work. The exercise itself is fully implemented in internal/runner/forgepublish_live_test.go and is ready to run: it logs the execution environment identifiers, asserts before the write that no push argv and no ref-update argv is constructible, produces a real commit through the real git adapter inside the real namespace, publishes through the real dispatcher, measures all four equalities of A9 against the real forge, measures the workflow-run count for the branch and requires zero, records the ref, the published commit, the published tree and observed_at, prints the exact owner-run delete command, and does NOT delete the ref."
+  },
+  {
+   "name": "the-gate-fails-rather-than-skips-when-the-designation-is-absent",
+   "status": "passed",
+   "argv": [
+    "devbox",
+    "run",
+    "--pure",
+    "-e",
+    "AGENTIC_LOOP_LIVE_FORGE_WRITE=1",
+    "--",
+    "go",
+    "test",
+    "-count=1",
+    "-run",
+    "TestForgePublicationLive",
+    "-v",
+    "./internal/runner"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 600,
+   "summary": "A24's gate semantics, MEASURED on this tree, PASSED. With the gate SET and the designation ABSENT the check FAILS naming the missing designation rather than skipping: verdict line '--- FAIL: TestForgePublicationLive (0.00s)', with the message 'live forge write check requested (AGENTIC_LOOP_LIVE_FORGE_WRITE=1) but AGENTIC_LOOP_LIVE_FORGE_WRITE_REPOSITORY is not set: the write target must be designated by the owner as <owner>/<name>'. With the gate UNSET the check SKIPS and logs its reason: verdict line '--- SKIP: TestForgePublicationLive (0.00s)' preceded by 'live forge write gate: AGENTIC_LOOP_LIVE_FORGE_WRITE=\"\", want \"1\"; recorded as skipped with this reason, never as a pass'. Both were run and both verdicts are quoted above. There is no hardcoded default anywhere in the file: the only defaulted variable is the optional clone ORIGIN for the working copy, which is never a write target."
+  },
+  {
+   "name": "live-exercise-file-set",
+   "status": "passed",
+   "argv": [
+    "sh",
+    "-c",
+    "set -eu; S=$(git rev-parse --show-toplevel); devbox run --pure -- go list -deps -test ./internal/runner"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 900,
+   "summary": "A25 and G6b, PUBLISHED. .agents/v2/evidence/artifacts/V2-072-live-exercise-files.json follows .agents/v2/evidence/artifacts/V2-075-live-exercise-files.json exactly -- the same reproduction argv for recomputing the compiled set, with this task's exercising package ./internal/runner and test name TestForgePublicationLive substituted -- and V2-075's artifact was NOT edited. Measured: 89 compiled paths from go list -deps -test intersected with git ls-files, plus 4 toolchain pins (devbox.json, devbox.lock, go.mod, go.sum), for 93 paths in total; 0 runtime-read paths, because this exercise opens no repository file while running. Three out-of-tree executables are recorded with their resolved paths and versions: git 2.55.0 and unshare from util-linux 2.42.2 from the devbox profile, and gh 2.92.0 at /usr/bin/gh, which was NOT started. The artifact carries an observation commit, and it states plainly that live_exercise_executed is false and that the commit is the one the file set was computed at rather than the commit of a live observation, because there is none. When the owner designates a target, the exercise must be run and both the file set and the intersection re-measured."
+  },
+  {
+   "name": "synthetic-evidence-key",
+   "status": "passed",
+   "argv": [
+    "devbox",
+    "run",
+    "--pure",
+    "--",
+    "make",
+    "evidence-keys"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 900,
+   "summary": "A27's synthetic key, stated so a gate can recompute it. This component name does not appear in make evidence-keys output, and it deliberately does not begin with provider-live- or gcp-live-, which would demand a preflight record this task has none of. COMPUTATION: sha256 of the concatenation, with no separator, of the judging commit's component keys for the four constituent components in this exact order: application, domain, runner, store-memory. On the final green tree those keys are application d7cf97a46e096bffe4d6d038f47400a4701bb48defb92389c6ca6e1a43b6d600, domain c049fa9bdfba25f2fe76408ed1d8bd76809c1fd91e0624f389ab66c1475995f5, runner 07fd721868c5a580f562787362c6227aaea65c04da05809caa6011de966ae969, store-memory 580d9ae6c3867494427249d4aa838ab8342367d228684e6151b7fba025f8b035, and the resulting value is fc8c21a94aa0613c239660958c73d40756ef93ccc6788a31a879824ecd6d569b which is this record's evidence_key. The four constituents are exactly the components the live exercise binds together: the real memory store, the real application command and dispatcher, the real domain records and the real runner adapters."
+  },
+  {
+   "name": "no-forge-object-beyond-the-branch",
+   "status": "passed",
+   "argv": [
+    "git",
+    "for-each-ref"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 600,
+   "summary": "PASSED. No Pull Request, release, tag, issue, comment or any other forge object was created -- and none could be: the closed operation list has no entry that names any of them. No real Provider CLI (codex, claude, opencode) was started and no Google Cloud resource was touched. git for-each-ref in this worktree names no probe ref and no working-copy ref: the only local head is refs/heads/v2-task/V2-072. No git fixture, pack file or bare directory was committed; every fixture repository lives in a t.TempDir() outside this working tree."
+  }
+ ],
+ "artifact_refs": [
+  {
+   "artifact_id": "live-exercise-file-set",
+   "media_type": "application/json",
+   "sha256": "85eef041236de6732e7ed681138a7ae9cd9f065a504114e96c8eef872decaf11",
+   "size_bytes": 16534,
+   "name": "V2-072-live-exercise-files.json"
+  }
+ ]
+}

@@ -1675,3 +1675,156 @@ func TestNeedsInputQuestionRowBehaviouralTableOnFirestore(t *testing.T) {
 		}
 	})
 }
+
+// ===========================================================================
+// Publication Observation (V2-072)
+// ===========================================================================
+//
+// The same assertions run against both adapters, under the same test name, as
+// TestRequirementRepositoryLinkIsWriteOnceAndBounded already does: write-once
+// per operation identifier, an identical re-write is an idempotent replay, a
+// differing re-write is a conflict, and the per-increment read applies its
+// bound in the storage query and reports truncation. No sleep, no timer, no
+// goroutine: every instant is an explicit value.
+
+func publicationObservation(operationID, incrementID, executionID string, at time.Time) domain.PublicationObservation {
+	ref, err := domain.PublicationRefName(domain.IncrementID(incrementID), domain.ExecutionID(executionID))
+	if err != nil {
+		panic(err)
+	}
+	const tree = "cccccccccccccccccccccccccccccccccccccccc"
+	return domain.PublicationObservation{
+		OperationID:     domain.OperationID(operationID),
+		RepositoryID:    "repo-1",
+		Ref:             ref,
+		PublishedCommit: "dddddddddddddddddddddddddddddddddddddddd",
+		PublishedTree:   tree,
+		LocalCommit:     "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		LocalTree:       tree,
+		TreesAgree:      true,
+		State:           domain.PublicationPublishedAndObserved,
+		Reason:          "the ref was created and all four content-addressed equalities held",
+		ObservedAt:      at,
+	}
+}
+
+func TestPublicationObservationIsWriteOncePerOperationAndBoundedPerIncrement(t *testing.T) {
+	store := emulatorStore(t)
+	ctx := context.Background()
+	at := time.Unix(1700000000, 0).UTC()
+
+	// An invalid Observation is refused by the adapter, not silently stored.
+	if err := store.Transact(ctx, func(u application.UnitOfWork) error {
+		return u.SavePublicationObservation(ctx, domain.PublicationObservation{OperationID: "op-bad", RepositoryID: "repo-1", Ref: "refs/heads/main", State: domain.PublicationUnobserved, Reason: "x", ObservedAt: at})
+	}); err == nil {
+		t.Fatal("an Observation whose ref is outside the reserved prefix was accepted")
+	}
+	if err := store.Transact(ctx, func(u application.UnitOfWork) error {
+		bad := publicationObservation("op-bad-2", "inc-1", "exe-1", at)
+		bad.State = "completed"
+		return u.SavePublicationObservation(ctx, bad)
+	}); err == nil {
+		t.Fatal("an Observation with a state outside the closed set was accepted")
+	}
+
+	if err := store.Transact(ctx, func(u application.UnitOfWork) error {
+		if e := u.SavePublicationObservation(ctx, publicationObservation("op-1", "inc-1", "exe-1", at)); e != nil {
+			return e
+		}
+		if e := u.SavePublicationObservation(ctx, publicationObservation("op-2", "inc-1", "exe-2", at)); e != nil {
+			return e
+		}
+		return u.SavePublicationObservation(ctx, publicationObservation("op-3", "inc-2", "exe-3", at))
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Write-once: the identical Observation replays, a differing one conflicts.
+	if err := store.Transact(ctx, func(u application.UnitOfWork) error {
+		return u.SavePublicationObservation(ctx, publicationObservation("op-1", "inc-1", "exe-1", at))
+	}); err != nil {
+		t.Fatalf("identical re-write must be an idempotent replay: %v", err)
+	}
+	if err := store.Transact(ctx, func(u application.UnitOfWork) error {
+		differing := publicationObservation("op-1", "inc-1", "exe-1", at)
+		differing.State = domain.PublicationConvergedOnExistingRef
+		return u.SavePublicationObservation(ctx, differing)
+	}); !errors.Is(err, domain.ErrStaleVersion) {
+		t.Fatalf("a second, differing Observation for one operation = %v, want ErrStaleVersion", err)
+	}
+	if err := store.Transact(ctx, func(u application.UnitOfWork) error {
+		differing := publicationObservation("op-1", "inc-1", "exe-1", at.Add(time.Hour))
+		return u.SavePublicationObservation(ctx, differing)
+	}); !errors.Is(err, domain.ErrStaleVersion) {
+		t.Fatalf("a re-write with a different instant = %v, want ErrStaleVersion", err)
+	}
+
+	if err := store.Transact(ctx, func(u application.UnitOfWork) error {
+		stored, ok, e := u.PublicationObservation(ctx, "op-1")
+		if e != nil {
+			return e
+		}
+		if !ok || stored.State != domain.PublicationPublishedAndObserved || !stored.ObservedAt.Equal(at) {
+			t.Fatalf("stored Observation = %+v ok=%v", stored, ok)
+		}
+		if _, ok, e = u.PublicationObservation(ctx, "op-absent"); e != nil {
+			return e
+		} else if ok {
+			t.Fatal("an operation with no row reported an Observation")
+		}
+		// The per-increment read is bounded and reports truncation.
+		rows, truncated, e := u.PublicationObservationsForIncrement(ctx, "inc-1", 10)
+		if e != nil {
+			return e
+		}
+		if truncated || len(rows) != 2 || rows[0].OperationID != "op-1" || rows[1].OperationID != "op-2" {
+			t.Fatalf("per-increment read = %+v truncated=%v", rows, truncated)
+		}
+		rows, truncated, e = u.PublicationObservationsForIncrement(ctx, "inc-1", 1)
+		if e != nil {
+			return e
+		}
+		if !truncated || len(rows) != 1 {
+			t.Fatalf("bounded per-increment read = %+v truncated=%v; the bound must be reported", rows, truncated)
+		}
+		rows, truncated, e = u.PublicationObservationsForIncrement(ctx, "inc-none", 10)
+		if e != nil {
+			return e
+		}
+		if truncated || len(rows) != 0 {
+			t.Fatalf("an Increment with no publication = %+v truncated=%v", rows, truncated)
+		}
+		if _, _, e = u.PublicationObservationsForIncrement(ctx, "", 10); e == nil {
+			t.Fatal("an empty increment id was accepted")
+		}
+		if rows, truncated, e = u.PublicationObservationsForIncrement(ctx, "inc-1", 0); e != nil {
+			return e
+		} else if truncated || len(rows) != 0 {
+			t.Fatalf("a non-positive bound = %+v truncated=%v", rows, truncated)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// A rolled-back transaction leaks no Observation into the committed state.
+	failure := errors.New("rollback")
+	if err := store.Transact(ctx, func(u application.UnitOfWork) error {
+		if e := u.SavePublicationObservation(ctx, publicationObservation("op-rolled-back", "inc-3", "exe-4", at)); e != nil {
+			return e
+		}
+		return failure
+	}); !errors.Is(err, failure) {
+		t.Fatalf("rollback = %v", err)
+	}
+	if err := store.Transact(ctx, func(u application.UnitOfWork) error {
+		if _, ok, e := u.PublicationObservation(ctx, "op-rolled-back"); e != nil {
+			return e
+		} else if ok {
+			t.Fatal("a rolled-back transaction committed an Observation")
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}

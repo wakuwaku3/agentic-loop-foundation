@@ -1,0 +1,59 @@
+{
+ "schema_version": "v1",
+ "id": "ev-v2-072-store-firestore",
+ "kind": "evidence",
+ "created_at": "2026-08-26T09:00:00Z",
+ "correlation_id": "v2-072-forge-write",
+ "task_id": "V2-072",
+ "component": "store-firestore",
+ "evidence_key": "6a18d93af41425263f2967ef5511cbcde847ffdfb20c7df437b84a17ded0fea8",
+ "result": "passed",
+ "observed_at": "2026-08-26T09:00:00Z",
+ "checks": [
+  {
+   "name": "environment-identifier",
+   "status": "passed",
+   "argv": [
+    "uname",
+    "-srm"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 10,
+   "summary": "execution environment: uname -srm = Linux 6.18.33.2-microsoft-standard-WSL2 x86_64; devbox run --pure -- go version = go1.25.0 linux/amd64; devbox 0.17.2, environment resolved from this worktree's devbox.json/devbox.lock, both untouched by this task; resolved absolute git path = /home/takushi/repos/agentic-loop-foundation-worktrees/v2-task-072/.devbox/nix/profile/default/bin/git, git version 2.55.0; resolved absolute unshare path = /home/takushi/repos/agentic-loop-foundation-worktrees/v2-task-072/.devbox/nix/profile/default/bin/unshare, unshare from util-linux 2.42.2; gh is ABSENT from the validated devbox --pure PATH and present at /usr/bin/gh, gh version 2.92.0 (2026-04-28), which is why absolute path resolution is required rather than defensive; worktree /home/takushi/repos/agentic-loop-foundation-worktrees/v2-task-072 on branch v2-task/V2-072, base commit 47b53c9, code commit 67d2543. No real Provider CLI was started, NO gh child was started at any point, and no Google Cloud resource was touched. The only external process any check started is the real git binary and the real unshare, both inside the rootless user+mount namespace, plus the local Firestore emulator scripts/firestore-emulator.sh starts for make component-store-firestore."
+  },
+  {
+   "name": "component-store-firestore",
+   "status": "passed",
+   "argv": [
+    "devbox",
+    "run",
+    "--pure",
+    "--",
+    "make",
+    "component-store-firestore"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 600,
+   "summary": "Verdict line: ok github.com/takushi/agentic-loop-foundation/v2/internal/store/firestore 14.502s, under the local Firestore emulator scripts/firestore-emulator.sh starts, with -race. Top-level test count 32 -> 33. Zero skips: the emulator was present, so the emulatorStore(t) guard did not fire."
+  },
+  {
+   "name": "write-once-and-bounded-in-the-storage-query",
+   "status": "passed",
+   "argv": [
+    "devbox",
+    "run",
+    "--pure",
+    "--",
+    "go",
+    "test",
+    "-count=1",
+    "-run",
+    "TestPublicationObservationIsWriteOncePerOperationAndBoundedPerIncrement",
+    "./internal/store/firestore"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 600,
+   "summary": "A22's Firestore half, PASSED, byte-identical assertions to the memory adapter's under the same test name. The Observation lives in its own collection publication_observations keyed by the operation identifier. The per-increment read applies its bound IN THE STORAGE QUERY as a single-field equality query in exactly the Where(...).OrderBy(DocumentID).Limit(n+1) shape ExecutionByLease and RequirementIDsForRepository already use, with the extra row distinguishing a complete answer from a truncated one. Firestore indexes every single field automatically, so NO composite index is needed: firestore.indexes.json is byte-identical and git diff --stat over it is empty. The increment id is projected into the existing index_increment_id field by reading the ref through domain.ParsePublicationRef at encode time, so a record whose ref does not parse is refused at encode rather than written with an empty index."
+  }
+ ]
+}

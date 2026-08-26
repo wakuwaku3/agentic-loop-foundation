@@ -317,6 +317,44 @@ type RequirementRepositoryLinkRepository interface {
 // observation or an instant for a Provider it holds no record for: "not
 // observed" and "healthy" must stay distinguishable, which is the whole reason
 // this surface exists.
+// PublicationObservationRepository is the persistence contract of the
+// publication Observation (V2-072), keyed by the operation identifier. It
+// follows ControlRequestedByRepository's precedent exactly: the value is not
+// an aggregate, has no state transition and no Version, and no domain rule
+// consults it, so it is tracked here as its own keyed record rather than as
+// new fields on domain.Increment or domain.Execution.
+//
+// The key is the operation identifier rather than the Increment because that
+// is what makes the join to the Outbox Item exact and what makes write-once
+// meaningful under retry: the same operation retried is the same key
+// (dp-v2-072 d11).
+//
+// SavePublicationObservation is write-once per operation identifier. An
+// implementation must
+//
+//   - treat an identical re-write as an idempotent replay rather than a
+//     second record, and
+//   - refuse, with domain.ErrStaleVersion, a save that would change any
+//     recorded field of an existing row.
+//
+// PublicationObservationsForIncrement is a bounded read and must apply its
+// bound in the storage query, matching RequirementReadRepository's stated
+// contract above. Its bool reports that the bound truncated the answer, so a
+// caller can say "at least n" rather than reporting a wrong total as if it
+// were exact. The Increment an Observation belongs to is read out of its ref
+// through domain.ParsePublicationRef, so the record itself carries no field
+// the ref producer does not already determine.
+//
+// PublicationObservation returns false for an operation with no row, and an
+// implementation must never synthesize one: "no publication was observed" and
+// "the publication was observed" must stay distinguishable, which is the
+// whole reason domain.PublicationUnobserved is a first-class state.
+type PublicationObservationRepository interface {
+	SavePublicationObservation(ctx context.Context, value domain.PublicationObservation) error
+	PublicationObservation(ctx context.Context, operationID string) (domain.PublicationObservation, bool, error)
+	PublicationObservationsForIncrement(ctx context.Context, incrementID string, limit int) ([]domain.PublicationObservation, bool, error)
+}
+
 type ProviderObservationRepository interface {
 	SaveProviderObservation(ctx context.Context, value ProviderObservation) error
 	ProviderObservations(ctx context.Context, name ProviderName) (ProviderObservationLog, error)
@@ -379,6 +417,7 @@ type UnitOfWork interface {
 	ProviderAssignmentRepository
 	RepositoryRepository
 	RequirementRepositoryLinkRepository
+	PublicationObservationRepository
 	RequirementNeedsInputRepository
 	RequirementReadRepository
 	EventReadRepository

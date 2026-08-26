@@ -280,6 +280,23 @@ func encodeDocument(kind string, value any) (document, error) {
 	if v, ok := value.(domain.RequirementRepositoryLink); ok {
 		d.IndexRepositoryID = v.RepositoryID.String()
 	}
+	// The publication Observation is projected onto the same single indexed
+	// increment field domain.Execution already uses, so the per-increment read
+	// is a single-field equality query. Firestore indexes every single field
+	// automatically, so firestore.indexes.json (which declares only the
+	// composite indexes for outbox and leases) needs no entry for it. The
+	// increment id is READ OUT OF THE REF with domain.ParsePublicationRef
+	// rather than stored twice: the ref stays the single source of the
+	// association, and a record whose ref does not parse is refused here
+	// rather than written with an empty index.
+	if v, ok := value.(domain.PublicationObservation); ok {
+		increment, err := v.IncrementID()
+		if err != nil {
+			return document{}, err
+		}
+		d.IndexIncrementID = increment.String()
+		d.IndexRepositoryID = v.RepositoryID.String()
+	}
 	if v, ok := value.(domain.Lease); ok {
 		d.LeaseStatus = string(v.Status)
 		if !v.ExpiresAt.IsZero() {
@@ -1496,6 +1513,87 @@ func (u *unit) RequirementIDsForRepository(ctx context.Context, repositoryID str
 		out = append(out, v.RequirementID.String())
 	}
 	sort.Strings(out)
+	return out, truncated, nil
+}
+
+// The publication Observation (V2-072) lives in its own collection, keyed by
+// the operation identifier, and is written at most once: a save that would
+// change any recorded field of an existing row is refused with
+// domain.ErrStaleVersion (the same conflict every other save in this adapter
+// reports) and an identical re-write is an idempotent replay that stages
+// nothing. There is no update path at all.
+func (u *unit) SavePublicationObservation(ctx context.Context, value domain.PublicationObservation) error {
+	if err := domain.ValidatePublicationObservation(value); err != nil {
+		return err
+	}
+	ref, err := u.store.path("publication_observations", value.OperationID.String())
+	if err != nil {
+		return err
+	}
+	var old domain.PublicationObservation
+	got, err := u.value(ref, "publication-observation", &old)
+	if err != nil {
+		return err
+	}
+	if got {
+		if old != value {
+			return domain.ErrStaleVersion
+		}
+		return nil
+	}
+	return u.stage(ref, "publication-observation", value, true)
+}
+func (u *unit) PublicationObservation(ctx context.Context, operationID string) (domain.PublicationObservation, bool, error) {
+	ref, err := u.store.path("publication_observations", operationID)
+	if err != nil {
+		return domain.PublicationObservation{}, false, err
+	}
+	var v domain.PublicationObservation
+	ok, err := u.value(ref, "publication-observation", &v)
+	return v, ok, err
+}
+
+// PublicationObservationsForIncrement applies its bound in the storage query,
+// in the same single-field Where(...).Limit(n+1) shape ExecutionByLease and
+// RequirementIDsForRepository already use. The extra row is what distinguishes
+// "this is the whole answer" from "the answer was truncated", which the bool
+// reports so no caller can present a bounded count as an exact total.
+func (u *unit) PublicationObservationsForIncrement(ctx context.Context, incrementID string, limit int) ([]domain.PublicationObservation, bool, error) {
+	if incrementID == "" {
+		return nil, false, errors.New("increment id is required")
+	}
+	if limit <= 0 {
+		return nil, false, nil
+	}
+	if limit > MaxQueryRows {
+		limit = MaxQueryRows
+	}
+	path, err := CollectionPath(u.store.installation, "publication_observations")
+	if err != nil {
+		return nil, false, err
+	}
+	q := u.store.client.Collection(path).
+		Where("index_increment_id", "==", incrementID).
+		OrderBy(cloudfirestore.DocumentID, cloudfirestore.Asc).
+		Limit(limit + 1)
+	snaps, err := u.tx.Documents(q).GetAll()
+	if err != nil {
+		return nil, false, err
+	}
+	u.countReads(snaps)
+	truncated := len(snaps) > limit
+	if truncated {
+		snaps = snaps[:limit]
+	}
+	out := make([]domain.PublicationObservation, 0, len(snaps))
+	for _, snap := range snaps {
+		var v domain.PublicationObservation
+		if decodeDocument(snap, "publication-observation", &v) != nil {
+			return nil, false, ErrInvalidSchema
+		}
+		out = append(out, v)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].OperationID < out[j].OperationID })
 	return out, truncated, nil
 }
 

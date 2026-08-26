@@ -301,7 +301,7 @@ func (s *Service) Renew(ctx context.Context, req RenewRequest) (out RenewRespons
 			return x
 		}
 		out = RenewResponse{LeaseID: req.LeaseID, ExpiresAt: next.ExpiresAt, Version: next.Version}
-		effect, x := s.effectOutbox(ctx, u, xid, oid, req.RequestID, domain.PermitProcess, target, next.Version, next.FencingToken, req.ControlRevision, "lease-renewed", req.LeaseID)
+		effect, x := s.effectOutbox(ctx, u, xid, oid, req.RequestID, domain.PermitProcess, target, next.Version, next.FencingToken, req.ControlRevision, "lease-renewed", req.LeaseID, nil)
 		if x != nil {
 			return x
 		}
@@ -1259,7 +1259,7 @@ func (s *Service) Claim(ctx context.Context, req ClaimRequest) (out ClaimRespons
 			return e
 		}
 		out = ClaimResponse{IncrementID: req.IncrementID, ExecutionID: executionID, LeaseID: leaseID, RunnerID: runner.String(), Version: next.Version, FencingToken: lease.FencingToken}
-		effectOutbox, e := s.effectOutbox(ctx, u, outboxID, operationID, req.RequestID, domain.PermitClaim, canonical, next.Version, lease.FencingToken, req.ControlRevision, "claim-issued", runner.String())
+		effectOutbox, e := s.effectOutbox(ctx, u, outboxID, operationID, req.RequestID, domain.PermitClaim, canonical, next.Version, lease.FencingToken, req.ControlRevision, "claim-issued", runner.String(), nil)
 		if e != nil {
 			return e
 		}
@@ -1611,7 +1611,7 @@ func (s *Service) AcceptResult(ctx context.Context, req AcceptResultRequest) (ou
 			}
 		}
 		out = AcceptResultResponse{ExecutionID: req.ExecutionID, Status: next.Status, Version: next.Version}
-		effectOutbox, e := s.effectOutbox(ctx, u, outboxID, operationID, req.RequestID, domain.PermitExternalEffect, canonical, next.Version, req.FencingToken, req.ControlRevision, "result-accepted", req.ExecutionID)
+		effectOutbox, e := s.effectOutbox(ctx, u, outboxID, operationID, req.RequestID, domain.PermitExternalEffect, canonical, next.Version, req.FencingToken, req.ControlRevision, "result-accepted", req.ExecutionID, nil)
 		if e != nil {
 			return e
 		}
@@ -1626,7 +1626,14 @@ func (s *Service) AcceptExecutionResult(ctx context.Context, req AcceptResultReq
 // effectOutbox is the sole construction path for external-effect outbox
 // records. It re-reads policy and fence immediately before durable intent is
 // recorded, then obtains the opaque domain Effect permit.
-func (s *Service) effectOutbox(ctx context.Context, u UnitOfWork, outboxID, operationID, requestID string, kind domain.PermitKind, target domain.ControlTarget, expected domain.Version, fence domain.FencingToken, revision domain.Revision, outboxKind, resource string) (*OutboxItem, error) {
+// payload is the Outbox Item's durable Payload. It is threaded through
+// domain.EffectFromPermit, which already takes one, so the Operation Intent
+// and the Payload are produced by the same permit evaluation rather than
+// assembled beside it (V2-072 A16). Every pre-existing call site passes nil,
+// which is byte-for-byte what those items carried before: EffectFromPermit
+// copies the slice with append([]byte(nil), payload...), and appending to a
+// nil slice from nil yields nil.
+func (s *Service) effectOutbox(ctx context.Context, u UnitOfWork, outboxID, operationID, requestID string, kind domain.PermitKind, target domain.ControlTarget, expected domain.Version, fence domain.FencingToken, revision domain.Revision, outboxKind, resource string, payload []byte) (*OutboxItem, error) {
 	var latest domain.Lease
 	if target.IncrementID != "" {
 		var found bool
@@ -1663,7 +1670,7 @@ func (s *Service) effectOutbox(ctx context.Context, u UnitOfWork, outboxID, oper
 	if err != nil {
 		return nil, err
 	}
-	effect, err := domain.EffectFromPermit(permit, current, fence, operation, request, kind, resource, expected, fence, revision, nil)
+	effect, err := domain.EffectFromPermit(permit, current, fence, operation, request, kind, resource, expected, fence, revision, payload)
 	if err != nil {
 		return nil, err
 	}
@@ -1689,7 +1696,7 @@ func (s *Service) effectOutbox(ctx context.Context, u UnitOfWork, outboxID, oper
 			persistedTarget = canonical
 		}
 	}
-	return &OutboxItem{ID: outboxID, OperationID: effect.OperationID.String(), Kind: outboxKind, Target: effect.Target, ExpectedVersion: effect.ExpectedVersion, FencingToken: effect.FencingToken, ControlRevision: effect.ControlRevision, IncrementID: target.IncrementID.String(), LeaseID: latest.ID.String(), RunnerID: target.RunnerID.String(), ControlTarget: persistedTarget, PermitKind: kind}, nil
+	return &OutboxItem{ID: outboxID, OperationID: effect.OperationID.String(), Kind: outboxKind, Target: effect.Target, ExpectedVersion: effect.ExpectedVersion, FencingToken: effect.FencingToken, ControlRevision: effect.ControlRevision, Payload: effect.Payload, IncrementID: target.IncrementID.String(), LeaseID: latest.ID.String(), RunnerID: target.RunnerID.String(), ControlTarget: persistedTarget, PermitKind: kind}, nil
 }
 
 func (s *Service) record(ctx context.Context, u UnitOfWork, eventID, operationID, fingerprint, requestID, operation, aggregateType, aggregateID string, version domain.Version, typ, actor string, outbox *OutboxItem, value any) error {

@@ -1,0 +1,173 @@
+{
+ "schema_version": "v1",
+ "id": "ev-v2-072-application",
+ "kind": "evidence",
+ "created_at": "2026-08-26T09:00:00Z",
+ "correlation_id": "v2-072-forge-write",
+ "task_id": "V2-072",
+ "component": "application",
+ "evidence_key": "d7cf97a46e096bffe4d6d038f47400a4701bb48defb92389c6ca6e1a43b6d600",
+ "result": "passed",
+ "observed_at": "2026-08-26T09:00:00Z",
+ "checks": [
+  {
+   "name": "environment-identifier",
+   "status": "passed",
+   "argv": [
+    "uname",
+    "-srm"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 10,
+   "summary": "execution environment: uname -srm = Linux 6.18.33.2-microsoft-standard-WSL2 x86_64; devbox run --pure -- go version = go1.25.0 linux/amd64; devbox 0.17.2, environment resolved from this worktree's devbox.json/devbox.lock, both untouched by this task; resolved absolute git path = /home/takushi/repos/agentic-loop-foundation-worktrees/v2-task-072/.devbox/nix/profile/default/bin/git, git version 2.55.0; resolved absolute unshare path = /home/takushi/repos/agentic-loop-foundation-worktrees/v2-task-072/.devbox/nix/profile/default/bin/unshare, unshare from util-linux 2.42.2; gh is ABSENT from the validated devbox --pure PATH and present at /usr/bin/gh, gh version 2.92.0 (2026-04-28), which is why absolute path resolution is required rather than defensive; worktree /home/takushi/repos/agentic-loop-foundation-worktrees/v2-task-072 on branch v2-task/V2-072, base commit 47b53c9, code commit 67d2543. No real Provider CLI was started, NO gh child was started at any point, and no Google Cloud resource was touched. The only external process any check started is the real git binary and the real unshare, both inside the rootless user+mount namespace, plus the local Firestore emulator scripts/firestore-emulator.sh starts for make component-store-firestore."
+  },
+  {
+   "name": "component-application",
+   "status": "passed",
+   "argv": [
+    "devbox",
+    "run",
+    "--pure",
+    "--",
+    "make",
+    "component-application"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 600,
+   "summary": "Verdict line: ok github.com/takushi/agentic-loop-foundation/v2/internal/application 0.170s. Top-level test count 160 -> 168, measured with go test -list on the starting tree and again here. internal/application/outbox_test.go is byte-identical and every one of its tests passes unmodified; so are idempotency.go, caller.go, repository.go and readmodels.go."
+  },
+  {
+   "name": "one-transaction-command",
+   "status": "passed",
+   "argv": [
+    "devbox",
+    "run",
+    "--pure",
+    "--",
+    "go",
+    "test",
+    "-count=1",
+    "-run",
+    "TestPublishChangeCreatesTheIntentAndTheOutboxItemInOneTransaction",
+    "./internal/application"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 600,
+   "summary": "A16, PASSED with one MEASURED DEVIATION reported below. Service.PublishChange performs, in order: the caller role check, requireRequest, requestFingerprint, s.mutate keyed by the operation and the request identifier, the idempotency read that replays a matching fingerprint and refuses a differing one, then inside the transaction the A17 target resolution, then the existing effectOutbox path with domain.PermitExternalEffect and the new outbox kind publication-requested, then one s.record event. The Outbox Item and the execution.publication-requested event are created in ONE domain transaction; the outbox grows by exactly one item, a replay returns the identical response and adds none, and a differing fingerprint on the same request id is ErrIdempotencyConflict. DEVIATION: A16 names 'requestedBy attribution', but internal/application/caller.go is a prohibited path and its requestedBy maps only RoleOwner and RoleScheduler, refusing RoleRunner -- and a publication is a Runner action, because A17 requires the Execution to be owned by the calling Runner. Neither new record carries a RequestedBy field (A13's field lists), so nothing is lost: the ceremony followed is AcceptResult's, which is Capture's minus requestedBy, and attribution is the event's ActorID plus the RunnerID the runner caller supplies. A SECOND MEASURED DEVIATION: A16 says effectOutbox has 'one existing call site'; measured on the starting tree it has THREE (Renew, Claim, AcceptResult). All three pass nil, and the test below asserts the result-accepted and claim-issued items carry a nil Payload."
+  },
+  {
+   "name": "existing-accept-result-outbox-unchanged",
+   "status": "passed",
+   "argv": [
+    "devbox",
+    "run",
+    "--pure",
+    "--",
+    "go",
+    "test",
+    "-count=1",
+    "-run",
+    "TestAcceptResultOutboxItemIsUnchangedByThePayloadParameter",
+    "./internal/application"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 600,
+   "summary": "A16's second half, PASSED. effectOutbox gained a payload parameter which it threads into domain.EffectFromPermit -- which already took one, so no new assembly path was created -- and every pre-existing call site passes nil. The result-accepted item's Payload is nil and its OperationID, ExpectedVersion, FencingToken, PermitKind, IncrementID and LeaseID are all populated exactly as before; the claim-issued item's Payload is nil too. EffectFromPermit copies with append([]byte(nil), payload...), and appending nothing to a nil slice yields nil, so those items are byte-for-byte what they were."
+  },
+  {
+   "name": "target-only-from-a-registered-repository",
+   "status": "passed",
+   "argv": [
+    "devbox",
+    "run",
+    "--pure",
+    "--",
+    "go",
+    "test",
+    "-count=1",
+    "-run",
+    "TestPublishChangeRefusesEveryTargetThatIsNotARegisteredRepository|TestPublishChangeRequestCarriesNoForgeCoordinate",
+    "./internal/application"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 600,
+   "summary": "A17, PASSED, six subtests. The coordinate is resolved inside the one transaction by reading the Execution, its Increment, that Increment's Requirement, the RequirementRepositoryLink for that Requirement and the Repository that link names, taking owner and name from the stored SourceLocator. All five named refusals are asserted and each creates NO Outbox Item: a Requirement with no link (ErrRequirementHasNoRepository), a Repository that does not exist (ErrNotFound, reached by writing a dangling link directly into the store, which is the only way the inconsistency can arise because no request field can name a coordinate), a retired Repository (ErrRepositoryNotAvailable), an Execution not owned by the calling Runner (ErrLeaseNotOwned) and a stale fencing token (ErrStaleFence); a stale execution version is refused too. PublishChangeRequest's own field names are read through reflection and none contains owner, locator, url, host, forge, repository, coordinate or remote, so a caller-supplied coordinate is unrepresentable rather than merely forbidden."
+  },
+  {
+   "name": "pre-write-target-re-read",
+   "status": "passed",
+   "argv": [
+    "devbox",
+    "run",
+    "--pure",
+    "--",
+    "go",
+    "test",
+    "-count=1",
+    "-run",
+    "TestPublicationTargetForOutboxRefusesADisagreeingPayload",
+    "./internal/application"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 600,
+   "summary": "A18's application half, PASSED. Service.PublicationTargetForOutbox re-walks Execution -> Increment -> Requirement -> link -> Repository and returns the coordinate as it stands now, together with the ref and the base commit from the durable Outbox Item's own payload. PublicationTarget.Agrees is a pure comparison over exactly repository identifier, owner, name, ref and base commit, and each of the five disagreements is asserted individually. An unknown outbox id is reported absent rather than fabricated, an outbox item of another kind is refused with ErrInvalidOutbox rather than read as a publication, and an owner caller is refused: the read is Runner-authenticated like every other Runner command."
+  },
+  {
+   "name": "write-once-observation-write",
+   "status": "passed",
+   "argv": [
+    "devbox",
+    "run",
+    "--pure",
+    "--",
+    "go",
+    "test",
+    "-count=1",
+    "-run",
+    "TestRecordPublicationIsWriteOncePerOperation",
+    "./internal/application"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 600,
+   "summary": "A15 and A22's application half, PASSED. internal/application/ports.go gained exactly ONE interface, PublicationObservationRepository, carrying a write-once save, a read by operation identifier and a bounded read by increment identifier whose bool reports truncation, and it is included in UnitOfWork. No existing port method signature changed. The command, the target read and the Observation write live in the new file internal/application/publication.go; internal/application/repository.go and readmodels.go are untouched and no view or read model was added. Service.RecordPublication validates before the store can be reached, an identical re-write is an idempotent replay, a differing re-write is domain.ErrStaleVersion, and an Observation with a state outside the closed set never reaches the store."
+  },
+  {
+   "name": "one-addition-to-outbox-go",
+   "status": "passed",
+   "argv": [
+    "devbox",
+    "run",
+    "--pure",
+    "--",
+    "go",
+    "test",
+    "-count=1",
+    "-run",
+    "TestUndecidableSentinelIsTheOnlyAdditionToTheAmbiguityVocabulary",
+    "./internal/application"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 600,
+   "summary": "A12, PASSED. internal/application/outbox.go received exactly one exported sentinel, ErrEffectUndecidable, and exactly one clause recognising it in the existing isAmbiguous predicate beside the deadline, cancellation and net.Error cases. git diff --stat reports 13 insertions and 0 deletions in that file: 11 lines of the sentinel and its doc comment, and 3 lines of the new clause less the blank. No field was added to DispatcherConfig and OutboxItem, the status vocabulary, claim, beforeEffect, deliver, ack, fail and resolveObservation are unchanged. internal/application/outbox_test.go is byte-identical and every test in it passes unmodified. The sentinel does not describe itself as a timeout, matches through errors.Join, and does not match a merely textually similar error."
+  },
+  {
+   "name": "no-requirement-or-increment-change",
+   "status": "passed",
+   "argv": [
+    "devbox",
+    "run",
+    "--pure",
+    "--",
+    "go",
+    "test",
+    "-count=1",
+    "-run",
+    "TestConfirmedPublicationChangesNoRequirementAndNoIncrement",
+    "./internal/application"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 600,
+   "summary": "A21(ii), PASSED. After a publication is requested and a confirmed Observation is recorded, the Requirement's status and version and the Increment's status and version are read back and are exactly what they were before, and the number of requirement-aggregate events is unchanged. This is the BEHAVIOURAL third of the three-way guarantee; the structural third is the AST control in internal/runner and the lexical third is the closed state vocabulary in internal/domain."
+  }
+ ]
+}
