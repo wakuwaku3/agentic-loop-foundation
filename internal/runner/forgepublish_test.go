@@ -1249,7 +1249,12 @@ func newProtocolGraph(t *testing.T, tag string) *protocolGraph {
 	if err != nil {
 		t.Fatalf("Capture: %v", err)
 	}
-	planned, err := service.Plan(ownerCtx, application.PlanRequest{RequestID: tag + ":plan", RequirementID: captured.RequirementID, ExpectedRequirementVersion: captured.Version})
+	// V2-089: this fixture claims, so its parent Requirement is moved to
+	// domain.RequirementReady -- '優先順位評価済みで実行可能',
+	// docs/architecture/domain-model.md:265 -- before the Plan, and the Plan
+	// carries the POST-seed version.
+	readyVersion := runnerSeedRequirementStatus(t, store, ownerCtx, captured.RequirementID, domain.RequirementReady)
+	planned, err := service.Plan(ownerCtx, application.PlanRequest{RequestID: tag + ":plan", RequirementID: captured.RequirementID, ExpectedRequirementVersion: readyVersion})
 	if err != nil {
 		t.Fatalf("Plan: %v", err)
 	}

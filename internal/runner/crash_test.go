@@ -54,7 +54,12 @@ func newJourney4Fixture(t *testing.T, name string) *journey4Fixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	planResp, err := service.Plan(owner, application.PlanRequest{RequestID: name + ":plan", RequirementID: capResp.RequirementID, ExpectedRequirementVersion: capResp.Version})
+	// V2-089: this fixture claims, so its parent Requirement is moved to
+	// domain.RequirementReady -- '優先順位評価済みで実行可能',
+	// docs/architecture/domain-model.md:265 -- before the Plan, and the Plan
+	// carries the POST-seed version.
+	readyVersion := runnerSeedRequirementStatus(t, st, owner, capResp.RequirementID, domain.RequirementReady)
+	planResp, err := service.Plan(owner, application.PlanRequest{RequestID: name + ":plan", RequirementID: capResp.RequirementID, ExpectedRequirementVersion: readyVersion})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -240,7 +240,12 @@ func (fx *liveFixture) capturePlanPrepare(t *testing.T, owner context.Context, b
 	if err != nil {
 		t.Fatalf("capture: %v", err)
 	}
-	planResp, err := fx.service.Plan(owner, application.PlanRequest{RequestID: base + ":plan", RequirementID: capResp.RequirementID, ExpectedRequirementVersion: capResp.Version})
+	// V2-089: this fixture claims, so its parent Requirement is moved to
+	// domain.RequirementReady -- '優先順位評価済みで実行可能',
+	// docs/architecture/domain-model.md:265 -- before the Plan, and the Plan
+	// carries the POST-seed version.
+	readyVersion := runnerSeedRequirementStatus(t, fx.store, owner, capResp.RequirementID, domain.RequirementReady)
+	planResp, err := fx.service.Plan(owner, application.PlanRequest{RequestID: base + ":plan", RequirementID: capResp.RequirementID, ExpectedRequirementVersion: readyVersion})
 	if err != nil {
 		t.Fatalf("plan: %v", err)
 	}

@@ -2,6 +2,7 @@ package reconciler
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -51,7 +52,12 @@ func runJourneyFiveHappyPath(t *testing.T, mode domain.ControlMode, expectProces
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan, err := svc.Plan(ownerCtx, application.PlanRequest{RequestID: "j5:plan", RequirementID: cap.RequirementID, ExpectedRequirementVersion: cap.Version})
+	// V2-089: this journey claims, so its parent Requirement is moved to
+	// domain.RequirementReady -- '優先順位評価済みで実行可能',
+	// docs/architecture/domain-model.md:265 -- before the Plan, and the Plan
+	// carries the POST-seed version.
+	readyVersion := reconcilerSeedRequirementStatus(t, st, ownerCtx, cap.RequirementID, domain.RequirementReady)
+	plan, err := svc.Plan(ownerCtx, application.PlanRequest{RequestID: "j5:plan", RequirementID: cap.RequirementID, ExpectedRequirementVersion: readyVersion})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -65,7 +71,15 @@ func runJourneyFiveHappyPath(t *testing.T, mode domain.ControlMode, expectProces
 	if err != nil {
 		t.Fatal(err)
 	}
-	planB, err := svc.Plan(ownerCtx, application.PlanRequest{RequestID: "j5:planB", RequirementID: capB.RequirementID, ExpectedRequirementVersion: capB.Version})
+	// V2-089: the SECOND Requirement is moved to domain.RequirementReady too,
+	// and for a sharper reason than the first. Step 2 below asserts that a new
+	// claim is DENIED once the stop is in force. V2-089's guard is ordered
+	// BEFORE domain.Permit, so leaving this parent in `captured` would still
+	// make step 2's `err == nil` check pass -- with ErrRequirementNotClaimable
+	// instead of domain.ErrControlDenied -- and the step would measure the
+	// wrong refusal. Seeding it `ready` keeps step 2 measuring the stop.
+	readyVersionB := reconcilerSeedRequirementStatus(t, st, ownerCtx, capB.RequirementID, domain.RequirementReady)
+	planB, err := svc.Plan(ownerCtx, application.PlanRequest{RequestID: "j5:planB", RequirementID: capB.RequirementID, ExpectedRequirementVersion: readyVersionB})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -99,6 +113,12 @@ func runJourneyFiveHappyPath(t *testing.T, mode domain.ControlMode, expectProces
 	// which this journey does not re-derive) stop.
 	if _, err := svc.Claim(runnerCtx, application.ClaimRequest{RequestID: "j5:claimB-denied", IncrementID: planB.IncrementID, ExpectedIncrementVersion: preparedB.Version, ControlRevision: ctrl.Revision}); err == nil {
 		t.Fatal("expected a new claim to be denied once stop is in effect")
+	} else if errors.Is(err, application.ErrRequirementNotClaimable) {
+		// V2-089: the denial must be the STOP, not the parent's status. This
+		// arm exists because the new guard is ordered ahead of domain.Permit,
+		// so a captured parent would satisfy the `err == nil` check above
+		// while measuring nothing about the stop.
+		t.Fatalf("the new claim was refused because its parent admits no work, not because the stop is in force: %v", err)
 	}
 
 	// Step 3: the Runner acks the revision through Heartbeat, and step 3's
