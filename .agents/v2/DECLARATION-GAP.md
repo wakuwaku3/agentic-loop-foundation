@@ -34,6 +34,14 @@ code evidenceのない行は台帳に載せていない。§4の到達境界表�
 本repositoryの内側にあるものは、外部systemが絡んでいても `UNREACHABLE` または `ABSENT`
 とした（例: IAP assertion検証はCloud Runを要さずcodeで書けるため `ABSENT`）。
 
+### 訂正履歴
+
+この台帳は分母なので、台帳自身の誤りは訂正して残す。**新しいtaskは起こさない。**
+
+| 日付 | 行 | 訂正 |
+|---|---|---|
+| 2026-08-27 | L92b（および依存する L179 / L106-118） | `domain.PriorityAssessment` を「型が存在しない」＝ABSENTとしていたのは誤り。型は `internal/domain/model.go:66` にあり採点器も `internal/scheduler/priority.go:128` にある。実際の不在は `BuildAllocationSnapshot` が全rowにAssessmentを入れないことで、分類はUNREACHABLEが正しい。V2-095の設計が実測して指摘した |
+
 ## 2. 網羅範囲
 
 対象文書の行数を再測定した（`wc -l`、合計 3080行）。
@@ -154,7 +162,7 @@ code evidenceのない行は台帳に載せていない。§4の到達境界表�
 | L71-73 b | 算出した配分をworkerへ渡す（適用する） | UNREACHABLE | `scheduler.Apply` の非test callerが0。`internal/application/allocation.go:37` が「この packageはApplyを呼ばない」と記録 |
 | L82 | workerがキューから排他的に仕事を取得する | UNREACHABLE | routeは `internal/api/api.go:384`、実装は `internal/application/service.go:1132`。しかし `ready` のIncrementが存在し得ない（§4） |
 | L92a | control planeがleaseを管理する | IMPLEMENTED | `internal/application/service.go:229`（`Renew`）、`internal/reconciler/reconciler.go:41`（expiry回収、`cmd/control-plane/main.go:202` で配線） |
-| L92b | control planeが優先順位を管理する | ABSENT | `domain.PriorityAssessment` 型が存在しない。`grep -rn 'PriorityAssessment' internal --include='*.go' \| grep -v _test.go` → `internal/scheduler/decision.go:44,64,66,107` のcomment 4件のみ |
+| L92b | control planeが優先順位を管理する | UNREACHABLE | **訂正済み（2026-08-27、V2-095の設計が指摘）。** 初版は「`domain.PriorityAssessment` 型が存在しない」と書いたが**偽**である。同じgrepを再実行すると非test 13行で、`internal/domain/model.go:66` に `type PriorityAssessment struct`、`internal/scheduler/priority.go:128` に `multiFactorScore(a domain.PriorityAssessment, ...)`、`internal/scheduler/scheduler.go:70` に `Assessment *domain.PriorityAssessment` がある。実際の不在はもっと狭い——`BuildAllocationSnapshot`（`internal/application/allocation.go:457-467`）が全rowにPriorityもAssessmentも入れないので、`UsedAssessment` が全候補でfalseになる。型と採点器は在り、それを供給する経路だけが無い。よって分類はABSENTではなくUNREACHABLEである |
 | L92c | control planeが依存を管理する | UNREACHABLE | `internal/scheduler/scheduler.go:60`（`Dependencies`）と `:204-207`（`dependenciesMet`）は存在するが、唯一のsnapshot生成 `internal/application/allocation.go:459-467` はこのfieldを一切設定しない |
 | L92d | control planeが実行履歴を管理する | IMPLEMENTED | `internal/application/service.go:1773`（`record`）、`internal/store/firestore/store.go:583`（event create-only） |
 | L97-99 | Execution Planeがrepository取得・作業空間・AI tool実行・変更・検証・成果物作成を担う | UNREACHABLE | `internal/runner/sourcecontrol.go`、`workspace.go:11`、`provider.go`、`forgepublish.go:234` のいずれも非test entryが無い（§4） |
@@ -198,7 +206,7 @@ code evidenceのない行は台帳に載せていない。§4の到達境界表�
 | L176 | 独立したRequirementは並列に進められる | UNREACHABLE | 同上 |
 | L177 | 競合を事前予測できなくても検出・停止・再計画・統合できる | ABSENT | 再計画（replan）と統合（integration）を行うcodeが無い。`grep -rn --include='*.go' 'Replan\|replan' internal cmd \| grep -v _test.go` → 0件 |
 | L178 | worker数を増やしても中央APIや外部I/Oが無制限に増えない | IMPLEMENTED | `internal/quota/quota.go:46`（`DefaultBudget`）、`internal/store/firestore/store.go:29-32`（`MaxWrites=400`／`MaxQueryRows=1000`）、`internal/reconciler/reconciler.go:16`（`MaxBatch=100`） |
-| L179 | 単一backlog内でAI provider枠とrunner slotを価値・緊急性・risk・cost・依存で配分する | WIDER-THAN-CODE | `internal/scheduler/decision.go` は価値相当のscoreと飢餓時間を扱うが、riskとcostのinputが無く（`domain.PriorityAssessment` がABSENT）、依存fieldは常に空（L92c） |
+| L179 | 単一backlog内でAI provider枠とrunner slotを価値・緊急性・risk・cost・依存で配分する | WIDER-THAN-CODE | `internal/scheduler/decision.go` は価値相当のscoreと飢餓時間を扱うが、riskとcostのinputが無く（`domain.PriorityAssessment` は存在するがsnapshotに供給されない。L92bの訂正を参照）、依存fieldは常に空（L92c） |
 | L180 | 1 repositoryの大量要求・故障・再試行が他を占有し続けない | IMPLEMENTED | `internal/scheduler/priority.go`／`internal/scheduler/starvation_test.go` の飢餓規則。`internal/application/allocation.go:625` から到達 |
 | L184-197 | 観測可能性11項目（どの要求／どの段階／進行か停滞か／なぜ待つ／人間入力が必要／失敗の回復性／何が変わりどう検証されたか／queue全体の処理能力・待ち時間・失敗傾向／停止の伝播範囲／repository別queueと共有資源） | 混在 | 到達可能: 要求一覧・段階（`internal/api/api.go:176,202`）、待機理由（`internal/application/allocation.go:558`）、人間入力（`internal/application/human_input.go`）、停止伝播（`internal/api/api.go:189`）、repository別（`internal/api/repositories.go:109`）、共有資源（`/v1/queue/summary`）。不在: 進行／停滞の区別（`progress deadline` を評価するcodeが無い。`grep -rn --include='*.go' 'ProgressDeadline' internal \| grep -v _test.go` → 0件）、失敗の自動回復性表示、変更内容と検証結果、処理能力・lead time・手戻り傾向（L51と同じくmetrics不在） |
 | L206-211 | Stable: Previewの障害に影響されず起動でき、破壊的schema変更を受けず、rollback後も進行中Requirementを再開でき、Preview破損時に同じRequirementを引き継いで復旧できる | UNREACHABLE | `internal/update/launch.go:54`（channel別起動）と `internal/update/switch.go:99`（stableの前進条件）は `cmd/bootstrap` から到達するが、Requirement引き継ぎの主体（runner）が不在（§4） |
@@ -233,7 +241,7 @@ code evidenceのない行は台帳に載せていない。§4の到達境界表�
 | L95-96 | Howは保存するが実装を約束せず、別解決策・変更不要・複数Repository跨ぎを選べる | UNREACHABLE | 解決策選択を行うcodeが無い（Plan／Prepareが到達不能、§4） |
 | L98-99 | 利用者は数値priorityやqueue順を決めない | IMPLEMENTED | `POST /v1/requirements` にpriority fieldが無い（`internal/application/service.go:748` のCaptureRequest） |
 | L101-102 | 成功時に一意なRequirement IDと永続化内容を表示し、canonical state登録完了を成功条件とする | IMPLEMENTED | `internal/application/service.go:748` の同一transaction内書き込み、`internal/web/owner.js:1`（capture handler） |
-| L106-118 | Backlog一覧とRepository絞り込み、および各Requirementの8項目 | 混在 | 到達可能: 要求内容・状態（`internal/application/readmodels.go:199,243`）、関連Repository（`internal/web/owner.html:9`）、人間対応待ちの区別（`readmodels.go:160-162`）。到達不能／不在: 優先度とその根拠（`domain.PriorityAssessment` ABSENT）、実行中／停滞中／自動回復中の区別（progress deadline不在、§5 L184-197）、進めているIncrementと進捗（Increment不在）、Preview／Stableへの反映（observer未装着）、次に行うこと（`next_action` fieldは `contracts/openapi/openapi-v1.yaml:483` に在るが到達可能statusが4種のため実質1値） |
+| L106-118 | Backlog一覧とRepository絞り込み、および各Requirementの8項目 | 混在 | 到達可能: 要求内容・状態（`internal/application/readmodels.go:199,243`）、関連Repository（`internal/web/owner.html:9`）、人間対応待ちの区別（`readmodels.go:160-162`）。到達不能／不在: 優先度とその根拠（`domain.PriorityAssessment` は存在するがsnapshotに供給されない。L92bの訂正を参照）、実行中／停滞中／自動回復中の区別（progress deadline不在、§5 L184-197）、進めているIncrementと進捗（Increment不在）、Preview／Stableへの反映（observer未装着）、次に行うこと（`next_action` fieldは `contracts/openapi/openapi-v1.yaml:483` に在るが到達可能statusが4種のため実質1値） |
 | L119 | 内部eventや生logを読まずに対応要否を判断できる | IMPLEMENTED | `internal/api/api.go:857` → `internal/application/readmodels.go:243`。raw logを返さない |
 | L123-134 | Runnerがclaimして10段階（調査／深掘り／分解／変更／検証／統合／Preview観測／修正／充足評価／Stable反映）を反復する | UNREACHABLE | 10段階すべての実行主体が `internal/runner` にあり非test entryが無い（§4）。分解は `service.go:887`、統合は `IncrementIntegrate` 非発行、Stable反映は `internal/release/pipeline.go:38` |
 | L136-137 | 1回のRunner占有・AI session・commit・PRで完結せず、中断・handoff・再開後も関係を失わない | UNREACHABLE | `internal/provider/handoff.go:113,151`（`PrepareHandoff`／`ChainHandoff`）に非test callerが0 |

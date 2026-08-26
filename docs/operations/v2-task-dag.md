@@ -676,6 +676,34 @@ coordinatorが`component`だけを`provider-live-claude`に直し、indexの`evi
 `runner`と書くと静かにcheckの射程から外れる。
 
 
+### 9.6.1 この checkを`release-live-`まで広げてはならない（2026-08-27、実測）
+
+V2-095の設計が、私が伝えた前提の誤りを実測で示した。**`provider_preflight.go:160`は
+`provider-live-`で始まるcomponentだけを選ぶ。`release-live-`は選ばない**——
+`grep -rn 'release-live' --include='*.go' .`は**0行**である。私は「どちらでも選ばれる」と
+伝えていた。
+
+つまり**M5が立つ根拠であるrelease-live-dogfood recordは、それを守るはずのcheckの射程外**に
+ある。§9.6がcomponent `runner`について記録したのと同型の穴が、M5のground上に現存する。
+
+**しかしcheckを広げてはならない。理由は測定である。**
+`ev-v2-022-release-live-dogfood`の`artifact_refs`は
+`real-tree-candidate-bundle-digest`・`real-tree-candidate-contract-digest`・
+`real-tree-candidate-docs-digest`・`release-contract-foundation-json`の4件で、
+**`provider-preflight`のrefを1件も持たない。**
+したがって`:160`を`release-live-`まで広げると、既存のこのrecordが即座に
+`no artifact_refs entry names provider-preflight`で落ち、`internal/contracts`が赤くなる。
+
+**これは§12.4が禁じる遡及そのものである。** 規則を広げて過去のevidenceを失効させる形になり、
+しかもその失効は「規則が変わったから」であって観測が変わったからではない。
+
+**採る手当て**（V2-095の設計の判断、是認する）: recordを2本出す。
+`release-live-dogfood`はG2の根拠として立ち、同じbindingを**自発的に**持ち、digestをrecord内で
+再計算して比較し、「このcomponentを検証するcheckは存在しない」と明記する。
+`provider-live-claude-dogfood`は`:160`に選ばれて2つの不変条件が機械的に強制される。
+**checkの射程の穴はrow(3)の記録として残す。**
+
+
 ## 10. checkpoint pushの手順と既知のdeploy workflow defect
 
 ### checkpointは1本ずつpushする
