@@ -670,3 +670,267 @@ func TestPlanAndPrepareAreMeasuredUnderEmergencyStop(t *testing.T) {
 		"internal/application/service.go was prohibited to that task.",
 		planErr, prepareErr, framingErr)
 }
+
+// ===========================================================================
+// V2-084: a Requirement can reach the only status the scheduler calls
+// schedulable, and an Increment that goes into progress carries its parent.
+// ===========================================================================
+//
+// REPRODUCTION FIRST. The two tests below were written and RUN RED before any
+// non-test file was edited, and their verbatim failures are recorded in
+// .agents/v2/evidence/V2-084-application.json. They are the permanent
+// assertions for A5 and for the "exactly one issuer" clause of the design.
+
+// TestAClaimedIncrementCarriesItsReadyParentIntoActive is V2-084 A5.
+//
+// docs/architecture/domain-model.md:266 DEFINES the Requirement status active
+// as "1つ以上のIncrementが進行中" -- one or more Increments in progress. That is
+// a definition, not a hint: the parent is active precisely because a
+// subordinate Increment is in progress, so the ready->active edge is licensed
+// by Increment progress and by nothing else, and its issuer must be the
+// transaction that CREATES the progress rather than a second command a caller
+// could forget. Service.Claim is that transaction.
+//
+// The reproduction path deliberately reaches ready WITHOUT the new command, by
+// asking a question and answering it, because that was the only way to reach
+// ready at all before this task: domain.RequirementReadyCommand's sole non-test
+// issuer was Service.AnswerHumanInput. So this test measured the second defect
+// in isolation from the first.
+//
+// The parent's expected version is taken from the value read INSIDE the claim
+// transaction and never from ClaimRequest, which gains no field. The proof that
+// it came from that transaction is Plan: Plan bumps the parent's Version
+// without a domain command, so by the time the claim runs the version differs
+// from every value any earlier response reported, and a claim that read it
+// anywhere else would fail with domain.ErrStaleVersion instead of moving the
+// parent.
+func TestAClaimedIncrementCarriesItsReadyParentIntoActive(t *testing.T) {
+	svc, st := service()
+	ctx := owner(context.Background())
+	runnerCtx := runner(context.Background(), "runner-1")
+
+	captured, err := svc.Capture(ctx, application.CaptureRequest{RequestID: "a5:capture", Text: "a requirement that will really be worked on"})
+	if err != nil {
+		t.Fatalf("capture: %v", err)
+	}
+	framed, err := svc.StartFraming(ctx, application.StartFramingRequest{RequestID: "a5:frame", RequirementID: captured.RequirementID, ExpectedVersion: captured.Version})
+	if err != nil {
+		t.Fatalf("start-framing: %v", err)
+	}
+	asked, err := svc.RequestHumanInput(runnerCtx, application.RequestHumanInputRequest{
+		RequestID:                  "a5:ask",
+		RequirementID:              captured.RequirementID,
+		ExpectedRequirementVersion: framed.Version,
+		Question:                   "Delete the branch or keep it?",
+		ReasonClass:                application.ReasonDestructiveIrreversible,
+		Reason:                     "Both choices lose something the Loop may not lose.",
+		Options: []application.HumanInputOption{
+			{OptionID: "delete", Summary: "Delete", Impact: "The commits stop being reachable."},
+			{OptionID: "keep", Summary: "Keep", Impact: "The Increment stays blocked."},
+		},
+		StoppedScope:    []application.HumanInputScope{application.ScopeNewClaimsForThisRequirement, application.ScopeLeaseRenewalForThisRequirement},
+		ContinuingScope: []application.HumanInputScope{application.ScopeOtherRequirements, application.ScopeOwnerReads},
+	})
+	if err != nil {
+		t.Fatalf("request-input: %v", err)
+	}
+	answered, err := svc.AnswerHumanInput(ctx, application.AnswerHumanInputRequest{RequestID: "a5:answer", RequirementID: captured.RequirementID, ExpectedRequirementVersion: asked.Version, OptionID: "keep"})
+	if err != nil {
+		t.Fatalf("answer-input: %v", err)
+	}
+	if answered.Status != domain.RequirementReady {
+		t.Fatalf("the fixture Requirement is %q, not ready", answered.Status)
+	}
+
+	// First Increment. Plan moves the parent's Version without a domain
+	// command, which is exactly what makes the in-transaction read load-bearing.
+	planned, err := svc.Plan(ctx, application.PlanRequest{RequestID: "a5:plan", RequirementID: captured.RequirementID, ExpectedRequirementVersion: answered.Version})
+	if err != nil {
+		t.Fatalf("plan: %v", err)
+	}
+	if _, err = svc.Prepare(ctx, application.PrepareRequest{RequestID: "a5:prepare", IncrementID: planned.IncrementID, ExpectedVersion: planned.Version}); err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	beforeClaim, ok := st.Requirement(captured.RequirementID)
+	if !ok {
+		t.Fatal("the Requirement is not in the store")
+	}
+	if beforeClaim.Status != domain.RequirementReady {
+		t.Fatalf("Plan or Prepare moved the parent's status to %q; neither may", beforeClaim.Status)
+	}
+	if beforeClaim.Version == answered.Version {
+		t.Fatal("Plan did not move the parent's Version; the in-transaction read is then not distinguishable from the response value")
+	}
+	if _, err = svc.Claim(runnerCtx, application.ClaimRequest{RequestID: "a5:claim", IncrementID: planned.IncrementID, ExpectedIncrementVersion: 2}); err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	afterClaim, _ := st.Requirement(captured.RequirementID)
+	if afterClaim.Status != domain.RequirementActive {
+		t.Fatalf("the claim left the parent Requirement at %q; domain-model.md:266 defines active as one or more Increments in progress, and the claim is what puts one in progress", afterClaim.Status)
+	}
+	if afterClaim.Version != beforeClaim.Version+1 {
+		t.Fatalf("the claim moved the parent's version from %d to %d, want exactly one step", beforeClaim.Version, afterClaim.Version)
+	}
+	if afterClaim.ID != beforeClaim.ID {
+		t.Fatalf("the claim named a different Requirement: %q vs %q", afterClaim.ID, beforeClaim.ID)
+	}
+
+	// Second Increment on the SAME parent. The parent is already active, so
+	// "one or more Increments in progress" is already true and the second claim
+	// must be idempotent with respect to the parent: zero version steps.
+	planned2, err := svc.Plan(ctx, application.PlanRequest{RequestID: "a5:plan-2", RequirementID: captured.RequirementID, ExpectedRequirementVersion: afterClaim.Version})
+	if err != nil {
+		t.Fatalf("plan 2: %v", err)
+	}
+	if _, err = svc.Prepare(ctx, application.PrepareRequest{RequestID: "a5:prepare-2", IncrementID: planned2.IncrementID, ExpectedVersion: planned2.Version}); err != nil {
+		t.Fatalf("prepare 2: %v", err)
+	}
+	beforeSecondClaim, _ := st.Requirement(captured.RequirementID)
+	if beforeSecondClaim.Status != domain.RequirementActive {
+		t.Fatalf("the parent is %q before the second claim", beforeSecondClaim.Status)
+	}
+	if _, err = svc.Claim(runnerCtx, application.ClaimRequest{RequestID: "a5:claim-2", IncrementID: planned2.IncrementID, ExpectedIncrementVersion: 2}); err != nil {
+		t.Fatalf("claim 2: %v", err)
+	}
+	afterSecondClaim, _ := st.Requirement(captured.RequirementID)
+	if !reflect.DeepEqual(afterSecondClaim, beforeSecondClaim) {
+		t.Fatalf("the second claim changed the already-active parent: before=%+v after=%+v", beforeSecondClaim, afterSecondClaim)
+	}
+	t.Logf("A5: parent %q went ready(v%d) -> active(v%d) on the first claim and stayed active(v%d) across the second",
+		captured.RequirementID, beforeClaim.Version, afterClaim.Version, afterSecondClaim.Version)
+}
+
+// TestClaimAgainstACapturedParentStillSucceeds is V2-084 A6, and it is a
+// MEASUREMENT with a LOGGED finding rather than an assertion of the refusal.
+//
+// The refusal -- Claim rejecting an Increment whose parent Requirement is
+// neither ready nor active -- is the right end state and is deliberately NOT
+// taken here. Measured blast radius: 18 test files across FOUR packages call
+// Service.Claim or Service.ClaimIncrement (internal/application 8 files,
+// internal/runner 7, internal/reconciler 2, internal/store/firestore 1; 15 of
+// the hits are in internal/application/service_test.go alone) and essentially
+// all of them capture, plan, prepare and claim without ever framing, so their
+// parents are captured. Asserting the defect would pin it in place and turn its
+// repair into a failure in files a repairing task may not own -- the same
+// reason TestPlanAndPrepareAreMeasuredUnderEmergencyStop above gives for the
+// same choice.
+//
+// So this test asserts only what is true and must stay true after this task:
+// the third branch of the parent transition is a NO-OP, the claim still
+// succeeds, and the captured parent is left byte-unchanged.
+func TestClaimAgainstACapturedParentStillSucceeds(t *testing.T) {
+	svc, st := service()
+	ctx := owner(context.Background())
+	runnerCtx := runner(context.Background(), "runner-1")
+
+	captured, err := svc.Capture(ctx, application.CaptureRequest{RequestID: "a6b:capture", Text: "never framed"})
+	if err != nil {
+		t.Fatalf("capture: %v", err)
+	}
+	planned, err := svc.Plan(ctx, application.PlanRequest{RequestID: "a6b:plan", RequirementID: captured.RequirementID, ExpectedRequirementVersion: captured.Version})
+	if err != nil {
+		t.Fatalf("plan: %v", err)
+	}
+	if _, err = svc.Prepare(ctx, application.PrepareRequest{RequestID: "a6b:prepare", IncrementID: planned.IncrementID, ExpectedVersion: planned.Version}); err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	before, _ := st.Requirement(captured.RequirementID)
+	if before.Status != domain.RequirementCaptured {
+		t.Fatalf("the fixture parent is %q, not captured", before.Status)
+	}
+	claimed, err := svc.Claim(runnerCtx, application.ClaimRequest{RequestID: "a6b:claim", IncrementID: planned.IncrementID, ExpectedIncrementVersion: 2})
+	if err != nil {
+		t.Fatalf("the claim against a captured parent was refused with %v; this task must NOT add that refusal", err)
+	}
+	after, _ := st.Requirement(captured.RequirementID)
+	if !reflect.DeepEqual(after, before) {
+		t.Fatalf("the claim against a captured parent changed it: before=%+v after=%+v", before, after)
+	}
+	t.Logf("A6 FINDING FOR THE TECH LEAD, measured and NOT repaired here: Service.Claim accepted increment %q "+
+		"(execution %q) while its parent Requirement %q was in %q, and the parent is still in %q afterwards. An "+
+		"Increment can therefore be put into progress under a Requirement that no caller has recorded as executable. "+
+		"The refusal is not added here because 18 test files across four packages claim Increments whose parents are "+
+		"captured; bringing every fixture onto the lifecycle the domain models is the F1 follow-on and its id is the "+
+		"coordinator's to issue.",
+		planned.IncrementID, claimed.ExecutionID, captured.RequirementID, before.Status, after.Status)
+}
+
+// TestExactlyOneCommandIssuesEachOfTheTwoNewEdges is the design's "no second
+// way in" clause, asserted by a source scan rather than by reading.
+//
+// Exactly one non-test site in this package may construct a
+// domain.RequirementCommand with Kind domain.RequirementReadyCommand from
+// framing (the new command in framing.go) plus the pre-existing one in
+// human_input.go, and exactly one non-test site may name
+// domain.RequirementStart (the block inside Service.Claim in service.go). The
+// scan is mechanical, modelled on TestStartFramingIsTheOnlyIssuerOfTheCapturedEdge
+// above, fails outright on a zero-file scan, and is verified against a
+// synthetic known-positive first.
+func TestExactlyOneCommandIssuesEachOfTheTwoNewEdges(t *testing.T) {
+	countIn := func(node ast.Node, name string) int {
+		n := 0
+		ast.Inspect(node, func(x ast.Node) bool {
+			sel, isSel := x.(*ast.SelectorExpr)
+			if !isSel {
+				return true
+			}
+			pkg, isIdent := sel.X.(*ast.Ident)
+			if isIdent && pkg.Name == "domain" && sel.Sel.Name == name {
+				n++
+			}
+			return true
+		})
+		return n
+	}
+	positive := "package application\n\nfunc x() {\n\t_ = domain.RequirementCommand{Kind: domain.RequirementReadyCommand}\n\t_ = domain.RequirementCommand{Kind: domain.RequirementStart}\n}\n"
+	synthetic, err := parser.ParseFile(token.NewFileSet(), "positive.go", positive, parser.AllErrors)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if countIn(synthetic, "RequirementReadyCommand") != 1 || countIn(synthetic, "RequirementStart") != 1 {
+		t.Fatal("positive control: the synthetic issuers were not counted")
+	}
+
+	paths, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(paths) == 0 {
+		t.Fatal("scanned zero files; the glob is broken")
+	}
+	scanned := 0
+	ready := map[string]int{}
+	start := map[string]int{}
+	for _, path := range paths {
+		if strings.HasSuffix(path, "_test.go") {
+			continue
+		}
+		file, parseErr := parser.ParseFile(token.NewFileSet(), path, nil, parser.AllErrors)
+		if parseErr != nil {
+			t.Fatalf("parse %s: %v", path, parseErr)
+		}
+		scanned++
+		if n := countIn(file, "RequirementReadyCommand"); n != 0 {
+			ready[path] = n
+		}
+		if n := countIn(file, "RequirementStart"); n != 0 {
+			start[path] = n
+		}
+	}
+	if scanned == 0 {
+		t.Fatal("scanned zero non-test files; the scan is broken")
+	}
+	// domain.RequirementStartFraming shares the prefix "RequirementStart" as a
+	// STRING but not as an identifier, and the scan compares identifiers, so
+	// framing.go's start-framing issuer must not appear in the start map.
+	if start["framing.go"] != 0 {
+		t.Fatalf("the scan confused domain.RequirementStartFraming with domain.RequirementStart: %v", start)
+	}
+	if len(ready) != 2 || ready["framing.go"] != 1 || ready["human_input.go"] != 1 {
+		t.Fatalf("domain.RequirementReadyCommand is issued from %v, want exactly framing.go once (the new command) and human_input.go once (AnswerHumanInput)", ready)
+	}
+	if len(start) != 1 || start["service.go"] != 1 {
+		t.Fatalf("domain.RequirementStart is named from %v, want exactly service.go once (the block inside Service.Claim)", start)
+	}
+	t.Logf("A5/A10 census: %d non-test files scanned; ready issued from %v; start issued from %v", scanned, ready, start)
+}
