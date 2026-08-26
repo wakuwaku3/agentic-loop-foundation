@@ -4658,3 +4658,105 @@ func TestAnUnclassifiedErrorReachesTheOperatorAndNotTheCaller(t *testing.T) {
 		t.Logf("OPPANIC\tresponse correlation_id=%v\theader=%q\trecord detail_bytes=%d truncated=%v", doc["correlation_id"], w.Header().Get("X-Correlation-ID"), len(detail), record["detail_truncated"])
 	})
 }
+
+// ===========================================================================
+// V2-086: the scheduler becomes a role a real caller can be.
+// ===========================================================================
+
+// v2086OwnerIAP, v2086SchedulerIAP and v2086ForeignIAP are the three IAP
+// identities the V2-086 proofs assert against. They are ordinary
+// service-account-shaped addresses and carry no credential of any kind: the
+// only secret in an IAP composition is the upstream assertion itself, which
+// httptest supplies as a header value.
+const (
+	v2086OwnerIAP     = "owner@example.com"
+	v2086SchedulerIAP = "reconciler@example.iam.gserviceaccount.com"
+	v2086ForeignIAP   = "stranger@example.com"
+	v2086IAPHeader    = "X-Goog-Authenticated-User-Email"
+	v2086IAPPrefix    = "accounts.google.com:"
+)
+
+// v2086IAPCall drives the composed handler with an IAP assertion instead of a
+// bearer token, which is the only way to reach CombinedAuthenticator. It
+// mirrors call() exactly apart from the authentication header, and it adds no
+// timing, no goroutine and no randomness.
+func v2086IAPCall(h http.Handler, method, path, body, iapEmail string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(method, path, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	if iapEmail != "" {
+		req.Header.Set(v2086IAPHeader, v2086IAPPrefix+iapEmail)
+	}
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	return w
+}
+
+// TestNoOwnerOrRunnerTransportCanRecordALoopRequester is V2-086 A3: the BEFORE
+// row of the measurement this task moves, kept as a permanent assertion.
+//
+// The composition here is deliberately the one that existed before this task:
+// an owner and a runner and nothing else. Driving Capture over it as each of
+// the two produces owner attribution and a 403, and never
+// domain.ActorTypeLoop -- so the value was unreachable for a Requirement's
+// RequestedBy not because the domain refused it (it has always admitted it)
+// and not because the command refused the role (Capture has always accepted
+// RoleScheduler), but solely because no transport produced the role. The same
+// claim is asserted directly against a CombinedAuthenticator with no scheduler
+// identity configured, which is the shape every deployment had at the parent
+// commit.
+func TestNoOwnerOrRunnerTransportCanRecordALoopRequester(t *testing.T) {
+	st := memory.New()
+	clk := &framingClock{at: time.Unix(1700000000, 0).UTC()}
+	svc, err := application.NewServiceWithConfig(st, clk, &ids{}, application.ServiceConfig{InstallationID: "install", LeaseTTL: time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Owner and runner only: the two roles internal/api/auth.go's four
+	// producers can actually assert.
+	auth := api.BearerAuthenticator{
+		"owner":  {Role: application.RoleOwner, Subject: "owner"},
+		"runner": {Role: application.RoleRunner, Subject: "runner", RunnerID: "runner-1"},
+	}
+	h := api.New(api.Config{Authenticator: auth, Service: svc, AllowedOrigins: []string{"https://console.example"}})
+
+	w := call(h, http.MethodPost, "/v1/requirements", `{"request_id":"a3:owner","text":"captured by the owner"}`, "owner")
+	if w.Code != http.StatusCreated {
+		t.Fatalf("owner capture status=%d body=%s", w.Code, w.Body.String())
+	}
+	doc := decodeBody(t, w.Body.Bytes())
+	requestedBy, ok := doc["requested_by"].(map[string]any)
+	if !ok {
+		t.Fatalf("the owner capture response carries no requested_by object: %s", w.Body.String())
+	}
+	if requestedBy["actor_type"] != "owner" {
+		t.Fatalf("owner capture requested_by.actor_type = %v, want owner", requestedBy["actor_type"])
+	}
+	id, _ := doc["requirement_id"].(string)
+	stored, found := st.Requirement(id)
+	if !found {
+		t.Fatalf("the captured Requirement %q is not in the store", id)
+	}
+	if stored.RequestedBy.ActorType != domain.ActorTypeOwner {
+		t.Fatalf("stored requested_by.actor_type = %q, want %q", stored.RequestedBy.ActorType, domain.ActorTypeOwner)
+	}
+
+	// A runner cannot capture at all, so it cannot record a loop requester
+	// either: Capture's callerActor pair is owner-or-scheduler.
+	clk.nextDay()
+	if w := call(h, http.MethodPost, "/v1/requirements", `{"request_id":"a3:runner","text":"captured by a runner"}`, "runner"); w.Code != http.StatusForbidden {
+		t.Fatalf("runner capture status=%d body=%s, want 403", w.Code, w.Body.String())
+	}
+
+	// And the production transport, with no scheduler identity configured,
+	// resolves an allowlisted IAP identity to exactly RoleOwner.
+	combined := api.CombinedAuthenticator{OwnerEmails: map[string]struct{}{v2086OwnerIAP: {}}}
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set(v2086IAPHeader, v2086IAPPrefix+v2086OwnerIAP)
+	caller, err := combined.Authenticate(req)
+	if err != nil || caller.Role != application.RoleOwner {
+		t.Fatalf("an unconfigured CombinedAuthenticator resolved %#v (err=%v), want RoleOwner", caller, err)
+	}
+	if caller.Role == application.RoleScheduler {
+		t.Fatal("a CombinedAuthenticator with no scheduler identity produced a scheduler caller")
+	}
+}

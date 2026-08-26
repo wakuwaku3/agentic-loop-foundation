@@ -3,6 +3,13 @@ package application_test
 import (
 	"context"
 	"errors"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"io/fs"
+	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/takushi/agentic-loop-foundation/v2/internal/application"
@@ -172,4 +179,197 @@ func TestRequestedByActorTypeIsAClosedEnum(t *testing.T) {
 	if err := domain.Validate(base); err == nil {
 		t.Fatal("an actor_type outside {owner, loop} should be rejected")
 	}
+}
+
+// ===========================================================================
+// V2-086: the scheduler becomes a role a real caller can be.
+//
+// The measurement this task repairs is a COUNT, so it is asserted as a count
+// rather than described. At the parent commit the number of non-test sites in
+// the whole repository that construct an application.Caller carrying
+// RoleScheduler was ZERO -- every non-test appearance of the role was on the
+// accepting side -- so domain.ActorTypeLoop was unreachable for a
+// Requirement's, a Repository's, a link's and a Control Intent's requester and
+// for the human-input answerer, because internal/application/caller.go's
+// requestedBy is the sole producer of that value for all five. After this task
+// the count is exactly ONE, and it is the return inside
+// application.LoopCaller: the single sanctioned producer.
+//
+// The scan is repo-wide and mechanical rather than a grep in a comment,
+// because the property it defends is "no OTHER package invents this identity
+// for itself" and a reviewer cannot keep checking that. It walks the module
+// from the repository root, parses every non-test *.go file with go/parser,
+// and reports every composite literal of type Caller whose Role field names
+// RoleScheduler, in either spelling (unqualified inside internal/application,
+// package-qualified everywhere else). A zero-file scan is a Fatal so no
+// assertion here can pass vacuously, and the matcher is exercised against a
+// known-positive and a known-negative first.
+// ===========================================================================
+
+// schedulerProducerSite is one measured producer of a RoleScheduler Caller.
+type schedulerProducerSite struct {
+	path string // slash-separated, relative to the repository root
+	line int
+}
+
+// schedulerProducerScanSkipDirs are the directories the walk does not enter.
+// None of them holds Go source that is compiled into this module.
+var schedulerProducerScanSkipDirs = map[string]bool{
+	".git": true, "build": true, "node_modules": true, ".agents": true,
+}
+
+// callerLiteralNamesScheduler reports whether a composite literal is a Caller
+// literal whose Role field is RoleScheduler. Both the type and the constant are
+// matched in either spelling: bare inside internal/application, and through a
+// package qualifier from anywhere else.
+func callerLiteralNamesScheduler(lit *ast.CompositeLit) bool {
+	switch t := lit.Type.(type) {
+	case *ast.Ident:
+		if t.Name != "Caller" {
+			return false
+		}
+	case *ast.SelectorExpr:
+		if t.Sel == nil || t.Sel.Name != "Caller" {
+			return false
+		}
+	default:
+		return false
+	}
+	for _, elt := range lit.Elts {
+		kv, ok := elt.(*ast.KeyValueExpr)
+		if !ok {
+			continue
+		}
+		key, ok := kv.Key.(*ast.Ident)
+		if !ok || key.Name != "Role" {
+			continue
+		}
+		switch v := kv.Value.(type) {
+		case *ast.Ident:
+			if v.Name == "RoleScheduler" {
+				return true
+			}
+		case *ast.SelectorExpr:
+			if v.Sel != nil && v.Sel.Name == "RoleScheduler" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// scanSchedulerProducers walks the repository root and returns every non-test
+// producer site, plus the number of files it actually parsed.
+func scanSchedulerProducers(t *testing.T, root string) ([]schedulerProducerSite, int) {
+	t.Helper()
+	sites := []schedulerProducerSite{}
+	parsed := 0
+	fset := token.NewFileSet()
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			if schedulerProducerScanSkipDirs[d.Name()] {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		file, perr := parser.ParseFile(fset, path, nil, parser.SkipObjectResolution)
+		if perr != nil {
+			t.Fatalf("parse %s: %v", path, perr)
+		}
+		parsed++
+		rel, rerr := filepath.Rel(root, path)
+		if rerr != nil {
+			t.Fatalf("relative path of %s: %v", path, rerr)
+		}
+		ast.Inspect(file, func(n ast.Node) bool {
+			lit, ok := n.(*ast.CompositeLit)
+			if !ok || !callerLiteralNamesScheduler(lit) {
+				return true
+			}
+			sites = append(sites, schedulerProducerSite{path: filepath.ToSlash(rel), line: fset.Position(lit.Pos()).Line})
+			return true
+		})
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk %s: %v", root, err)
+	}
+	return sites, parsed
+}
+
+// TestExactlyOneSanctionedSchedulerCallerProducerExists is V2-086 A4's
+// measurement: 0 producers before this task, exactly 1 after, and the one is
+// inside internal/application. Any other package inventing a scheduler
+// identity for itself -- the defect internal/runner/orchestrator.go committed
+// with RoleOwner -- fails here by name and line.
+func TestExactlyOneSanctionedSchedulerCallerProducerExists(t *testing.T) {
+	// The matcher is verified before the scan trusts it: both spellings of a
+	// positive, and the two shapes that must NOT match.
+	const controls = `package control
+
+type Role string
+type Caller struct {
+	Role    Role
+	Subject string
+}
+
+const (
+	RoleOwner     Role = "owner"
+	RoleScheduler Role = "scheduler"
+)
+
+var bare = Caller{Role: RoleScheduler, Subject: "a"}
+var qualified = application.Caller{Role: application.RoleScheduler, Subject: "b"}
+var owner = Caller{Role: RoleOwner, Subject: "c"}
+var notACaller = Session{Role: RoleScheduler}
+`
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "synthetic_scheduler_producers.go", controls, parser.SkipObjectResolution)
+	if err != nil {
+		t.Fatal(err)
+	}
+	matched := []string{}
+	ast.Inspect(file, func(n ast.Node) bool {
+		lit, ok := n.(*ast.CompositeLit)
+		if ok && callerLiteralNamesScheduler(lit) {
+			matched = append(matched, strconv.Itoa(fset.Position(lit.Pos()).Line))
+		}
+		return true
+	})
+	if len(matched) != 2 {
+		t.Fatalf("matcher control: matched %d literals at lines %v, want exactly the two RoleScheduler Caller literals", len(matched), matched)
+	}
+
+	root, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sites, parsed := scanSchedulerProducers(t, root)
+	const wantMinParsedFiles = 40
+	if parsed < wantMinParsedFiles {
+		t.Fatalf("the scan parsed %d non-test .go files, want at least %d; the walk is not seeing the module and every assertion below would pass vacuously", parsed, wantMinParsedFiles)
+	}
+	const sanctioned = "internal/application/caller.go"
+	outside := []schedulerProducerSite{}
+	inside := []schedulerProducerSite{}
+	for _, s := range sites {
+		if s.path == sanctioned {
+			inside = append(inside, s)
+			continue
+		}
+		outside = append(outside, s)
+	}
+	for _, s := range outside {
+		t.Errorf("%s:%d constructs a Caller with RoleScheduler; application.LoopCaller in %s is the only sanctioned producer of a scheduler identity", s.path, s.line, sanctioned)
+	}
+	if len(inside) != 1 {
+		t.Fatalf("the scan parsed %d non-test files and found %d RoleScheduler Caller literals in %s (all sites: %v), want exactly 1 -- the return inside LoopCaller. Zero means no transport or in-process caller can be the scheduler at all, which is the defect V2-086 repairs; more than one means the single sanctioned producer was duplicated", parsed, len(inside), sanctioned, sites)
+	}
+	t.Logf("scheduler-producer scan parsed %d non-test .go files: 1 sanctioned producer at %s:%d and 0 anywhere else", parsed, inside[0].path, inside[0].line)
 }
