@@ -272,6 +272,91 @@ func TestControlPlanePreviewLocalLive(t *testing.T) {
 		t.Fatalf("requirement detail status = %q, want captured", got)
 	}
 
+	// --- V2-082: the Requirement LEAVES captured, against the real binary,
+	// the real Firestore emulator and real HTTP. This is the executed proof of
+	// the one edge this task adds. Measured on the parent tree, the set of
+	// Requirement statuses reachable through every application command was the
+	// single element {captured}: nothing outside a test ever issued the
+	// captured->framing transition, so the needs-input question -- which the
+	// domain admits from framing, active and evaluating only -- could not be
+	// asked at all.
+	//
+	// Boundary, stated rather than implied. The segment executed here against
+	// real persistence is exactly capture -> start-framing -> the detail
+	// reports framing. The rest of the chain (:request-input, the detail
+	// showing the question, :answer-input) needs a RUNNER session, and this
+	// file composes owner-authenticated routes only and has no runner
+	// enrolment; that segment is asserted over the composed handler in
+	// internal/api/api_test.go and is left to the M5 re-dogfood over real
+	// everything. No Provider is involved in anything below.
+	detailVersionBefore, _ := detail.body["version"].(float64)
+	if detailVersionBefore == 0 {
+		t.Fatalf("requirement detail carried no version: %+v", detail.body)
+	}
+	framing := liveCall(t, client, http.MethodPost, base+"/v1/requirements/"+requirementID+":start-framing", ownerToken, map[string]any{
+		"request_id":                   "live-start-framing-1",
+		"expected_requirement_version": detailVersionBefore,
+	})
+	if framing.status != http.StatusOK {
+		t.Fatalf("start-framing: expected 200, got %d: %+v", framing.status, framing.body)
+	}
+	if got, _ := framing.body["requirement_id"].(string); got != requirementID {
+		t.Fatalf("start-framing named requirement_id=%q, want %q", got, requirementID)
+	}
+	if got, _ := framing.body["status"].(string); got != "framing" {
+		t.Fatalf("start-framing response status = %q, want framing", got)
+	}
+	framingVersion, _ := framing.body["version"].(float64)
+	if framingVersion != detailVersionBefore+1 {
+		t.Fatalf("start-framing response version = %v, want %v", framingVersion, detailVersionBefore+1)
+	}
+	// Read it back through the pre-existing detail route: the status the real
+	// emulator now holds is framing, at the incremented version.
+	framedDetail := liveCall(t, client, http.MethodGet, base+"/v1/requirements/"+requirementID, ownerToken, nil)
+	if framedDetail.status != http.StatusOK {
+		t.Fatalf("requirement detail after start-framing: expected 200, got %d: %+v", framedDetail.status, framedDetail.body)
+	}
+	if got, _ := framedDetail.body["status"].(string); got != "framing" {
+		t.Fatalf("requirement detail status after start-framing = %q, want framing; the Requirement did not leave captured in real persistence", got)
+	}
+	if got, _ := framedDetail.body["version"].(float64); got != framingVersion {
+		t.Fatalf("requirement detail version after start-framing = %v, want %v", got, framingVersion)
+	}
+	t.Logf("V2-082 live-local: requirement_id=%s left captured for framing at version %v against the real Firestore emulator", requirementID, framingVersion)
+	// A SECOND identical request with the SAME request_id replays the prior
+	// response instead of transitioning again: the version does not move, and
+	// the stored status does not move either.
+	replay := liveCall(t, client, http.MethodPost, base+"/v1/requirements/"+requirementID+":start-framing", ownerToken, map[string]any{
+		"request_id":                   "live-start-framing-1",
+		"expected_requirement_version": detailVersionBefore,
+	})
+	if replay.status != http.StatusOK {
+		t.Fatalf("start-framing replay: expected 200, got %d: %+v", replay.status, replay.body)
+	}
+	if got, _ := replay.body["version"].(float64); got != framingVersion {
+		t.Fatalf("start-framing replay version = %v, want the prior %v; the replay transitioned again", got, framingVersion)
+	}
+	if got, _ := replay.body["status"].(string); got != "framing" {
+		t.Fatalf("start-framing replay status = %q, want framing", got)
+	}
+	replayedDetail := liveCall(t, client, http.MethodGet, base+"/v1/requirements/"+requirementID, ownerToken, nil)
+	if replayedDetail.status != http.StatusOK {
+		t.Fatalf("requirement detail after the replay: expected 200, got %d: %+v", replayedDetail.status, replayedDetail.body)
+	}
+	if got, _ := replayedDetail.body["version"].(float64); got != framingVersion {
+		t.Fatalf("the idempotent replay moved the stored version to %v, want %v", got, framingVersion)
+	}
+	// A runner-less boundary check that costs nothing: framing again with a
+	// FRESH request id is refused by the domain transition table, because
+	// captured is the only admitted source.
+	again := liveCall(t, client, http.MethodPost, base+"/v1/requirements/"+requirementID+":start-framing", ownerToken, map[string]any{
+		"request_id":                   "live-start-framing-2",
+		"expected_requirement_version": framingVersion,
+	})
+	if again.status != http.StatusBadRequest {
+		t.Fatalf("framing an already-framing Requirement: expected 400, got %d: %+v", again.status, again.body)
+	}
+
 	// --- Control display (also exercises the Outbox: Control stages a
 	// control-changed outbox item) ---
 	control := liveCall(t, client, http.MethodPost, base+"/v1/controls", ownerToken, map[string]any{

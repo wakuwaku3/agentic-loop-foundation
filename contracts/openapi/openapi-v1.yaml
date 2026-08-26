@@ -219,6 +219,34 @@ paths:
       parameters: [{name: requirement_id, in: path, required: true, schema: {type: string}}]
       requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/AnswerHumanInputRequest'}}}}
       responses: {'200': {description: the answer was recorded and the same Requirement resumed, content: {application/json: {schema: {$ref: '#/components/schemas/AnswerHumanInputResponse'}}}}, '400': {$ref: '#/components/responses/Error'}, '401': {$ref: '#/components/responses/Error'}, '403': {$ref: '#/components/responses/Error'}, '404': {$ref: '#/components/responses/Error'}, '409': {$ref: '#/components/responses/Error'}, '413': {$ref: '#/components/responses/Error'}, '415': {$ref: '#/components/responses/Error'}, '429': {$ref: '#/components/responses/Error'}, '500': {$ref: '#/components/responses/Error'}, '503': {$ref: '#/components/responses/Error'}}
+  /v1/requirements/{requirement_id}:start-framing:
+    post:
+      operationId: startRequirementFraming
+      security: [{iapOwner: []}]
+      description: |
+        The owner asks that a captured Requirement start being shaped, and it
+        moves from captured to framing. This is the one edge that leaves the
+        captured status: before it existed, the only Requirement status any
+        caller could reach was captured, so the needs-input question below
+        could never be asked, because that transition is admitted from
+        framing, active and evaluating only.
+
+        Callable by the owner or by the scheduler; a Runner is refused,
+        because a Runner executes an Increment it was handed and does not
+        decide that a Requirement should start being shaped. Admitted from
+        captured only: a Requirement already in framing is refused by the
+        domain transition table itself, not by an application flag.
+
+        The claim Permit is evaluated against the Requirement's own target,
+        so pause-claim and every stop mode deny it, while pause-intake still
+        ALLOWS it: pause-intake means take no new work in and finish what you
+        already have, and framing an already-captured Requirement is
+        finishing what you have. No outbox item is staged: nothing outside
+        the control plane is asked to do anything by a Requirement beginning
+        to be shaped.
+      parameters: [{name: requirement_id, in: path, required: true, schema: {type: string}}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/StartRequirementFramingRequest'}}}}
+      responses: {'200': {description: the Requirement left captured and is in framing, content: {application/json: {schema: {$ref: '#/components/schemas/StartRequirementFramingResponse'}}}}, '400': {$ref: '#/components/responses/Error'}, '401': {$ref: '#/components/responses/Error'}, '403': {$ref: '#/components/responses/Error'}, '404': {$ref: '#/components/responses/Error'}, '409': {$ref: '#/components/responses/Error'}, '413': {$ref: '#/components/responses/Error'}, '415': {$ref: '#/components/responses/Error'}, '429': {$ref: '#/components/responses/Error'}, '500': {$ref: '#/components/responses/Error'}, '503': {$ref: '#/components/responses/Error'}}
   /v1/repositories:
     get:
       operationId: listRepositories
@@ -531,6 +559,28 @@ components:
         answered_option_id: {type: string, maxLength: 64}
         answered_at: {type: string, format: date-time}
         answered_by: {$ref: '#/components/schemas/RequestedBy'}
+    StartRequirementFramingRequest:
+      type: object
+      additionalProperties: false
+      required: [request_id, expected_requirement_version]
+      description: |
+        There is deliberately no control_revision, no repository_id and no
+        timestamp field. The control revision is derived from the effective
+        control inside the command's own transaction, the repository comes
+        from the Requirement's own link, and the instant is that
+        transaction's authority time: none of the three can be supplied by a
+        caller.
+      properties:
+        request_id: {type: string}
+        expected_requirement_version: {type: integer}
+    StartRequirementFramingResponse:
+      type: object
+      additionalProperties: false
+      required: [requirement_id, status, version]
+      properties:
+        requirement_id: {type: string, description: 'the SAME Requirement; framing creates nothing'}
+        status: {type: string, description: 'framing, which is the status from which a question can be asked'}
+        version: {type: integer}
     ControlRead:
       type: object
       additionalProperties: false

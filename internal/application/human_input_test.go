@@ -207,7 +207,18 @@ func TestRequirementTransitionsInTheApplicationLayerAreExactlyTheTwoNewCommands(
 			})
 		}
 	}
-	want := map[string]bool{"RequestHumanInput": true, "AnswerHumanInput": true}
+	// V2-082 is the third caller this guard's own doc comment asked to arrive
+	// with its own justification, and here it is. Service.StartFraming issues
+	// domain.RequirementStartFraming, the one transition that leaves the
+	// captured status. Before it, the set of Requirement statuses reachable
+	// through every application command was the single element {captured}, so
+	// the two commands above -- both of which require a source status of
+	// framing, active, evaluating, waiting or needs-input -- could never be
+	// reached at all through the real surface. Widening the set by exactly one
+	// entry is what makes that reachable; the set stays CLOSED, and a fourth
+	// caller still fails here. internal/domain was not edited: the transition,
+	// its guard and its target status already existed.
+	want := map[string]bool{"RequestHumanInput": true, "AnswerHumanInput": true, "StartFraming": true}
 	if !reflect.DeepEqual(callers, want) {
 		t.Fatalf("domain.DecideRequirement is called from %v, want exactly %v", keysSorted(callers), keysSorted(want))
 	}

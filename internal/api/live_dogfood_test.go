@@ -1039,11 +1039,34 @@ func (fx *dogfood) capture(t *testing.T, requestID, text string) (string, domain
 	return id, domain.Version(floatField(r.body, "version"))
 }
 
-// capHumanInputRequest exercises cap-human-input-request as far as the
-// implementation reaches and records it FAILED against its declared success
-// condition. wo-v2-022 A11 predicted no application command, no API route and
-// no detail field (E22-2); all three exist at this commit (V2-065). The
-// measurement below finds the remaining, decisive gap.
+// capHumanInputRequest drives cap-human-input-request's declared chain end to
+// end against the dogfood's real base URL and real callers, and records what
+// it measured. It issues no verdict: the verdict and its evidence_ids belong to
+// the M5 re-dogfood.
+//
+// HISTORY, kept rather than deleted. wo-v2-022 A11 predicted that no
+// application command, no API route and no detail field existed for asking the
+// owner a question (escalation E22-2). On 2026-08-26, V2-022's dogfood run
+// measured that all three DID exist -- V2-065 had shipped them -- and found the
+// remaining, decisive gap one level deeper: domain.DecideRequirement admits the
+// needs-input command from framing, active and evaluating only, the only
+// command that leaves "captured" is domain.RequirementStartFraming, and NO
+// application command issued it. So no Requirement created through the real
+// surface could reach a status from which a question was a legal transition:
+// the ask trigger was not merely unwired to a decision, its precondition was
+// unreachable. This probe therefore FAILED ON PURPOSE if POST :request-input
+// ever succeeded on a captured Requirement, with a message instructing the
+// reader that "this capability's eligibility must be re-judged, not assumed".
+//
+// V2-082 supplied exactly that judgement. It added one caller-initiated
+// application command, Service.StartFraming, and one route, POST
+// /v1/requirements/{requirement_id}:start-framing, issuing the transition the
+// domain had always admitted from captured; internal/domain was not edited,
+// because the transition, its guard and its target status already existed. The
+// set of Requirement statuses reachable through the application went from the
+// single element {captured} to exactly {captured, framing, needs-input,
+// ready}. So the inverted assertion is replaced by the assertion it demanded:
+// the whole declared chain, in order, over real HTTP with the real callers.
 func (fx *dogfood) capHumanInputRequest(t *testing.T) {
 	fx.enroll(t)
 	requirementID, version := fx.capture(t, "v2-022-needs-input-1", "V2-022 dogfood: ask the owner a question about this Requirement")
@@ -1052,13 +1075,54 @@ func (fx *dogfood) capHumanInputRequest(t *testing.T) {
 	if before.status != http.StatusOK {
 		t.Fatalf("requirement detail before the ask: %d %+v", before.status, before.body)
 	}
+	if got := stringField(before.body, "status"); got != "captured" {
+		t.Fatalf("a freshly captured Requirement reports status %q, want captured", got)
+	}
 	if _, present := before.body["needs_input"]; present {
 		t.Fatalf("a freshly captured Requirement already reports a needs_input object: %+v", before.body)
 	}
+	// The Backlog row count, read here and again after the answer, so "the
+	// SAME Requirement resumed" is asserted against a count rather than
+	// inferred. It is read inline rather than through a new helper: this task
+	// changes exactly one function in this file.
+	rowCount := func(when string) int {
+		page := dogfoodCall(t, fx.client, http.MethodGet, fx.base+"/v1/requirements?page_size=100", fx.owner(), nil)
+		if page.status != http.StatusOK {
+			t.Fatalf("the requirement page %s: %d %+v", when, page.status, page.body)
+		}
+		rows, _ := page.body["requirements"].([]any)
+		return len(rows)
+	}
+	backlogBefore := rowCount("before the chain")
 
+	// 1. The Requirement leaves captured. This is the edge V2-082 added, and
+	// it is what makes everything below reachable at all.
+	framing := dogfoodCall(t, fx.client, http.MethodPost, fx.base+"/v1/requirements/"+requirementID+":start-framing", fx.owner(), map[string]any{
+		"request_id":                   "v2-022-start-framing-1",
+		"expected_requirement_version": int(version),
+	})
+	if framing.status != http.StatusOK {
+		t.Fatalf("POST :start-framing on a captured Requirement: %d %+v", framing.status, framing.body)
+	}
+	if got := stringField(framing.body, "status"); got != "framing" {
+		t.Fatalf("start-framing reports status %q, want framing", got)
+	}
+	framingVersion := domain.Version(floatField(framing.body, "version"))
+	if framingVersion != version+1 {
+		t.Fatalf("start-framing reports version %d, want %d", framingVersion, version+1)
+	}
+	framed := dogfoodCall(t, fx.client, http.MethodGet, fx.base+"/v1/requirements/"+requirementID, fx.owner(), nil)
+	if framed.status != http.StatusOK {
+		t.Fatalf("requirement detail after start-framing: %d %+v", framed.status, framed.body)
+	}
+	if got := stringField(framed.body, "status"); got != "framing" {
+		t.Fatalf("the detail after start-framing reports %q, want framing", got)
+	}
+
+	// 2. The Loop asks the question, as a Runner.
 	ask := dogfoodCall(t, fx.client, http.MethodPost, fx.base+"/v1/requirements/"+requirementID+":request-input", fx.runner(), map[string]any{
 		"request_id":                   "v2-022-ask-1",
-		"expected_requirement_version": int(version),
+		"expected_requirement_version": int(framingVersion),
 		"question":                     "Should this dogfood run register the owner's own Repository against the real forge?",
 		"reason_class":                 "destructive-irreversible",
 		"reason":                       "reaching a forge is outside this task's declared side-effect surface",
@@ -1069,29 +1133,83 @@ func (fx *dogfood) capHumanInputRequest(t *testing.T) {
 		"stopped_scope":    []string{"new-claims-for-this-requirement", "lease-renewal-for-this-requirement"},
 		"continuing_scope": []string{"other-requirements", "owner-reads"},
 	})
-	if ask.status == http.StatusOK {
-		t.Fatalf("POST :request-input unexpectedly succeeded on a captured Requirement (%+v); the measured precondition gap below no longer holds and this capability's eligibility must be re-judged, not assumed", ask.body)
+	if ask.status != http.StatusOK {
+		t.Fatalf("POST :request-input on a framing Requirement: %d %+v", ask.status, ask.body)
 	}
-	t.Logf("measured: POST /v1/requirements/{id}:request-input on a Requirement captured through the real surface -> %d %v", ask.status, ask.body["error"])
+	if got := stringField(ask.body, "status"); got != "needs-input" {
+		t.Fatalf("the ask reports status %q, want needs-input", got)
+	}
+	askVersion := domain.Version(floatField(ask.body, "version"))
 
-	// The decisive, measured gap. domain.DecideRequirement admits the
-	// needs-input command only from framing, active or evaluating; the only
-	// command that leaves "captured" is domain.RequirementStartFraming, and
-	// NO application command issues it (nor RequirementStart). So no
-	// Requirement created through the real surface can ever reach a status
-	// from which a question is a legal transition: the ask trigger is not
-	// merely unwired to a decision, its precondition is unreachable.
-	after := dogfoodCall(t, fx.client, http.MethodGet, fx.base+"/v1/requirements/"+requirementID, fx.owner(), nil)
-	if after.status != http.StatusOK {
-		t.Fatalf("requirement detail after the refused ask: %d %+v", after.status, after.body)
+	// 3. The owner's read surface shows the question: the reason class, every
+	// option with its impact, and both scope lists.
+	asked := dogfoodCall(t, fx.client, http.MethodGet, fx.base+"/v1/requirements/"+requirementID, fx.owner(), nil)
+	if asked.status != http.StatusOK {
+		t.Fatalf("requirement detail after the ask: %d %+v", asked.status, asked.body)
 	}
-	if got := stringField(after.body, "status"); got != stringField(before.body, "status") {
-		t.Fatalf("the refused ask changed the Requirement status from %q to %q; the declared rollback condition (leave the state unchanged) does not hold", stringField(before.body, "status"), got)
+	if got := stringField(asked.body, "status"); got != "needs-input" {
+		t.Fatalf("the detail after the ask reports %q, want needs-input", got)
 	}
-	if _, present := after.body["needs_input"]; present {
-		t.Fatalf("the refused ask recorded a question anyway: %+v", after.body)
+	question, ok := asked.body["needs_input"].(map[string]any)
+	if !ok {
+		t.Fatalf("the detail reports no needs_input object after the ask: %+v", asked.body)
 	}
-	t.Logf("cap-human-input-request recorded FAILED: the two routes, the two commands and the needs_input detail field all exist (E22-2's original ground is FALSE), and the declared rollback condition holds, but the declared success condition cannot be observed: the Requirement status precondition for asking is unreachable through every application command, so no question can be displayed and no answer can resume anything. Bucket: ESCALATION (the ask trigger has no wiring and its precondition is unreachable).")
+	if stringField(question, "reason_class") != "destructive-irreversible" {
+		t.Fatalf("the displayed question reports reason_class %q", stringField(question, "reason_class"))
+	}
+	if stringField(question, "question") == "" {
+		t.Fatalf("the displayed question carries no question text: %+v", question)
+	}
+	options, ok := question["options"].([]any)
+	if !ok || len(options) != 2 {
+		t.Fatalf("the displayed question reports %v options, want 2", question["options"])
+	}
+	seen := map[string]bool{}
+	for _, raw := range options {
+		option, isObject := raw.(map[string]any)
+		if !isObject {
+			t.Fatalf("a displayed option is not an object: %v", raw)
+		}
+		if stringField(option, "impact") == "" {
+			t.Fatalf("a displayed option carries no impact: %+v", option)
+		}
+		seen[stringField(option, "option_id")] = true
+	}
+	if !seen["skip"] || !seen["reach"] {
+		t.Fatalf("the displayed question does not report both recorded options: %v", seen)
+	}
+	for _, list := range []string{"stopped_scope", "continuing_scope"} {
+		entries, isList := question[list].([]any)
+		if !isList || len(entries) == 0 {
+			t.Fatalf("the displayed question reports no %s: %v", list, question[list])
+		}
+	}
+
+	// 4. The owner answers by naming one recorded option, and the SAME
+	// Requirement resumes. The declared failure condition -- a new Requirement
+	// instead of a resumed one -- is asserted in the same run.
+	answer := dogfoodCall(t, fx.client, http.MethodPost, fx.base+"/v1/requirements/"+requirementID+":answer-input", fx.owner(), map[string]any{
+		"request_id":                   "v2-022-answer-1",
+		"expected_requirement_version": int(askVersion),
+		"option_id":                    "skip",
+	})
+	if answer.status != http.StatusOK {
+		t.Fatalf("POST :answer-input: %d %+v", answer.status, answer.body)
+	}
+	if got := stringField(answer.body, "requirement_id"); got != requirementID {
+		t.Fatalf("the answer resumed requirement_id %q, want the SAME %q", got, requirementID)
+	}
+	if got := stringField(answer.body, "status"); got != "ready" {
+		t.Fatalf("the answer left the Requirement at %q, want ready", got)
+	}
+	if got := stringField(answer.body, "answered_option_id"); got != "skip" {
+		t.Fatalf("the answer recorded option %q", got)
+	}
+	if got := rowCount("after the chain"); got != backlogBefore {
+		t.Fatalf("the chain changed the number of Requirements from %d to %d; resuming must create nothing", backlogBefore, got)
+	}
+
+	t.Logf("measured: requirement_id=%s walked captured -> framing -> needs-input -> ready over the real base URL with the real owner and runner callers, at versions %d -> %d -> %d, the displayed question carried its reason class, both options with their impacts and both scope lists, and the Requirement row count was unchanged at %d. E22-2's original ground (no command, no route, no detail field) was already FALSE at V2-065; the precondition gap this probe was inverted to detect -- that no application command issued the captured->framing transition -- was closed by V2-082 (Service.StartFraming and POST /v1/requirements/{requirement_id}:start-framing, with internal/domain unedited). This helper records what it measured and issues no verdict; the cap-human-input-request verdict and its evidence_ids belong to the M5 re-dogfood.", requirementID, version, framingVersion, askVersion, backlogBefore)
 }
 
 // dogfoodInvocation is Build -> Run -> Parse against the real claude CLI,

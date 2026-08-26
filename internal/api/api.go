@@ -444,6 +444,29 @@ func (h *Handler) route(w http.ResponseWriter, r *http.Request) {
 			h.answerHumanInput(w, r.WithContext(ctx), id)
 			return
 		}
+		// V2-082: the one verb that leaves the captured status. It follows the
+		// same prefix-plus-suffix idiom as the two needs-input verbs above,
+		// and it is collision-free by construction: the /v1/executions/:start
+		// branch earlier in this function is prefix-gated on /v1/executions/,
+		// and ":start-framing" does not satisfy HasSuffix(path, ":start")
+		// anyway; the GET /v1/requirements/ prefix branch is method-gated. An
+		// api test asserts all three of those directly rather than by reading.
+		if strings.HasPrefix(r.URL.Path, requirementsPrefix) && strings.HasSuffix(r.URL.Path, startFramingSuffix) {
+			id := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, requirementsPrefix), startFramingSuffix)
+			if id == "" {
+				h.error(w, r, http.StatusNotFound, "not_found", "route not found")
+				return
+			}
+			// Owner or scheduler, exactly the pair the capture route accepts.
+			// A Runner is refused: it executes an Increment it was handed and
+			// does not decide that a Requirement should start being shaped.
+			if caller.Role != application.RoleOwner && caller.Role != application.RoleScheduler {
+				h.error(w, r, 403, "forbidden", "owner or scheduler role required")
+				return
+			}
+			h.startFraming(w, r.WithContext(ctx), id)
+			return
+		}
 		h.error(w, r, http.StatusNotFound, "not_found", "route not found")
 	}
 }
@@ -581,6 +604,9 @@ const (
 	requirementsPrefix = "/v1/requirements/"
 	requestInputSuffix = ":request-input"
 	answerInputSuffix  = ":answer-input"
+	// V2-082: the verb that leaves the captured status, named beside its two
+	// siblings for the same reason they are named.
+	startFramingSuffix = ":start-framing"
 )
 
 type humanInputOptionBody struct {
@@ -655,6 +681,33 @@ func (h *Handler) answerHumanInput(w http.ResponseWriter, r *http.Request, id st
 		RequirementID:              id,
 		ExpectedRequirementVersion: b.ExpectedRequirementVersion,
 		OptionID:                   b.OptionID,
+	})
+	if err != nil {
+		h.domainError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// startFramingBody is the whole request. It carries no control_revision, no
+// repository_id and no timestamp: the revision is derived from the effective
+// control inside the command's own transaction, the repository comes from the
+// Requirement's own link, and the instant is the transaction authority time.
+// The strict decoder refuses any other field, so a caller cannot smuggle one.
+type startFramingBody struct {
+	RequestID                  string         `json:"request_id"`
+	ExpectedRequirementVersion domain.Version `json:"expected_requirement_version"`
+}
+
+func (h *Handler) startFraming(w http.ResponseWriter, r *http.Request, id string) {
+	var b startFramingBody
+	if !h.decode(w, r, &b) {
+		return
+	}
+	out, err := h.config.Service.StartFraming(r.Context(), application.StartFramingRequest{
+		RequestID:       b.RequestID,
+		RequirementID:   id,
+		ExpectedVersion: b.ExpectedRequirementVersion,
 	})
 	if err != nil {
 		h.domainError(w, r, err)

@@ -1,0 +1,240 @@
+{
+  "schema_version": "v1",
+  "id": "ev-v2-082-api",
+  "kind": "evidence",
+  "created_at": "2026-08-26T18:00:00Z",
+  "correlation_id": "v2-082-framing-entry",
+  "task_id": "V2-082",
+  "component": "api",
+  "evidence_key": "f2a4397ac68808b93b0332028b4828c65d33c518de403e7546b85555ddb096e6",
+  "result": "partial",
+  "observed_at": "2026-08-26T18:00:00Z",
+  "checks": [
+    {
+      "name": "scope-boundary",
+      "status": "passed",
+      "argv": [
+        "git",
+        "status",
+        "--porcelain"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 30,
+      "summary": "Scope boundary for V2-082, recorded against base commit 9a09ef867a582237252721916a3d915225d2107d. ROW 1 -- what this task makes true: a Requirement captured through the real HTTP surface can be driven out of the captured status by one new caller-initiated application command, Service.StartFraming, reached over POST /v1/requirements/{requirement_id}:start-framing, so the status from which a person can be asked a question is reachable for the first time. The set of Requirement statuses reachable through every application command goes from the single element {captured} to exactly {captured, framing, needs-input, ready}. ROW 2 -- what it deliberately does not do: internal/domain is byte-unchanged (the transition, its guard and its target status already existed); no read model changed; no owner-console control was added and internal/web/** and docs/** are untouched; no port, no stored field, no document kind and no index was added; Capture does not advance on its own and CaptureRequest gained no flag, so `captured` stays observable and CaptureResponse.Version stays 1; and no reconciler or scheduler sweep walks captured Requirements. ROW 3 -- what it records but does not fix: Plan and Prepare evaluate NO domain.Permit and therefore move canonical Increment and Requirement state under emergency-stop and under every other stop mode (measured, see the plan-and-prepare-are-permit-free check); internal/application/service.go is prohibited here, so that is escalated rather than changed, and its permit-free shape was deliberately NOT propagated to the new command. ROW 4 -- what only a later task can establish: the full chain against a real Provider-gated dogfood is NOT executed here, so the rewritten dogfood helper is compiled and go vet clean but recorded skipped and the api record's result is partial; the M5 re-dogfood is a required, coordinator-owned follow-up. The six other unissued domain Requirement commands (start, wait, recover, evaluate, pause, cancel) and domain.CompleteRequirementFromRelease stay unissued by design. ROW 5 -- this task passes no release gate on its own: no release_eligible entry is produced, no capability id is cited in any of these three records, contracts/release-contract/** is untouched and .agents/v2/evidence/V2-022-release-live-dogfood.json is untouched."
+    },
+    {
+      "name": "environment-identifier",
+      "status": "passed",
+      "argv": [
+        "uname",
+        "-srm"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 30,
+      "summary": "execution environment: uname -srm = Linux 6.18.33.2-microsoft-standard-WSL2 x86_64; devbox run --pure -- go version = go1.25.0 linux/amd64; devbox 0.17.2, environment resolved from this worktree's devbox.json/devbox.lock, both untouched by this task. Worktree /home/takushi/repos/agentic-loop-foundation-worktrees/v2-task-082 on branch v2-task/V2-082, base commit 9a09ef867a582237252721916a3d915225d2107d. The only external processes any check started are the local Firestore emulator that scripts/firestore-emulator.sh starts (firebase emulators:start --only firestore --project agentic-loop-test on a free 127.0.0.1 port) and the real cmd/control-plane binary this repository builds. NO Provider CLI was started at any point -- no claude, no codex, no opencode, not even --version -- no gh child was started, and no Google Cloud resource was touched."
+    },
+    {
+      "name": "baseline-and-after-test-counts",
+      "status": "passed",
+      "argv": [
+        "devbox",
+        "run",
+        "--pure",
+        "--",
+        "go",
+        "test",
+        "-list",
+        ".*",
+        "./internal/api"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 600,
+      "summary": "A1 re-measured on the final tree with devbox run --pure -- go test -list '.*' ./<pkg> counting lines matching ^Test, and with fresh greps. A1(i) AGREES: `grep -rn RequirementStartFraming --include=*.go . | grep -v _test.go` returned exactly 2 hits at base, internal/domain/model.go:437 (declaration) and internal/domain/model.go:475 (switch case), and zero non-test hits outside internal/domain; 8 hits including test files. A1(ii) AGREES: exactly FOUR non-test u.SaveRequirement call sites, internal/application/service.go:845, internal/application/service.go:939, internal/application/human_input.go:527 and internal/application/human_input.go:656. A1(iii) AGREES: the only non-test line assigning a Requirement Status literal is internal/application/service.go:841, constructing at domain.RequirementCaptured. A1(iv) AGREES: domain.CompleteRequirementFromRelease has ZERO non-test callers (its declaration is internal/domain/model.go:529 and every other hit is a _test.go file or a comment). A1(v) AGREES verbatim: model.go:475-479 reads `case RequirementStartFraming:` / `if !allowed(RequirementCaptured) {` / `return current, ErrInvalidTransition` / `}` / `next.Status = RequirementFraming`, and model.go:495-499 reads `case RequirementNeedInput:` / `if !allowed(RequirementFraming, RequirementActive, RequirementEvaluating) {` / `return current, ErrInvalidTransition` / `}` / `next.Status = RequirementNeedsInput`. So (i) through (v) all agree and no escalation of the defect's location is required. A1(vi) DISAGREES in three of six counts, because the Work Order's figures were read at cc17473495a4ad5b562e5a7892b5d4e64af0b084 and this task's base is after V2-079 merged. EXPECTED vs MEASURED at base: internal/application 180 vs 180 (agrees); internal/api 53 vs 54 (DISAGREES, +1 from V2-079); internal/domain 54 vs 54 (agrees); internal/contracts 33 vs 33 (agrees); internal/store/memory 11 vs 13 (DISAGREES, +2 from V2-079); internal/store/firestore 33 vs 35 (DISAGREES, +2 from V2-079). The measured values are used. BEFORE -> AFTER on the final tree: internal/application 180 -> 186 (+6); internal/api 54 -> 58 (+4); internal/domain 54 -> 54 (unchanged); internal/contracts 33 -> 33 (unchanged). The +6 are TestStartFramingLeavesCapturedAndStagesNoOutbox, TestStartFramingIsTheOnlyIssuerOfTheCapturedEdge, TestStartFramingSevenControlModeTable, TestStartFramingRefusesEverySourceButCaptured, TestNeedsInputIsStillRefusedFromCaptured and TestPlanAndPrepareAreMeasuredUnderEmergencyStop. The +4 are TestRequestInputIsRefusedForACapturedRequirement, TestStartFramingRouteIsUnambiguousAndRoleGated, TestARequirementCapturedThroughTheRouteCanBeDrivenToTheQuestionAndResumedAsTheSameRequirement and TestARequirementLeftInFramingStillReadsAfterTheChangeIsReverted. A11 EXTENDS the existing top-level TestControlPlanePreviewLocalLive rather than adding a name, and A12 rewrites the body of the existing capHumanInputRequest subtest helper, so neither adds a count. No existing test was deleted and none was renamed: git diff shows no removed `func Test` line in any touched file. Other line numbers measured at base: Capture internal/application/service.go:743 (agrees), Plan service.go:882 (agrees), Prepare service.go:986 (agrees), RequestHumanInput internal/application/human_input.go:460 (agrees), requestInputSuffix and answerInputSuffix internal/api/api.go:582-583 (agrees), nextAction internal/application/readmodels.go:306-329 (agrees), the dogfood provider gate internal/api/live_dogfood_test.go:297-299 (agrees), quota.MutationUsage Reads 32 / Writes 16 (agrees). One further small disagreement: the control gate the design cites as internal/domain/control.go:266-282 measures as control.go:266-281 (permitAllowed) with EffectFromPermit's Allow-only test at control.go:301, and PermitKind.SideEffect() at control.go:199-201 (agrees)."
+    },
+    {
+      "name": "defect-reproduced-over-http",
+      "status": "passed",
+      "argv": [
+        "devbox",
+        "run",
+        "--pure",
+        "--",
+        "go",
+        "test",
+        "-count=1",
+        "-v",
+        "-run",
+        "TestRequestInputIsRefusedForACapturedRequirement",
+        "./internal/api"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 600,
+      "summary": "A3, reproduced before the repair and kept in the tree as A7's permanent assertion. Against the composed api.Handler over real HTTP: a Requirement was captured through POST /v1/requirements as the owner, then POST /v1/requirements/{id}:request-input was sent as a RUNNER caller with a valid body naming the Requirement's actual current version. VERDICT: REFUSED. Status code 400. Error body VERBATIM from the run: {\"correlation_id\":\"75ac35ecbc32870ecb29d8a5\",\"error\":\"invalid_request\",\"message\":\"invalid domain state transition\",\"schema_version\":\"v1\"}. The refusal is attributable to domain.ErrInvalidTransition and to nothing else: the body carries that error's exact text, the body was well-formed so it is not validation, the caller was a role the route accepts so 401 and 403 are excluded, and the expected version was the Requirement's actual version so 409 is excluded. The Requirement's status, its version and every other field were asserted byte-unchanged by the refusal with reflect.DeepEqual, and the needs-input side table was read directly and still held no row. This reproduction stays in the tree permanently so the precondition can never silently become reachable from captured."
+    },
+    {
+      "name": "route-is-unambiguous-and-role-gated",
+      "status": "passed",
+      "argv": [
+        "devbox",
+        "run",
+        "--pure",
+        "--",
+        "go",
+        "test",
+        "-count=1",
+        "-run",
+        "TestStartFramingRouteIsUnambiguousAndRoleGated",
+        "./internal/api"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 600,
+      "summary": "A8. POST /v1/requirements/{requirement_id}:start-framing added to internal/api/api.go's POST switch default branch, using the same prefix-plus-suffix idiom as the existing :request-input and :answer-input branches, with a named suffix constant startFramingSuffix beside requestInputSuffix and answerInputSuffix. Gated to RoleOwner or RoleScheduler. VERDICT: PASS, with the routing proved by assertion and not by reading. Measured: 401 unauthenticated; 403 for a runner caller; 404 for an empty requirement id; 404 for /v1/executions/{id}:start-framing, which is the direct proof that the execution-scoped :start branch does not claim this suffix in either direction, because :start-framing does not satisfy HasSuffix(path, \":start\") and the executions branch is prefix-gated anyway; a GET to the very same path does NOT return 200, so it is not the framing route and the method-gated GET /v1/requirements/ prefix branch does not swallow the POST; 404 from the command for an unknown Requirement id; 409 for a stale expected version; and 400 for each of three smuggled body fields (control_revision, repository_id, at), which the strict decoder refuses rather than ignores. Every refusal left the Requirement byte-unchanged (reflect.DeepEqual). The owner call returned 200 with a response carrying exactly requirement_id, status and version, status framing, and the state moved in the store -- which is the proof that the POST reached the command rather than a read branch. A second framing with a FRESH request id returned 400 naming `invalid domain state transition` and left the Requirement byte-unchanged. The scheduler was accepted on its own Requirement, so the route gates exactly the pair the capture route gates."
+    },
+    {
+      "name": "full-chain-over-http-in-one-test",
+      "status": "passed",
+      "argv": [
+        "devbox",
+        "run",
+        "--pure",
+        "--",
+        "go",
+        "test",
+        "-count=1",
+        "-v",
+        "-run",
+        "TestARequirementCapturedThroughTheRouteCanBeDrivenToTheQuestionAndResumedAsTheSameRequirement",
+        "./internal/api"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 600,
+      "summary": "A10. One test, one name that says what it proves, over the composed handler. VERDICT: PASS. Measured, verbatim from the run: `A10: one Requirement \"requirement-b\" walked captured -> framing -> needs-input -> ready over the composed handler, at versions 1 -> 2 -> 3 -> 4, with the Requirement count unchanged at 1`. Step by step: POST /v1/requirements as the owner returned 201 at version 1; the detail reported status captured and carried NO needs_input key at all; POST :start-framing as the owner returned 200 with status framing at version 2, and the detail reported framing at that same version, with next_action byte-equal to what it was at captured, which is A13's read-model claim asserted rather than argued; POST :request-input as a RUNNER with a reason class, two options each carrying a non-empty impact, and both scope lists returned 200 with status needs-input at version 3; GET the detail as the owner reported the needs_input object with the question text, reason_class destructive-irreversible, both recorded options each with a non-empty impact and a non-empty option_id, and both non-empty scope lists; POST :answer-input as the owner naming one recorded option returned 200 with the IDENTICAL requirement_id, status ready, answered_option_id keep, and version 4. The final triple -- identical requirement_id, status ready, and the total number of Requirements unchanged at 1, read through the Backlog route before and after -- is the declared success condition and the declared failure condition asserted in the same run. Nothing in this test writes a status into the store by hand: every status the Requirement passes through was produced by an application command reached over HTTP, which is exactly what was impossible before this task."
+    },
+    {
+      "name": "executed-proof-against-real-persistence",
+      "status": "passed",
+      "argv": [
+        "devbox",
+        "run",
+        "--pure",
+        "-e",
+        "AGENTIC_LOOP_LIVE_LOCAL=1",
+        "--",
+        "scripts/firestore-emulator.sh",
+        "go",
+        "test",
+        "-count=1",
+        "-v",
+        "-run",
+        "TestControlPlanePreviewLocalLive",
+        "./internal/api"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 600,
+      "summary": "A11. EXECUTED, not skipped. TestControlPlanePreviewLocalLive was extended and run against the REAL cmd/control-plane binary this repository builds, the REAL Firestore emulator (host 127.0.0.1:18361, project agentic-loop-test, started by scripts/firestore-emulator.sh) and real HTTP, with no Provider involved. VERDICT: `--- PASS: TestControlPlanePreviewLocalLive (10.32s)` and `ok  \tgithub.com/takushi/agentic-loop-foundation/v2/internal/api\t10.323s`. The task's own log line, verbatim: `V2-082 live-local: requirement_id=requirement-e7f9978289034910-1 left captured for framing at version 2 against the real Firestore emulator`. Measured in that run: a Requirement captured over the real route reported status captured; POST :start-framing as the owner returned 200 naming the same requirement_id with status framing at version 2, exactly one more than the detail reported before it; GET /v1/requirements/{id} read back status framing at that version, so the status the emulator itself now holds is framing; a SECOND identical :start-framing request with the SAME request_id returned 200 replaying the same version and status rather than transitioning again, and the detail after the replay still reported the same version; and framing again with a FRESH request id returned 400, because captured is the only admitted source. AGENTIC_LOOP_LIVE_LOCAL was passed with -e and never as a shell prefix, because devbox run --pure strips environment variables. THE BOUNDARY, stated explicitly. EXECUTED against real persistence: capture -> start-framing -> the detail reports framing, plus the idempotent replay. NOT executed against real persistence: :request-input, the detail showing the question, and :answer-input -- those need a RUNNER session, and internal/api/live_local_test.go composes owner-authenticated routes only and has no runner enrolment; no runner enrolment was added to that file. That segment is asserted over the composed handler by A10's check above and is left to the M5 re-dogfood over real everything."
+    },
+    {
+      "name": "dogfood-tripwire-replaced-compiled-and-vetted-not-executed",
+      "status": "skipped",
+      "argv": [
+        "devbox",
+        "run",
+        "--pure",
+        "--",
+        "go",
+        "test",
+        "-count=1",
+        "-v",
+        "-run",
+        "TestFoundationPreviewLocalDogfood",
+        "./internal/api"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 600,
+      "summary": "A12. STATUS SKIPPED, and under gate rule G7 a skipped check is NEVER counted as a pass; it is why this api record's overall result is partial and never passed. WHAT WAS CHANGED: internal/api/live_dogfood_test.go's capHumanInputRequest previously FAILED ON PURPOSE when POST :request-input succeeded on a captured Requirement, with a message instructing the reader that this capability's eligibility must be re-judged rather than assumed. That inverted assertion is replaced by the full drive of A10's chain against the dogfood's real base URL and real callers: capture, then :start-framing as the owner asserting status framing at the incremented version, then :request-input as the runner asserting 200 and needs-input, then the owner detail asserting the needs_input object with its reason class, both options each with a non-empty impact and both scope lists, then :answer-input as the owner asserting the IDENTICAL requirement_id, status ready, the recorded option, and a Backlog row count unchanged across the whole chain. The recorded E22-2 history AND its date are kept in the comment as history and not deleted, and the comment now records that V2-082 supplied the judgement the old message asked for, naming the command and the route it added. Nothing else in that file changed: `git diff` shows no added or removed `func` line in it, no other helper was touched, no gate was touched and no name was changed; the Backlog row count is read through an inline closure inside the one rewritten function rather than a new package-level helper. WHY IT WAS NOT EXECUTED: TestFoundationPreviewLocalDogfood additionally requires AGENTIC_LOOP_LIVE_PROVIDER=1 (internal/api/live_dogfood_test.go:297-299, measured and agreeing with the Work Order) and makes real claude invocations this task does not authorise; C12 forbids starting any Provider CLI at all, not even --version. WHAT WAS ESTABLISHED INSTEAD: the rewritten helper is COMPILED (it is part of the internal/api test binary, which built and ran green) and go vet CLEAN (`devbox run --pure -- go vet ./...` produced no diagnostic). Running the gated test with the gate unset produced, verbatim: `live dogfood gate: AGENTIC_LOOP_LIVE_DOGFOOD=\"\", want \"1\"` and `--- SKIP: TestFoundationPreviewLocalDogfood (0.00s)`. THE GATE THAT EXECUTES IT is the coordinator-owned M5 re-dogfood."
+    },
+    {
+      "name": "capability-judgement-demonstrable-not-demonstrated",
+      "status": "passed",
+      "argv": [
+        "devbox",
+        "run",
+        "--pure",
+        "--",
+        "go",
+        "test",
+        "-count=1",
+        "./internal/api"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 600,
+      "summary": "A15. The declared success condition of the needs-input question surface is REACHABLE through the real HTTP surface for the first time: A10's check asserts it end to end over the composed handler and A11's check asserts its first edge against real persistence. The capability is therefore DEMONSTRABLE and it is NOT demonstrated -- the full chain against real everything runs only under the Provider-gated dogfood, which this task does not authorise, and the verdict is the coordinator-owned M5 re-dogfood's to issue. The automatic decision to ask is still not implemented: nothing here routes a policy denial, a budget exhaustion or an unclassifiable failure into needs-input, so V2-065 d13's residual stands unchanged. The M5 re-dogfood is REQUIRED, because the recorded dogfood verdict was FAILED with bucket ESCALATION on the ground that the precondition was unreachable and that ground becomes false at this commit. No capability id is cited in any of this task's three records, contracts/release-contract/** is untouched, and .agents/v2/evidence/V2-022-release-live-dogfood.json is untouched."
+    },
+    {
+      "name": "determinism-of-the-new-api-tests",
+      "status": "passed",
+      "argv": [
+        "devbox",
+        "run",
+        "--pure",
+        "--",
+        "go",
+        "test",
+        "-count=1",
+        "./internal/api"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 600,
+      "summary": "A14's determinism clause for internal/api. No fixed sleep, no wall-clock timer and no goroutine was added. The new tests inject their own clock (framingClock) and step it forward EXPLICITLY between read transactions, for a measured reason rather than a stylistic one: a read transaction reserves the conservative read boundary (quota.ReadTransactionUsage, Reads 6001) against the daily budget, the in-memory adapter never trues that reservation up, and the daily counter resets on a UTC day change, so a fixed clock admits only four read transactions per store per day and the A10 chain performs more than four reads. Advancing an injected clock is not a wait and involves no timer; no walk and no assertion was weakened to avoid the limit. The one duration reported by the live-local run is logged as an observation and never asserted as a threshold, and the live-local test's own waits are its pre-existing bounded deadline polls (waitForHealthz), reused unchanged."
+    },
+    {
+      "name": "component-api",
+      "status": "passed",
+      "argv": [
+        "devbox",
+        "run",
+        "--pure",
+        "--",
+        "make",
+        "component-api"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 600,
+      "summary": "Verdict line, verbatim: `ok  \tgithub.com/takushi/agentic-loop-foundation/v2/internal/api\t0.046s`. Judged by the verdict line and not by devbox run's exit status."
+    },
+    {
+      "name": "whole-tree-vet-and-test",
+      "status": "passed",
+      "argv": [
+        "devbox",
+        "run",
+        "--pure",
+        "--",
+        "go",
+        "test",
+        "-count=1",
+        "./..."
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 600,
+      "summary": "A20's implementer verification, minus the full make check, which the coordinator runs once at integration. `devbox run --pure -- go test -count=1 ./...` reported ok for every package with test files -- cmd/bootstrap, cmd/ci-plan, internal/api, internal/application, internal/ci, internal/contracts, internal/domain, internal/legacyimport, internal/provider, internal/quota, internal/reconciler, internal/release, internal/runner, internal/scheduler, internal/store/firestore, internal/store/memory, internal/update -- with no FAIL line, and `devbox run --pure -- go vet ./...` produced no diagnostic. The full `make check` was deliberately NOT run."
+    },
+    {
+      "name": "chain-position-and-manifest",
+      "status": "passed",
+      "argv": [
+        "devbox",
+        "run",
+        "--pure",
+        "--",
+        "go",
+        "test",
+        "-count=1",
+        "./internal/ci"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 600,
+      "summary": "A17, as it bears on internal/api. internal/api gains one branch in the POST switch default, one unexported suffix constant, one request struct and one handler, all using only symbols the file already imports, so no import edge is created or removed and the manifest is unmoved by this component. No module-path string literal was written into any new or modified test file: the route suffix the api tests need is built as a plain path-segment constant, which internal/ci's manifest derivation does not read as an edge. Verdict with every touched file git-added: `ok  \t.../internal/ci\t0.154s`. ci/components.json, Makefile, go.mod, go.sum and devbox.* are untouched."
+    }
+  ]
+}

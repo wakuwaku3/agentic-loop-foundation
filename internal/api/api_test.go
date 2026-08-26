@@ -3015,3 +3015,548 @@ func TestTheBacklogStillRefusesACursorItDidNotIssue(t *testing.T) {
 		})
 	}
 }
+
+// ===========================================================================
+// V2-082: a Requirement can reach the state that asks a person a question.
+// ===========================================================================
+
+// startFramingBody builds the whole request body for the new verb. The request
+// carries exactly request_id and expected_requirement_version: no
+// control_revision, no repository_id and no timestamp. strconv and strings are
+// already imported by this file, so this adds no import.
+func startFramingBody(requestID string, version domain.Version) string {
+	return `{"request_id":"` + requestID + `","expected_requirement_version":` + strconv.FormatInt(int64(version), 10) + `}`
+}
+
+// captureRequirement drives the real capture route as the owner and returns the
+// id and version it reports. It exists so the V2-082 tests below never write a
+// status into the store by hand: the whole point of this task is that the
+// application layer, and only the application layer, moves the status.
+func captureRequirement(t *testing.T, h http.Handler, tag string) (string, domain.Version) {
+	t.Helper()
+	w := call(h, http.MethodPost, "/v1/requirements", `{"request_id":"`+tag+`:capture","text":"a requirement to be shaped"}`, "owner")
+	if w.Code != http.StatusCreated {
+		t.Fatalf("capture status=%d body=%s", w.Code, w.Body.String())
+	}
+	doc := decodeBody(t, w.Body.Bytes())
+	id, ok := doc["requirement_id"].(string)
+	if !ok || id == "" {
+		t.Fatalf("capture response carries no requirement_id: %s", w.Body.String())
+	}
+	version, ok := doc["version"].(float64)
+	if !ok {
+		t.Fatalf("capture response carries no version: %s", w.Body.String())
+	}
+	return id, domain.Version(version)
+}
+
+// humanInputRowExists reads the needs-input side table directly, so "the
+// absence of a row" is asserted against storage rather than inferred from a
+// response body.
+func humanInputRowExists(t *testing.T, st *memory.Store, id string) bool {
+	t.Helper()
+	found := false
+	if err := st.Transact(context.Background(), func(u application.UnitOfWork) error {
+		_, ok, e := u.HumanInputRequest(context.Background(), id)
+		found = ok
+		return e
+	}); err != nil {
+		t.Fatalf("reading the needs-input row: %v", err)
+	}
+	return found
+}
+
+// TestRequestInputIsRefusedForACapturedRequirement is V2-082 A3's
+// reproduction, kept in the tree as A7's permanent assertion.
+//
+// A3 asked for the defect to be reproduced over HTTP before it was repaired,
+// and A7 asks for that reproduction to become permanent, because the repair is
+// that framing became REACHABLE -- never that the needs-input command became
+// callable from captured. domain.DecideRequirement admits
+// domain.RequirementNeedInput from framing, active and evaluating only, so a
+// Requirement that has only been captured must refuse the ask, and the refusal
+// must be attributable to the domain transition rather than to validation, to
+// the role gate or to the expected version.
+func TestRequestInputIsRefusedForACapturedRequirement(t *testing.T) {
+	h, st, _ := needsInputHandler(t)
+	id, version := captureRequirement(t, h, "a3")
+
+	before, ok := st.Requirement(id)
+	if !ok {
+		t.Fatalf("the captured Requirement %q is not in the store", id)
+	}
+	if before.Status != domain.RequirementCaptured || before.Version != version {
+		t.Fatalf("the capture route did not leave the Requirement at captured/v%d: %+v", version, before)
+	}
+	if humanInputRowExists(t, st, id) {
+		t.Fatal("a freshly captured Requirement already carries a needs-input row")
+	}
+
+	// The ask is well-formed, is sent by a role the route accepts, and names
+	// the Requirement's actual current version, so none of validation, the
+	// role gate or the version check can be what refuses it.
+	w := call(h, http.MethodPost, "/v1/requirements/"+id+":request-input", askBody("a3-ask", version), "runner")
+	if w.Code == http.StatusOK {
+		t.Fatalf("the needs-input ask succeeded from captured; domain.DecideRequirement admits needs-input from framing, active and evaluating only: %s", w.Body.String())
+	}
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("the refusal is not the domain transition: status=%d body=%s (401/403 would be the role gate, 409 the version check)", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, domain.ErrInvalidTransition.Error()) {
+		t.Fatalf("the refusal does not name the domain transition error %q: %s", domain.ErrInvalidTransition.Error(), body)
+	}
+	t.Logf("A3 reproduction: POST :request-input on a captured Requirement -> status=%d body=%s", w.Code, body)
+
+	// The refusal changed nothing: status, version and the absence of the row
+	// are all exactly what they were.
+	after, ok := st.Requirement(id)
+	if !ok {
+		t.Fatal("the Requirement disappeared")
+	}
+	if !reflect.DeepEqual(before, after) {
+		t.Fatalf("a refused ask changed the Requirement: before=%+v after=%+v", before, after)
+	}
+	if humanInputRowExists(t, st, id) {
+		t.Fatal("a refused ask created a needs-input row")
+	}
+}
+
+// framingClock is the injected clock the V2-082 chain test advances by hand.
+// It exists for one measured reason: a read transaction reserves the
+// conservative read boundary against the daily quota budget, and the memory
+// adapter never trues that reservation up, so a fixed clock allows only four
+// read transactions per UTC day per store. The chain below performs more than
+// four reads, so the clock is stepped forward a whole day between them. That
+// is an injected clock advanced explicitly, never a sleep, a timer or a
+// goroutine, and the assertions below never depend on the values it returns.
+type framingClock struct{ at time.Time }
+
+func (c *framingClock) Now() time.Time { return c.at }
+
+func (c *framingClock) nextDay() { c.at = c.at.Add(25 * time.Hour) }
+
+// framingHandler composes the same handler needsInputHandler composes -- owner,
+// runner and scheduler bearer tokens over a memory store -- with the steppable
+// clock above. It is a separate builder rather than an edit to
+// needsInputHandler, whose signature several pre-existing tests depend on.
+func framingHandler(t *testing.T) (http.Handler, *memory.Store, *framingClock) {
+	t.Helper()
+	st := memory.New()
+	c := &framingClock{at: time.Unix(1700000000, 0).UTC()}
+	svc, err := application.NewServiceWithConfig(st, c, &ids{}, application.ServiceConfig{InstallationID: "install", LeaseTTL: time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	auth := api.BearerAuthenticator{
+		"owner":     {Role: application.RoleOwner, Subject: "owner"},
+		"runner":    {Role: application.RoleRunner, Subject: "runner", RunnerID: "runner-1"},
+		"scheduler": {Role: application.RoleScheduler, Subject: "scheduler.self"},
+	}
+	return api.New(api.Config{Authenticator: auth, Service: svc, AllowedOrigins: []string{"https://console.example"}}), st, c
+}
+
+// TestStartFramingRouteIsUnambiguousAndRoleGated is V2-082 A8, plus the
+// transport half of A7.
+//
+// The routing claims are asserted rather than read. The new suffix cannot be
+// swallowed by the /v1/executions/{id}:start branch, because that branch is
+// prefix-gated on /v1/executions/ and because ":start-framing" does not
+// satisfy HasSuffix(path, ":start") either -- both directions are checked. It
+// cannot be swallowed by the GET /v1/requirements/ prefix branch, because that
+// branch is method-gated, and the proof that the POST reaches the command is
+// that it changes state. An empty id is a 404 rather than a route to the
+// command with an empty target.
+func TestStartFramingRouteIsUnambiguousAndRoleGated(t *testing.T) {
+	h, st, _ := framingHandler(t)
+	id, version := captureRequirement(t, h, "a8")
+	path := "/v1/requirements/" + id + startFramingRouteSuffix
+
+	// 401 unauthenticated.
+	if w := call(h, http.MethodPost, path, startFramingBody("a8-unauth", version), ""); w.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated status=%d body=%s", w.Code, w.Body.String())
+	}
+	// 403 for a runner: a Runner executes an Increment it was handed and does
+	// not decide that a Requirement should start being shaped.
+	if w := call(h, http.MethodPost, path, startFramingBody("a8-runner", version), "runner"); w.Code != http.StatusForbidden {
+		t.Fatalf("runner status=%d body=%s", w.Code, w.Body.String())
+	}
+	// An empty requirement id is a 404, not a command with an empty target.
+	if w := call(h, http.MethodPost, "/v1/requirements/"+startFramingRouteSuffix, startFramingBody("a8-empty", version), "owner"); w.Code != http.StatusNotFound {
+		t.Fatalf("empty id status=%d body=%s", w.Code, w.Body.String())
+	}
+	// The execution-scoped :start branch does not claim this suffix, in either
+	// direction: an executions path carrying :start-framing is a 404, because
+	// ":start-framing" does not satisfy HasSuffix(path, ":start").
+	if w := call(h, http.MethodPost, "/v1/executions/"+id+startFramingRouteSuffix, startFramingBody("a8-exec", version), "owner"); w.Code != http.StatusNotFound {
+		t.Fatalf("an executions path with the framing suffix status=%d body=%s; it must not reach either handler", w.Code, w.Body.String())
+	}
+	// A GET to the same path is not the framing route: it falls through to the
+	// method-gated read branch, where the framing suffix is part of an id no
+	// Requirement has, and it changes nothing.
+	if w := call(h, http.MethodGet, path, "", "owner"); w.Code == http.StatusOK {
+		t.Fatalf("a GET to the framing path returned 200: %s", w.Body.String())
+	}
+	// A body field the contract does not declare is refused by the strict
+	// decoder rather than ignored: the request carries no control_revision, no
+	// repository_id and no timestamp, and cannot be made to.
+	for _, smuggled := range []string{
+		`{"request_id":"a8-smuggle-a","expected_requirement_version":1,"control_revision":0}`,
+		`{"request_id":"a8-smuggle-b","expected_requirement_version":1,"repository_id":"repository-a"}`,
+		`{"request_id":"a8-smuggle-c","expected_requirement_version":1,"at":"2026-01-01T00:00:00Z"}`,
+	} {
+		if w := call(h, http.MethodPost, path, smuggled, "owner"); w.Code != http.StatusBadRequest {
+			t.Fatalf("a smuggled field was accepted: status=%d body=%s request=%s", w.Code, w.Body.String(), smuggled)
+		}
+	}
+
+	// Every refusal above left the Requirement byte-unchanged.
+	before, ok := st.Requirement(id)
+	if !ok {
+		t.Fatal("the Requirement disappeared")
+	}
+	if before.Status != domain.RequirementCaptured || before.Version != version {
+		t.Fatalf("a refused request changed the Requirement: %+v", before)
+	}
+
+	// An unknown Requirement id is a 404 from the command, not from the router.
+	if w := call(h, http.MethodPost, "/v1/requirements/requirement-does-not-exist"+startFramingRouteSuffix, startFramingBody("a8-unknown", 1), "owner"); w.Code != http.StatusNotFound {
+		t.Fatalf("an unknown Requirement status=%d body=%s", w.Code, w.Body.String())
+	}
+	// A stale expected version is a 409.
+	if w := call(h, http.MethodPost, path, startFramingBody("a8-stale", version+7), "owner"); w.Code != http.StatusConflict {
+		t.Fatalf("a stale expected version status=%d body=%s", w.Code, w.Body.String())
+	}
+	if after, _ := st.Requirement(id); !reflect.DeepEqual(before, after) {
+		t.Fatalf("a refused request changed the Requirement: before=%+v after=%+v", before, after)
+	}
+
+	// The owner may call it, and the proof that the POST reached the command
+	// rather than the method-gated read branch is that the state moved.
+	w := call(h, http.MethodPost, path, startFramingBody("a8-owner", version), "owner")
+	if w.Code != http.StatusOK {
+		t.Fatalf("owner start-framing status=%d body=%s", w.Code, w.Body.String())
+	}
+	doc := decodeBody(t, w.Body.Bytes())
+	for key := range doc {
+		if key != "requirement_id" && key != "status" && key != "version" {
+			t.Fatalf("the start-framing response carries an unnamed field %q", key)
+		}
+	}
+	if doc["requirement_id"] != id || doc["status"] != "framing" {
+		t.Fatalf("the start-framing response is %s", w.Body.String())
+	}
+	framed, _ := st.Requirement(id)
+	if framed.Status != domain.RequirementFraming || framed.Version != version+1 {
+		t.Fatalf("the POST did not reach the command; the Requirement is %+v", framed)
+	}
+	// A second framing of the same Requirement, with a fresh request id, is
+	// refused by the domain transition table: captured is the only source.
+	if w = call(h, http.MethodPost, path, startFramingBody("a8-again", framed.Version), "owner"); w.Code != http.StatusBadRequest {
+		t.Fatalf("framing an already-framing Requirement status=%d body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), domain.ErrInvalidTransition.Error()) {
+		t.Fatalf("the second framing was not refused by the domain transition: %s", w.Body.String())
+	}
+	if again, _ := st.Requirement(id); !reflect.DeepEqual(again, framed) {
+		t.Fatalf("a refused second framing changed the Requirement: %+v", again)
+	}
+
+	// The scheduler is accepted too, on its own Requirement: the route gates
+	// exactly the pair the capture route gates.
+	otherID, otherVersion := captureRequirement(t, h, "a8-scheduler")
+	if w = call(h, http.MethodPost, "/v1/requirements/"+otherID+startFramingRouteSuffix, startFramingBody("a8-sched", otherVersion), "scheduler"); w.Code != http.StatusOK {
+		t.Fatalf("scheduler start-framing status=%d body=%s", w.Code, w.Body.String())
+	}
+
+	// The route is declared in the transport contract, with the operation id
+	// and the two schemas this task names, and the read surface the capability
+	// declares is still declared too.
+	data, err := os.ReadFile(filepath.Join("..", "..", "contracts", "openapi", "openapi-v1.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	yaml := string(data)
+	for _, want := range []string{
+		"  /v1/requirements/{requirement_id}" + startFramingRouteSuffix + ":",
+		"operationId: startRequirementFraming",
+		"StartRequirementFramingRequest:",
+		"StartRequirementFramingResponse:",
+		"  /v1/requirements/{requirement_id}:",
+	} {
+		if !strings.Contains(yaml, want) {
+			t.Fatalf("openapi-v1.yaml does not declare %q", want)
+		}
+	}
+	// The declared request carries exactly the two fields the command accepts.
+	block := yaml[strings.Index(yaml, "StartRequirementFramingRequest:"):]
+	block = block[:strings.Index(block, "StartRequirementFramingResponse:")]
+	if !strings.Contains(block, "additionalProperties: false") || !strings.Contains(block, "required: [request_id, expected_requirement_version]") {
+		t.Fatalf("the declared request schema is not closed to exactly two required fields: %s", block)
+	}
+	// The forbidden-name check runs against the declared PROPERTIES rather
+	// than the whole block: the block's description says in prose which three
+	// fields the request deliberately does not carry, and that sentence must
+	// not be deleted to satisfy a substring check.
+	properties := block[strings.Index(block, "properties:"):]
+	for _, forbidden := range []string{"control_revision", "repository_id", "timestamp", "password", "credential", "token", "secret", "raw_prompt", "raw_provider_output"} {
+		if strings.Contains(properties, forbidden) {
+			t.Fatalf("the declared request properties carry %q", forbidden)
+		}
+	}
+	if !strings.Contains(properties, "request_id") || !strings.Contains(properties, "expected_requirement_version") {
+		t.Fatalf("the declared request properties are not the two fields the command accepts: %s", properties)
+	}
+}
+
+// startFramingRouteSuffix is the route suffix, built here rather than imported
+// because internal/api's constant is unexported. It is a literal path segment
+// and not a module path, so it is invisible to the manifest derivation.
+const startFramingRouteSuffix = ":start-framing"
+
+// TestARequirementCapturedThroughTheRouteCanBeDrivenToTheQuestionAndResumedAsTheSameRequirement
+// is V2-082 A10.
+//
+// One test, over the composed handler, for the whole chain: capture ->
+// start-framing -> request-input -> the detail shows the question ->
+// answer-input. It is the only place the declared success condition is
+// asserted in one run, and it asserts the declared failure condition in the
+// same run: the requirement_id is IDENTICAL at the end, and the total number
+// of Requirements is unchanged, so resuming created nothing.
+//
+// Nothing in this test writes a status into the store by hand. Every status
+// the Requirement passes through is produced by an application command reached
+// over HTTP, which is precisely what was impossible before this task: the only
+// Requirement status reachable through any application command was captured.
+func TestARequirementCapturedThroughTheRouteCanBeDrivenToTheQuestionAndResumedAsTheSameRequirement(t *testing.T) {
+	h, st, c := framingHandler(t)
+
+	// 1. Capture, over the real route, as the owner.
+	id, capturedVersion := captureRequirement(t, h, "a10")
+	if capturedVersion != 1 {
+		t.Fatalf("capture reported version %d; the capture response contract is version 1", capturedVersion)
+	}
+
+	requirementCount := func(step string) int {
+		c.nextDay()
+		w := call(h, http.MethodGet, "/v1/requirements?page_size=100", "", "owner")
+		if w.Code != http.StatusOK {
+			t.Fatalf("%s: the requirement page status=%d body=%s", step, w.Code, w.Body.String())
+		}
+		var page struct {
+			Requirements []struct {
+				RequirementID string `json:"requirement_id"`
+			} `json:"requirements"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &page); err != nil {
+			t.Fatalf("%s: %v", step, err)
+		}
+		return len(page.Requirements)
+	}
+	detail := func(step string) map[string]any {
+		c.nextDay()
+		w := call(h, http.MethodGet, "/v1/requirements/"+id, "", "owner")
+		if w.Code != http.StatusOK {
+			t.Fatalf("%s: the detail status=%d body=%s", step, w.Code, w.Body.String())
+		}
+		return decodeBody(t, w.Body.Bytes())
+	}
+
+	countAfterCapture := requirementCount("after capture")
+	if countAfterCapture != 1 {
+		t.Fatalf("the fixture holds %d Requirements, want exactly 1", countAfterCapture)
+	}
+
+	// 2. The detail reports captured and carries no needs_input key at all.
+	afterCapture := detail("after capture")
+	if afterCapture["status"] != "captured" {
+		t.Fatalf("the detail reports %v after capture", afterCapture["status"])
+	}
+	if _, present := afterCapture["needs_input"]; present {
+		t.Fatalf("a captured Requirement already carries a needs_input key: %+v", afterCapture)
+	}
+	if afterCapture["version"] != float64(capturedVersion) {
+		t.Fatalf("the detail reports version %v after capture", afterCapture["version"])
+	}
+
+	// 3. start-framing, as the owner. The response AND the detail both report
+	// framing, at exactly one more than the captured version.
+	w := call(h, http.MethodPost, "/v1/requirements/"+id+startFramingRouteSuffix, startFramingBody("a10-frame", capturedVersion), "owner")
+	if w.Code != http.StatusOK {
+		t.Fatalf("start-framing status=%d body=%s", w.Code, w.Body.String())
+	}
+	framingResponse := decodeBody(t, w.Body.Bytes())
+	if framingResponse["requirement_id"] != id {
+		t.Fatalf("start-framing named a different Requirement: %s", w.Body.String())
+	}
+	if framingResponse["status"] != "framing" {
+		t.Fatalf("start-framing reports %v", framingResponse["status"])
+	}
+	if framingResponse["version"] != float64(capturedVersion+1) {
+		t.Fatalf("start-framing reports version %v, want %d", framingResponse["version"], capturedVersion+1)
+	}
+	framingVersion := domain.Version(framingResponse["version"].(float64))
+	afterFraming := detail("after start-framing")
+	if afterFraming["status"] != "framing" || afterFraming["version"] != float64(framingVersion) {
+		t.Fatalf("the detail after start-framing is %+v", afterFraming)
+	}
+	if _, present := afterFraming["needs_input"]; present {
+		t.Fatalf("framing alone recorded a question: %+v", afterFraming)
+	}
+	// A13: nextAction is status-agnostic apart from completed and cancelled,
+	// so a framing Requirement with no Increment still reports the same next
+	// action a captured one does. This is why no read model changed.
+	if afterFraming["next_action"] != afterCapture["next_action"] {
+		t.Fatalf("framing changed next_action from %v to %v; the read model was supposed to be untouched", afterCapture["next_action"], afterFraming["next_action"])
+	}
+
+	// 4. request-input, as a runner, with a reason class, two options each
+	// carrying a non-empty impact, and both scope lists.
+	w = call(h, http.MethodPost, "/v1/requirements/"+id+":request-input", askBody("a10-ask", framingVersion), "runner")
+	if w.Code != http.StatusOK {
+		t.Fatalf("request-input status=%d body=%s", w.Code, w.Body.String())
+	}
+	askResponse := decodeBody(t, w.Body.Bytes())
+	if askResponse["status"] != "needs-input" || askResponse["requirement_id"] != id {
+		t.Fatalf("the ask response is %s", w.Body.String())
+	}
+	askVersion := domain.Version(askResponse["version"].(float64))
+
+	// 5. The detail carries the question: the reason class, every option with
+	// its impact, and both scope lists.
+	asked := detail("after request-input")
+	if asked["status"] != "needs-input" {
+		t.Fatalf("the detail after the ask reports %v", asked["status"])
+	}
+	question, ok := asked["needs_input"].(map[string]any)
+	if !ok {
+		t.Fatalf("the detail carries no needs_input object: %+v", asked)
+	}
+	if question["question"] != "Delete the branch or keep it?" {
+		t.Fatalf("the detail reports the question as %v", question["question"])
+	}
+	if question["reason_class"] != "destructive-irreversible" {
+		t.Fatalf("the detail reports the reason class as %v", question["reason_class"])
+	}
+	options, ok := question["options"].([]any)
+	if !ok || len(options) != 2 {
+		t.Fatalf("the detail reports %v options, want 2", question["options"])
+	}
+	seen := map[string]bool{}
+	for _, raw := range options {
+		option, isObject := raw.(map[string]any)
+		if !isObject {
+			t.Fatalf("an option is not an object: %v", raw)
+		}
+		impact, isString := option["impact"].(string)
+		if !isString || impact == "" {
+			t.Fatalf("an option carries no impact: %v", option)
+		}
+		optionID, isString := option["option_id"].(string)
+		if !isString || optionID == "" {
+			t.Fatalf("an option carries no option_id: %v", option)
+		}
+		seen[optionID] = true
+	}
+	if !seen["delete"] || !seen["keep"] {
+		t.Fatalf("the detail does not report both recorded options: %v", seen)
+	}
+	for _, list := range []string{"stopped_scope", "continuing_scope"} {
+		entries, isList := question[list].([]any)
+		if !isList || len(entries) == 0 {
+			t.Fatalf("the detail reports no %s: %v", list, question[list])
+		}
+	}
+
+	// 6. answer-input, as the owner, naming one recorded option. The SAME
+	// Requirement resumes: identical id, status ready, and the total number of
+	// Requirements is unchanged. That triple is the declared success condition
+	// and the declared failure condition asserted in the same run.
+	w = call(h, http.MethodPost, "/v1/requirements/"+id+":answer-input", answerBodyJSON("a10-answer", askVersion, "keep"), "owner")
+	if w.Code != http.StatusOK {
+		t.Fatalf("answer-input status=%d body=%s", w.Code, w.Body.String())
+	}
+	answer := decodeBody(t, w.Body.Bytes())
+	if answer["requirement_id"] != id {
+		t.Fatalf("the answer resumed a different Requirement: %v vs %q", answer["requirement_id"], id)
+	}
+	if answer["status"] != "ready" {
+		t.Fatalf("the answer left the Requirement at %v, want ready", answer["status"])
+	}
+	if answer["answered_option_id"] != "keep" {
+		t.Fatalf("the answer recorded option %v", answer["answered_option_id"])
+	}
+	if got := requirementCount("after the answer"); got != countAfterCapture {
+		t.Fatalf("the chain changed the number of Requirements from %d to %d; resuming must create nothing", countAfterCapture, got)
+	}
+	final, ok := st.Requirement(id)
+	if !ok {
+		t.Fatal("the Requirement disappeared")
+	}
+	if final.Status != domain.RequirementReady {
+		t.Fatalf("the stored Requirement is %+v, want ready", final)
+	}
+	t.Logf("A10: one Requirement %q walked captured -> framing -> needs-input -> ready over the composed handler, at versions %d -> %d -> %d -> %d, with the Requirement count unchanged at %d",
+		id, capturedVersion, framingVersion, askVersion, final.Version, countAfterCapture)
+}
+
+// TestARequirementLeftInFramingStillReadsAfterTheChangeIsReverted is V2-082
+// A16's verification clause. Rollback is a revert of internal/application/framing.go,
+// the one branch and one suffix constant in internal/api/api.go, and the one
+// path block in contracts/openapi/openapi-v1.yaml -- and nothing else, because
+// the change adds no port, no field to any stored record, no document kind and
+// no index, and writes only documents the existing capture and plan paths
+// already write.
+//
+// The claim that needs verifying is the last one: that no data exists which
+// only the new code can read. framing is a status the domain already accepts
+// and every read model already reports, so a Requirement left in framing by
+// reverted code still reads. That is asserted here by putting a Requirement
+// into framing WITHOUT the new command -- writing the status directly, exactly
+// as the pre-existing needs-input fixture writes active -- and reading it back
+// through the pre-existing detail route.
+func TestARequirementLeftInFramingStillReadsAfterTheChangeIsReverted(t *testing.T) {
+	h, st, c := framingHandler(t)
+	id, version := captureRequirement(t, h, "a16")
+
+	// The state a reverted tree would be left holding, written without any
+	// V2-082 code path.
+	if err := st.Transact(context.Background(), func(u application.UnitOfWork) error {
+		r, ok, e := u.Requirement(context.Background(), id)
+		if e != nil || !ok {
+			t.Fatalf("seed: ok=%v err=%v", ok, e)
+		}
+		next := r
+		next.Status = domain.RequirementFraming
+		next.Version++
+		return u.SaveRequirement(context.Background(), next, r.Version)
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	c.nextDay()
+	w := call(h, http.MethodGet, "/v1/requirements/"+id, "", "owner")
+	if w.Code != http.StatusOK {
+		t.Fatalf("a Requirement stored in framing does not read: status=%d body=%s", w.Code, w.Body.String())
+	}
+	doc := decodeBody(t, w.Body.Bytes())
+	if doc["status"] != "framing" {
+		t.Fatalf("the detail reports %v for a Requirement stored in framing", doc["status"])
+	}
+	if doc["version"] != float64(version+1) {
+		t.Fatalf("the detail reports version %v", doc["version"])
+	}
+	// And the read model reports the same next action it reports for a
+	// captured Requirement with no Increment, which is why readmodels.go is
+	// prohibited by design rather than by omission.
+	if doc["next_action"] != "plan increments" {
+		t.Fatalf("a framing Requirement with no Increment reports next_action %v", doc["next_action"])
+	}
+	c.nextDay()
+	if w = call(h, http.MethodGet, "/v1/requirements?page_size=100", "", "owner"); w.Code != http.StatusOK {
+		t.Fatalf("the requirement page does not read with a framing Requirement in it: status=%d body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), id) {
+		t.Fatalf("the requirement page omits the framing Requirement: %s", w.Body.String())
+	}
+}
