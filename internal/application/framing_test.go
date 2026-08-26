@@ -541,27 +541,46 @@ func rowExists(t *testing.T, st *memory.Store, id string) bool {
 }
 
 // ---------------------------------------------------------------------------
-// A6: the neighbouring defect the choice of gate exposed. RECORDED, NOT FIXED.
+// A6: the neighbouring defect the choice of gate exposed. V2-085 SUPPLIED THE
+// REPAIR, and this test is now an assertion.
 // ---------------------------------------------------------------------------
 
-// TestPlanAndPrepareAreMeasuredUnderEmergencyStop is A6. It is a MEASUREMENT
-// and a recorded finding, not a repair: internal/application/service.go is
-// prohibited to this task, and the repair is owned elsewhere.
+// TestPlanAndPrepareAreMeasuredUnderEmergencyStop is A6, and it keeps its
+// name because the history is the point.
 //
-// The finding, named for the tech lead: PLAN AND PREPARE ARE PERMIT-FREE.
-// Neither evaluates a domain.Permit, so both change canonical Increment and
-// Requirement state under emergency-stop -- and under every other stop mode.
-// A stop that still permits canonical state to move is not a stop.
+// V2-082 HISTORY, kept rather than deleted. When this test was written it was
+// a MEASUREMENT and a recorded finding, not a repair:
+// internal/application/service.go was prohibited to V2-082, and the repair was
+// owned elsewhere. The finding, named for the tech lead, was PLAN AND PREPARE
+// ARE PERMIT-FREE -- neither evaluated a domain.Permit, so both changed
+// canonical Increment and Requirement state under emergency-stop and under
+// every other stop mode, and a stop that still permits canonical state to move
+// is not a stop. The Plan/Prepare outcome was LOGGED rather than asserted ON
+// PURPOSE: asserting the defect would have pinned it in place and turned its
+// future repair into a test failure in a file that task could not edit. The
+// log line below the assertions named V2-085 as the owner of the repair.
 //
-// dp-v2-082 d5 deliberately did NOT propagate that shape to StartFraming.
-// A precedent is not an argument when the precedent is the thing being
-// escalated: this test asserts, in the same run, that the new command IS
-// denied under the very mode in which Plan and Prepare are measured, so the
-// difference is a measured fact rather than a claim in a comment.
+// V2-085 SUPPLIED IT. Service.Plan and Service.Prepare now each evaluate one
+// domain.Permit of kind domain.PermitClaim against a domain.ControlTarget and
+// a control revision resolved inside the same transaction from the
+// Requirement's own Repository link and domain.EffectiveControl, so the logged
+// outcome is now an ASSERTION: under emergency-stop both are refused with
+// domain.ErrControlDenied and leave the Requirement, the Increment and the
+// event count byte-unchanged, while Service.StartFraming stays refused exactly
+// as before. The verbatim BEFORE measurement, taken by V2-085 by running this
+// very test at base commit b0b9ffef8c628f8091e5dbfdbedf88736144a62c before
+// touching any source file, was: "Plan err=<nil> (canonical Requirement state
+// moved: true) and Prepare err=<nil> (canonical Increment state moved to
+// ready: true)".
 //
-// The Plan/Prepare outcome itself is LOGGED rather than asserted, on purpose:
-// asserting the defect would pin it in place and turn its future repair into a
-// test failure in a file that task cannot edit.
+// dp-v2-082 d5 deliberately did NOT propagate the permit-free shape to
+// StartFraming. A precedent is not an argument when the precedent is the thing
+// being escalated: this test asserts, in the same run, that all three commands
+// are denied under the same mode.
+//
+// The full seven-mode table for Plan and Prepare, and the pause-intake
+// boundary that is the argument for the kind, live in
+// planning_permit_test.go.
 func TestPlanAndPrepareAreMeasuredUnderEmergencyStop(t *testing.T) {
 	svc, st := service()
 	ctx := owner(context.Background())
@@ -569,6 +588,14 @@ func TestPlanAndPrepareAreMeasuredUnderEmergencyStop(t *testing.T) {
 	captured, err := svc.Capture(ctx, application.CaptureRequest{RequestID: "a6:capture", Text: "x"})
 	if err != nil {
 		t.Fatalf("capture: %v", err)
+	}
+	// The Increment the Prepare cell attempts is planned while the mode is
+	// still allow, exactly as planning_permit_test.go and stop_matrix_test.go
+	// build their own fixtures, so this test never plans under a non-allow
+	// mode by accident and the Prepare refusal is attributable to the mode.
+	planned, err := svc.Plan(ctx, application.PlanRequest{RequestID: "a6:plan-fixture", RequirementID: captured.RequirementID, ExpectedRequirementVersion: captured.Version})
+	if err != nil {
+		t.Fatalf("fixture plan under allow: %v", err)
 	}
 	if _, err = svc.Control(ctx, application.ControlRequest{
 		RequestID: "a6:control",
@@ -580,8 +607,20 @@ func TestPlanAndPrepareAreMeasuredUnderEmergencyStop(t *testing.T) {
 	}
 
 	before, _ := st.Requirement(captured.RequirementID)
+	incrementBefore, ok := st.Increment(planned.IncrementID)
+	if !ok {
+		t.Fatal("the fixture Increment is not in the store")
+	}
+	if incrementBefore.Status != domain.IncrementProposed {
+		t.Fatalf("the fixture Increment is %q, not proposed", incrementBefore.Status)
+	}
+	eventsBefore := len(st.Events())
+	// The Control Intent itself stages an outbox item, so the outbox
+	// assertion below is a delta across the three refusals rather than an
+	// absolute zero.
+	outboxBefore := len(st.Outbox())
 
-	// The command this task owns: denied, and it changes nothing.
+	// The command V2-082 owns: denied, and it changes nothing.
 	_, framingErr := svc.StartFraming(ctx, application.StartFramingRequest{RequestID: "a6:frame", RequirementID: captured.RequirementID, ExpectedVersion: before.Version})
 	if !errors.Is(framingErr, domain.ErrControlDenied) {
 		t.Fatalf("start-framing under emergency-stop returned %v, want ErrControlDenied", framingErr)
@@ -590,27 +629,44 @@ func TestPlanAndPrepareAreMeasuredUnderEmergencyStop(t *testing.T) {
 		t.Fatalf("the denied framing changed the Requirement: %+v", unchanged)
 	}
 
-	// The neighbours: measured, logged, not asserted and not repaired.
-	plan, planErr := svc.Plan(ctx, application.PlanRequest{RequestID: "a6:plan", RequirementID: captured.RequirementID, ExpectedRequirementVersion: before.Version})
+	// The neighbour V2-085 repaired, half one: Plan is refused and the parent
+	// Requirement is byte-unchanged, its Version and its Increments slice
+	// included.
+	_, planErr := svc.Plan(ctx, application.PlanRequest{RequestID: "a6:plan", RequirementID: captured.RequirementID, ExpectedRequirementVersion: before.Version})
+	if !errors.Is(planErr, domain.ErrControlDenied) {
+		t.Fatalf("Plan under emergency-stop returned %v, want ErrControlDenied", planErr)
+	}
 	afterPlan, _ := st.Requirement(captured.RequirementID)
-	planMovedCanonicalState := !reflect.DeepEqual(afterPlan, before)
-
-	var prepareErr error
-	preparedMovedCanonicalState := false
-	if planErr == nil {
-		var prepared application.PrepareResponse
-		prepared, prepareErr = svc.Prepare(ctx, application.PrepareRequest{RequestID: "a6:prepare", IncrementID: plan.IncrementID, ExpectedVersion: plan.Version})
-		if prepareErr == nil {
-			if inc, ok := st.Increment(plan.IncrementID); ok {
-				preparedMovedCanonicalState = inc.Status == domain.IncrementReady && inc.Version == prepared.Version
-			}
-		}
+	if !reflect.DeepEqual(afterPlan, before) {
+		t.Fatalf("the denied Plan changed the Requirement: before=%+v after=%+v", before, afterPlan)
 	}
 
-	t.Logf("A6 FINDING (recorded, not fixed; V2-085 owns the repair): under an effective control mode of emergency-stop, "+
-		"Plan err=%v (canonical Requirement state moved: %v) and Prepare err=%v (canonical Increment state moved to ready: %v), "+
-		"while Service.StartFraming is denied with %v. Plan and Prepare evaluate no domain.Permit at all, so a stop mode does not "+
-		"reach them; StartFraming evaluates domain.Permit with Kind claim and is therefore denied by every stop mode. "+
-		"internal/application/service.go is prohibited to V2-082, so this is escalated rather than changed.",
-		planErr, planMovedCanonicalState, prepareErr, preparedMovedCanonicalState, framingErr)
+	// Half two: Prepare is refused and the proposed Increment is
+	// byte-unchanged, so it never reaches the only status a Claim accepts.
+	_, prepareErr := svc.Prepare(ctx, application.PrepareRequest{RequestID: "a6:prepare", IncrementID: planned.IncrementID, ExpectedVersion: incrementBefore.Version})
+	if !errors.Is(prepareErr, domain.ErrControlDenied) {
+		t.Fatalf("Prepare under emergency-stop returned %v, want ErrControlDenied", prepareErr)
+	}
+	incrementAfter, _ := st.Increment(planned.IncrementID)
+	if !reflect.DeepEqual(incrementAfter, incrementBefore) {
+		t.Fatalf("the denied Prepare changed the Increment: before=%+v after=%+v", incrementBefore, incrementAfter)
+	}
+	if incrementAfter.Status != domain.IncrementProposed {
+		t.Fatalf("the denied Prepare left the Increment at %q, want proposed", incrementAfter.Status)
+	}
+
+	// None of the three refusals recorded an event or staged an outbox item.
+	if got := len(st.Events()); got != eventsBefore {
+		t.Fatalf("the three refusals changed the event count from %d to %d", eventsBefore, got)
+	}
+	if got := len(st.Outbox()); got != outboxBefore {
+		t.Fatalf("the three refusals changed the outbox from %d to %d items", outboxBefore, got)
+	}
+
+	t.Logf("A6 REPAIRED by V2-085: under an effective control mode of emergency-stop, Plan is now refused with %v (the Requirement is "+
+		"byte-unchanged) and Prepare is now refused with %v (the Increment stays proposed and byte-unchanged), while Service.StartFraming "+
+		"is refused with %v exactly as before. V2-082 measured this same test's BEFORE row as Plan err=<nil> with the canonical "+
+		"Requirement state moved and Prepare err=<nil> with the Increment moved to ready, and logged rather than asserted it because "+
+		"internal/application/service.go was prohibited to that task.",
+		planErr, prepareErr, framingErr)
 }
