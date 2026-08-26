@@ -104,7 +104,7 @@ V2-022へ合流する並行枝として扱う。roadmap M3の完了条件はGCP 
 - V2-048はV2-047後、V2-017のowner承認待ちと並行して進められる
 - V2-027はV2-018 gate後、V2-030はV2-020 gate後にそれぞれ並列
 
-## 4. gate共通判定規則 G1〜G5
+## 4. gate共通判定規則 G1〜G7
 
 すべてのgate task（V2-006, V2-011, V2-015, V2-018, V2-020, V2-026, V2-029,
 V2-032, V2-036, V2-039）は次を満たしてはじめてcompleteにできる。
@@ -431,6 +431,77 @@ D1の管轄であり、M9の最終置換までに払われる。M5が証明し�
 **逆向きの拘束も置く。** 安全性として読める条件を到達性の証拠で通してはならない。
 「昇格が起きたから安全性も満たされている」は成立しない（1回の昇格は拒否の網羅性を
 何も語らない）。安全性は列挙か閉包で示すこと。
+
+
+### 8.1への訂正2件（V2-081の判定を受けて）
+
+**訂正1: この節が裁定しているのは条件4のみで、条件1ではない。** 本文は
+「全機能Evidenceを持つcandidateだけStableになる」を逐語で名指しており、3根拠は
+すべてその条件と§3のgovernanceについてのものである。「このFoundation Repositoryを
+Preview対象にしてdogfoodする」を再分類する文は1つもない。**そしてその条件は安全性としては
+読めない**——「だけ」も否定も無く、dogfoodを主題にして「やった」と主張している。
+V2-026のfailure注記とV2-081のWork Orderが「条件1と4を裁定した」と書いたのはcoordinatorの
+誤りである。条件1は到達性として読み、**12 capabilityのうち成功が1件だからではなく、
+適格な根拠が存在しないから**落とす。出来事そのものは争わない。
+
+**訂正2: 上の第1根拠は、この節が2段落後に禁じている形になっている。** A17のpositive halfは
+合成treeでの1回の昇格、negative halfは実treeでの1回の拒否集合である。**単一のoccurrenceで
+安全性を通すのは、まさにこの節の逆向き拘束が禁じたこと**である。V2-081の判定者がこれを指摘し、
+根拠を`internal/domain/release_test.go:230`と`:372`の閉包grid列挙、および`:122`の
+12拒否class分離に置き換えた。**結論は生き残り、根拠だけ強い方に替わった。**
+A17を使えない実務上の理由もある——それはresultがpartialで鮮度も無いlive記録の中にあり、
+閉包列挙の方はG6aのmake checkで判定commitごとに再実行される。
+
+## 8.2 live記録は1本ではない。gateごとに守る記録が違う
+
+**私はここで間違えた。記録しておく。**
+
+§5の表はmilestoneごとに別のlive componentを要求している。
+
+| gate | 必須component | exercise |
+|---|---|---|
+| M2 | `control-plane-local-live` | `./internal/api`の`TestControlPlanePreviewLocalLive` |
+| **M3live** | `provider-live-claude` | `./internal/runner`の`TestProviderLiveVerticalSlice` |
+| **M5live** | `release-live-dogfood` | `./internal/api`の`TestFoundationPreviewLocalDogfood` |
+| M6live | `provider-live-multi` | 3 provider全部 |
+
+V2-080はM3liveの記録を再観測した。私はそれでM5のG6bが閉じると判断し、Work Orderにも
+HANDOFF.mdにも書いたが、**閉じていない。** G6bは「観測commitから判定commitまでのdiffが
+exercise file setと交わらないこと」を要求するが、**どのexerciseのfile setかはgateが決める。**
+別のexerciseを何回再観測してもそのgateの鮮度は動かない。
+
+**手続き: liveの鮮度を主張する前に、§5の表でそのgateの必須component名を引き、
+その名前を持つindex entryを引き、そのrecordが宣言するexerciseのfile setで測る。**
+componentの名前が違えば別の記録である。
+
+## 8.3 partialの原因を分類する。宣言による繰り延べとproduct gapは別物である
+
+G2は「partialなrecordは根拠にできない」と定める。これは正しいが、**partialの原因が
+そのmilestoneの外にあるとき、G2をそのまま適用するとmilestoneが構造的に充足不能になる**
+——§8.1が完了条件について指摘したのと同じ形が、gate規則の層で起きる。
+
+V2-022のdogfoodで失敗した11 capabilityを実測分類すると:
+
+| 原因 | 数 |
+|---|---|
+| 宣言にcodexとopencodeを含み、当該machineで未認証 | 3 |
+| 宣言にCloud Runを含み、D1の管轄 | 4 |
+| **そのmilestone自身が負うproduct gap** | 4 |
+
+**規則**: capabilityのevidenceが *宣言によって繰り延べられている* とは、そのcapability
+自身が宣言する外部systemに、等級が繰り延べられているもの（Cloud Run→D1）か、
+当該machineで認証されていないProvider（codex/opencode→M6）が含まれることをいう。
+これは**判断ではなく、capabilityの宣言から導出できる測定可能な事実**である。
+繰り延べられたcapabilityは`failed`ではなく*ineligible-by-declaration*として記録してよく、
+そのときrecordは`passed`になりうる。
+
+**逆向きの拘束、これが本体である。** **product gapを繰り延べとして記録してはならない。**
+繰り延べは必ずcapability自身の宣言から導出し、「到達できなかった」という観察からは
+導出しない。到達できなかった理由が自分のmilestoneの中にあるなら、それは`failed`である。
+V2-022の4件（`cap-repository-registration`、`cap-backlog-visibility`、
+`cap-human-input-request`、`cap-user-documentation`）はこちら側であり、
+**この規則はそれらを1件も救わない。**
+
 
 ## 9.1 台帳artifactをcommitする前の手順と、禁止git操作の実体
 

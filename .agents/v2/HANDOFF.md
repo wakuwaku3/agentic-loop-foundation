@@ -183,11 +183,38 @@ V2-089 は「機構は既に1状態について存在していたので、これ
 
 ---
 
-## 4. このマシンに残した価値
+## 4. このマシンの到達点と、M5 について私が間違えたこと
 
-- `v2` は remote と一致。`make check` 緑。
-- **complete 68 / 95。** gate は M0〜M4 通過、M5 は V2-026 で失敗し V2-081 が後継。
-- V2-080（pooled live 観測）をここで払う。判定 commit での交わりを空にして
-  **V2-081 が M5 を再判定できる状態**にするのが、このマシンの最後の仕事である。
-- M5 が失敗した2つの根拠のうち片方（G6a の赤い `make check`）は既に解消済み。
-  もう片方が G6b の交わりで、それが V2-080 の対象である。
+- `v2` は remote と一致。`make check` 緑。**complete 69 / 96**（blocked 20・failed 6・queued 1）。
+- gate は **M0〜M4 通過。M5 は失敗**（V2-026、後継 V2-081 も **failed**）。
+
+**live 記録は1本ではなく2本ある。ここを取り違えた。**
+
+| gate | 必須 component | exercise |
+|---|---|---|
+| **M3live** | `provider-live-claude` | `./internal/runner` の `TestProviderLiveVerticalSlice` |
+| **M5live** | `release-live-dogfood` | `./internal/api` の `TestFoundationPreviewLocalDogfood` |
+
+V2-080 が再観測したのは**上の行**である。私はこれで M5 の G6b が閉じると書いたが、
+**閉じていない。** M5 の根拠は下の行で、別の exercise・別の record である。
+V2-080 それ自体は正しく、M3 の根拠の鮮度を回復している。
+
+**さらに M5 は、このマシンでは原理的に閉じられない。** V2-022 の dogfood が `partial`
+だった理由を capability ごとに実測すると:
+
+| 原因 | 数 | capability |
+|---|---|---|
+| **codex/opencode 未認証** | 3 | `cap-autonomous-resolution`, `cap-shared-resource-allocation`, `cap-provider-operation` |
+| **GCP 待ち（D1）** | 4 | `cap-preview-operation`, `cap-stable-promotion`, `cap-loop-control`, `cap-loop-self-update` |
+| **M5 自身が負う product gap** | 4 | `cap-repository-registration`, `cap-backlog-visibility`, `cap-human-input-request`, `cap-user-documentation` |
+
+**12 のうち 7 は人の作業が入るまで到達できない。** いま払っても同じ `partial` が返るので、
+再観測は無駄になる。したがって **V2-095**（dogfood 再観測）は認証と project と
+4つの gap 修正を待つ `blocked` として登録してある。
+
+なお 4つの gap のうち `cap-backlog-visibility` の cursor 拒否は **V2-079 が既に直しており**、
+`cap-human-input-request` の「captured から needs-input に入れない」は V2-082 が入れた
+framing と V2-084 の `CompleteFraming` が触る範囲なので、**再観測すれば正当に反転する見込み**がある。
+
+**M5 は M6 相当の作業の後に閉じる。** milestone の番号順とは逆になるが、これは
+§8.1 の第3根拠が既に述べていたことである。
