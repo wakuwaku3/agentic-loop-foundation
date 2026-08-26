@@ -3817,10 +3817,10 @@ func pinRows() []pinRow {
 		// --- POST /internal/reconcile ------------------------------------
 		{name: "reconcile-without-the-scheduler-identity", method: http.MethodPost, path: "/internal/reconcile", wantStatus: 401, wantCode: "unauthorized"},
 		{name: "reconcile-with-a-runner-session-header", method: http.MethodPost, path: "/internal/reconcile",
-			headers: map[string]string{"X-Goog-Authenticated-User-Email": pinReconcileAssertion, "X-Agentic-Runner-Session": "anything"},
+			headers:    map[string]string{"X-Goog-Authenticated-User-Email": pinReconcileAssertion, "X-Agentic-Runner-Session": "anything"},
 			wantStatus: 401, wantCode: "unauthorized"},
 		{name: "reconcile-with-a-foreign-identity", method: http.MethodPost, path: "/internal/reconcile",
-			headers: map[string]string{"X-Goog-Authenticated-User-Email": "accounts.google.com:someone.else@example.com"},
+			headers:    map[string]string{"X-Goog-Authenticated-User-Email": "accounts.google.com:someone.else@example.com"},
 			wantStatus: 401, wantCode: "unauthorized"},
 		{name: "reconcile-accepted", method: http.MethodPost, path: "/internal/reconcile",
 			headers:    map[string]string{"X-Goog-Authenticated-User-Email": pinReconcileAssertion},
