@@ -1272,6 +1272,30 @@ func (fx *dogfood) planAndPrepare(t *testing.T, base, requirementID string, vers
 	service, closeStore := fx.directStoreService(t)
 	defer closeStore()
 	ctx := application.ContextWithCaller(context.Background(), application.Caller{Role: application.RoleOwner, Subject: fx.ownerEmail})
+	// V2-089: every journey fed by this helper claims the Increment it creates,
+	// and a claim is refused unless the parent Requirement is in one of the four
+	// statuses that admit work -- ready, active, waiting, recovering. Each
+	// caller passes a Requirement that fx.capture left in `captured`, so the
+	// helper walks it to `ready` through the product's OWN commands -- V2-082's
+	// Service.StartFraming and V2-084's Service.CompleteFraming, on the same
+	// direct-store Service this helper already holds -- and threads the
+	// resulting version into the Plan. No store write and no assertion is
+	// touched: this block is purely additive, and it is the only change V2-089
+	// makes to this file.
+	//
+	// This file is behind the live dogfood gate and was NOT EXECUTED by V2-089
+	// (no Provider CLI invocation is authorised and no Google Cloud resource may
+	// be contacted), so this edit is compile-checked by `go vet ./internal/api`
+	// and `gofmt` only and is recorded as unexecuted.
+	framed, err := service.StartFraming(ctx, application.StartFramingRequest{RequestID: base + ":start-framing", RequirementID: requirementID, ExpectedVersion: version})
+	if err != nil {
+		t.Fatalf("start framing (direct store, so the claim below is not refused for a parent that admits no work): %v", err)
+	}
+	readied, err := service.CompleteFraming(ctx, application.CompleteFramingRequest{RequestID: base + ":complete-framing", RequirementID: requirementID, ExpectedVersion: framed.Version})
+	if err != nil {
+		t.Fatalf("complete framing (direct store): %v", err)
+	}
+	version = readied.Version
 	planned, err := service.Plan(ctx, application.PlanRequest{RequestID: base + ":plan", RequirementID: requirementID, ExpectedRequirementVersion: version})
 	if err != nil {
 		t.Fatalf("plan (direct store, because no /v1 route creates an Increment): %v", err)

@@ -1111,7 +1111,33 @@ func driveRunnerRoutes(t *testing.T, report string) []struct {
 	if err != nil {
 		t.Fatal(err)
 	}
-	planned, err := svc.Plan(ctx, application.PlanRequest{RequestID: "plan", RequirementID: captured.RequirementID, ExpectedRequirementVersion: captured.Version})
+	// V2-089: claims:acquire is refused unless the parent Requirement is in one
+	// of the four statuses that admit work, and it was MEASURED to answer 409
+	// conflict here before this migration. The Requirement is moved to `ready`
+	// through the product's OWN routes -- :start-framing and V2-084's
+	// :complete-framing over this same composed handler -- rather than a store
+	// write, because this fixture already holds the handler and needs no store
+	// access to do it. Both commands bump the Requirement's Version, so the
+	// version threaded into the Plan below is the one :complete-framing
+	// reported, not captured.Version.
+	framed := call(h, http.MethodPost, "/v1/requirements/"+captured.RequirementID+":start-framing",
+		`{"request_id":"drive-start-framing","expected_requirement_version":`+strconv.Itoa(int(captured.Version))+`}`, "owner")
+	if framed.Code != 200 {
+		t.Fatalf("start-framing: status=%d body=%s", framed.Code, framed.Body.String())
+	}
+	framedVersion := int(decodeBody(t, framed.Body.Bytes())["version"].(float64))
+	readied := call(h, http.MethodPost, "/v1/requirements/"+captured.RequirementID+":complete-framing",
+		`{"request_id":"drive-complete-framing","expected_requirement_version":`+strconv.Itoa(framedVersion)+`}`, "owner")
+	if readied.Code != 200 {
+		t.Fatalf("complete-framing: status=%d body=%s", readied.Code, readied.Body.String())
+	}
+	readyBody := decodeBody(t, readied.Body.Bytes())
+	if readyBody["status"] != string(domain.RequirementReady) {
+		t.Fatalf("complete-framing left the Requirement in %v, want %q", readyBody["status"], domain.RequirementReady)
+	}
+	readyVersion := domain.Version(int(readyBody["version"].(float64)))
+
+	planned, err := svc.Plan(ctx, application.PlanRequest{RequestID: "plan", RequirementID: captured.RequirementID, ExpectedRequirementVersion: readyVersion})
 	if err != nil {
 		t.Fatal(err)
 	}
