@@ -380,6 +380,24 @@
    "working_directory": ".",
    "timeout_seconds": 900,
    "summary": "A25 EVIDENCE. EXACTLY FOUR records were created: .agents/v2/evidence/V2-090-domain.json (id ev-v2-090-domain, component domain), V2-090-application.json (id ev-v2-090-application, component application), V2-090-api.json (id ev-v2-090-api, component api) and V2-090-contracts.json (id ev-v2-090-contracts, component contracts). Every record carries task_id V2-090 -- the PRODUCING task, never a consuming one -- and correlation_id v2-090-requirement-pause-resume-cancel. Every acceptance item A1 through A27 is traceable to a named check in these four records, and every check records the argv actually executed, the working directory and the timeout, with a summary stating the MEASURED result. The execution environment is recorded once per record in the execution-environment check: uname -srm, the go version as resolved inside devbox run --pure, the devbox version, the worktree path, the branch and the base commit. NO check is recorded as passed that was not executed. NO check is skipped in these records; the two G7-relevant skip populations that exist in the repository -- internal/store/firestore with no emulator, 26 top-level and 49 including subtests -- are recorded with their grep patterns beside their numbers in the a20 check and are never counted as a pass, and the emulator was started for real so the firestore component is green by execution. The strings 'capability exercised' and 'preview journey passed' appear nowhere in these records and NO capability id is cited. All four are registered with appended entries in .agents/v2/evidence/index.json -- compact one-line JSON, this task's four entries appended to the existing entries array, NO other task's entry touched, all four with release_eligible false -- and each entry's evidence_hash is the sha256 of that artifact's final committed bytes. COMPLETION: `devbox run --pure -- sh -c 'go test -count=1 ./internal/contracts'` is green, including TestActiveEvidenceIndex (which re-hashes every artifact and compares it against its index entry, validates each against contracts/schemas/evidence.json, and requires the indexed path set to equal the on-disk set) and TestSchemasRejectSensitiveFieldNames. Verdict: 'ok github.com/takushi/agentic-loop-foundation/v2/internal/contracts'. Every digest written in prose in these records is 64 hex characters followed by at most one punctuation character, and no two revisions are ever joined by a two-dot range. NO prompt and NO raw provider response appears in any form, truncated or hashed; NO credential value appears anywhere; NO Provider CLI was invoked, not even for a version string; and nothing contacted GCP -- the only external processes were the local Firestore emulator scripts/firestore-emulator.sh starts and the cmd/control-plane binary this repository builds."
+  },
+  {
+   "name": "a25-gitleaks-after-the-evidence-commit",
+   "status": "passed",
+   "argv": [
+    "devbox",
+    "run",
+    "--pure",
+    "--",
+    "gitleaks",
+    "dir",
+    ".agents",
+    "--config",
+    ".gitleaks.toml"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 900,
+   "summary": "Run AFTER the evidence commit c10a5d1, as A25 directs, and scoped to .agents rather than the whole tree: `devbox run --pure -- gitleaks dir .agents --config .gitleaks.toml`. VERBATIM verdict lines: 'INF scanned ~5993883 bytes (5.99 MB) in 427ms' and 'INF no leaks found'. `gitleaks dir .` was deliberately NOT run, because it reports roughly 26 findings from the gitignored build/evidence/** tree and would drown the signal."
   }
  ]
 }
