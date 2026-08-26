@@ -36,6 +36,13 @@ const RunnerSessionHeader = "X-Agentic-Runner-Session"
 type CombinedAuthenticator struct {
 	Runner      *runner.Service
 	OwnerEmails map[string]struct{}
+	// SchedulerIdentity is the single IAP-asserted email of the Loop's own
+	// machine identity -- in a real deployment the Cloud Scheduler OIDC
+	// service account cmd/control-plane already requires as
+	// RECONCILE_IDENTITY. It is optional: an empty value means this
+	// composition can assert an owner and a runner and nothing else, which is
+	// exactly the shape every deployment had before V2-086.
+	SchedulerIdentity string
 }
 
 func (a CombinedAuthenticator) Authenticate(r *http.Request) (application.Caller, error) {
@@ -52,6 +59,26 @@ func (a CombinedAuthenticator) Authenticate(r *http.Request) (application.Caller
 	email, err := parseIAPEmail(r.Header.Get("X-Goog-Authenticated-User-Email"))
 	if err != nil {
 		return application.Caller{}, err
+	}
+	// The scheduler identity is checked BEFORE the owner map, and that order is
+	// load-bearing rather than stylistic: an identity that resolved as owner
+	// first would silently acquire every owner-only route, which is the same
+	// self-naming defect one level up. The runner-session branch above still
+	// runs first and is unchanged, so a verified runner session is a runner
+	// even when a scheduler identity is configured.
+	//
+	// An identity configured as BOTH scheduler and owner is refused outright,
+	// for both of them and for every other IAP caller, instead of being
+	// resolved by precedence. A single asserted email must produce exactly one
+	// role, or an error; silently picking one would hand whichever role lost
+	// the tie to an operator who believes they configured the other.
+	if scheduler := strings.ToLower(strings.TrimSpace(a.SchedulerIdentity)); scheduler != "" {
+		if _, ok := a.OwnerEmails[scheduler]; ok {
+			return application.Caller{}, errors.New("misconfigured identity: the scheduler identity is also an owner email; an asserted identity must have exactly one role")
+		}
+		if scheduler == email {
+			return application.LoopCaller(email)
+		}
 	}
 	if _, ok := a.OwnerEmails[email]; !ok {
 		return application.Caller{}, errors.New("IAP identity is not an owner")

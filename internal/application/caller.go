@@ -3,6 +3,7 @@ package application
 import (
 	"context"
 	"errors"
+	"strings"
 
 	"github.com/takushi/agentic-loop-foundation/v2/internal/domain"
 )
@@ -35,6 +36,40 @@ func CallerFromContext(ctx context.Context) (Caller, error) {
 	}
 	return v, nil
 }
+
+// LoopCaller is the ONLY sanctioned way to obtain a Caller carrying
+// RoleScheduler, and it is the in-process analogue of internal/api's transport
+// constructors: those establish an owner from an IAP assertion or a bearer
+// token and a runner from a verified session, and this one establishes the Loop
+// itself from a component subject its caller already authenticated.
+//
+// It exists because of a measurement rather than for symmetry. Before V2-086 no
+// non-test site in this repository constructed a Caller with RoleScheduler at
+// all, while thirteen non-test sites ACCEPTED the role, and requestedBy below is
+// the sole producer of domain.ActorTypeLoop for a Requirement's, a Repository's
+// and a link's RequestedBy, for a Control Intent's requester and for a
+// human-input answerer. So the role was declared, accepted and unreachable, and
+// every Requirement the Loop captured was recorded as owner-originated.
+// Funnelling the role through one named constructor is what makes the number of
+// producers greppable and assertable -- internal/application's
+// requested_by_test.go asserts the repository-wide count is exactly one -- and
+// gives the refusal of an empty subject one home instead of none. A bare
+// composite literal is precisely how a component names itself, which is the
+// defect internal/runner.Orchestrator committed with RoleOwner.
+//
+// An empty or whitespace-only subject is ErrUnauthenticated rather than a
+// Caller with no subject: callerActor refuses an empty Subject anyway, so
+// returning one would only move the failure further from its cause, and
+// requestedBy would otherwise mint a domain.RequestedBy with an empty subject.
+// The returned Subject is the argument as given, not a trimmed copy, so a
+// caller sees back exactly the identifier it passed in.
+func LoopCaller(subject string) (Caller, error) {
+	if strings.TrimSpace(subject) == "" {
+		return Caller{}, ErrUnauthenticated
+	}
+	return Caller{Role: RoleScheduler, Subject: subject}, nil
+}
+
 func callerActor(ctx context.Context, roles ...Role) (Caller, domain.ActorID, error) {
 	c, err := CallerFromContext(ctx)
 	if err != nil {
