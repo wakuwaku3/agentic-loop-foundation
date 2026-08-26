@@ -12,7 +12,8 @@
     "V2-079",
     "V2-082",
     "V2-083",
-    "V2-087"
+    "V2-087",
+    "V2-088"
   ],
   "outcome": "Pay the representative Provider's live re-observation once for all the source changes that have accumulated since the last one, under a fresh approved record with room for the transient failures every previous observation actually hit, and prove the corrected working directory reaches the real child.",
   "non_goals": [
@@ -151,5 +152,5 @@
       "reason": "three more tasks will edit files inside the set the live exercise compiles, so the single pooled observation waits until they land rather than being spent and invalidated again"
     }
   ],
-  "block_reason": "V2-082,V2-083,V2-087"
+  "block_reason": "V2-082,V2-083,V2-087,V2-088"
 }
