@@ -205,6 +205,22 @@
       "summary": "Execution environment, recorded so every verdict above is attributable. uname -srm: 'Linux 6.18.33.2-microsoft-standard-WSL2 x86_64'. go version as resolved INSIDE devbox run --pure: 'go version go1.25.0 linux/amd64'. devbox version: 0.17.2 (devbox itself reports an available upgrade to v0.18.0 on every invocation; it was not taken, because devbox.json and devbox.lock are prohibited to this task). Worktree path: /home/takushi/repos/agentic-loop-foundation-worktrees/v2-task-086. Branch: v2-task/V2-086. Base commit: a0622910d493cadd94c6d819690dbab0232a44ab. Every devbox run was judged by its verdict line and never by the shell exit status, which is unreliable in this repository."
     },
     {
+      "name": "a19-verification-gitleaks-agents",
+      "status": "passed",
+      "argv": [
+        "devbox",
+        "run",
+        "--pure",
+        "--",
+        "sh",
+        "-c",
+        "gitleaks dir .agents --config .gitleaks.toml"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 900,
+      "summary": "A19, run AFTER the evidence was committed, over .agents only. Verdict lines: 'INF scanned ~4725743 bytes (4.73 MB) in 344ms' and 'INF no leaks found'. `gitleaks dir .` was NOT run: it reports 26 findings from gitignored build/evidence/** paths that are not part of this task and would drown the signal. No credential value appears in any of these three records -- the identities they name are identifiers (an owner email, a scheduler service-account email, a stranger email) and no token, key or password value is recorded anywhere, in full, truncated or hashed form. No prompt and no provider response appears in any form."
+    },
+    {
       "name": "a19-no-provider-cli-and-no-cloud-resource",
       "status": "passed",
       "argv": [

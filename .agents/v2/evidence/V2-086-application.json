@@ -389,6 +389,22 @@
       "summary": "Gate rule G7, recorded and NEVER counted as a pass, with a DISAGREEMENT. A bare `go test -count=1 -v ./internal/store/firestore` with no emulator prints ok while producing 26 '--- SKIP' lines (MEASURED 26 by `grep -c '^--- SKIP'`; the coordinator's brief said 49). That package's run therefore measured NOTHING about this change. It measures nothing about it in any case: internal/store/** is prohibited to this task and byte-unchanged, and the A9 proof runs against internal/store/memory. The check is recorded with status skipped."
     },
     {
+      "name": "a19-verification-gitleaks-agents",
+      "status": "passed",
+      "argv": [
+        "devbox",
+        "run",
+        "--pure",
+        "--",
+        "sh",
+        "-c",
+        "gitleaks dir .agents --config .gitleaks.toml"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 900,
+      "summary": "A19, run AFTER the evidence was committed, over .agents only. Verdict lines: 'INF scanned ~4725743 bytes (4.73 MB) in 344ms' and 'INF no leaks found'. `gitleaks dir .` was NOT run: it reports 26 findings from gitignored build/evidence/** paths that are not part of this task and would drown the signal. No credential value appears in any of these three records -- the identities they name are identifiers (an owner email, a scheduler service-account email, a stranger email) and no token, key or password value is recorded anywhere, in full, truncated or hashed form. No prompt and no provider response appears in any form."
+    },
+    {
       "name": "a19-no-provider-cli-and-no-cloud-resource",
       "status": "passed",
       "argv": [

@@ -325,6 +325,22 @@
       "summary": "A14 MEASURED over every new and modified test. No new or modified test contains time.Sleep, time.After, time.NewTimer, time.Tick, time.Now, `go ` (a goroutine), math/rand or crypto/rand: verified by grepping the four touched test files for each of those tokens. Every clock is injected: internal/api's new fixture uses framingClock, the steppable injected clock the V2-082 chain test already introduced, advanced only by its own nextDay() method; internal/runner's new tests reuse the package's existing journeyClock, which returns a fixed time.Unix(1700000000, 0).UTC(); internal/application's new tests use the package's existing service() helper and its fixed clock. There is no wait of any kind in any new test, so there is no deadline poll to bound and no measured duration is asserted as a threshold. The whole suite was run with -race and -count=1 and reported ok for every package. QUOTA: the in-memory adapter does not true up its quota reservation, so quota.ReadTransactionUsage (Reads 6001, Writes 1, at internal/quota/quota.go:56) admits only FOUR read transactions per budget day against quota.DefaultBudget's 25000 reads (internal/quota/quota.go:46). The A9 proof performs three GET /v1/requirements/{id} reads plus three captures plus two verb mutations plus two 403s plus five reconcile requests, so the injected clock is stepped a whole UTC day three times (after the captures, before the two verbs, and before the owner-only refusals) rather than dropping a read or weakening an assertion. internal/quota is prohibited and that adapter defect stays V2-087's. ONE deliberate residual randomness, recorded rather than hidden: internal/api/auth_test.go's runner-session test drives the real enrollment protocol, whose nonce and tokens come from crypto/rand inside internal/runner's PRODUCTION code (the pre-existing TestRunnerEnrollmentHTTPChallengeFlow does the same); the test itself introduces none -- its ed25519 key is derived from an all-zero seed rather than generated -- and no assertion depends on any random value."
     },
     {
+      "name": "a19-verification-gitleaks-agents",
+      "status": "passed",
+      "argv": [
+        "devbox",
+        "run",
+        "--pure",
+        "--",
+        "sh",
+        "-c",
+        "gitleaks dir .agents --config .gitleaks.toml"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 900,
+      "summary": "A19, run AFTER the evidence was committed, over .agents only. Verdict lines: 'INF scanned ~4725743 bytes (4.73 MB) in 344ms' and 'INF no leaks found'. `gitleaks dir .` was NOT run: it reports 26 findings from gitignored build/evidence/** paths that are not part of this task and would drown the signal. No credential value appears in any of these three records -- the identities they name are identifiers (an owner email, a scheduler service-account email, a stranger email) and no token, key or password value is recorded anywhere, in full, truncated or hashed form. No prompt and no provider response appears in any form."
+    },
+    {
       "name": "a19-no-provider-cli-and-no-cloud-resource",
       "status": "passed",
       "argv": [
