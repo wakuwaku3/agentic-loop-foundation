@@ -253,7 +253,29 @@ func TestRequirementTransitionsInTheApplicationLayerAreExactlyTheTwoNewCommands(
 	//     destroying the Requirement.
 	// Nothing else in this guard changes, and the set stays CLOSED: a ninth
 	// caller still fails here.
-	want := map[string]bool{"RequestHumanInput": true, "AnswerHumanInput": true, "StartFraming": true, "CompleteFraming": true, "Claim": true, "PauseRequirement": true, "ResumeRequirement": true, "CancelRequirement": true}
+	// V2-091 widens the closed set from eight to TEN, under v2-task-dag.md 12.12,
+	// and the widening is again the MEASUREMENT rather than a weakening. Two
+	// entries are added, each with its own reason, and both live in the ONE new
+	// file internal/application/loop.go:
+	//   - loopRequirementTransition issues domain.RequirementWait and
+	//     domain.RequirementRecover. Measured at 848d899, both command kinds had
+	//     ZERO non-test occurrences outside internal/domain/model.go: the domain
+	//     declared them, admitted them from three and two source statuses
+	//     respectively (model.go:580-583 and :590-591), and nothing in any
+	//     running process could issue either, so `waiting` and `recovering` --
+	//     two of the eleven declared Requirement statuses -- were unreachable.
+	//   - loopCompleteRequirement issues domain.RequirementEvaluate, whose
+	//     non-test occurrence count outside model.go was also ZERO, in the SAME
+	//     transaction as domain.CompleteRequirementFromRelease, so a failure
+	//     between them leaves the Requirement in neither evaluating nor
+	//     completed.
+	// It is ONE decision rather than two: all three commands are issued by the
+	// same single bounded pass, under the same single scheduler identity, and
+	// each carries the observation that justified it. internal/domain was not
+	// edited -- every transition, guard and target status already existed.
+	// Nothing else in this guard changes, and the set stays CLOSED: an ELEVENTH
+	// caller still fails here.
+	want := map[string]bool{"RequestHumanInput": true, "AnswerHumanInput": true, "StartFraming": true, "CompleteFraming": true, "Claim": true, "PauseRequirement": true, "ResumeRequirement": true, "CancelRequirement": true, "loopRequirementTransition": true, "loopCompleteRequirement": true}
 	if !reflect.DeepEqual(callers, want) {
 		t.Fatalf("domain.DecideRequirement is called from %v, want exactly %v", keysSorted(callers), keysSorted(want))
 	}

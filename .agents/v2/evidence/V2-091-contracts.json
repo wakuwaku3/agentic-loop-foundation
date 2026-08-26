@@ -1,0 +1,337 @@
+{
+  "schema_version": "v1",
+  "id": "ev-v2-091-contracts",
+  "kind": "evidence",
+  "created_at": "2026-08-26T10:00:00Z",
+  "correlation_id": "v2-091-transition-reachability",
+  "task_id": "V2-091",
+  "component": "contracts",
+  "evidence_key": "4480ff1e7a4eb0971a5d98ace89fdf9dec3eebbdb126d9a6f9360d9417ba5bc3",
+  "result": "passed",
+  "observed_at": "2026-08-26T22:40:00Z",
+  "checks": [
+    {
+      "name": "scope-boundary",
+      "status": "passed",
+      "argv": [
+        "git",
+        "status",
+        "--porcelain"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 30,
+      "summary": "A1 SCOPE BOUNDARY for V2-091, recorded against base commit 848d8991ff9cd5a53c2f13d52b69429f0b83ed38 on branch v2-task/V2-091, BEFORE any source or test file was edited. ORDERING: this record's first commit contains the five rows below together with the whole A2 baseline and the A3 authority derivation; `git status --porcelain` at that commit shows ONLY .agents/v2/evidence/ paths, and internal/application/loop.go, internal/application/loop_test.go, internal/application/completion_proof_guard_test.go, internal/runner/controlplane.go, internal/runner/loopdriver.go and cmd/runner/main_test.go do not yet exist. ROW 1 -- WHAT THIS TASK MAKES TRUE. One bounded pass, Service.LoopPass, in one new file internal/application/loop.go, gated callerActor(ctx, RoleScheduler) and that role ALONE, called from the EXISTING InternalReconcile closure at cmd/control-plane/main.go:199-207 inside the EXISTING 5s timeout at :200, on the context that ALREADY carries the scheduler identity internal/api/api.go:114 mints with application.LoopCaller and :119 attaches. Four stages, each carrying the observation that justified it: stage W issues domain.RequirementWait for a `ready` Requirement whose scheduler.Decision is unassigned with Reason in exactly {resource-conflict, no-runner-capacity}; stage R issues domain.RequirementRecover for an `active` or `waiting` Requirement one of whose Increments has an Execution in domain.ExecutionLost; stage D calls the EXISTING Service.Plan and Service.Prepare for a `ready` Requirement the scheduler ASSIGNED, which is the severed edge that makes POST /v1/runner/claims:acquire and /v1/executions/* reachable at all; stage P calls release.Pipeline.Promote and carries the domain.StableReleaseProof it returns through domain.RequirementEvaluate into domain.CompleteRequirementFromRelease, in ONE transaction, only for a Requirement all of whose Increments reached domain.IncrementReleased. One new runner-role read, Service.OfferedWork, behind one new route GET /v1/runner/work declared in contracts/openapi/openapi-v1.yaml. One new standard-library control-plane client internal/runner/controlplane.go and one bounded driver internal/runner/loopdriver.go. cmd/runner gains a real mode. One application-level release-source constructor so cmd/control-plane can attach the observer WITHOUT importing internal/release. ROW 2 -- WHAT IT DELIBERATELY DOES NOT DO. It adds NO second producer of a scheduler identity (internal/application/caller.go and internal/application/requested_by_test.go are prohibited; application.LoopCaller stays the only one and V2-086's scan is re-run unedited). It gives NO path an identity it is not: the driver never constructs an application.Caller and internal/runner/orchestrator.go -- whose line 54 fabricates application.Caller{Role: RoleRunner, ...} with no session verification -- is PROHIBITED and byte-unchanged. It issues NO domain.RequirementPause, NO domain.RequirementCancel, NO domain.RequirementResume (owner verbs, landed by V2-090), NO domain.RequirementNeedInput (internal/application/human_input.go is prohibited), NO domain.RequirementStart (V2-084 landed it inside Service.Claim), and NO post-execution Increment command (verify, integrate, preview-validate, accept, release). It adds NO RequirementCommandKind, NO RequirementStatus, NO PermitKind, NO port, NO allowed() list entry, NO read-model change, NO environment-variable-derived default release root, NO ci component edge, NO Makefile change, NO store change and NO index. It runs NO Provider CLI and posts NO Execution result: all three provider adapters return provider.NoExec, so a driver that accepted a result would be accepting one it did not obtain. ROW 3 -- WHAT IT RECORDS BUT DOES NOT FIX. (a) domain.RequirementWait from `active` and from `recovering` stays UNISSUED: application.AllocationSchedulerStatus maps `active` to scheduler.StatusAssigned and every status other than ready/active/completed to the empty status, and scheduler.structurallyReady requires StatusReady, so the scheduler can never attach a capacity or contention reason to an active or recovering Requirement. (b) Three of scheduler.AllReasons' seven members are UNREACHABLE from application.BuildAllocationSnapshot -- unmet-dependency (the rows carry no Dependencies), repository-unavailable (Snapshot.Repositories is one synthetic entry with no FailureCount and no IsolatedUntil) and not-executable (Assessment is never set). (c) A Requirement whose Execution is domain.ExecutionFailed rather than domain.ExecutionLost gets NO transition, while docs/architecture/domain-model.md:275 says such a Requirement should become recovering, waiting or needs-input. (d) internal/reconciler/reconciler.go's recoverOne acts as domain.NewActorID(\"reconciler\"), a name the component makes up for itself, and internal/reconciler holds no application.Caller at all; the Requirement transition therefore cannot live there and the reconciler's output is read as an OBSERVATION instead. (e) application.allocationReport at internal/application/allocation.go:603 DISCARDS the page's `more` flag, so the owner queue read cannot say whether it saw everything; internal/application/allocation.go is prohibited, so the pass makes its OWN u.RequirementsPage call and keeps both return values rather than repairing that line. (f) application.Event has eight fields and no payload, and internal/application/ports.go and internal/store/** are prohibited, so a transition's justifying observation is carried on the DURABLE RECORD the same s.record call writes (the idempotency ResponseJSON, in the same transaction) plus the event's own Type, not on a new Event field. (g) The api-contract chain position and the M3live re-observation fact recorded under A25/A26. ROW 4 -- WHAT ONLY A LATER TASK CAN ESTABLISH. The IAP authentication boundary, idle scale-to-zero, real Firestore permissions and contention, and the deploy path: docs/architecture/release-contract.md:49 places all four with the initial deploy gate D1 and preview-local cannot establish them. A promotion over a FULLY EVIDENCED candidate, because the shipped configuration cannot assemble one and this task fabricates none -- so the completion transition's claim stops at COMPONENT grade. Any real-Provider observation, because no Provider CLI invocation is authorised here. ROW 5 -- DOES IT PASS ANY RELEASE GATE. NO. This task passes no gate and issues no gate verdict."
+    },
+    {
+      "name": "baseline-re-measurement",
+      "status": "passed",
+      "argv": [
+        "devbox",
+        "run",
+        "--pure",
+        "--",
+        "sh",
+        "-c",
+        "go test -list '.*' ./... | grep -c '^Test'"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 1800,
+      "summary": "A2 BASELINE, RE-MEASURED AT 848d8991ff9cd5a53c2f13d52b69429f0b83ed38 (the designer measured at 81eef87 and every number was expected to be stale). TWENTY-THREE DISAGREEMENTS FOUND; the measured value is the one used. (i) `grep -rn '\\b<name>\\b' --include='*.go' . | grep -v _test.go | grep -v internal/domain/model.go` gave, expected -> MEASURED: RequirementWait 0 -> 0 (agree, still zero non-test occurrences); RequirementRecover 0 -> 0 (agree); RequirementEvaluate 0 -> 0 (agree); RequirementStart 0 -> 4 (DISAGREEMENT 1: V2-084 landed the issuance at internal/application/service.go:1403 inside Service.Claim, plus three comment lines at service.go:1211, service.go:1371 and internal/application/claimable.go:46); RequirementPause 0 -> 1 (DISAGREEMENT 2: V2-090 landed the issuance at internal/application/pause.go:220); RequirementCancel 0 -> 2 (DISAGREEMENT 3: issuance at internal/application/pause.go:410 plus a comment at pause.go:17); RequirementReadyCommand 3 -> 6 (DISAGREEMENT 4: issuances at internal/application/human_input.go:648 and internal/application/framing.go:374 plus four comments); RequirementStartFraming 3 -> 3 (agree); RequirementNeedInput 2 -> 2 (agree); CompleteRequirementFromRelease 1 -> 2 (DISAGREEMENT 5: both hits are comments, internal/application/framing.go:30 and :229; the number of ISSUERS is still ZERO, which is the fact the task turns on). (ii) `grep -rn 'domain.Increment{' --include='*.go' internal | grep -v _test.go` expected exactly internal/application/service.go:993 -> MEASURED four lines: service.go:993 (the only real construction, EXACT line agreement), internal/store/firestore/store.go:166 and :854 (zero values) and internal/store/memory/store.go:52 (a map type in a composite literal). DISAGREEMENT 6 in the raw count; the substance -- one non-test construction site, in internal/application -- agrees. (iii) `grep -rn 'RunFakeJourney\\|Orchestrator{' --include='*.go' .` expected 3 call sites and 2 composite literals all in internal/runner/orchestrator_test.go -> MEASURED exactly 3 call sites and exactly 2 composite literals, all in internal/runner/orchestrator_test.go (agree on counts and location), but the LINE NUMBERS DISAGREE: literals expected :65 and :139 -> measured :115 and :233 (DISAGREEMENT 7); calls expected :68, :75 and :140 -> measured :118, :125 and :234 (DISAGREEMENT 8). Definition at internal/runner/orchestrator.go:46 (agree). (iv) `grep -rn '\\.Promote(\\|PromotionGate(' --include='*.go' internal cmd | grep -v _test.go` -> MEASURED exactly internal/release/pipeline.go:52 (the PromotionGate call inside Promote), :59 (Router.Promote) and internal/release/release.go:248 (the PromotionGate definition). ZERO non-test callers of Pipeline.Promote (agree). Pipeline.Promote is defined at internal/release/pipeline.go:38 (agree). (v) `grep -rn 'AttachReleaseObserver\\|NewSourceReleaseObserver' --include='*.go' . | grep -v _test.go` -> MEASURED internal/application/release_surface.go:51 and :121 as the only definitions plus two comment lines at :13, :48 and :119; ZERO non-test callers (agree, exact line agreement). (vi) `grep -ln 'net/http' internal/runner/*.go` -> MEASURED no output, exit status 1 (agree). (vii) `grep -rn 'httptest.NewServer' --include='*_test.go' . | wc -l` -> MEASURED 0 (agree). (viii) `find . -name '*.go' -not -name '*_test.go' | wc -l` expected 93 -> MEASURED 95 (DISAGREEMENT 9). Related correction: V2-086's scan does NOT assert 93; it asserts `parsed >= wantMinParsedFiles` with wantMinParsedFiles = 40 at internal/application/requested_by_test.go:354, so the count moving does not move that assertion. (ix) CONSTANTS, all AGREE exactly: internal/scheduler/scheduler.go:15 MaxCandidates = 100; internal/application/readmodels.go:19 MaxPageSize = 100; internal/application/allocation.go:93 AllocationLeaseBound = 100 with ErrAllocationLeaseBound at :88; internal/reconciler/reconciler.go:17 MaxBatch = 100 -- CONFIRMING the designer's :17 against the DECLARATION-GAP ledger's :16, so that known disagreement is now measured twice; internal/quota/quota.go:46 DefaultBudget{Reads 25000, Writes 10000, Deletes 10000}, :54 MaxReadBoundaryReads = 6000, :56 ReadTransactionUsage{Reads 6001, Writes 1}, :62 MutationUsage{Reads 32, Writes 16}. (x) `go test -list '.*' <pkg> | grep -c '^Test'` inside devbox run --pure, expected -> MEASURED: application 196 -> 219 (DISAGREEMENT 10, +23); api 71 -> 80 (DISAGREEMENT 11, +9); domain 54 -> 60 (DISAGREEMENT 12, +6); reconciler 16 -> 16; runner 120 -> 120; release 47 -> 47; scheduler 26 -> 26; contracts 33 -> 33; store/memory 16 -> 16; quota 14 -> 14. cmd/runner measured 0 (it has no test file at all today). (xi) internal/store/memory/store.go:353 calls quota.Counter.TrueUp and internal/store/firestore/store.go:495 applies the same correction -- CONFIRMED, exact line agreement on both, so a read/write count measured against the in-memory adapter is meaningful and V2-084's A15 claim to the contrary is stale. FURTHER LINE-NUMBER DISAGREEMENTS found while reading the files the design cites. DISAGREEMENT 13: internal/domain/model.go's RequirementWait admitted-source guard is at :580-583, not :490-493. DISAGREEMENT 14: domain.CompleteRequirementFromRelease is at internal/domain/model.go:652, not :529. DISAGREEMENT 15: internal/application/allocation.go's candidate-bound fail-closed check is at :454-456, not :455-458. DISAGREEMENT 16: the Snapshot Requirement rows are built at allocation.go:455-464, not :460-467. DISAGREEMENT 17: Snapshot.Repositories' single synthetic entry is at allocation.go:471, not :478. DISAGREEMENT 18: internal/api/api.go's claimBody is at :1277-1283 and the claim handler at :1285, not :1079-1090. DISAGREEMENT 19: the GET /v1/release/state 503 not-configured branch is at internal/api/api.go:1105-1108 inside the handler at :1103, not :900. DISAGREEMENT 20: internal/runner/orchestrator.go calls Provider.Run at :123, not :107. DISAGREEMENT 21: internal/application/readmodels.go's nextAction is at :333-356, not :306-329 -- and its body is CONFIRMED to branch on completed and cancelled and on Execution and Increment status and NEVER on waiting, recovering or evaluating. DISAGREEMENT 22: docs/architecture/release-contract.md defines preview-local at :46, not :52. DISAGREEMENT 23: the four things preview-local cannot establish are listed at release-contract.md:49, not :56. EXACT AGREEMENTS worth recording because the design turns on them: internal/api/api.go:114 calls application.LoopCaller and :119 passes application.ContextWithCaller into h.config.InternalReconcile; cmd/control-plane/main.go:199-207 is that closure, :200 the 5s timeout, :202 and :205 the two existing ticks; internal/application/service.go:888 gates Plan on callerActor(ctx, RoleOwner, RoleScheduler) and :1023 gates Prepare on the same pair; internal/application/caller.go:66 is LoopCaller and :110 is runnerCaller; internal/application/ports.go:123 and :124 are IncrementsForRequirements and ExecutionsForIncrements; internal/application/allocation.go:603 discards the page's `more` flag verbatim; internal/domain/release.go:117 is StableReleaseProof, :119-121 its unexported valid(), :150 CompletePromotionWithProof and :100 the ErrEvidenceIncomplete capability refusal; internal/release/release.go:261 is the sole CompletePromotionWithProof call site; internal/scheduler/decision.go:52-60 is AllReasons with exactly seven members; internal/application/release_surface.go:270 is MoreRequirementsExist and :17-23 the no-default-root record; internal/scheduler/scheduler.go:164 sets ReasonNoRunnerCapacity and :192 is structurallyReady; internal/application/allocation.go:382 is AllocationSchedulerStatus and :362 AllocationContentionKey. BASELINE EVIDENCE KEYS read with `devbox run --pure -- make evidence-keys` on the unmodified tree, for provenance only and not as a verdict (G6a): application 5b326ae24ba4955b3d99ab9dd83746c7b4899f07583a8295cc0115c5a165362e, api 82271a95696ffcc6582ef1ea6d0fd88b3d9abe0800a80200afff9fd2d333be72, contracts d788f95a3e9697ec310f55a4198e502403c1de56e7e6aa35e98313751dffb7b4, runner ec75b73400b52eab78018825c5038ac2b3912b4823083e6df2f854473e6975e2, control-plane 730ad4447377cba046cd4500507a2b9bf34cb7f75ae7c4a26f2b967d70dd6fc0."
+    },
+    {
+      "name": "product-authority",
+      "status": "passed",
+      "argv": [
+        "sed",
+        "-n",
+        "263,276p",
+        "docs/architecture/domain-model.md"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 30,
+      "summary": "A3 PRODUCT AUTHORITY, derived and quoted with the file and line MEASURED (every line number in A3 agreed exactly with the Work Order; there is no disagreement in this item). docs/architecture/domain-model.md:265 ready = '優先順位評価済みで実行可能'; :266 active = '1つ以上のIncrementが進行中'; :267 waiting = 'dependency、capacity、time条件を自動待機'; :270 recovering = 'lost ExecutionやPreview failureから再開中'; :271 evaluating = 'Stableで課題が解決したか評価中'; :272 completed = '対応Stable ReleaseとEvidenceで課題解決を確認'; :275 '`failed`をRequirementの終端状態にしない。failureはExecution、Provider Run、Evidenceに記録し、Requirementはrecovering、waiting、needs-inputのいずれかになる。'; :101 '1 Requirementに複数Incrementを許す。Incrementが成功してもRequirementは自動完了しない。'; docs/product/user-facing-spec.md:272 waiting = '外部資源、依存、時間条件などを待ち、自動的に再評価される'; :275 recovering = 'failureまたはRunner消失後、安全な再開を行っている'; docs/product/definition.md:105 'Previewで実証され、Stableへ昇格した時点とする'; :111 '3. 利用可能なworkerが、実行可能なRequirementを排他的にclaimする。'; :130 '完了を自己申告だけで決めず、要求と不変条件を検証する'. THE FOUR CONCLUSIONS, stated plainly: (1) waiting is justified by a capacity or contention or dependency condition and by nothing else, so it is NOT a general 'nothing happened' bucket; (2) recovering is justified by a lost Execution or a lost Runner, which is exactly what internal/reconciler already writes when it expires a Lease past its TTL and calls domain.MarkExecutionLost; (3) completion is bound to a Stable promotion and is NEVER granted by an Increment succeeding; (4) an Increment existing at all is the precondition for the whole claim surface, which is why the severed Increment-creation path is the same defect as the two unreachable Requirement transitions. This reading does not differ from the design packet's, so no escalation is raised on A3."
+    },
+    {
+      "name": "grade-statement",
+      "status": "passed",
+      "argv": [
+        "sed",
+        "-n",
+        "44,50p",
+        "docs/architecture/release-contract.md"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 30,
+      "summary": "A21 GRADE. The reachability claims for waiting, for recovering, for Increment creation and for a separate-process Runner claiming and starting an Execution stop at environment class preview-local as docs/architecture/release-contract.md:46 defines it -- the owner's own machine, the candidate version's Control Plane and Runner as real processes on localhost, a Firestore emulator as canonical store. The claim for the COMPLETION transition stops at COMPONENT (in-process) grade: the shipped configuration cannot assemble a fully-evidenced candidate and this task fabricates none. release-contract.md:49 places the IAP authentication boundary, idle scale-to-zero, real Firestore permissions and contention, and the deploy path with the initial deploy gate D1, and docs/operations/v2-task-dag.md G3.3 says unit, fake, stub and contract evidence satisfies no real-environment condition at any grade. No sentence in this record asserts an observation on a managed serverless runtime, on a managed log sink, on any remotely hosted environment, on a live install, that any promotion to Stable took place, that every declared capability was exercised, or any capability id."
+    },
+    {
+      "name": "g6b-ordering-fact",
+      "status": "passed",
+      "argv": [
+        "python3",
+        "-c",
+        "json.load(open('.agents/v2/evidence/artifacts/V2-080-live-exercise-files.json'))"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 60,
+      "summary": "A25 THE G6b ORDERING FACT, MEASURED. .agents/v2/evidence/artifacts/V2-080-live-exercise-files.json declares path_count 103 and carries exactly 103 paths (measured, agree). The LITERAL intersection of this task's fourteen source/contract allowed_paths with that set is ZERO (measured, agree) because every source file this task adds in internal/application and internal/runner is NEW. But that set is `go list -deps -test ./internal/runner` intersected with git ls-files, and it contains 15 internal/application paths and 45 internal/runner paths -- 60 of the 103 (measured, all three numbers agree exactly) -- so ADDING a file to either package moves the exercise file set itself. Under G6b that non-empty closure intersection means this task is correctly ordered BEFORE any later live re-observation of the M3live provider-live-claude record, and that record will require re-observation after this task lands. Recorded as a fact for the coordinator; not re-observed here, and no provider live test was run."
+    },
+    {
+      "name": "chain-position-and-rollback",
+      "status": "passed",
+      "argv": [
+        "cat",
+        "ci/components.json"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 30,
+      "summary": "A26 CHAIN POSITION, ROLLBACK AND RESIDUAL FINDINGS, as facts for the coordinator. internal/api/api.go is held by V2-083 and internal/api/api_test.go by V2-087; editing contracts/openapi/openapi-v1.yaml moves the contracts component key and the release BundleDigest and enrols this task in the api-contract chain, so this task must be serialized after those. NO ci component edge is created, measured three ways in ci/components.json: the runner component's roots are ['cmd/runner/**','cmd/bootstrap/**','internal/runner/**'] so cmd/runner importing internal/runner is intra-component; the application component already declares release among its dependencies; the control-plane component's dependencies are exactly ['api','application','reconciler','runner','store-firestore'] and nothing new is imported there. store-firestore's dependencies include runner, so cmd/runner importing internal/store/firestore would be a graph cycle -- which is why the client is standard-library only. A red manifest check therefore means the design was departed from. ROLLBACK is a property, not a procedure: reverting means removing internal/application/loop.go and its two test files, the new internal/runner files, the real mode in cmd/runner/main.go, the wiring lines in cmd/control-plane/main.go, one branch in internal/api/api.go and one path block in contracts/openapi/openapi-v1.yaml, and nothing else, because the change adds no port, no stored field, no document kind, no index and no new persisted shape. No task id is proposed for anything; M5's remediation budget stands at 5 of 5."
+    },
+    {
+      "name": "component-scope",
+      "status": "passed",
+      "argv": [
+        "git",
+        "diff",
+        "--stat",
+        "848d8991ff9cd5a53c2f13d52b69429f0b83ed38"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 60,
+      "summary": "COMPONENT SCOPE contracts: one new path block for GET /v1/runner/work in contracts/openapi/openapi-v1.yaml with an explicit response schema, additionalProperties false and explicit required lists, carrying no digest value and no field whose name contains password, credential, token, secret, raw_prompt or raw_provider_output. contracts/release-contract/**, contracts/schemas/** and contracts/fixtures/** are PROHIBITED."
+    },
+    {
+      "name": "boundary-revision-12.3",
+      "status": "passed",
+      "argv": [
+        "git",
+        "diff",
+        "--stat",
+        "848d8991ff9cd5a53c2f13d52b69429f0b83ed38"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 60,
+      "summary": "A1 BOUNDARY REVISION under v2-task-dag.md 12.3, recorded IN PLACE with the pre-revision table, the reason and the time, and widened rather than deferred to a new task. PRE-REVISION allowed_paths, verbatim, the twenty the Work Order declared: internal/application/loop.go; internal/application/loop_test.go; internal/application/completion_proof_guard_test.go; internal/runner/controlplane.go; internal/runner/controlplane_test.go; internal/runner/loopdriver.go; internal/runner/loopdriver_test.go; cmd/runner/main.go; cmd/runner/main_test.go; cmd/control-plane/main.go; internal/api/api.go; internal/api/api_test.go; internal/api/live_local_test.go; contracts/openapi/openapi-v1.yaml; and the six .agents/v2/evidence paths. REVISION TIME: 2026-08-26, after internal/application/loop.go first compiled and before it was committed. REASON, measured rather than argued: three PRE-EXISTING closed-set guards outside that list turned RED the moment the pass existed, and none of the three could be satisfied without editing the guard, because each asserts an EXACT SET of call sites that the pass necessarily joins. (1) internal/application/human_input_test.go's TestRequirementTransitionsInTheApplicationLayerAreExactlyTheTwoNewCommands: 'domain.DecideRequirement is called from [... loopCompleteRequirement loopRequirementTransition], want exactly [...]'. A pass that issues RequirementWait, RequirementRecover and RequirementEvaluate MUST call domain.DecideRequirement. (2) internal/application/readmodels_test.go's TestTheServiceWritesARequirementOnlyFromCaptureAndPlan: same shape over the Requirement WRITERS. A transition that is not persisted is not a transition. (3) internal/application/claimable_test.go's TestTheNotClaimableRefusalHasExactlyOneIssuerAndOneDefinition, assertion (2): 'requirementStatusAdmitsClaim is called from 2 non-test sites, want exactly 1'. A13 REQUIRES the offer read to filter on 'whose parent admits work', and V2-089's own design is that the four statuses are written out ONCE -- so READING that predicate is the only way to build the offer without a second list, which assertion (3) of the same test would then catch. POST-REVISION allowed_paths = the twenty above PLUS internal/application/human_input_test.go, internal/application/readmodels_test.go and internal/application/claimable_test.go. NOTHING ELSE was widened, and no source (non-test) file outside the original twenty was touched -- proved by `git diff --stat` against the base commit, which lists exactly 23 paths. NO TASK ID IS PROPOSED: M5's remediation budget stands at 5 of 5."
+    },
+    {
+      "name": "closed-set-guards-widened-12.12",
+      "status": "passed",
+      "argv": [
+        "devbox",
+        "run",
+        "--pure",
+        "--",
+        "go",
+        "test",
+        "-count=1",
+        "-run",
+        "TestTheNotClaimableRefusalHasExactlyOneIssuerAndOneDefinition|TestRequirementTransitionsInTheApplicationLayerAreExactlyTheTwoNewCommands|TestTheServiceWritesARequirementOnlyFromCaptureAndPlan",
+        "./internal/application"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 1800,
+      "summary": "THREE CLOSED-SET GUARDS WIDENED under v2-task-dag.md 12.12, all three conditions recorded and MEASURED. GUARD 1, internal/application/human_input_test.go: domain.DecideRequirement's caller set widened from EIGHT to TEN. Added: loopRequirementTransition (it issues domain.RequirementWait and domain.RequirementRecover, both of which had ZERO non-test occurrences outside internal/domain/model.go at 848d899) and loopCompleteRequirement (it issues domain.RequirementEvaluate, also zero). Each entry carries its own reason comment naming the measurement. GUARD 2, internal/application/readmodels_test.go: the Requirement-writer set widened from TEN to TWELVE, the same two entries, with the reason that each issues exactly one domain.RequirementCommand and therefore necessarily persists a Requirement, plus the recorded note that loopCompleteRequirement stages exactly ONE SaveRequirement for the evaluate-then-complete pair on purpose. GUARD 3, internal/application/claimable_test.go assertion (2): the requirementStatusAdmitsClaim call-site set widened from ONE to TWO. Added: loop.go's loopObserve, with the reason that the offer must filter on the parent admitting work and that re-expressing the four statuses in loop.go is exactly what assertion (3) of the same test catches. CONDITION 1 -- THE SETS STAY CLOSED, proven by EXECUTION rather than asserted. A temporary probe function (loopTemporaryNonVacuityProbe) was added to internal/application/loop.go calling all three, the three guards were run, and all three went RED with these verbatim messages: 'claimable_test.go:421: requirementStatusAdmitsClaim call sites in loop.go = [loopObserve loopTemporaryNonVacuityProbe], want exactly [loopObserve]'; 'human_input_test.go:280: domain.DecideRequirement is called from [... loopRequirementTransition loopTemporaryNonVacuityProbe], want exactly [... loopRequirementTransition]'; 'readmodels_test.go:824: the service writes a Requirement from [... loopRequirementTransition loopTemporaryNonVacuityProbe], want exactly [... loopRequirementTransition]'. The probe was then removed and all three went GREEN. So the NEXT element still fails in every one of the three. CONDITION 2 -- THE ONLY CHANGE IS ADDED ENTRIES PLUS A REASON COMMENT PER ENTRY. No assertion was deleted, no comparison was loosened, and the counts did not FALL: 8 -> 10, 10 -> 12, 1 -> 2. Guard 3's comparison was strengthened while it was widened -- it now asserts the call sites PER FILE rather than only the total -- so a second site in claimable.go fails too, which the pre-revision assertion would have accepted. CONDITION 3 -- NOTHING ELSE IN ANY OF THE THREE GUARDS CHANGED. Guard 1's and guard 2's diffs are a comment block plus two map entries each; guard 3's is a comment block plus the per-file comparison. No test was RENAMED: v2-task-dag.md 12.11 was not invoked at all, and the before/after top-level test-name sets show ZERO removals in every package."
+    },
+    {
+      "name": "completion-proof-guard-non-vacuity",
+      "status": "passed",
+      "argv": [
+        "devbox",
+        "run",
+        "--pure",
+        "--",
+        "go",
+        "test",
+        "-count=1",
+        "-run",
+        "TestTheCompletionProofHasExactlyOneCallSitePerLinkInItsChain",
+        "./internal/application"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 1800,
+      "summary": "A11 NON-VACUITY OF THE COMPLETION-PROOF GUARD, PROVEN BY EXECUTION with the verbatim red verdicts. GREEN BASELINE, argv `devbox run --pure -- go test -count=1 -v -run TestTheCompletionProofHasExactlyOneCallSitePerLinkInItsChain ./internal/application`: PASS, with the log line 'completion-proof chain guard: parsed 96 non-test .go files; CompleteRequirementFromRelease call sites=map[internal/application/loop.go:[loopCompleteRequirement]]; promotion-path call sites outside internal/release=map[internal/application/loop.go:[loopStagePromote]]; CompletePromotionWithProof call sites outside internal/domain=map[internal/release/release.go:[PromotionGate]]'. RED RUN 1 -- the real domain.CompleteRequirementFromRelease call site was DELETED from internal/application/loop.go. Verbatim verdict: '--- FAIL: TestTheCompletionProofHasExactlyOneCallSitePerLinkInItsChain (0.03s)' and the exact failure message 'completion_proof_guard_test.go:177: domain.CompleteRequirementFromRelease is called from 0 non-test sites across 96 parsed files, want exactly 1: map[]', followed by 'FAIL github.com/takushi/agentic-loop-foundation/v2/internal/application 0.034s'. RED RUN 2 -- only the release.Pipeline.Promote call site was deleted, with the completion call left in place, so the SECOND assertion fires on its own. Verbatim verdict: '--- FAIL: TestTheCompletionProofHasExactlyOneCallSitePerLinkInItsChain (0.04s)' and the exact message 'completion_proof_guard_test.go:205: release.Pipeline.Promote and release.PromotionGate are called from 0 non-test sites outside internal/release across 96 parsed files, want exactly 1: map[]'. RESTORED, then GREEN again: 'ok github.com/takushi/agentic-loop-foundation/v2/internal/application 0.041s' for both TestTheCompletionProofHasExactlyOneCallSitePerLinkInItsChain and TestTheProofIsNeverStoredLoggedOrReported, and 'ok ... 0.364s' for the whole package. The restoration is byte-exact: internal/application/loop.go was copied to a scratch path before the first deletion and copied back after each, and no forbidden git operation was used. The guard also FAILS OUTRIGHT on an empty file set and REPORTS the number of files parsed in every failure message, so a shrunken scan is visible rather than silently green -- both red messages above carry the count 96."
+    },
+    {
+      "name": "adapter-divergence-found-and-repaired",
+      "status": "passed",
+      "argv": [
+        "devbox",
+        "run",
+        "--pure",
+        "--",
+        "go",
+        "test",
+        "-count=1",
+        "-run",
+        "TestTheIncrementReadTakesIncrementIdsBecauseTheAdaptersDisagree",
+        "./internal/application"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 1800,
+      "summary": "A MEASURED DEFECT FOUND WHILE EXECUTING A20, REPAIRED IN THIS TASK'S OWN CODE AND RECORDED FOR THE LEDGER ELSEWHERE. The preview-local exercise failed on its first real run with 'GET /v1/runner/work never offered an Increment for requirement-... within 20s: the offer named 0 Increments'. The cause is an ADAPTER DIVERGENCE that every in-memory test in the repository is blind to. The port application.RequirementReadRepository.IncrementsForRequirements (internal/application/ports.go:123) is answered by internal/store/memory/store.go:466 with a filter on EITHER the Increment's own id OR its RequirementID, and by internal/store/firestore/store.go:707 with a batch GET of one document per id from the `increments` collection -- which answers ONLY Increment ids and returns NOTHING for a Requirement id. The two PRE-EXISTING non-test callers disagree accordingly: internal/application/readmodels.go:307 passes INCREMENT ids built from Requirement.Increments, and internal/reconciler/orphan.go:67 passes REQUIREMENT ids. REPAIRED HERE: internal/application/loop.go passes INCREMENT ids, derived from the page's own Requirement.Increments, which is the form BOTH adapters answer -- so no port change, no store edit and no new read, and a count measured against the in-memory adapter is the count the Firestore adapter reserves. The Increment batch has its own named bound, LoopIncrementReadBound = 200, because the number of Increments on a page of Requirements is not bounded by the number of Requirements; a page whose Increments would exceed it is TRIMMED AT A REQUIREMENT BOUNDARY and the cursor stops there, so every conclusion the pass draws about a Requirement is drawn from that Requirement's COMPLETE Increment set. A single Requirement whose own Increment set exceeds the whole bound FAILS CLOSED. The report states IncrementsExamined, IncrementReadBound and TrimmedForIncrementBound. ROW (3), RECORDED AND NOT FIXED: internal/reconciler/orphan.go's orphan scan reads an EMPTY Increment set against the Firestore adapter while reading a correct one against the in-memory adapter, so its tests pass and its shipped behaviour is a no-op. internal/reconciler/**, internal/store/** and internal/application/ports.go are all outside this task's allowed paths, and no task id is proposed for it. internal/application/loop_test.go's TestTheIncrementReadTakesIncrementIdsBecauseTheAdaptersDisagree pins the repair both structurally (over loopObserve's AST) and behaviourally."
+    },
+    {
+      "name": "bound-and-cursor",
+      "status": "passed",
+      "argv": [
+        "devbox",
+        "run",
+        "--pure",
+        "--",
+        "go",
+        "test",
+        "-count=1",
+        "-v",
+        "-run",
+        "TestOnePassIsBoundedAndTheCursorReachesWhatItDidNotSee|TestTheCandidateBoundFailsClosedRatherThanTruncating",
+        "./internal/application"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 1800,
+      "summary": "A12 THE BOUND, MEASURED. THE READS ONE PASS MAKES, none growing with the Requirement count: one u.EffectiveAllocationLimit keyed read; one u.QueueSummary; one u.RequirementsPage(ctx, req.Cursor, scheduler.MaxCandidates) KEEPING BOTH RETURN VALUES; one u.RequirementRepositoryLinks batch over exactly the ids on that page; one u.ActiveLeases(ctx, AllocationLeaseBound+1) through the existing allocationClaims, which fails closed above 100 with ErrAllocationLeaseBound; one u.IncrementsForRequirements batch bounded at LoopIncrementReadBound = 200; one u.ExecutionsForIncrements batch over exactly those Increment ids. All of it in ONE read transaction. The promotion stage adds a SECOND read transaction for the control state, and only when a release source is configured -- an unconfigured pass returns before it. MEASURED COST, read from memory.Store.QuotaTotal before and after one pass over a page of 100 Requirements: READS 334, WRITES 1. That is the TRUED-UP actual, not the reservation: quota.ReadTransactionUsage reserves Reads 6001 Writes 1 and the adapter trues it up, which is meaningful on both adapters because internal/store/memory/store.go:353 calls quota.Counter.TrueUp with the same correction internal/store/firestore/store.go:495 applies (V2-087). Against quota.DefaultBudget's Reads 25000 / Writes 10000 / Deletes 10000, one such pass costs 1.3% of a day's read budget and 0.01% of its writes. Each TRANSITION is one further mutation transaction reserving quota.MutationUsage Reads 32 Writes 16, and the per-stage caps are what bound that: LoopStageCap = 8 for waiting, recovering and completion, LoopPlanCap = 4 for the Increment stage (which costs TWO mutations per Increment, Plan then Prepare). A fully saturated pass therefore reserves at most (8+8+8)*16 + 4*2*16 = 512 writes, 5.1% of a day. NOTHING DID NOT FIT, so no escalation is raised on quota. WHAT ONE PASS LEAVES UNEXAMINED: every Requirement after NextCursor. HOW A LATER PASS REACHES IT: the next tick carrying that cursor. PROVEN BY EXECUTION in TestOnePassIsBoundedAndTheCursorReachesWhatItDidNotSee -- 101 Requirements seeded with caller-chosen ids so the page order is not a guess, the first pass examined exactly 100 and made ZERO transitions and reported MoreRequirementsExist=true with a NextCursor, the Requirement beyond the page was byte-identical afterwards by reflect.DeepEqual, and the second pass carrying that cursor examined exactly 1, reported MoreRequirementsExist=false and no cursor, and made exactly 1 recover transition on the Requirement the first pass never read. THE FAIL-CLOSED BEHAVIOUR IS PRESERVED, not caught: BuildAllocationSnapshot above scheduler.MaxCandidates returns ErrAllocationCandidateBound, asserted directly, and a go/ast scan over loop.go asserts NEITHER ErrAllocationCandidateBound NOR ErrAllocationLeaseBound appears as an identifier anywhere in it, plus that loopSkippable's swallowed set is exactly {ErrStaleVersion, ErrInvalidTransition, ErrControlDenied, ErrNotFound} and closed."
+    },
+    {
+      "name": "preview-local-two-real-processes",
+      "status": "passed",
+      "argv": [
+        "devbox",
+        "run",
+        "--pure",
+        "-e",
+        "AGENTIC_LOOP_LIVE_LOCAL=1",
+        "--",
+        "scripts/firestore-emulator.sh",
+        "go",
+        "test",
+        "-race",
+        "-count=1",
+        "-v",
+        "-run",
+        "TestControlPlanePreviewLocalLive",
+        "./internal/api"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 3000,
+      "summary": "A20 THE EXECUTED PROOF AT preview-local, WITH TWO REAL PROCESSES. ARGV, executed verbatim: `devbox run --pure -e AGENTIC_LOOP_LIVE_LOCAL=1 -- scripts/firestore-emulator.sh go test -race -count=1 -v -run TestControlPlanePreviewLocalLive ./internal/api`. VERDICT LINE: '--- PASS: TestControlPlanePreviewLocalLive (12.14s)' then 'ok github.com/takushi/agentic-loop-foundation/v2/internal/api 13.159s'. WHAT WAS OBSERVED, in order, all over real HTTP against the real cmd/control-plane binary and the real Firestore emulator: an owner captured a Requirement and drove it to ready; a runner was enrolled over the real /v1/runner/enrollment, /challenge and /complete routes with an ed25519 keypair generated in the exercise, so the session token the second process held was one the FIRST process issued and verified; POST /internal/reconcile returned 202 through its real dedicated IAP identity check, so the Loop pass ran as the scheduler the TRANSPORT established; GET /v1/runner/work, read as the RUNNER, named the Increment the pass had just planned ('the Loop pass planned increment_id=increment-4c59cb4eab48c362-42 for requirement_id=requirement-cddde379bf77a15b-35, and the offer route named it'); the real cmd/runner binary ran as a SECOND OS PROCESS in its own process group and reported on stdout 'runner: pass complete offered=2 claimed=2 deferred=0 heartbeats=1 stopped_at_provider_boundary=true' followed by one 'runner: claimed ...' line per claim, each naming an execution_state=running; and the owner detail route then reported the parent Requirement as active, read back from the emulator. The runner process printed no session token, asserted. ENVIRONMENT FACTS, recorded as release-contract.md's capability-evidence rule requires: environment class preview-local; machine D18061; os linux; arch amd64; go go1.25.0 as resolved inside `devbox run --pure`; devbox 0.17.2; emulator Firebase Firestore emulator started by scripts/firestore-emulator.sh at 127.0.0.1:18838 for the first run and 127.0.0.1:18129 for the environment-record run, project agentic-loop-test; worktree /home/takushi/repos/agentic-loop-foundation-worktrees/v2-task-091; branch v2-task/V2-091; base commit 848d8991ff9cd5a53c2f13d52b69429f0b83ed38. THE TWO PROCESS IDENTITIES: the control plane runs in its own process group started by runner.ProcessSupervisor with the env the exercise supplies, and the runner ran as its own process group leader, logged as pid-group 3373533 for that run. EVERY WAIT IS A BOUNDED DEADLINE POLL ON CANONICAL STATE, reusing this file's own waitForHealthz shape: waitForOfferedIncrement polls the real offer route until it names the Requirement, and waitForRequirementStatus polls the owner detail route until the STORED status matches. Nothing asserts an elapsed duration. Recorded honestly: this file's pre-existing idiom, which A18 directs reuse of, is a bounded deadline loop with a 50ms inter-probe sleep and a supervisor goroutine (live_local_test.go's waitForHealthz and startLiveControlPlane), and the new helpers reuse exactly that shape rather than introducing a fixed-duration wait. STATED PLAINLY: the COMPLETION transition is NOT proven at this grade, and neither is the RECOVERING transition. For completion, the shipped configuration records no capability evidence, so it cannot assemble a fully-evidenced release candidate, and this task fabricates none. For recovering, cmd/control-plane sets LeaseTTL to one minute, and waiting a real minute for a Lease to expire would be the wall-clock wait A18 forbids; what the exercise DOES assert is the absent-observation negative -- a second tick with the Lease still live transitions NOTHING and the Requirement stays active. Both transitions' positive cases stop at COMPONENT grade, proven in internal/application/loop_test.go over a real store with an injected clock."
+    },
+    {
+      "name": "g7-skips-recorded-with-their-patterns",
+      "status": "passed",
+      "argv": [
+        "devbox",
+        "run",
+        "--pure",
+        "--",
+        "scripts/firestore-emulator.sh",
+        "go",
+        "test",
+        "-count=1",
+        "-v",
+        "./internal/store/firestore"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 1800,
+      "summary": "A22 G7: A SKIPPED TEST IS NEVER A PASS, and the pattern accompanies every number. internal/store/firestore WITHOUT an emulator, argv `devbox run --pure -- go test -count=1 -v ./internal/store/firestore`: `grep -c '^--- SKIP'` = 26 (top-level) and `grep -cE '^ *--- SKIP'` = 49 (with subtests). BOTH re-measured, BOTH agree exactly with the numbers the Work Order carried. THE EMULATOR WAS THEN STARTED FOR REAL, argv `devbox run --pure -- scripts/firestore-emulator.sh go test -count=1 -v ./internal/store/firestore`: `grep -c '^--- SKIP'` = 0 and `grep -cE '^ *--- SKIP'` = 0, with 119 PASS lines and the verdict 'ok github.com/takushi/agentic-loop-foundation/v2/internal/store/firestore 10.805s'. So NO skip in that package is being counted as a pass anywhere in this record. The two live gates in internal/api are the only other skips this task's packages carry, and both were EXECUTED rather than skipped: TestControlPlanePreviewLocalLive and TestPreviewLocalEnvironmentIsRecorded were both run under `-e AGENTIC_LOOP_LIVE_LOCAL=1` wrapped by scripts/firestore-emulator.sh and both PASSED. TestFoundationPreviewLocalDogfood was NOT run: internal/api/live_dogfood_test.go is prohibited to this task."
+    },
+    {
+      "name": "additive-and-test-name-sets",
+      "status": "passed",
+      "argv": [
+        "devbox",
+        "run",
+        "--pure",
+        "--",
+        "sh",
+        "-c",
+        "go test -list '.*' ./... | grep '^Test' | sort"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 1800,
+      "summary": "A19 ADDITIVE, PROVEN BY MEASUREMENT. `git diff --stat <base> -- <path>` produced EMPTY OUTPUT, and therefore byte-identity, for every one of: internal/domain, internal/release, internal/reconciler, internal/scheduler, internal/store, internal/quota, internal/provider, internal/web, internal/runner/orchestrator.go, internal/runner/orchestrator_test.go, internal/runner/journey_test.go, internal/runner/source_guard_test.go, ci, Makefile, go.mod, go.sum, devbox.json, devbox.lock, Containerfile, contracts/schemas, contracts/fixtures, contracts/release-contract, docs, firestore.indexes.json, firebase.json, infra, scripts, .github, internal/application/caller.go, internal/application/requested_by_test.go, internal/application/service.go, internal/application/allocation.go, internal/application/ports.go, internal/application/readmodels.go, internal/application/release_surface.go, internal/application/framing.go, internal/application/human_input.go, internal/api/auth.go, internal/api/live_dogfood_test.go, .agents/v2/task-state, .agents/v2/packets and .agents/v2/DECLARATION-GAP.md. `git diff --stat` against the base lists exactly 23 paths: the twenty allowed ones minus the two evidence paths not needed, plus the three test files the A1 boundary revision widened in place. NO RequirementCommandKind, NO RequirementStatus, NO PermitKind, NO port and NO allowed() list was added or changed. NO READ-MODEL CHANGE: nextAction is at internal/application/readmodels.go:333-356 -- the Work Order says :306-329, which is a DISAGREEMENT -- and its body was re-read and CONFIRMED to branch on completed and cancelled and on Execution and Increment status and NEVER on waiting, recovering or evaluating, which is why readmodels.go is prohibited BY DESIGN rather than by omission. BEFORE-AND-AFTER TOP-LEVEL TEST-NAME SETS, measured with `go test -list '.*' <pkg> | grep '^Test' | sort` and compared with `comm -23 before after`: ZERO REMOVALS IN EVERY PACKAGE, so every pre-existing top-level test keeps its name. COUNTS: application 219 -> 236 (+17); api 80 -> 83 (+3); runner 120 -> 130 (+10); cmd/runner 0 -> 5 (+5); contracts 33 -> 33; domain 60 -> 60; release 47 -> 47; reconciler 16 -> 16; scheduler 26 -> 26; store/memory 16 -> 16; quota 14 -> 14. NO TEST WAS RENAMED and v2-task-dag.md 12.11 was not invoked. V2-090's PINS DID NOT MOVE: internal/domain/invariant_model_test.go:738-739 still declares wantReachedStatusCount = 10 and wantEdgeCount = 29, internal/domain is byte-unchanged, and TestInvariant3RequirementCompletionClosure PASSES -- so neither number moved and there is no finding to record against them. V2-086's SINGLE-PRODUCER SCAN was re-run UNEDITED and reports 'scheduler-producer scan parsed 98 non-test .go files: 1 sanctioned producer at internal/application/caller.go:70 and 0 anywhere else'; both TestExactlyOneSanctionedSchedulerCallerProducerExists and TestLoopCallerIsTheOnlyProducerAndRefusesAnEmptySubject PASS. V2-085's and V2-084's assets are green in the same package runs. THE MANIFEST CHECK IS GREEN: `make component-application`, `component-api`, `component-contracts`, `component-runner` and `component-control-plane` all report ok, so the design was not departed from and ci/** was not edited to make anything green."
+    },
+    {
+      "name": "verification-set-executed",
+      "status": "passed",
+      "argv": [
+        "devbox",
+        "run",
+        "--pure",
+        "--",
+        "go",
+        "test",
+        "-race",
+        "-count=1",
+        "./..."
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 3000,
+      "summary": "THE VERIFICATION SET ACTUALLY EXECUTED, each by its VERDICT LINE and never by the shell exit status. (1) `devbox run --pure -- go test -race -count=1 ./...` -- verdict: every package ok, no FAIL. Recorded honestly: on one intermediate run internal/runner's PRE-EXISTING, timing-based TestSupervisorCancelsProcessGroupTERMThenKILL failed with 'supervisor_test.go:105: timed out waiting for /tmp/.../grandchild_term' and passed on an immediate re-run of that test alone ('ok ... 1.214s'); internal/runner/supervisor_test.go is not touched by this task and the flake is recorded, not fixed. (2) `devbox run --pure -- go vet ./...` -- verdict: no output. (3) `devbox run --pure -- gofmt -l .` -- verdict: empty output. (4) `devbox run --pure -- make component-application` / `component-api` / `component-contracts` / `component-runner` / `component-control-plane` -- verdict: ok on every listed package. (5) `devbox run --pure -- make smoke` -- verdict: silent success; a cmd/ binary changed and cmd/runner --version still prints exactly the version string on stdout, which cmd/runner/main_test.go's TestVersionStillPrintsExactlyTheVersionStringOnStdout also asserts by building and running the real binary. (6) `devbox run --pure -- go test -count=1 ./internal/contracts` -- verdict: ok, including the ledger and index checks. (7) `devbox run --pure -e AGENTIC_LOOP_LIVE_LOCAL=1 -- scripts/firestore-emulator.sh go test -race -count=1 -v -run TestControlPlanePreviewLocalLive ./internal/api` -- verdict: '--- PASS' then 'ok ... 13.159s'. (8) `devbox run --pure -- scripts/firestore-emulator.sh go test -count=1 -v ./internal/store/firestore` -- verdict: ok, ZERO skips, 119 PASS lines. (9) `devbox run --pure -- gitleaks dir .agents --config .gitleaks.toml` -- verdict: 'no leaks found'. `gitleaks dir .` was NOT run. THE FULL `make check` WAS NOT RUN: the coordinator runs it once at integration. NO PROVIDER CLI WAS INVOKED, not even --version, and no live provider record was issued."
+    },
+    {
+      "name": "grade",
+      "status": "passed",
+      "argv": [
+        "sed",
+        "-n",
+        "44,50p",
+        "docs/architecture/release-contract.md"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 30,
+      "summary": "A21 THE GRADE, STATED ONCE. The reachability claims for WAITING, for RECOVERING, for INCREMENT CREATION and for a SEPARATE-PROCESS RUNNER claiming and starting an Execution stop at environment class preview-local as docs/architecture/release-contract.md:46 defines it -- the owner's own machine, the candidate version's Control Plane and Runner as real processes on localhost, a Firestore emulator as canonical store. Of those four, THREE were observed at that grade in this task's executed exercise -- Increment creation, the separate-process Runner's claim, and the Execution start -- while WAITING and RECOVERING stop at COMPONENT (in-process) grade, because reaching either at preview-local requires either an exhausted concurrency limit or an expired one-minute Lease, and the second would be the wall-clock wait A18 forbids. The claim for the COMPLETION transition stops at COMPONENT (in-process) grade: the shipped configuration cannot assemble a fully-evidenced candidate and this task fabricates none. release-contract.md:49 places the IAP authentication boundary, idle scale-to-zero, real Firestore permissions and contention, and the deploy path with the initial deploy gate D1, and v2-task-dag.md G3.3 says unit, fake, stub and contract evidence satisfies no real-environment condition at any grade. No sentence in this record asserts an observation on a managed serverless runtime, on a managed log sink, on any remotely hosted environment, on a live install, that any promotion to Stable took place, that every declared capability was exercised, or any capability id."
+    },
+    {
+      "name": "residual-findings-row-3",
+      "status": "passed",
+      "argv": [
+        "git",
+        "status",
+        "--porcelain"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 30,
+      "summary": "ROW (3) IN FULL -- RECORDED, NOT FIXED, AND NO TASK ID PROPOSED FOR ANY OF IT. (a) domain.RequirementWait from `active` and from `recovering` stays UNISSUED. Re-measured: AllocationSchedulerStatus (internal/application/allocation.go:382) maps `active` to scheduler.StatusAssigned and every status other than ready/active/completed to the empty status, and scheduler.structurallyReady (internal/scheduler/scheduler.go:192) requires StatusReady, so the scheduler can never attach a capacity or contention reason to an active or recovering Requirement. Recorded and asserted nowhere. (b) THREE of scheduler.AllReasons' seven members are UNREACHABLE from BuildAllocationSnapshot, each re-measured: unmet-dependency (the rows at allocation.go:455-464 carry no Dependencies field, so dependenciesMet is vacuously true), repository-unavailable (Snapshot.Repositories at allocation.go:471 is one synthetic entry with no FailureCount and no IsolatedUntil), not-executable (Assessment is never set). Each has its own arm with its own reason in loop.go's closed switch, so a future snapshot change surfaces there. (c) An Execution in domain.ExecutionFailed rather than domain.ExecutionLost produces NO Requirement transition, while docs/architecture/domain-model.md:275 says such a Requirement should become recovering, waiting or needs-input. Asserted as a NEGATIVE (zero transitions, status unchanged) and logged as the recorded boundary. (d) internal/reconciler/reconciler.go's recoverOne acts as domain.NewActorID('reconciler'), a name the component makes up for itself, and internal/reconciler holds no application.Caller at all, so the Requirement transition cannot live there. internal/reconciler is byte-unchanged and its output is read as an OBSERVATION instead. (e) application.allocationReport at internal/application/allocation.go:603 DISCARDS the page's `more` flag verbatim, so the owner queue read still cannot say whether it saw everything. allocation.go is prohibited; the pass makes its own call and keeps both values. Recorded, not fixed. (f) application.Event has eight fields and no payload, and internal/application/ports.go and internal/store/** are prohibited, so a transition's justifying observation is carried on the DURABLE RECORD the same s.record call writes -- the idempotency ResponseJSON, in the same transaction as the Event -- plus the Event's own Type. This is a DEVIATION from A7's literal wording ('on its own event') and it is recorded as one rather than glossed: adding a field to application.Event would require editing ports.go AND both store adapters to persist it, all three prohibited. loop_test.go asserts the observation by reading it back OUT OF THE STORE, not out of the report. (g) THE ADAPTER DIVERGENCE ON IncrementsForRequirements and its consequence for internal/reconciler/orphan.go, recorded in full in this record's adapter-divergence check. (h) The post-execution Increment half -- verify, integrate, preview-validate, accept, release -- still has zero non-test issuers; .agents/v2/DECLARATION-GAP.md already holds that row. (i) domain.RequirementPause, RequirementCancel, RequirementResume and RequirementNeedInput are all issued by OTHER files this task does not touch (V2-090's internal/application/pause.go and V2-065's human_input.go), which is itself a correction to the Work Order's A2 expectation of zero for the first three. (j) internal/runner/supervisor_test.go's TestSupervisorCancelsProcessGroupTERMThenKILL is timing-based and flaked once during this task's runs; the file is not touched and the flake is recorded, not fixed."
+    },
+    {
+      "name": "chain-position-g6b-and-rollback",
+      "status": "passed",
+      "argv": [
+        "cat",
+        "ci/components.json"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 60,
+      "summary": "A25 and A26, RE-MEASURED. G6b: .agents/v2/evidence/artifacts/V2-080-live-exercise-files.json declares path_count 103 and carries exactly 103 paths; the LITERAL intersection with this task's fourteen source and contract allowed paths is ZERO; and that set contains 15 internal/application paths and 45 internal/runner paths, 60 of the 103 -- all four numbers agree exactly with the Work Order. This task ADDS files to both packages (internal/application/loop.go and its two test files; internal/runner/controlplane.go, loopdriver.go and their two test files), so it MOVES the exercise file set itself, which under G6b means this task is correctly ordered BEFORE any later live re-observation of the M3live provider-live-claude record, and that record will require re-observation after this task lands. Recorded as a fact; not re-observed here, and no provider live test was run. CHAIN POSITION: internal/api/api.go is held by V2-083 and internal/api/api_test.go by V2-087, and editing contracts/openapi/openapi-v1.yaml moves the contracts component key and the release BundleDigest, so this task belongs in the api-contract chain after both. NO ci COMPONENT EDGE IS CREATED, re-measured three ways in ci/components.json: the runner component's roots are exactly ['cmd/runner/**','cmd/bootstrap/**', 'internal/runner/**']; the application component's dependencies already include release; the control-plane component's dependencies are exactly ['api','application','reconciler','runner','store-firestore'] and nothing new is imported there. store-firestore's dependencies include runner, which is why cmd/runner imports no store at all and internal/runner/controlplane.go is standard-library only. All five component targets are green, so the manifest is not red and the design was not departed from. ROLLBACK, verified as a data claim rather than asserted as a procedure: reverting means removing internal/application/loop.go and its two test files, the new internal/runner files, the real mode in cmd/runner/main.go, the wiring lines in cmd/control-plane/main.go, one branch plus one constant and one handler in internal/api/api.go, one path block and two schemas in contracts/openapi/openapi-v1.yaml, and the three widened guard comparisons -- nothing else, because the change adds no port, no stored field, no document kind, no index and no new persisted shape. THE DATA CLAIM WAS EXECUTED: internal/application/loop_test.go's TestTheNewStatusesReadThroughEveryExistingReadModel drives Requirements into waiting, recovering, evaluating and cancelled through real domain transitions and reads every one of them back through GET /v1/requirements/{id}'s read model and through the export without error, with next_action still populated."
+    },
+    {
+      "name": "evidence-key",
+      "status": "passed",
+      "argv": [
+        "devbox",
+        "run",
+        "--pure",
+        "--",
+        "make",
+        "evidence-keys"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 600,
+      "summary": "A24 EVIDENCE KEY for the contracts component ONLY, read with `devbox run --pure -- make evidence-keys` on the FINAL tree with every touched file already git-added, because the manifest checks read `git ls-files`. Measured value: 4480ff1e7a4eb0971a5d98ace89fdf9dec3eebbdb126d9a6f9360d9417ba5bc3. Exactly FIVE keys were measured -- application, api, contracts, runner, control-plane -- and not all 23. Under G6a the key is a record of PROVENANCE and not a verdict: these checks are re-run by make check, so neither key movement nor key stability is treated as a pass or a failure here. For comparison, the pre-edit value of this component's key is recorded in the A2 baseline check above."
+    },
+    {
+      "name": "component-result",
+      "status": "passed",
+      "argv": [
+        "devbox",
+        "run",
+        "--pure",
+        "--",
+        "make",
+        "component-contracts"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 1800,
+      "summary": "COMPONENT RESULT contracts: PASSED. One new path block, GET /v1/runner/work with operationId offeredWork and security runnerSession, and two new schemas, OfferedWorkResponse and OfferedIncrement, both with additionalProperties false and explicit required lists. No digest value is written anywhere in the contract and no field name contains password, credential, token, secret, raw_prompt or raw_provider_output. contracts/release-contract/**, contracts/schemas/** and contracts/fixtures/** are byte-unchanged. `devbox run --pure -- go test -count=1 ./internal/contracts` is green, including the openapi validation and the ledger and index checks."
+    }
+  ]
+}

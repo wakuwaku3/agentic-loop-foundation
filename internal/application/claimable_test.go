@@ -396,8 +396,38 @@ func TestTheNotClaimableRefusalHasExactlyOneIssuerAndOneDefinition(t *testing.T)
 	for _, names := range calls {
 		callTotal += len(names)
 	}
-	if callTotal != 1 || len(calls["claimable.go"]) != 1 || calls["claimable.go"][0] != "requirementAdmitsClaim" {
-		t.Fatalf("requirementStatusAdmitsClaim is called from %d non-test sites, want exactly 1 and that one requirementAdmitsClaim in claimable.go: %v", callTotal, calls)
+	// V2-091 widens this closed set from ONE call site to TWO, under
+	// v2-task-dag.md 12.12, and the widening is the MEASUREMENT rather than a
+	// weakening. One entry is added, with its reason:
+	//   - loop.go's loopObserve reads this predicate to filter the runner-role
+	//     offer behind GET /v1/runner/work down to Increments whose PARENT
+	//     admits work. Offering an Increment whose parent refuses a claim would
+	//     offer a Runner work that the very next call refuses, and re-expressing
+	//     the four statuses in loop.go is exactly the drift assertion (3) below
+	//     exists to catch -- so READING this predicate is the only way to build
+	//     the offer without a second list.
+	// Nothing else in this guard changes: the predicate is still DECLARED exactly
+	// once, the sentinel is still returned from exactly one function, the four
+	// statuses still appear together in exactly one switch, and the set stays
+	// CLOSED -- a THIRD call site still fails here.
+	wantCalls := map[string][]string{
+		"claimable.go": {"requirementAdmitsClaim"},
+		"loop.go":      {"loopObserve"},
+	}
+	wantCallTotal := 0
+	for file, names := range wantCalls {
+		wantCallTotal += len(names)
+		if len(calls[file]) != len(names) {
+			t.Fatalf("requirementStatusAdmitsClaim call sites in %s = %v, want exactly %v (all sites: %v)", file, calls[file], names, calls)
+		}
+		for i, name := range names {
+			if calls[file][i] != name {
+				t.Fatalf("requirementStatusAdmitsClaim call site %d in %s = %q, want %q (all sites: %v)", i, file, calls[file][i], name, calls)
+			}
+		}
+	}
+	if callTotal != wantCallTotal || len(calls) != len(wantCalls) {
+		t.Fatalf("requirementStatusAdmitsClaim is called from %d non-test sites in %d files, want exactly %d in %d: %v", callTotal, len(calls), wantCallTotal, len(wantCalls), calls)
 	}
 
 	// (3) The four status constants appear TOGETHER in exactly one switch in

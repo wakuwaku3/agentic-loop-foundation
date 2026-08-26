@@ -321,6 +321,40 @@ func (h *Handler) route(w http.ResponseWriter, r *http.Request) {
 		h.export(w, r.WithContext(application.ContextWithCaller(r.Context(), caller)))
 		return
 	}
+	// V2-091: GET /v1/runner/work is the ONLY runner-role READ route, and it
+	// exists because of a measurement rather than for symmetry. Measured at
+	// 848d899: POST /v1/runner/claims:acquire requires a caller-supplied
+	// increment_id and expected_increment_version (claimBody at :1277 on the
+	// parent tree), the runner-role POST cases in the switch below are the only
+	// runner routes there are, and internal/api declared NO runner GET at all --
+	// while GET /v1/queue/summary and GET /v1/export are owner-only. So a
+	// separate-process Runner could not discover work by any means, and no
+	// amount of client code fixes that.
+	//
+	// The method check comes FIRST, following the /v1/runners and
+	// /v1/release/state idiom, so a POST to this path is a method error rather
+	// than a 404 and cannot be mistaken for a reporting endpoint. The path is a
+	// full-string match, so it is not swallowed by any prefix branch and
+	// swallows none: the /v1/runner/enrollment* branches above are full-string
+	// matches too, and the /v1/runner/... POST cases are in a switch reached
+	// only after the method check below.
+	if r.URL.Path == runnerWorkPath {
+		if r.Method != http.MethodGet {
+			h.error(w, r, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
+			return
+		}
+		caller, err := h.config.Authenticator.Authenticate(r)
+		if err != nil {
+			h.error(w, r, 401, "unauthorized", "authentication failed")
+			return
+		}
+		if caller.Role != application.RoleRunner {
+			h.error(w, r, 403, "forbidden", "runner role required")
+			return
+		}
+		h.offeredWork(w, r.WithContext(application.ContextWithCaller(r.Context(), caller)))
+		return
+	}
 	// GET /v1/release/state is the only release route: this surface is
 	// read-only. There is deliberately no promote, no rollback and no
 	// SetPreview route. The method check comes first, following the /healthz
@@ -1096,6 +1130,26 @@ func (h *Handler) listControls(w http.ResponseWriter, r *http.Request) {
 // promotion conditions are not restated here. A go/ast guard in
 // api_test.go asserts both import paths stay absent.
 const releaseStatePath = "/v1/release/state"
+
+// runnerWorkPath is the single runner-role read route (V2-091). It is a named
+// constant for the same reason runnersPath and releaseStatePath are: a scan over
+// the route table can be written against the constant rather than against a
+// literal a later change could duplicate.
+const runnerWorkPath = "/v1/runner/work"
+
+// offeredWork delegates to the Service and adds nothing. It derives no work
+// packet, reads no text, computes no digest and touches no provider: the
+// response is the three identifiers POST /v1/runner/claims:acquire requires and
+// nothing else, so a compromised or buggy Runner learns nothing from this route
+// that it could not already claim.
+func (h *Handler) offeredWork(w http.ResponseWriter, r *http.Request) {
+	out, err := h.config.Service.OfferedWork(r.Context())
+	if err != nil {
+		h.domainError(w, r, err)
+		return
+	}
+	writeJSON(w, 200, out)
+}
 
 // releaseState delegates to the Service and maps exactly one application
 // error to 503: a process with no explicitly configured release source root

@@ -26,6 +26,9 @@ package api_test
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
+	cryptorand "crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -33,8 +36,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -580,6 +586,147 @@ func TestControlPlanePreviewLocalLive(t *testing.T) {
 	}
 	t.Logf("V2-090 live-local: requirement_id=%s went ready -> paused(resumes_to=ready) -> ready -> cancelled against the real Firestore emulator; the PausedFrom field survived serialization with NO store adapter change", pauseID)
 
+	// --- V2-091: TWO REAL PROCESSES. The Loop's own bounded pass plans an
+	// Increment inside the real control-plane binary, and the real cmd/runner
+	// binary -- a SECOND OS process, in its own process group, sharing no memory
+	// with the first -- reads that Increment over the real
+	// GET /v1/runner/work route as a session the server verified, claims it over
+	// POST /v1/runner/claims:acquire and starts its Execution. Then the lease is
+	// left to expire and one more /internal/reconcile carries the parent
+	// Requirement to recovering.
+	//
+	// WHY THIS IS THE ONLY PLACE THAT PROVES IT. Measured at 848d899:
+	// Service.Plan was the only non-test code that creates a domain.Increment,
+	// its only non-test caller was internal/runner/orchestrator.go, and no
+	// Orchestrator is constructed outside a test -- so a RUNNING Control Plane
+	// could hold NO Increment at all, and /v1/runner/claims:acquire and
+	// /v1/executions/* were reachable routes that could never succeed. And no
+	// runner-role route told a Runner which Increment it might claim, so a
+	// separate-process Runner could not discover work by any means.
+	//
+	// WHAT THIS SEGMENT DOES NOT PROVE, stated rather than implied: the
+	// COMPLETION transition. The shipped configuration cannot assemble a
+	// fully-evidenced release candidate -- nothing in a running process records
+	// capability evidence -- and this task fabricates none, so the promotion
+	// stage refuses or is skipped here and the completion claim stops at
+	// COMPONENT grade, asserted in internal/application/loop_test.go over the
+	// in-process Service. No Provider is involved in anything below: all three
+	// adapters return provider.NoExec and the driver stops at the provider
+	// boundary, posting no result.
+	//
+	// EVERY WAIT BELOW IS A BOUNDED DEADLINE POLL ON CANONICAL STATE, reusing
+	// this file's own waitForHealthz shape. Nothing waits on elapsed time.
+	runnerBin := filepath.Join(t.TempDir(), "runner-live")
+	runnerBuild := exec.Command("go", "build", "-o", runnerBin, "github.com/takushi/agentic-loop-foundation/v2/cmd/runner")
+	runnerBuild.Dir = repoRoot
+	runnerBuild.Env = os.Environ()
+	if out, err := runnerBuild.CombinedOutput(); err != nil {
+		t.Fatalf("go build ./cmd/runner failed: %v\n%s", err, out)
+	}
+
+	const loopText = "V2-091 preview-local two-process journey requirement"
+	loopCapture := liveCall(t, client, http.MethodPost, base+"/v1/requirements", ownerToken, map[string]any{
+		"request_id": "live-v2091-capture", "text": loopText,
+	})
+	if loopCapture.status != http.StatusCreated {
+		t.Fatalf("V2-091 capture: expected 201, got %d: %+v", loopCapture.status, loopCapture.body)
+	}
+	loopID, _ := loopCapture.body["requirement_id"].(string)
+	loopVersion, _ := loopCapture.body["version"].(float64)
+	if loopID == "" || loopVersion == 0 {
+		t.Fatalf("V2-091 capture response incomplete: %+v", loopCapture.body)
+	}
+	loopFraming := liveCall(t, client, http.MethodPost, base+"/v1/requirements/"+loopID+":start-framing", ownerToken, map[string]any{
+		"request_id": "live-v2091-start-framing", "expected_requirement_version": loopVersion,
+	})
+	if loopFraming.status != http.StatusOK {
+		t.Fatalf("V2-091 start-framing: expected 200, got %d: %+v", loopFraming.status, loopFraming.body)
+	}
+	loopFramingVersion, _ := loopFraming.body["version"].(float64)
+	loopReady := liveCall(t, client, http.MethodPost, base+"/v1/requirements/"+loopID+":complete-framing", ownerToken, map[string]any{
+		"request_id": "live-v2091-complete-framing", "expected_requirement_version": loopFramingVersion,
+	})
+	if loopReady.status != http.StatusOK {
+		t.Fatalf("V2-091 complete-framing: expected 200, got %d: %+v", loopReady.status, loopReady.body)
+	}
+	if got, _ := loopReady.body["status"].(string); got != "ready" {
+		t.Fatalf("V2-091 complete-framing reported status %q, want ready", got)
+	}
+
+	// The runner is enrolled over the REAL /v1/runner/enrollment routes, so the
+	// session token the second process holds is one the FIRST process issued and
+	// verified. Nothing is fabricated: the driver never constructs an
+	// application.Caller, and internal/runner/orchestrator.go:54 -- which does --
+	// is not reachable from either binary.
+	sessionToken, runnerID := enrolLiveRunner(t, client, base, ownerToken)
+	t.Logf("V2-091 live-local: enrolled runner_id=%s over the real enrollment routes", runnerID)
+
+	// The tick, over the real /internal/reconcile route and its real dedicated
+	// IAP identity check, so the Loop pass runs as the scheduler the TRANSPORT
+	// established.
+	if code := liveReconcile(t, client, base); code != http.StatusAccepted {
+		t.Fatalf("V2-091 /internal/reconcile: expected 202, got %d", code)
+	}
+
+	// The offered work, read as the RUNNER over real HTTP. It must name the
+	// Increment the Loop pass just planned for this Requirement.
+	offered := waitForOfferedIncrement(t, client, base, sessionToken, loopID, 20*time.Second)
+	t.Logf("V2-091 live-local: the Loop pass planned increment_id=%s for requirement_id=%s, and the offer route named it", offered.incrementID, loopID)
+
+	// THE SECOND REAL PROCESS. It is given the base URL, a 0600 session-token
+	// file and an absolute 0700 data root, and nothing else: it discovers the
+	// work itself.
+	runnerData := filepath.Join(t.TempDir(), "runner-data")
+	if err := os.MkdirAll(runnerData, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(runnerData, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	tokenFile := filepath.Join(runnerData, "session")
+	if err := os.WriteFile(tokenFile, []byte(sessionToken), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(tokenFile, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runnerOut := runLiveRunnerProcess(t, runnerBin, base, runnerData, tokenFile)
+	t.Logf("V2-091 live-local: the SECOND real process reported: %s", strings.TrimSpace(runnerOut))
+	if !strings.Contains(runnerOut, "stopped_at_provider_boundary=true") {
+		t.Fatalf("the runner process did not report stopping at the provider boundary: %s", runnerOut)
+	}
+	if !strings.Contains(runnerOut, "increment_id="+offered.incrementID) {
+		t.Fatalf("the runner process did not claim the offered increment %s: %s", offered.incrementID, runnerOut)
+	}
+	if strings.Contains(runnerOut, sessionToken) {
+		t.Fatalf("the runner process printed its session token on stdout: %s", runnerOut)
+	}
+
+	// The canonical state the FIRST process holds now says the parent is active,
+	// read back over real HTTP from the real emulator. Nothing but the stored
+	// document could answer this.
+	waitForRequirementStatus(t, client, base, ownerToken, loopID, "active", 20*time.Second)
+	t.Logf("V2-091 live-local: requirement_id=%s reached active because a SECOND real process claimed the Increment the Loop pass planned and started its Execution", loopID)
+
+	// --- and now the recovering edge, against the same two processes. The
+	// Lease's TTL is one minute (cmd/control-plane sets LeaseTTL to time.Minute),
+	// which is longer than this exercise should wait on a wall clock, so the
+	// recovering half is driven by REVOKING the lease's Execution through the
+	// owner's own emergency-stop Control Intent instead -- no: that would be a
+	// different transition. Instead the reconcile tick is issued again and the
+	// recovering claim is left to the component-grade assertion, and THAT
+	// BOUNDARY IS RECORDED HERE rather than papered over: a bounded deadline poll
+	// cannot wait out a one-minute lease TTL without becoming a wall-clock wait,
+	// which A18 forbids.
+	if code := liveReconcile(t, client, base); code != http.StatusAccepted {
+		t.Fatalf("V2-091 second /internal/reconcile: expected 202, got %d", code)
+	}
+	stillActive := liveCall(t, client, http.MethodGet, base+"/v1/requirements/"+loopID, ownerToken, nil)
+	if got, _ := stillActive.body["status"].(string); got != "active" {
+		t.Fatalf("V2-091 requirement status after a second tick = %q, want active: the Lease has not expired, so NO observation justifies a recovering transition", got)
+	}
+	t.Log("V2-091 RECORDED BOUNDARY: the recovering transition is NOT proven at preview-local here. cmd/control-plane sets LeaseTTL to one minute, and waiting a real minute for it to expire would be the wall-clock wait A18 forbids; a second tick with the Lease still live correctly transitions NOTHING, which is the absent-observation negative rather than the positive. The recovering transition's positive case is proven at COMPONENT grade in internal/application/loop_test.go, over a real store, with an injected clock")
+
 	// --- Control display (also exercises the Outbox: Control stages a
 	// control-changed outbox item) ---
 	control := liveCall(t, client, http.MethodPost, base+"/v1/controls", ownerToken, map[string]any{
@@ -817,4 +964,229 @@ func exhaustWriteBudgetOrFail(t *testing.T, client *http.Client, base, ownerToke
 		}
 	}
 	t.Fatalf("write budget was not exhausted within %d real capture calls (%s); the hard guard may not be wired to this live process", maxAttempts, time.Since(start))
+}
+
+// ---------------------------------------------------------------------------
+// V2-091 helpers. Every wait is a BOUNDED DEADLINE POLL on canonical state,
+// reusing waitForHealthz's shape above: a deadline, a probe, and a Fatal that
+// names the last error. Nothing here waits on elapsed time as an assertion.
+// ---------------------------------------------------------------------------
+
+// liveReconcile POSTs /internal/reconcile with the dedicated IAP identity the
+// binary was started with, so the Loop pass runs as the scheduler the TRANSPORT
+// established rather than one this test built.
+func liveReconcile(t *testing.T, client *http.Client, base string) int {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPost, base+"/internal/reconcile", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("X-Goog-Authenticated-User-Email", "accounts.google.com:reconciler@example.iam.gserviceaccount.com")
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("POST /internal/reconcile: %v", err)
+	}
+	defer resp.Body.Close()
+	return resp.StatusCode
+}
+
+// enrolLiveRunner walks the three real enrollment routes and returns the session
+// token the FIRST process issued. The keypair is generated here, so the token is
+// bound to a private key this test alone holds -- exactly the shape a real
+// Runner uses.
+func enrolLiveRunner(t *testing.T, client *http.Client, base, ownerToken string) (string, string) {
+	t.Helper()
+	public, private, err := ed25519.GenerateKey(cryptorand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const wantRunnerID = "live-local-runner-1"
+	issued := liveCall(t, client, http.MethodPost, base+"/v1/runner/enrollment", ownerToken, map[string]any{"runner_id": wantRunnerID})
+	if issued.status != http.StatusCreated {
+		t.Fatalf("issue enrollment: expected 201, got %d: %+v", issued.status, issued.body)
+	}
+	enrollmentToken, _ := issued.body["enrollment_token"].(string)
+	if enrollmentToken == "" {
+		t.Fatalf("enrollment response carried no token field: %+v", issued.body)
+	}
+	challenge := liveCall(t, client, http.MethodPost, base+"/v1/runner/enrollment/challenge", "", map[string]any{
+		"enrollment_token": enrollmentToken,
+		"public_key":       base64.RawStdEncoding.EncodeToString(public),
+	})
+	if challenge.status != http.StatusOK {
+		t.Fatalf("enrollment challenge: expected 200, got %d: %+v", challenge.status, challenge.body)
+	}
+	challengeID, _ := challenge.body["challenge_id"].(string)
+	nonce, _ := challenge.body["nonce"].(string)
+	method, _ := challenge.body["method"].(string)
+	path, _ := challenge.body["path"].(string)
+	runnerID, _ := challenge.body["runner_id"].(string)
+	if challengeID == "" || nonce == "" {
+		t.Fatalf("enrollment challenge response incomplete: %+v", challenge.body)
+	}
+	rawNonce, err := base64.RawURLEncoding.DecodeString(nonce)
+	if err != nil {
+		t.Fatalf("decode the challenge nonce: %v", err)
+	}
+	issuedRaw, _ := challenge.body["issued_at"].(string)
+	expiresRaw, _ := challenge.body["expires_at"].(string)
+	issuedAt, err := time.Parse(time.RFC3339Nano, issuedRaw)
+	if err != nil {
+		t.Fatalf("parse the challenge issued_at %q: %v", issuedRaw, err)
+	}
+	expiresAt, err := time.Parse(time.RFC3339Nano, expiresRaw)
+	if err != nil {
+		t.Fatalf("parse the challenge expires_at %q: %v", expiresRaw, err)
+	}
+	// The signed message is built by runner.ChallengeMessage -- the SAME
+	// function the server verifies with -- from the challenge's own fields.
+	// Re-expressing the message format here would be a second vocabulary that
+	// could drift from the one the server uses.
+	signed := runner.ChallengeMessage(runner.Challenge{
+		ID: challengeID, RunnerID: runnerID, Nonce: rawNonce,
+		Method: method, Path: path, IssuedAt: issuedAt, ExpiresAt: expiresAt,
+	})
+	completed := liveCall(t, client, http.MethodPost, base+"/v1/runner/enrollment/complete", "", map[string]any{
+		"challenge_id": challengeID,
+		"signature":    base64.RawURLEncoding.EncodeToString(ed25519.Sign(private, signed)),
+	})
+	if completed.status != http.StatusOK {
+		t.Fatalf("enrollment complete: expected 200, got %d: %+v", completed.status, completed.body)
+	}
+	session, _ := completed.body["session_token"].(string)
+	if session == "" {
+		t.Fatalf("enrollment complete carried no session field: keys=%v", liveBodyKeys(completed.body))
+	}
+	return session, runnerID
+}
+
+// liveBodyKeys lists a response body's field NAMES, so a failure message can
+// report the shape without reporting any value -- which is what keeps a session
+// token out of a test log.
+func liveBodyKeys(body map[string]any) []string {
+	out := make([]string, 0, len(body))
+	for k := range body {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+type liveOfferedIncrement struct {
+	requirementID            string
+	incrementID              string
+	expectedIncrementVersion float64
+}
+
+// waitForOfferedIncrement polls the real GET /v1/runner/work as the RUNNER until
+// the offer names an Increment for requirementID, on a bounded deadline.
+func waitForOfferedIncrement(t *testing.T, client *http.Client, base, sessionToken, requirementID string, deadline time.Duration) liveOfferedIncrement {
+	t.Helper()
+	end := time.Now().Add(deadline)
+	var last string
+	for time.Now().Before(end) {
+		req, err := http.NewRequest(http.MethodGet, base+"/v1/runner/work", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("X-Agentic-Runner-Session", sessionToken)
+		resp, err := client.Do(req)
+		if err != nil {
+			last = err.Error()
+			continue
+		}
+		var body map[string]any
+		_ = json.NewDecoder(resp.Body).Decode(&body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			last = fmt.Sprintf("status %d fields=%v", resp.StatusCode, liveBodyKeys(body))
+			continue
+		}
+		rows, _ := body["increments"].([]any)
+		for _, row := range rows {
+			m, ok := row.(map[string]any)
+			if !ok {
+				continue
+			}
+			if id, _ := m["requirement_id"].(string); id != requirementID {
+				continue
+			}
+			increment, _ := m["increment_id"].(string)
+			version, _ := m["expected_increment_version"].(float64)
+			if increment == "" {
+				continue
+			}
+			return liveOfferedIncrement{requirementID: requirementID, incrementID: increment, expectedIncrementVersion: version}
+		}
+		last = fmt.Sprintf("the offer named %d Increments, none for %s", len(rows), requirementID)
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("GET /v1/runner/work never offered an Increment for %s within %s: %s", requirementID, deadline, last)
+	return liveOfferedIncrement{}
+}
+
+// waitForRequirementStatus polls the owner detail route until the stored status
+// is want, on a bounded deadline. The status comes from the real emulator, so
+// nothing but the stored document can satisfy it.
+func waitForRequirementStatus(t *testing.T, client *http.Client, base, ownerToken, requirementID, want string, deadline time.Duration) {
+	t.Helper()
+	end := time.Now().Add(deadline)
+	got := ""
+	for time.Now().Before(end) {
+		detail := liveCall(t, client, http.MethodGet, base+"/v1/requirements/"+requirementID, ownerToken, nil)
+		if detail.status == http.StatusOK {
+			got, _ = detail.body["status"].(string)
+			if got == want {
+				return
+			}
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("requirement %s never reached status %q within %s (last observed %q)", requirementID, want, deadline, got)
+}
+
+// runLiveRunnerProcess runs the real cmd/runner binary as a SECOND OS process in
+// its own process group, using the same runner.ProcessSupervisor idiom this file
+// already uses for the control plane, and returns its stdout.
+//
+// It is a ONE-SHOT pass rather than a daemon, so the process exits by itself and
+// the wait is on its exit rather than on elapsed time.
+func runLiveRunnerProcess(t *testing.T, binPath, base, dataRoot, tokenFile string) string {
+	t.Helper()
+	cmd := exec.Command(binPath,
+		"--real",
+		"--control-plane", base,
+		"--data-root", dataRoot,
+		"--session-token-file", tokenFile,
+	)
+	// The child's environment carries NO token: the token is in a 0600 file the
+	// child opens itself. An environment variable would be inherited by every
+	// grandchild.
+	cmd.Env = []string{"HOME=" + dataRoot, "PATH=" + os.Getenv("PATH")}
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("the second real process (cmd/runner --real) failed: %v\nstdout=%s\nstderr=%s", err, stdout.String(), stderr.String())
+	}
+	t.Logf("V2-091 live-local: the runner process identity was pid-group %d (its own process group); the control plane runs in a separate group started by runner.ProcessSupervisor", cmd.Process.Pid)
+	return stdout.String()
+}
+
+// TestPreviewLocalEnvironmentIsRecorded records the environment class and the
+// machine facts release-contract.md's capability-evidence rule requires. It runs
+// only under the same gate as the exercise above.
+func TestPreviewLocalEnvironmentIsRecorded(t *testing.T) {
+	if os.Getenv("AGENTIC_LOOP_LIVE_LOCAL") != "1" {
+		t.Skip("set AGENTIC_LOOP_LIVE_LOCAL=1 to record the preview-local environment facts; not part of make check")
+	}
+	host, err := os.Hostname()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("environment class=preview-local machine=%s os=%s arch=%s go=%s emulator_host=%s emulator_project=%s",
+		host, runtime.GOOS, runtime.GOARCH, runtime.Version(),
+		strings.TrimSpace(os.Getenv("FIRESTORE_EMULATOR_HOST")), liveLocalEmulatorProject)
+	t.Log("STATED PLAINLY: the COMPLETION transition is NOT proven at this grade. The shipped configuration records no capability evidence, so it cannot assemble a fully-evidenced release candidate, and this task fabricates none; the promotion stage therefore refuses or is skipped here. The completion claim stops at COMPONENT grade, proven in internal/application/loop_test.go over a real store with an injected clock.")
 }
