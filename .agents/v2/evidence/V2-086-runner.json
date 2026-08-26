@@ -218,7 +218,7 @@
       ],
       "working_directory": ".",
       "timeout_seconds": 900,
-      "summary": "A19, run AFTER the evidence was committed, over .agents only. Verdict lines: 'INF scanned ~4725743 bytes (4.73 MB) in 344ms' and 'INF no leaks found'. `gitleaks dir .` was NOT run: it reports 26 findings from gitignored build/evidence/** paths that are not part of this task and would drown the signal. No credential value appears in any of these three records -- the identities they name are identifiers (an owner email, a scheduler service-account email, a stranger email) and no token, key or password value is recorded anywhere, in full, truncated or hashed form. No prompt and no provider response appears in any form."
+      "summary": "A19, run AFTER the evidence was committed, over .agents only, and re-run after every subsequent record edit. THE VERDICT, identical on every run: 'INF no leaks found'. The scanned size grows as these records grow and is reported for provenance only, never as an assertion: 'INF scanned ~4725743 bytes (4.73 MB) in 344ms' on the first run, and 'INF scanned ~4739392 bytes (4.74 MB) in 357ms' after the A6 record was rewritten. `gitleaks dir .` was NOT run: it reports 26 findings from gitignored build/evidence/** paths that are not part of this task and would drown the signal. No credential value appears in any of these three records -- the identities they name are identifiers (an owner email, a scheduler service-account email, a stranger email) and no token, key or password value is recorded anywhere, in full, truncated or hashed form. No prompt and no provider response appears in any form."
     },
     {
       "name": "a19-no-provider-cli-and-no-cloud-resource",
