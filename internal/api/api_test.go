@@ -1111,7 +1111,33 @@ func driveRunnerRoutes(t *testing.T, report string) []struct {
 	if err != nil {
 		t.Fatal(err)
 	}
-	planned, err := svc.Plan(ctx, application.PlanRequest{RequestID: "plan", RequirementID: captured.RequirementID, ExpectedRequirementVersion: captured.Version})
+	// V2-089: claims:acquire is refused unless the parent Requirement is in one
+	// of the four statuses that admit work, and it was MEASURED to answer 409
+	// conflict here before this migration. The Requirement is moved to `ready`
+	// through the product's OWN routes -- :start-framing and V2-084's
+	// :complete-framing over this same composed handler -- rather than a store
+	// write, because this fixture already holds the handler and needs no store
+	// access to do it. Both commands bump the Requirement's Version, so the
+	// version threaded into the Plan below is the one :complete-framing
+	// reported, not captured.Version.
+	framed := call(h, http.MethodPost, "/v1/requirements/"+captured.RequirementID+":start-framing",
+		`{"request_id":"drive-start-framing","expected_requirement_version":`+strconv.Itoa(int(captured.Version))+`}`, "owner")
+	if framed.Code != 200 {
+		t.Fatalf("start-framing: status=%d body=%s", framed.Code, framed.Body.String())
+	}
+	framedVersion := int(decodeBody(t, framed.Body.Bytes())["version"].(float64))
+	readied := call(h, http.MethodPost, "/v1/requirements/"+captured.RequirementID+":complete-framing",
+		`{"request_id":"drive-complete-framing","expected_requirement_version":`+strconv.Itoa(framedVersion)+`}`, "owner")
+	if readied.Code != 200 {
+		t.Fatalf("complete-framing: status=%d body=%s", readied.Code, readied.Body.String())
+	}
+	readyBody := decodeBody(t, readied.Body.Bytes())
+	if readyBody["status"] != string(domain.RequirementReady) {
+		t.Fatalf("complete-framing left the Requirement in %v, want %q", readyBody["status"], domain.RequirementReady)
+	}
+	readyVersion := domain.Version(int(readyBody["version"].(float64)))
+
+	planned, err := svc.Plan(ctx, application.PlanRequest{RequestID: "plan", RequirementID: captured.RequirementID, ExpectedRequirementVersion: readyVersion})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -5647,4 +5673,239 @@ func TestARequirementLeftInReadyOrActiveStillReadsAfterTheChangeIsReverted(t *te
 			t.Fatalf("the export omits the %s Requirement", tc.want)
 		}
 	}
+}
+
+// TestAClaimIsRefused409UntilItsRequirementIsFramedReadyAndThenSucceeds is
+// V2-089 A21: the whole journey over the composed handler, in the order that
+// makes the refusal and its repair one observation rather than two.
+//
+// The detail route and the requirement page are read several times, so the
+// injected framingClock is stepped a whole UTC day between reads -- the existing
+// idiom in this file. No sleep, no timer, no goroutine, no wall-clock read and no
+// assertion on any value the clock returns.
+func TestAClaimIsRefused409UntilItsRequirementIsFramedReadyAndThenSucceeds(t *testing.T) {
+	h, st, c, svc := v2084Handler(t)
+	ownerCtx := application.ContextWithCaller(context.Background(), application.Caller{Role: application.RoleOwner, Subject: "owner"})
+
+	requirementCount := func(step string) int {
+		c.nextDay()
+		w := call(h, http.MethodGet, "/v1/requirements?page_size=100", "", "owner")
+		if w.Code != http.StatusOK {
+			t.Fatalf("%s: the requirement page status=%d body=%s", step, w.Code, w.Body.String())
+		}
+		var page struct {
+			Requirements []struct {
+				RequirementID string `json:"requirement_id"`
+			} `json:"requirements"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &page); err != nil {
+			t.Fatalf("%s: %v", step, err)
+		}
+		return len(page.Requirements)
+	}
+	detail := func(step, id string) map[string]any {
+		c.nextDay()
+		w := call(h, http.MethodGet, "/v1/requirements/"+id, "", "owner")
+		if w.Code != http.StatusOK {
+			t.Fatalf("%s: the detail status=%d body=%s", step, w.Code, w.Body.String())
+		}
+		return decodeBody(t, w.Body.Bytes())
+	}
+	// leaseAndExecutionSets is the pair a refused claim must leave unchanged.
+	leaseAndExecutionSets := func(step, incrementID string) ([]domain.Lease, domain.FencingToken) {
+		ctx := context.Background()
+		var leases []domain.Lease
+		var fencing domain.FencingToken
+		if err := st.Transact(ctx, func(u application.UnitOfWork) error {
+			var e error
+			if leases, e = u.ActiveLeases(ctx, 100); e != nil {
+				return e
+			}
+			fencing, e = u.MaxFencingToken(ctx, incrementID)
+			return e
+		}); err != nil {
+			t.Fatalf("%s: reading the lease and execution sets: %v", step, err)
+		}
+		return leases, fencing
+	}
+
+	// 1. Capture, over the real route, as the owner.
+	id, capturedVersion := captureRequirement(t, h, "v2089a21")
+	countAfterCapture := requirementCount("after capture")
+	if countAfterCapture != 1 {
+		t.Fatalf("the fixture holds %d Requirements, want exactly 1", countAfterCapture)
+	}
+	if got := detail("after capture", id)["status"]; got != "captured" {
+		t.Fatalf("the detail reports %v after capture, want captured", got)
+	}
+
+	// 2. One Increment under a Requirement that admits NO work. Plan and Prepare
+	// are deliberately NOT refused by V2-089 -- that residual is recorded, never
+	// asserted -- so both succeed here, which is what makes the claim's own
+	// question the one under test.
+	c.nextDay()
+	planned, err := svc.Plan(ownerCtx, application.PlanRequest{RequestID: "v2089a21:plan", RequirementID: id, ExpectedRequirementVersion: capturedVersion})
+	if err != nil {
+		t.Fatalf("plan under a captured parent (through the Service, because no /v1 route creates an Increment): %v", err)
+	}
+	c.nextDay()
+	prepared, err := svc.Prepare(ownerCtx, application.PrepareRequest{RequestID: "v2089a21:prepare", IncrementID: planned.IncrementID, ExpectedVersion: planned.Version})
+	if err != nil {
+		t.Fatalf("prepare under a captured parent: %v", err)
+	}
+	incrementBefore, ok := st.Increment(planned.IncrementID)
+	if !ok {
+		t.Fatal("the planned Increment is not in the store")
+	}
+	leasesBefore, fencingBefore := leaseAndExecutionSets("before the refused claim", planned.IncrementID)
+
+	claimBody := func(requestID string) string {
+		return `{"request_id":"` + requestID + `","increment_id":"` + planned.IncrementID +
+			`","expected_increment_version":` + strconv.FormatInt(int64(prepared.Version), 10) +
+			`,"target":{"installation_id":"install","requirement_id":"` + id + `","increment_id":"` + planned.IncrementID + `"}}`
+	}
+
+	// 3. The claim, as a RUNNER, while the parent is captured: 409 conflict.
+	c.nextDay()
+	w := call(h, http.MethodPost, "/v1/runner/claims:acquire", claimBody("v2089a21-claim-refused"), "runner")
+	if w.Code != http.StatusConflict {
+		t.Fatalf("the claim under a captured parent returned status=%d body=%s, want 409", w.Code, w.Body.String())
+	}
+	refusal := decodeBody(t, w.Body.Bytes())
+	if refusal["error"] != "conflict" {
+		t.Fatalf("the refusal body carries error=%v, want conflict: %s", refusal["error"], w.Body.String())
+	}
+
+	// 4. The refusal changed nothing: the Increment, the active-lease set and the
+	// max fencing token are byte-unchanged, and the Requirement count has not
+	// moved since the first capture.
+	incrementAfter, _ := st.Increment(planned.IncrementID)
+	if !reflect.DeepEqual(incrementBefore, incrementAfter) {
+		t.Fatalf("the refused claim changed the Increment:\n before = %#v\n after  = %#v", incrementBefore, incrementAfter)
+	}
+	leasesAfter, fencingAfter := leaseAndExecutionSets("after the refused claim", planned.IncrementID)
+	if !reflect.DeepEqual(leasesBefore, leasesAfter) || fencingBefore != fencingAfter {
+		t.Fatalf("the refused claim changed the lease or execution set: leases %#v -> %#v, fencing %d -> %d", leasesBefore, leasesAfter, fencingBefore, fencingAfter)
+	}
+	if n := requirementCount("after the refused claim"); n != countAfterCapture {
+		t.Fatalf("the Requirement count moved from %d to %d", countAfterCapture, n)
+	}
+
+	// 5. :start-framing and :complete-framing, as the owner, over the real
+	// routes: the Requirement reaches ready.
+	capturedNow, _ := st.Requirement(id)
+	c.nextDay()
+	w = call(h, http.MethodPost, "/v1/requirements/"+id+startFramingRouteSuffix, startFramingBody("v2089a21-frame", capturedNow.Version), "owner")
+	if w.Code != http.StatusOK {
+		t.Fatalf("start-framing status=%d body=%s", w.Code, w.Body.String())
+	}
+	framingVersion := domain.Version(decodeBody(t, w.Body.Bytes())["version"].(float64))
+	c.nextDay()
+	w = call(h, http.MethodPost, "/v1/requirements/"+id+completeFramingRouteSuffix, completeFramingBody("v2089a21-complete", framingVersion), "owner")
+	if w.Code != http.StatusOK {
+		t.Fatalf("complete-framing status=%d body=%s", w.Code, w.Body.String())
+	}
+	if got := decodeBody(t, w.Body.Bytes())["status"]; got != "ready" {
+		t.Fatalf("complete-framing reports %v, want ready", got)
+	}
+	if got := detail("after complete-framing", id)["status"]; got != "ready" {
+		t.Fatalf("the detail reports %v after complete-framing, want ready", got)
+	}
+
+	// 6. The SAME Increment, claimed again with a NEW request_id: 200, and the
+	// parent is now active through V2-084's edge.
+	c.nextDay()
+	w = call(h, http.MethodPost, "/v1/runner/claims:acquire", claimBody("v2089a21-claim-accepted"), "runner")
+	if w.Code != http.StatusOK {
+		t.Fatalf("the claim under a ready parent returned status=%d body=%s, want 200", w.Code, w.Body.String())
+	}
+	accepted := decodeBody(t, w.Body.Bytes())
+	if accepted["increment_id"] != planned.IncrementID {
+		t.Fatalf("the claim response names %v", accepted["increment_id"])
+	}
+	if got := detail("after the accepted claim", id)["status"]; got != "active" {
+		t.Fatalf("the detail reports %v after the accepted claim, want active", got)
+	}
+
+	// 7. A SECOND Increment on the SAME, now active, parent: 200, and the parent
+	// stays active. domain-model.md:266 defines active as one or more Increments
+	// in progress, so a second concurrent Increment needs no transition.
+	activeNow, _ := st.Requirement(id)
+	c.nextDay()
+	planned2, err := svc.Plan(ownerCtx, application.PlanRequest{RequestID: "v2089a21:plan-2", RequirementID: id, ExpectedRequirementVersion: activeNow.Version})
+	if err != nil {
+		t.Fatalf("plan the second Increment: %v", err)
+	}
+	c.nextDay()
+	prepared2, err := svc.Prepare(ownerCtx, application.PrepareRequest{RequestID: "v2089a21:prepare-2", IncrementID: planned2.IncrementID, ExpectedVersion: planned2.Version})
+	if err != nil {
+		t.Fatalf("prepare the second Increment: %v", err)
+	}
+	c.nextDay()
+	w = call(h, http.MethodPost, "/v1/runner/claims:acquire",
+		`{"request_id":"v2089a21-claim-second","increment_id":"`+planned2.IncrementID+
+			`","expected_increment_version":`+strconv.FormatInt(int64(prepared2.Version), 10)+
+			`,"target":{"installation_id":"install","requirement_id":"`+id+`","increment_id":"`+planned2.IncrementID+`"}}`, "runner")
+	if w.Code != http.StatusOK {
+		t.Fatalf("the second claim returned status=%d body=%s, want 200", w.Code, w.Body.String())
+	}
+	if got := detail("after the second claim", id)["status"]; got != "active" {
+		t.Fatalf("the detail reports %v after the second claim, want active", got)
+	}
+	if n := requirementCount("after the second claim"); n != countAfterCapture {
+		t.Fatalf("the Requirement count moved from %d to %d over the whole journey", countAfterCapture, n)
+	}
+	t.Logf("A21: one Requirement over the composed handler -- captured, claim 409 conflict with the Increment, the lease set and the max fencing token byte-unchanged, then :start-framing and :complete-framing to ready, then the SAME Increment claimed with a NEW request_id at 200 leaving the parent active, then a second Increment claimed at 200 with the parent still active. The Requirement count stayed %d throughout.", countAfterCapture)
+}
+
+// TestTheNeedsInputRefusalKeepsItsOwnBodyAtTheTransport is the other half of
+// A10: the disjunct V2-089 added to the existing 409 branch must not change what
+// the V2-065 refusal answers. Both refusals are 409 with code `conflict`, and
+// the needs-input one still carries its own message.
+func TestTheNeedsInputRefusalKeepsItsOwnBodyAtTheTransport(t *testing.T) {
+	h, st, svc := needsInputHandler(t)
+	ctx := application.ContextWithCaller(context.Background(), application.Caller{Role: application.RoleOwner, Subject: "owner"})
+	id, capturedVersion := captureRequirement(t, h, "a10")
+	// needs-input is reached through the product's OWN routes -- :start-framing
+	// then :request-input -- so this new test adds nothing to V2-089's A15(i)
+	// tripwire, which counts direct status assignments in test files
+	// and must only grow by fixtures naming one of the FOUR admitting statuses.
+	w := call(h, http.MethodPost, "/v1/requirements/"+id+startFramingRouteSuffix, startFramingBody("a10-frame", capturedVersion), "owner")
+	if w.Code != http.StatusOK {
+		t.Fatalf("start-framing status=%d body=%s", w.Code, w.Body.String())
+	}
+	framingVersion := domain.Version(decodeBody(t, w.Body.Bytes())["version"].(float64))
+	if w = call(h, http.MethodPost, "/v1/requirements/"+id+":request-input", askBody("a10-ask", framingVersion), "runner"); w.Code != http.StatusOK {
+		t.Fatalf("request-input status=%d body=%s", w.Code, w.Body.String())
+	}
+	asked, ok := st.Requirement(id)
+	if !ok || asked.Status != domain.RequirementNeedsInput {
+		t.Fatalf("the fixture parent is %q, want needs-input", asked.Status)
+	}
+	planned, err := svc.Plan(ctx, application.PlanRequest{RequestID: "a10:plan", RequirementID: id, ExpectedRequirementVersion: asked.Version})
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared, err := svc.Prepare(ctx, application.PrepareRequest{RequestID: "a10:prepare", IncrementID: planned.IncrementID, ExpectedVersion: planned.Version})
+	if err != nil {
+		t.Fatal(err)
+	}
+	w = call(h, http.MethodPost, "/v1/runner/claims:acquire",
+		`{"request_id":"a10-claim","increment_id":"`+planned.IncrementID+
+			`","expected_increment_version":`+strconv.FormatInt(int64(prepared.Version), 10)+`}`, "runner")
+	if w.Code != http.StatusConflict {
+		t.Fatalf("the needs-input claim returned status=%d body=%s, want 409", w.Code, w.Body.String())
+	}
+	body := decodeBody(t, w.Body.Bytes())
+	if body["error"] != "conflict" {
+		t.Fatalf("the needs-input refusal carries error=%v, want conflict: %s", body["error"], w.Body.String())
+	}
+	message, _ := body["message"].(string)
+	if !strings.Contains(message, "waiting for human input") {
+		t.Fatalf("the needs-input refusal message is %q; V2-089's disjunct must not change it", message)
+	}
+	if strings.Contains(message, "not in a state that admits work") {
+		t.Fatalf("the needs-input refusal now reports V2-089's message: %q", message)
+	}
+	t.Logf("A10: the needs-input claim is still 409 conflict with its own message %q, and V2-089's refusal is 409 conflict with its own; one branch, two messages.", message)
 }

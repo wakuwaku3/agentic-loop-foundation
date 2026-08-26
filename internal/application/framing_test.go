@@ -800,24 +800,23 @@ func TestAClaimedIncrementCarriesItsReadyParentIntoActive(t *testing.T) {
 		captured.RequirementID, beforeClaim.Version, afterClaim.Version, afterSecondClaim.Version)
 }
 
-// TestClaimAgainstACapturedParentStillSucceeds is V2-084 A6, and it is a
-// MEASUREMENT with a LOGGED finding rather than an assertion of the refusal.
+// TestClaimAgainstACapturedParentStillSucceeds was V2-084's A6 MEASUREMENT and
+// V2-089 INVERTED ITS POLARITY. Its name is kept deliberately: renaming a
+// pre-existing test is prohibited, and the name is now the record of what
+// changed rather than a description of the assertion.
 //
-// The refusal -- Claim rejecting an Increment whose parent Requirement is
-// neither ready nor active -- is the right end state and is deliberately NOT
-// taken here. Measured blast radius: 18 test files across FOUR packages call
-// Service.Claim or Service.ClaimIncrement (internal/application 8 files,
-// internal/runner 7, internal/reconciler 2, internal/store/firestore 1; 15 of
-// the hits are in internal/application/service_test.go alone) and essentially
-// all of them capture, plan, prepare and claim without ever framing, so their
-// parents are captured. Asserting the defect would pin it in place and turn its
-// repair into a failure in files a repairing task may not own -- the same
-// reason TestPlanAndPrepareAreMeasuredUnderEmergencyStop above gives for the
-// same choice.
+// V2-084 recorded, and deliberately did not repair, that Service.Claim accepted
+// an Increment whose parent Requirement was still `captured`, and logged the
+// blast radius as the F1 follow-on. V2-089 is that repair: a claim is refused
+// unless the parent is in one of the four statuses that admit work -- ready,
+// active, waiting, recovering, which is
+// {s : domain.DecideRequirement admits domain.RequirementStart from s} plus
+// active. So the finding V2-084 LOGGED is now ASSERTED, in the direction that
+// closes it.
 //
-// So this test asserts only what is true and must stay true after this task:
-// the third branch of the parent transition is a NO-OP, the claim still
-// succeeds, and the captured parent is left byte-unchanged.
+// Everything else this test measured still holds and is still asserted: a
+// refused claim is a no-op, so the captured parent is byte-unchanged, and it
+// stays captured. What changed is the sign of the claim's own result.
 func TestClaimAgainstACapturedParentStillSucceeds(t *testing.T) {
 	svc, st := service()
 	ctx := owner(context.Background())
@@ -838,21 +837,24 @@ func TestClaimAgainstACapturedParentStillSucceeds(t *testing.T) {
 	if before.Status != domain.RequirementCaptured {
 		t.Fatalf("the fixture parent is %q, not captured", before.Status)
 	}
-	claimed, err := svc.Claim(runnerCtx, application.ClaimRequest{RequestID: "a6b:claim", IncrementID: planned.IncrementID, ExpectedIncrementVersion: 2})
-	if err != nil {
-		t.Fatalf("the claim against a captured parent was refused with %v; this task must NOT add that refusal", err)
+	_, err = svc.Claim(runnerCtx, application.ClaimRequest{RequestID: "a6b:claim", IncrementID: planned.IncrementID, ExpectedIncrementVersion: 2})
+	if !errors.Is(err, application.ErrRequirementNotClaimable) {
+		t.Fatalf("the claim against a captured parent returned %v, want application.ErrRequirementNotClaimable", err)
+	}
+	if errors.Is(err, application.ErrAwaitingHumanInput) {
+		t.Fatalf("the captured-parent refusal reports that the Requirement is waiting for human input: %v", err)
 	}
 	after, _ := st.Requirement(captured.RequirementID)
 	if !reflect.DeepEqual(after, before) {
-		t.Fatalf("the claim against a captured parent changed it: before=%+v after=%+v", before, after)
+		t.Fatalf("the refused claim against a captured parent changed it: before=%+v after=%+v", before, after)
 	}
-	t.Logf("A6 FINDING FOR THE TECH LEAD, measured and NOT repaired here: Service.Claim accepted increment %q "+
-		"(execution %q) while its parent Requirement %q was in %q, and the parent is still in %q afterwards. An "+
-		"Increment can therefore be put into progress under a Requirement that no caller has recorded as executable. "+
-		"The refusal is not added here because 18 test files across four packages claim Increments whose parents are "+
-		"captured; bringing every fixture onto the lifecycle the domain models is the F1 follow-on and its id is the "+
-		"coordinator's to issue.",
-		planned.IncrementID, claimed.ExecutionID, captured.RequirementID, before.Status, after.Status)
+	if after.Status != domain.RequirementCaptured {
+		t.Fatalf("the refused claim left the parent in %q, want captured", after.Status)
+	}
+	t.Logf("V2-089 closed V2-084's A6 finding: Service.Claim REFUSED increment %q while its parent Requirement %q "+
+		"was in %q, with an error errors.Is matches against application.ErrRequirementNotClaimable, and the parent "+
+		"is byte-unchanged and still in %q. What V2-084 measured and logged is now asserted.",
+		planned.IncrementID, captured.RequirementID, before.Status, after.Status)
 }
 
 // TestExactlyOneCommandIssuesEachOfTheTwoNewEdges is the design's "no second

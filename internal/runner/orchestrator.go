@@ -56,7 +56,23 @@ func (o *Orchestrator) RunFakeJourney(ctx context.Context, req JourneyRequest) (
 	if err != nil {
 		return JourneyResult{}, fmt.Errorf("capture: %w", err)
 	}
-	plan, err := o.Service.Plan(callerCtx, application.PlanRequest{RequestID: req.RequestID + ":plan", RequirementID: cap.RequirementID, ExpectedRequirementVersion: cap.Version})
+	// V2-089: the claim below is refused unless the Requirement is in one of
+	// the four statuses that admit work, and this journey is the ONE place in
+	// the tree where that status is reached through the product's own commands
+	// rather than a fixture's store write. StartFraming moves captured ->
+	// framing and V2-084's CompleteFraming moves framing -> ready, both as the
+	// owner identity this Orchestrator already holds, and the resulting version
+	// is threaded into the Plan below: the two commands each bump the
+	// Requirement's Version, so cap.Version is stale by the time Plan runs.
+	framed, err := o.Service.StartFraming(callerCtx, application.StartFramingRequest{RequestID: req.RequestID + ":start-framing", RequirementID: cap.RequirementID, ExpectedVersion: cap.Version})
+	if err != nil {
+		return JourneyResult{}, fmt.Errorf("start framing: %w", err)
+	}
+	ready, err := o.Service.CompleteFraming(callerCtx, application.CompleteFramingRequest{RequestID: req.RequestID + ":complete-framing", RequirementID: cap.RequirementID, ExpectedVersion: framed.Version})
+	if err != nil {
+		return JourneyResult{}, fmt.Errorf("complete framing: %w", err)
+	}
+	plan, err := o.Service.Plan(callerCtx, application.PlanRequest{RequestID: req.RequestID + ":plan", RequirementID: cap.RequirementID, ExpectedRequirementVersion: ready.Version})
 	if err != nil {
 		return JourneyResult{}, fmt.Errorf("plan: %w", err)
 	}

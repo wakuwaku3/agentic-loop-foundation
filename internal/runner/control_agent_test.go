@@ -112,7 +112,12 @@ func newControlAgentFixture(t *testing.T) (*application.Service, *memory.Store, 
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan, err := service.Plan(owner, application.PlanRequest{RequestID: "ca:plan", RequirementID: cap.RequirementID, ExpectedRequirementVersion: cap.Version})
+	// V2-089: this fixture claims, so its parent Requirement is moved to
+	// domain.RequirementReady -- '優先順位評価済みで実行可能',
+	// docs/architecture/domain-model.md:265 -- before the Plan, and the Plan
+	// carries the POST-seed version.
+	readyVersion := runnerSeedRequirementStatus(t, st, owner, cap.RequirementID, domain.RequirementReady)
+	plan, err := service.Plan(owner, application.PlanRequest{RequestID: "ca:plan", RequirementID: cap.RequirementID, ExpectedRequirementVersion: readyVersion})
 	if err != nil {
 		t.Fatal(err)
 	}

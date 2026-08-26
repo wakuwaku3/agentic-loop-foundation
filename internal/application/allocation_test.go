@@ -66,8 +66,9 @@ func allocCapture(t *testing.T, s *application.Service, ctx context.Context, tag
 // transaction. It never assigns a status directly: every step goes through
 // domain.DecideRequirement, so a fixture cannot reach a state the transition
 // table forbids.
-func allocAdvance(t *testing.T, st *memory.Store, ctx context.Context, at time.Time, id string, kinds ...domain.RequirementCommandKind) {
+func allocAdvance(t *testing.T, st *memory.Store, ctx context.Context, at time.Time, id string, kinds ...domain.RequirementCommandKind) domain.Version {
 	t.Helper()
+	var version domain.Version
 	actor, err := domain.NewActorID("allocation-fixture")
 	if err != nil {
 		t.Fatal(err)
@@ -88,20 +89,26 @@ func allocAdvance(t *testing.T, st *memory.Store, ctx context.Context, at time.T
 			if e = u.SaveRequirement(ctx, next, r.Version); e != nil {
 				return e
 			}
+			version = next.Version
 		}
 		return nil
 	}); err != nil {
 		t.Fatal(err)
 	}
+	return version
 }
 
 // allocReady captures a Requirement and drives it to domain.RequirementReady,
-// which is the only schedulable status.
-func allocReady(t *testing.T, s *application.Service, st *memory.Store, ctx context.Context, at time.Time, tag string) string {
+// which is the only schedulable status. It returns the id AND the version the
+// ready transition left behind, because V2-089 made that version load-bearing:
+// a claim is refused unless the parent Requirement is in one of the four
+// statuses that admit work, so every fixture that leases must come through
+// here, and the Plan that follows must carry the POST-ready version as its
+// ExpectedRequirementVersion.
+func allocReady(t *testing.T, s *application.Service, st *memory.Store, ctx context.Context, at time.Time, tag string) (string, domain.Version) {
 	t.Helper()
 	id, _ := allocCapture(t, s, ctx, tag)
-	allocAdvance(t, st, ctx, at, id, domain.RequirementStartFraming, domain.RequirementReadyCommand)
-	return id
+	return id, allocAdvance(t, st, ctx, at, id, domain.RequirementStartFraming, domain.RequirementReadyCommand)
 }
 
 // allocLease plans an Increment for an existing Requirement, prepares it and
@@ -768,7 +775,7 @@ func TestAPermitDecisionIsByteIdenticalWithAndWithoutALimitInForce(t *testing.T)
 
 		// Two active Leases, so a limit of 1 is genuinely below the active count.
 		for _, tag := range []string{"a", "b"} {
-			id, version := allocCapture(t, s, ctx, "permit-"+tag)
+			id, version := allocReady(t, s, st, ctx, clk.now, "permit-"+tag)
 			allocLease(t, s, st, ctx, clk.now, id, version, "permit-"+tag)
 		}
 		if withLimit {
@@ -814,9 +821,9 @@ func TestQueueSummaryKeepsTheFiveCountersAndIsDeterministic(t *testing.T) {
 	s, st, clk := allocService(t)
 	ctx := owner(context.Background())
 
-	ready := allocReady(t, s, st, ctx, clk.now, "det-ready")
+	ready, _ := allocReady(t, s, st, ctx, clk.now, "det-ready")
 	_ = ready
-	id, version := allocCapture(t, s, ctx, "det-active")
+	id, version := allocReady(t, s, st, ctx, clk.now, "det-active")
 	allocLease(t, s, st, ctx, clk.now, id, version, "det-active")
 	allocSetLimit(t, s, ctx, "det", 5)
 
@@ -1168,7 +1175,7 @@ func TestQueueSummaryPerformsZeroWritesAndReservesNoMutationQuota(t *testing.T) 
 	// Seed real state through the real service, over the un-spied store.
 	allocReady(t, seed, inner, ctx, clk.now, "spy-ready-1")
 	allocReady(t, seed, inner, ctx, clk.now, "spy-ready-2")
-	id, version := allocCapture(t, seed, ctx, "spy-active")
+	id, version := allocReady(t, seed, inner, ctx, clk.now, "spy-active")
 	allocLease(t, seed, inner, ctx, clk.now, id, version, "spy-active")
 	allocSetLimit(t, seed, ctx, "spy", 3)
 
@@ -1239,7 +1246,7 @@ func TestTheReportedAllocationIsThePlanAndZeroWhenTheSchedulerPlansNothing(t *te
 	s2, st2, clk2 := allocService(t)
 	ctx2 := owner(context.Background())
 	for _, tag := range []string{"x", "y"} {
-		id, version := allocCapture(t, s2, ctx2, "plan-none-"+tag)
+		id, version := allocReady(t, s2, st2, ctx2, clk2.now, "plan-none-"+tag)
 		allocLease(t, s2, st2, ctx2, clk2.now, id, version, "plan-none-"+tag)
 	}
 	allocSetLimit(t, s2, ctx2, "plan-none", 20)
@@ -1424,9 +1431,15 @@ func TestEachReachableWaitingReasonIsDrivenThroughTheSummary(t *testing.T) {
 		s, st, clk := allocService(t)
 		ctx := owner(context.Background())
 		// One Requirement that is ready AND already holds an active Lease.
-		id, version := allocCapture(t, s, ctx, "reason-owned")
+		// V2-089: the claim is only issued for a parent in a status that admits
+		// work, so the Requirement is driven to `ready` BEFORE the lease, and
+		// V2-084's edge then moves it to `active` at the claim. It is brought
+		// back to `ready` through two real domain transitions -- wait, then
+		// ready -- because domain-model.md gives `active` no direct edge to
+		// `ready`. The asserted end state is unchanged: ready, already owned.
+		id, version := allocReady(t, s, st, ctx, clk.now, "reason-owned")
 		allocLease(t, s, st, ctx, clk.now, id, version, "reason-owned")
-		allocAdvance(t, st, ctx, clk.now, id, domain.RequirementStartFraming, domain.RequirementReadyCommand)
+		allocAdvance(t, st, ctx, clk.now, id, domain.RequirementWait, domain.RequirementReadyCommand)
 		allocSetLimit(t, s, ctx, "reason-owned", 20)
 		summary := allocSummaryNextDay(t, s, ctx, clk)
 		allocAssertReasons(t, summary, map[string]int{string(scheduler.ReasonAlreadyOwned): 1})
@@ -1439,7 +1452,7 @@ func TestEachReachableWaitingReasonIsDrivenThroughTheSummary(t *testing.T) {
 		// for all of them: the first takes that Repository's write claim and the
 		// other two report the conflict.
 		for _, tag := range []string{"a", "b", "c"} {
-			id := allocReady(t, s, st, ctx, clk.now, "reason-conflict-"+tag)
+			id, _ := allocReady(t, s, st, ctx, clk.now, "reason-conflict-"+tag)
 			allocLink(t, st, ctx, clk.now, id, "repository-shared")
 		}
 		allocSetLimit(t, s, ctx, "reason-conflict", 20)
@@ -1458,14 +1471,17 @@ func TestEachReachableWaitingReasonIsDrivenThroughTheSummary(t *testing.T) {
 		ctx := owner(context.Background())
 		// One active Lease and a limit of 1: no capacity is left, so the ready
 		// candidate clears every other check and finds none.
-		active, version := allocCapture(t, s, ctx, "reason-capacity-active")
+		active, version := allocReady(t, s, st, ctx, clk.now, "reason-capacity-active")
 		allocLease(t, s, st, ctx, clk.now, active, version, "reason-capacity-active")
 		allocReady(t, s, st, ctx, clk.now, "reason-capacity-waiter")
 		allocSetLimit(t, s, ctx, "reason-capacity", 1)
 		summary := allocSummaryNextDay(t, s, ctx, clk)
 		// Two candidates are waiting, for two different reasons: the waiter
-		// found no capacity, and the Requirement whose Execution is running was
-		// never driven past `captured`, so it is not schedulable on its own
+		// found no capacity, and the Requirement whose Execution is running is
+		// in `active` -- V2-089 refuses a claim from `captured`, so this fixture
+		// reaches `ready` first and V2-084's edge moves it to `active` at the
+		// claim -- which AllocationSchedulerStatus maps to
+		// scheduler.StatusAssigned, so it is still not schedulable on its own
 		// terms. Both are asserted, so neither hides the other.
 		allocAssertReasons(t, summary, map[string]int{
 			string(scheduler.ReasonNoRunnerCapacity): 1,
@@ -1515,7 +1531,7 @@ func TestWaitingTotalEqualsTheConsideredCandidatesThatWereNotAssigned(t *testing
 	// Five candidates: three ready and linked to one Repository, two only
 	// captured. One of the three takes the Repository's write claim.
 	for _, tag := range []string{"a", "b", "c"} {
-		id := allocReady(t, s, st, ctx, clk.now, "total-ready-"+tag)
+		id, _ := allocReady(t, s, st, ctx, clk.now, "total-ready-"+tag)
 		allocLink(t, st, ctx, clk.now, id, "repository-total")
 	}
 	for _, tag := range []string{"d", "e"} {
@@ -1595,7 +1611,7 @@ func TestExhaustionThroughTheSummary(t *testing.T) {
 	t.Run("a-capacity-remains", func(t *testing.T) {
 		s, st, clk := allocService(t)
 		ctx := owner(context.Background())
-		id, version := allocCapture(t, s, ctx, "exh-a")
+		id, version := allocReady(t, s, st, ctx, clk.now, "exh-a")
 		allocLease(t, s, st, ctx, clk.now, id, version, "exh-a")
 		allocSetLimit(t, s, ctx, "exh-a", 5)
 		summary := allocSummaryNextDay(t, s, ctx, clk)
@@ -1611,7 +1627,7 @@ func TestExhaustionThroughTheSummary(t *testing.T) {
 		s, st, clk := allocService(t)
 		ctx := owner(context.Background())
 		for _, tag := range []string{"p", "q"} {
-			id, version := allocCapture(t, s, ctx, "exh-b-"+tag)
+			id, version := allocReady(t, s, st, ctx, clk.now, "exh-b-"+tag)
 			allocLease(t, s, st, ctx, clk.now, id, version, "exh-b-"+tag)
 		}
 		allocSetLimit(t, s, ctx, "exh-b", 2)
@@ -1631,7 +1647,7 @@ func TestExhaustionThroughTheSummary(t *testing.T) {
 		ctx := owner(context.Background())
 		for i := 0; i < application.AllocationLimitCeiling; i++ {
 			tag := fmt.Sprintf("exh-c-%02d", i)
-			id, version := allocCapture(t, s, ctx, tag)
+			id, version := allocReady(t, s, st, ctx, clk.now, tag)
 			allocLease(t, s, st, ctx, clk.now, id, version, tag)
 		}
 		summary := allocSummaryNextDay(t, s, ctx, clk)
@@ -1652,7 +1668,7 @@ func TestExhaustionThroughTheSummary(t *testing.T) {
 		// Two ready candidates and plenty of capacity: one is assigned, the
 		// other reports resource-conflict, and capacity remains.
 		for _, tag := range []string{"exh-d-1", "exh-d-2"} {
-			id := allocReady(t, s, st, ctx, clk.now, tag)
+			id, _ := allocReady(t, s, st, ctx, clk.now, tag)
 			allocLink(t, st, ctx, clk.now, id, "repository-exh-d")
 		}
 		allocSetLimit(t, s, ctx, "exh-d", 20)
@@ -1741,10 +1757,10 @@ func TestALoweredLimitInvalidatesNothingThatWasAlreadyGranted(t *testing.T) {
 	// Three Executions running, each with its own Lease and fencing token, and
 	// one ready Requirement waiting behind them.
 	for _, tag := range []string{"g1", "g2", "g3"} {
-		id, version := allocCapture(t, s, ctx, "granted-"+tag)
+		id, version := allocReady(t, s, st, ctx, clk.now, "granted-"+tag)
 		allocLease(t, s, st, ctx, clk.now, id, version, "granted-"+tag)
 	}
-	waiter := allocReady(t, s, st, ctx, clk.now, "granted-waiter")
+	waiter, _ := allocReady(t, s, st, ctx, clk.now, "granted-waiter")
 	_ = waiter
 
 	leasesBefore := allocLeaseDigests(t, st, ctx)
@@ -1959,7 +1975,7 @@ func TestOneSummaryReadCompletesInsideTheSectionFiveDeadline(t *testing.T) {
 	base := owner(context.Background())
 	for i := 0; i < scheduler.MaxCandidates; i++ {
 		tag := fmt.Sprintf("deadline-%03d", i)
-		id := allocReady(t, s, st, base, clk.now, tag)
+		id, _ := allocReady(t, s, st, base, clk.now, tag)
 		if i%2 == 0 {
 			allocLink(t, st, base, clk.now, id, "repository-deadline")
 		}

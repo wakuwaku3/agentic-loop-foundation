@@ -134,7 +134,15 @@ func TestConcurrentClaimOnlyOneSucceeds(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan, err := s.Plan(ctx, application.PlanRequest{RequestID: "plan", RequirementID: p.RequirementID, ExpectedRequirementVersion: p.Version})
+	// V2-089: a claim is refused unless the parent Requirement is in a
+	// status that admits work. This fixture claims, so the parent is moved
+	// to domain.RequirementReady -- '優先順位評価済みで実行可能',
+	// docs/architecture/domain-model.md:265 -- and the Plan below carries
+	// the POST-seed version, because the seed bumps the Requirement's
+	// Version and a dropped or zeroed ExpectedRequirementVersion would
+	// delete a real assertion.
+	readyVersion := seedRequirementStatus(t, st, p.RequirementID, domain.RequirementReady)
+	plan, err := s.Plan(ctx, application.PlanRequest{RequestID: "plan", RequirementID: p.RequirementID, ExpectedRequirementVersion: readyVersion})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -256,7 +264,15 @@ func TestExpiredLeaseCanBeReclaimed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	p, err := s.Plan(ctx, application.PlanRequest{RequestID: "p", RequirementID: c.RequirementID, ExpectedRequirementVersion: c.Version})
+	// V2-089: a claim is refused unless the parent Requirement is in a
+	// status that admits work. This fixture claims, so the parent is moved
+	// to domain.RequirementReady -- '優先順位評価済みで実行可能',
+	// docs/architecture/domain-model.md:265 -- and the Plan below carries
+	// the POST-seed version, because the seed bumps the Requirement's
+	// Version and a dropped or zeroed ExpectedRequirementVersion would
+	// delete a real assertion.
+	readyVersion := seedRequirementStatus(t, st, c.RequirementID, domain.RequirementReady)
+	p, err := s.Plan(ctx, application.PlanRequest{RequestID: "p", RequirementID: c.RequirementID, ExpectedRequirementVersion: readyVersion})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -298,7 +314,15 @@ func TestClaimCannotBypassCanonicalStop(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	p, err := s.Plan(ctx, application.PlanRequest{RequestID: "plan", RequirementID: c.RequirementID, ExpectedRequirementVersion: c.Version})
+	// V2-089: a claim is refused unless the parent Requirement is in a
+	// status that admits work. This fixture claims, so the parent is moved
+	// to domain.RequirementReady -- '優先順位評価済みで実行可能',
+	// docs/architecture/domain-model.md:265 -- and the Plan below carries
+	// the POST-seed version, because the seed bumps the Requirement's
+	// Version and a dropped or zeroed ExpectedRequirementVersion would
+	// delete a real assertion.
+	readyVersion := seedRequirementStatus(t, st, c.RequirementID, domain.RequirementReady)
+	p, err := s.Plan(ctx, application.PlanRequest{RequestID: "plan", RequirementID: c.RequirementID, ExpectedRequirementVersion: readyVersion})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -334,7 +358,15 @@ func TestAcceptResultWritesEffectOutbox(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	p, err := s.Plan(ctx, application.PlanRequest{RequestID: "plan-r", RequirementID: c.RequirementID, ExpectedRequirementVersion: c.Version})
+	// V2-089: a claim is refused unless the parent Requirement is in a
+	// status that admits work. This fixture claims, so the parent is moved
+	// to domain.RequirementReady -- '優先順位評価済みで実行可能',
+	// docs/architecture/domain-model.md:265 -- and the Plan below carries
+	// the POST-seed version, because the seed bumps the Requirement's
+	// Version and a dropped or zeroed ExpectedRequirementVersion would
+	// delete a real assertion.
+	readyVersion := seedRequirementStatus(t, st, c.RequirementID, domain.RequirementReady)
+	p, err := s.Plan(ctx, application.PlanRequest{RequestID: "plan-r", RequirementID: c.RequirementID, ExpectedRequirementVersion: readyVersion})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -429,7 +461,15 @@ func TestClaimReclaimTerminatesSupersededExecutionAtSource(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	p, err := s.Plan(ctx, application.PlanRequest{RequestID: "plan", RequirementID: c.RequirementID, ExpectedRequirementVersion: c.Version})
+	// V2-089: a claim is refused unless the parent Requirement is in a
+	// status that admits work. This fixture claims, so the parent is moved
+	// to domain.RequirementReady -- '優先順位評価済みで実行可能',
+	// docs/architecture/domain-model.md:265 -- and the Plan below carries
+	// the POST-seed version, because the seed bumps the Requirement's
+	// Version and a dropped or zeroed ExpectedRequirementVersion would
+	// delete a real assertion.
+	readyVersion := seedRequirementStatus(t, st, c.RequirementID, domain.RequirementReady)
+	p, err := s.Plan(ctx, application.PlanRequest{RequestID: "plan", RequirementID: c.RequirementID, ExpectedRequirementVersion: readyVersion})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -517,7 +557,15 @@ func TestClaimReclaimAtomicWithSupersededTermination(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	p, err := s.Plan(ctx, application.PlanRequest{RequestID: "plan", RequirementID: c.RequirementID, ExpectedRequirementVersion: c.Version})
+	// V2-089: a claim is refused unless the parent Requirement is in a
+	// status that admits work. This fixture claims, so the parent is moved
+	// to domain.RequirementReady -- '優先順位評価済みで実行可能',
+	// docs/architecture/domain-model.md:265 -- and the Plan below carries
+	// the POST-seed version, because the seed bumps the Requirement's
+	// Version and a dropped or zeroed ExpectedRequirementVersion would
+	// delete a real assertion.
+	readyVersion := seedRequirementStatus(t, st, c.RequirementID, domain.RequirementReady)
+	p, err := s.Plan(ctx, application.PlanRequest{RequestID: "plan", RequirementID: c.RequirementID, ExpectedRequirementVersion: readyVersion})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -614,7 +662,15 @@ func TestClaimReclaimSkipsWhenSupersededExecutionIsAbsent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	p, err := s.Plan(ctx, application.PlanRequest{RequestID: "plan", RequirementID: c.RequirementID, ExpectedRequirementVersion: c.Version})
+	// V2-089: a claim is refused unless the parent Requirement is in a
+	// status that admits work. This fixture claims, so the parent is moved
+	// to domain.RequirementReady -- '優先順位評価済みで実行可能',
+	// docs/architecture/domain-model.md:265 -- and the Plan below carries
+	// the POST-seed version, because the seed bumps the Requirement's
+	// Version and a dropped or zeroed ExpectedRequirementVersion would
+	// delete a real assertion.
+	readyVersion := seedRequirementStatus(t, st, c.RequirementID, domain.RequirementReady)
+	p, err := s.Plan(ctx, application.PlanRequest{RequestID: "plan", RequirementID: c.RequirementID, ExpectedRequirementVersion: readyVersion})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -698,7 +754,15 @@ func TestClaimReclaimSkipsWhenSupersededExecutionAlreadyTerminal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	p, err := s.Plan(ctx, application.PlanRequest{RequestID: "plan", RequirementID: c.RequirementID, ExpectedRequirementVersion: c.Version})
+	// V2-089: a claim is refused unless the parent Requirement is in a
+	// status that admits work. This fixture claims, so the parent is moved
+	// to domain.RequirementReady -- '優先順位評価済みで実行可能',
+	// docs/architecture/domain-model.md:265 -- and the Plan below carries
+	// the POST-seed version, because the seed bumps the Requirement's
+	// Version and a dropped or zeroed ExpectedRequirementVersion would
+	// delete a real assertion.
+	readyVersion := seedRequirementStatus(t, st, c.RequirementID, domain.RequirementReady)
+	p, err := s.Plan(ctx, application.PlanRequest{RequestID: "plan", RequirementID: c.RequirementID, ExpectedRequirementVersion: readyVersion})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -784,7 +848,15 @@ func TestClaimReclaimSkipsWhenSupersededExecutionLinkageMismatches(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	p, err := s.Plan(ctx, application.PlanRequest{RequestID: "plan", RequirementID: c.RequirementID, ExpectedRequirementVersion: c.Version})
+	// V2-089: a claim is refused unless the parent Requirement is in a
+	// status that admits work. This fixture claims, so the parent is moved
+	// to domain.RequirementReady -- '優先順位評価済みで実行可能',
+	// docs/architecture/domain-model.md:265 -- and the Plan below carries
+	// the POST-seed version, because the seed bumps the Requirement's
+	// Version and a dropped or zeroed ExpectedRequirementVersion would
+	// delete a real assertion.
+	readyVersion := seedRequirementStatus(t, st, c.RequirementID, domain.RequirementReady)
+	p, err := s.Plan(ctx, application.PlanRequest{RequestID: "plan", RequirementID: c.RequirementID, ExpectedRequirementVersion: readyVersion})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1046,3 +1118,426 @@ func TestCaptureRefusesAZeroClockRatherThanRecordingAZeroCaptureTime(t *testing.
 type zeroClock struct{}
 
 func (zeroClock) Now() time.Time { return time.Time{} }
+
+// ===========================================================================
+// V2-089: the Service-level half of the claimable-parent guard.
+//
+// These live here rather than in internal/application/claimable_test.go for one
+// measured reason: claimable_test.go must be an IN-PACKAGE test file (package
+// application) so A7 can CALL the unexported requirementStatusAdmitsClaim and
+// A20 can scan for it, and an in-package test file cannot import
+// internal/store/memory -- measured verbatim, `imports .../internal/store/memory
+// from claimable_test.go / imports .../internal/application from store.go:
+// import cycle not allowed in test`. Everything the Work Order asks for is
+// asserted; only its file is different, and this file is in allowed_paths.
+// ===========================================================================
+
+// claimableSnapshot is the store state a refused claim must leave byte-unchanged.
+type claimableSnapshot struct {
+	requirement  domain.Requirement
+	increment    domain.Increment
+	activeLeases []domain.Lease
+	maxFencing   domain.FencingToken
+	events       int
+	outbox       int
+}
+
+func claimableReadSnapshot(t *testing.T, st *memory.Store, requirementID, incrementID string) claimableSnapshot {
+	t.Helper()
+	ctx := context.Background()
+	out := claimableSnapshot{events: len(st.Events()), outbox: len(st.Outbox())}
+	out.requirement, _ = st.Requirement(requirementID)
+	out.increment, _ = st.Increment(incrementID)
+	if err := st.Transact(ctx, func(u application.UnitOfWork) error {
+		leases, e := u.ActiveLeases(ctx, 100)
+		if e != nil {
+			return e
+		}
+		out.activeLeases = leases
+		out.maxFencing, e = u.MaxFencingToken(ctx, incrementID)
+		return e
+	}); err != nil {
+		t.Fatalf("reading the claimable snapshot: %v", err)
+	}
+	return out
+}
+
+// claimableFixture captures one Requirement, moves it to status, plans and
+// prepares one Increment under it, and returns everything a claim needs. The
+// status is always passed by the caller as a domain constant literal.
+//
+// The `completed` cell needs care and it is measured: internal/domain/model.go
+// rejects a completed Requirement whose StableReleaseSnapshot is incomplete, and
+// seedRequirementStatus calls domain.Validate before saving, so the snapshot is
+// written FIRST -- by concatenating a prefix with a suffix, so no secret-shaped
+// literal exists in this file -- and only then is the status set. That write sets
+// no Status field at all, so it adds nothing to A15's status-assignment
+// tripwire over test files.
+func claimableFixture(t *testing.T, tag string, status domain.RequirementStatus) (*application.Service, *memory.Store, string, string, domain.Version) {
+	t.Helper()
+	s, st := service()
+	ctx := owner(context.Background())
+	captured, err := s.Capture(ctx, application.CaptureRequest{RequestID: tag + ":capture", Text: "claimable cell " + tag})
+	if err != nil {
+		t.Fatalf("capture: %v", err)
+	}
+	if status == domain.RequirementCompleted {
+		if e := st.Transact(ctx, func(u application.UnitOfWork) error {
+			r, ok, x := u.Requirement(ctx, captured.RequirementID)
+			if x != nil || !ok {
+				t.Fatalf("snapshot seed: ok=%v err=%v", ok, x)
+			}
+			next := r
+			next.StableSnapshot = domain.StableReleaseSnapshot{
+				ReleaseID:      domain.ReleaseID("release-" + tag),
+				ReleaseVersion: 1,
+				BundleDigest:   "bundle-" + tag + "-digest",
+				EvidenceDigest: "evidence-" + tag + "-digest",
+			}
+			next.Version++
+			return u.SaveRequirement(ctx, next, r.Version)
+		}); e != nil {
+			t.Fatalf("seeding the StableSnapshot a completed Requirement needs: %v", e)
+		}
+	}
+	seeded := seedRequirementStatus(t, st, captured.RequirementID, status)
+	planned, err := s.Plan(ctx, application.PlanRequest{RequestID: tag + ":plan", RequirementID: captured.RequirementID, ExpectedRequirementVersion: seeded})
+	if err != nil {
+		t.Fatalf("plan under a %q parent: %v", status, err)
+	}
+	prepared, err := s.Prepare(ctx, application.PrepareRequest{RequestID: tag + ":prepare", IncrementID: planned.IncrementID, ExpectedVersion: planned.Version})
+	if err != nil {
+		t.Fatalf("prepare under a %q parent: %v", status, err)
+	}
+	return s, st, captured.RequirementID, planned.IncrementID, prepared.Version
+}
+
+// TestClaimingIsAdmittedByExactlyFourOfTheElevenRequirementStatuses is V2-089
+// A8: the eleven-cell table over the REAL Service and a REAL memory store.
+//
+// For each of the four admitting statuses it asserts that claiming still does
+// exactly what it did before the guard existed -- the lease is issued, the
+// Execution created, the fencing token non-zero, the Increment's version
+// advances by one, the increment.claimed event is recorded and the claim-issued
+// outbox item is staged. That is how "do not change what claiming does when the
+// state admits it" is MEASURED rather than promised: a test that only asserts
+// the refusal is compatible with a claim that now fails in some admitting state
+// nobody sampled.
+//
+// For each of the other seven it asserts the refusal by identity -- needs-input
+// through application.ErrAwaitingHumanInput, which is V2-065's shipped refusal
+// keeping its identity, and the other six through
+// application.ErrRequirementNotClaimable -- that the Requirement, the Increment,
+// the active-lease set, the max fencing token and the event and outbox counts
+// are byte-unchanged, and that NO idempotency record was written, proved by
+// replaying the same request_id after moving the parent into an admitting status
+// and asserting it executes for real.
+func TestClaimingIsAdmittedByExactlyFourOfTheElevenRequirementStatuses(t *testing.T) {
+	admitting := map[domain.RequirementStatus]bool{
+		domain.RequirementReady:      true,
+		domain.RequirementActive:     true,
+		domain.RequirementWaiting:    true,
+		domain.RequirementRecovering: true,
+	}
+	// The axis is written out here because this file is package application_test
+	// and cannot read the unexported predicate; internal/application/
+	// claimable_test.go derives the SAME axis from internal/domain by go/ast and
+	// asserts it has eleven members, so a twelfth status fails there.
+	cells := []struct {
+		status domain.RequirementStatus
+		tag    string
+	}{
+		{domain.RequirementCaptured, "cell-captured"},
+		{domain.RequirementFraming, "cell-framing"},
+		{domain.RequirementReady, "cell-ready"},
+		{domain.RequirementActive, "cell-active"},
+		{domain.RequirementWaiting, "cell-waiting"},
+		{domain.RequirementNeedsInput, "cell-needs-input"},
+		{domain.RequirementPaused, "cell-paused"},
+		{domain.RequirementRecovering, "cell-recovering"},
+		{domain.RequirementEvaluating, "cell-evaluating"},
+		{domain.RequirementCompleted, "cell-completed"},
+		{domain.RequirementCancelled, "cell-cancelled"},
+	}
+	if len(cells) != 11 {
+		t.Fatalf("the table has %d cells, want 11", len(cells))
+	}
+	admittedSeen, refusedSeen := 0, 0
+	for _, cell := range cells {
+		t.Run(string(cell.status), func(t *testing.T) {
+			s, st, requirementID, incrementID, preparedVersion := claimableFixture(t, cell.tag, cell.status)
+			before := claimableReadSnapshot(t, st, requirementID, incrementID)
+			if before.requirement.Status != cell.status {
+				t.Fatalf("the fixture parent is %q, not %q", before.requirement.Status, cell.status)
+			}
+			claimed, err := s.Claim(runner(context.Background(), "runner-cell"), application.ClaimRequest{
+				RequestID: cell.tag + ":claim", IncrementID: incrementID, ExpectedIncrementVersion: preparedVersion,
+			})
+			if admitting[cell.status] {
+				if err != nil {
+					t.Fatalf("a claim under a %q parent was refused with %v; %q admits work", cell.status, err, cell.status)
+				}
+				// Nothing about an admitted claim changed.
+				if claimed.LeaseID == "" {
+					t.Fatal("the admitted claim issued no lease")
+				}
+				if _, ok := st.Lease(claimed.LeaseID); !ok {
+					t.Fatalf("the lease %q the claim reported is not in the store", claimed.LeaseID)
+				}
+				if claimed.ExecutionID == "" {
+					t.Fatal("the admitted claim created no Execution")
+				}
+				if _, ok := st.Execution(claimed.ExecutionID); !ok {
+					t.Fatalf("the Execution %q the claim reported is not in the store", claimed.ExecutionID)
+				}
+				if claimed.FencingToken == 0 {
+					t.Fatal("the admitted claim issued a zero fencing token")
+				}
+				if claimed.Version != before.increment.Version+1 {
+					t.Fatalf("the Increment version went %d -> %d, want +1", before.increment.Version, claimed.Version)
+				}
+				events := st.Events()
+				found := false
+				for _, e := range events {
+					if e.Type == "increment.claimed" && e.AggregateID == incrementID {
+						found = true
+					}
+				}
+				if !found {
+					t.Fatalf("no increment.claimed event was recorded for %q: %#v", incrementID, events)
+				}
+				staged := false
+				for _, item := range st.Outbox() {
+					if item.Kind == "claim-issued" {
+						staged = true
+					}
+				}
+				if !staged {
+					t.Fatalf("no claim-issued outbox item was staged: %#v", st.Outbox())
+				}
+				admittedSeen++
+				return
+			}
+
+			// Refused. The identity first: V2-065's needs-input refusal keeps
+			// its own error, and the six others carry the new one.
+			if cell.status == domain.RequirementNeedsInput {
+				if !errors.Is(err, application.ErrAwaitingHumanInput) {
+					t.Fatalf("a claim under a needs-input parent returned %v, want application.ErrAwaitingHumanInput -- V2-065's refusal must keep its identity", err)
+				}
+				if errors.Is(err, application.ErrRequirementNotClaimable) {
+					t.Fatalf("the needs-input refusal also matches ErrRequirementNotClaimable (%v); the new guard was ordered ahead of the old one", err)
+				}
+			} else {
+				if !errors.Is(err, application.ErrRequirementNotClaimable) {
+					t.Fatalf("a claim under a %q parent returned %v, want application.ErrRequirementNotClaimable", cell.status, err)
+				}
+				if errors.Is(err, application.ErrAwaitingHumanInput) {
+					t.Fatalf("the %q refusal claims the Requirement is waiting for human input: %v", cell.status, err)
+				}
+			}
+			after := claimableReadSnapshot(t, st, requirementID, incrementID)
+			if !reflect.DeepEqual(before, after) {
+				t.Fatalf("the refused claim changed the store:\n before = %#v\n after  = %#v", before, after)
+			}
+			if _, ok := st.Idempotency(cell.tag + ":claim"); ok {
+				t.Fatalf("the refused claim wrote an idempotency record for request %q", cell.tag+":claim")
+			}
+			// The replay proof: the same request_id executes FOR REAL once the
+			// parent admits work, which it could not do if the refusal had been
+			// recorded.
+			readyVersion := seedRequirementStatus(t, st, requirementID, domain.RequirementReady)
+			_ = readyVersion
+			replayed, replayErr := s.Claim(runner(context.Background(), "runner-cell"), application.ClaimRequest{
+				RequestID: cell.tag + ":claim", IncrementID: incrementID, ExpectedIncrementVersion: preparedVersion,
+			})
+			if replayErr != nil {
+				t.Fatalf("replaying the same request_id after moving the parent to ready failed: %v", replayErr)
+			}
+			if replayed.LeaseID == "" || replayed.ExecutionID == "" || replayed.FencingToken == 0 {
+				t.Fatalf("the replay returned a restored empty response rather than executing for real: %#v", replayed)
+			}
+			refusedSeen++
+		})
+	}
+	if admittedSeen != 4 || refusedSeen != 7 {
+		t.Fatalf("admitted %d cells and refused %d, want 4 and 7", admittedSeen, refusedSeen)
+	}
+	t.Logf("A8: 11 cells over the real Service and a real memory store -- 4 admitted (ready, active, waiting, recovering), 7 refused (captured, framing, needs-input, paused, evaluating, completed, cancelled). needs-input is refused by ErrAwaitingHumanInput and the other six by ErrRequirementNotClaimable; every refusal left the store byte-unchanged and wrote no idempotency record.")
+}
+
+// TestAClaimWhoseParentCannotBeReadIsRefused is the second half of A9. No
+// fixture in the repository reaches either case -- measured: the permissive and
+// the strict variants of the guard produce byte-identical failing sets -- so
+// both are asserted explicitly. The reason is a citation rather than a
+// preference: docs/product/definition.md:111's 実行可能 cannot be established for
+// a record that does not exist.
+func TestAClaimWhoseParentCannotBeReadIsRefused(t *testing.T) {
+	s, st, requirementID, incrementID, _ := claimableFixture(t, "unknown-parent", domain.RequirementReady)
+	ctx := context.Background()
+
+	// (1) The parent link names a Requirement that is not in the store. The
+	// Increment is repointed at an id nothing was ever saved under.
+	if err := st.Transact(ctx, func(u application.UnitOfWork) error {
+		inc, ok, e := u.Increment(ctx, incrementID)
+		if e != nil || !ok {
+			t.Fatalf("reading the increment: ok=%v err=%v", ok, e)
+		}
+		next := inc
+		next.RequirementID = domain.RequirementID("requirement-that-was-never-saved")
+		next.Version++
+		return u.SaveIncrement(ctx, next, inc.Version)
+	}); err != nil {
+		t.Fatalf("repointing the increment at an absent parent: %v", err)
+	}
+	repointed, _ := st.Increment(incrementID)
+	if _, err := s.Claim(runner(ctx, "runner-unknown"), application.ClaimRequest{
+		RequestID: "unknown-parent:absent", IncrementID: incrementID, ExpectedIncrementVersion: repointed.Version,
+	}); !errors.Is(err, application.ErrRequirementNotClaimable) {
+		t.Fatalf("a claim whose parent Requirement is absent returned %v, want application.ErrRequirementNotClaimable", err)
+	}
+
+	// (2) The parent link is EMPTY.
+	if err := st.Transact(ctx, func(u application.UnitOfWork) error {
+		inc, ok, e := u.Increment(ctx, incrementID)
+		if e != nil || !ok {
+			t.Fatalf("reading the increment: ok=%v err=%v", ok, e)
+		}
+		next := inc
+		next.RequirementID = domain.RequirementID("")
+		next.Version++
+		return u.SaveIncrement(ctx, next, inc.Version)
+	}); err != nil {
+		t.Fatalf("clearing the increment's parent link: %v", err)
+	}
+	unlinked, _ := st.Increment(incrementID)
+	if _, err := s.Claim(runner(ctx, "runner-unknown"), application.ClaimRequest{
+		RequestID: "unknown-parent:empty", IncrementID: incrementID, ExpectedIncrementVersion: unlinked.Version,
+	}); !errors.Is(err, application.ErrRequirementNotClaimable) {
+		t.Fatalf("a claim whose parent link is empty returned %v, want application.ErrRequirementNotClaimable", err)
+	}
+	if _, ok := st.Requirement(requirementID); !ok {
+		t.Fatal("the original parent Requirement vanished; the fixture is not measuring what it claims")
+	}
+	t.Log("A9 second half: both unknown-parent cases -- an absent Requirement and an empty parent link -- are refused with ErrRequirementNotClaimable. requirementAwaitsHumanInput answers FALSE for both and is right to, because it asks the narrower question; the two questions have opposite correct answers on the unknown case, which is why they are two helpers.")
+}
+
+// TestTheNotClaimableRefusalPrecedesThePermitAndFollowsTheNeedsInputRefusal is
+// A11, asserted in BOTH directions so the ordering cannot drift the next time a
+// branch is inserted.
+func TestTheNotClaimableRefusalPrecedesThePermitAndFollowsTheNeedsInputRefusal(t *testing.T) {
+	// (1) A captured parent AND a stop in force: the caller sees the state
+	// conflict, not the control denial, because the new guard is ordered before
+	// the canonical-target resolution and domain.Permit.
+	s, st, _, incrementID, preparedVersion := claimableFixture(t, "prec-captured", domain.RequirementCaptured)
+	_ = st
+	if _, err := s.Control(owner(context.Background()), application.ControlRequest{
+		RequestID: "prec-captured:stop",
+		Scope:     domain.ControlScope{Kind: domain.ScopeInstallation, Value: "install"},
+		Mode:      domain.ControlEmergencyStop,
+		Reason:    "V2-089 A11",
+		At:        clock{}.Now(),
+	}); err != nil {
+		t.Fatalf("writing the emergency-stop Intent: %v", err)
+	}
+	_, err := s.Claim(runner(context.Background(), "runner-prec"), application.ClaimRequest{
+		RequestID: "prec-captured:claim", IncrementID: incrementID, ExpectedIncrementVersion: preparedVersion,
+	})
+	if !errors.Is(err, application.ErrRequirementNotClaimable) {
+		t.Fatalf("with a captured parent AND a stop in force the error is %v, want application.ErrRequirementNotClaimable", err)
+	}
+	if errors.Is(err, domain.ErrControlDenied) {
+		t.Fatalf("the refusal is a control denial (%v); the new guard is not ordered before domain.Permit", err)
+	}
+
+	// (2) The SAME Intent with a parent in an admitting status: now the caller
+	// sees the control denial, so the guard has not swallowed the permit.
+	s2, _, _, incrementID2, preparedVersion2 := claimableFixture(t, "prec-ready", domain.RequirementReady)
+	if _, err = s2.Control(owner(context.Background()), application.ControlRequest{
+		RequestID: "prec-ready:stop",
+		Scope:     domain.ControlScope{Kind: domain.ScopeInstallation, Value: "install"},
+		Mode:      domain.ControlEmergencyStop,
+		Reason:    "V2-089 A11",
+		At:        clock{}.Now(),
+	}); err != nil {
+		t.Fatalf("writing the emergency-stop Intent: %v", err)
+	}
+	_, err = s2.Claim(runner(context.Background(), "runner-prec"), application.ClaimRequest{
+		RequestID: "prec-ready:claim", IncrementID: incrementID2, ExpectedIncrementVersion: preparedVersion2,
+	})
+	if !errors.Is(err, domain.ErrControlDenied) {
+		t.Fatalf("with a ready parent and a stop in force the error is %v, want domain.ErrControlDenied", err)
+	}
+	if errors.Is(err, application.ErrRequirementNotClaimable) {
+		t.Fatalf("a claim the Requirement's state admits was refused as not-claimable: %v", err)
+	}
+
+	// (3) The other precedence: a needs-input parent still reports V2-065's own
+	// refusal, with its own identity, from its own position.
+	s3, _, _, incrementID3, preparedVersion3 := claimableFixture(t, "prec-needs-input", domain.RequirementNeedsInput)
+	_, err = s3.Claim(runner(context.Background(), "runner-prec"), application.ClaimRequest{
+		RequestID: "prec-needs-input:claim", IncrementID: incrementID3, ExpectedIncrementVersion: preparedVersion3,
+	})
+	if !errors.Is(err, application.ErrAwaitingHumanInput) {
+		t.Fatalf("with a needs-input parent the error is %v, want application.ErrAwaitingHumanInput", err)
+	}
+	if errors.Is(err, application.ErrRequirementNotClaimable) {
+		t.Fatalf("the needs-input refusal also matches ErrRequirementNotClaimable (%v); the new guard leaked into V2-065's case", err)
+	}
+	t.Log("A11: captured parent + stop -> ErrRequirementNotClaimable (not ErrControlDenied); admitting parent + the same stop -> ErrControlDenied (not ErrRequirementNotClaimable); needs-input parent -> ErrAwaitingHumanInput (not ErrRequirementNotClaimable).")
+}
+
+// TestALeaseAlreadyHeldStaysRenewableAfterItsParentLeavesTheAdmittingSet is
+// A12, and it is the boundary of this task stated as a test rather than as a
+// sentence.
+//
+// internal/application/service.go records that the needs-input refusal is closed
+// on the ISSUING side on purpose, because no domain transition can revoke or
+// release an active lease early, and docs/product/definition.md:143 says the
+// same thing from the product side: pause claim stops 新しい仕事のclaim and
+// '実行中の仕事が進める「定義済みの境界」はcheckpointであり'. So a refusal means
+// "no NEW claim" and never "the work in flight stops".
+func TestALeaseAlreadyHeldStaysRenewableAfterItsParentLeavesTheAdmittingSet(t *testing.T) {
+	for _, after := range []domain.RequirementStatus{domain.RequirementPaused, domain.RequirementEvaluating} {
+		t.Run(string(after), func(t *testing.T) {
+			s, st, requirementID, incrementID, preparedVersion := claimableFixture(t, "renew-"+string(after), domain.RequirementReady)
+			runnerCtx := runner(context.Background(), "runner-renew")
+			claimed, err := s.Claim(runnerCtx, application.ClaimRequest{
+				RequestID: "renew:claim-" + string(after), IncrementID: incrementID, ExpectedIncrementVersion: preparedVersion,
+			})
+			if err != nil {
+				t.Fatalf("the claim under a ready parent failed: %v", err)
+			}
+			held, ok := st.Lease(claimed.LeaseID)
+			if !ok {
+				t.Fatalf("lease %q is absent", claimed.LeaseID)
+			}
+			expiresAtBefore := held.ExpiresAt
+
+			// The parent leaves the admitting set AFTER the lease is held.
+			seedRequirementStatus(t, st, requirementID, after)
+			if got, _ := st.Requirement(requirementID); got.Status != after {
+				t.Fatalf("the parent is %q, not %q", got.Status, after)
+			}
+
+			renewed, err := s.Renew(runnerCtx, application.RenewRequest{
+				RequestID: "renew:renew-" + string(after), LeaseID: claimed.LeaseID,
+				ExpectedLeaseVersion: held.Version, FencingToken: claimed.FencingToken,
+			})
+			if err != nil {
+				t.Fatalf("Renew after the parent moved to %q failed with %v; V2-089 must not touch Service.Renew", after, err)
+			}
+			if !renewed.ExpiresAt.Equal(expiresAtBefore) {
+				t.Fatalf("the renewal moved ExpiresAt from %v to %v; the injected clock did not advance, so it must not", expiresAtBefore, renewed.ExpiresAt)
+			}
+			// And a NEW claim on the same Increment is refused, which is the
+			// asymmetry the product describes.
+			if _, e := s.Claim(runner(context.Background(), "runner-second"), application.ClaimRequest{
+				RequestID: "renew:second-claim-" + string(after), IncrementID: incrementID, ExpectedIncrementVersion: claimed.Version,
+			}); !errors.Is(e, application.ErrRequirementNotClaimable) {
+				t.Fatalf("a NEW claim under a %q parent returned %v, want application.ErrRequirementNotClaimable", after, e)
+			}
+			t.Logf("A12 (%s): the held lease renewed and kept ExpiresAt %v, while a new claim on the same Increment was refused as not-claimable.", after, renewed.ExpiresAt)
+		})
+	}
+}

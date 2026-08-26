@@ -20,6 +20,56 @@ import (
 	"github.com/takushi/agentic-loop-foundation/v2/internal/store/memory"
 )
 
+// runnerSeedRequirementStatus is internal/runner's ONE seeding helper, added by
+// V2-089 because this package had none. It moves a Requirement to status
+// directly through the store, bumping its Version exactly as a transition
+// would, and validates before saving so a fixture cannot reach a record the
+// domain rejects. It exists because V2-089 refuses a claim whose parent
+// Requirement is not in one of the four statuses that admit work -- ready,
+// active, waiting, recovering -- and this package's fixtures capture, plan,
+// prepare and claim without framing.
+//
+// Every call site passes the status as a domain constant literal, never a
+// variable and never a string, so the state a fixture establishes is readable
+// at the fixture. The returned Version is the POST-seed version and the Plan
+// that follows must carry it as its ExpectedRequirementVersion: dropping it,
+// passing zero, or seeding after the Plan would each delete a real assertion.
+//
+// A store write rather than Service.StartFraming plus Service.CompleteFraming
+// is deliberate and is recorded: each of these fixtures is a UNIT fixture for
+// something else -- a lease keeper, a secret broker, a control agent, a crash
+// resume, a publication dispatcher -- and threading two owner commands and two
+// Control permits through each would put a Requirement lifecycle inside a test
+// whose subject is not the Requirement lifecycle. The ONE journey in this
+// package that must prove the admitting state is REACHABLE through the
+// product's own commands is RunFakeJourney, and it does: see
+// TestOrchestratorFakeJourney above and orchestrator.go's StartFraming and
+// CompleteFraming calls, which use no store write at all.
+func runnerSeedRequirementStatus(t *testing.T, st *memory.Store, ctx context.Context, id string, status domain.RequirementStatus) domain.Version {
+	t.Helper()
+	var version domain.Version
+	if err := st.Transact(ctx, func(u application.UnitOfWork) error {
+		r, ok, e := u.Requirement(ctx, id)
+		if e != nil {
+			return e
+		}
+		if !ok {
+			t.Fatalf("seed: requirement %q does not exist", id)
+		}
+		next := r
+		next.Status = status
+		next.Version++
+		if e = domain.Validate(next); e != nil {
+			return e
+		}
+		version = next.Version
+		return u.SaveRequirement(ctx, next, r.Version)
+	}); err != nil {
+		t.Fatalf("seed requirement %q to %q: %v", id, status, err)
+	}
+	return version
+}
+
 type journeyClock struct{}
 
 func (journeyClock) Now() time.Time { return time.Unix(1700000000, 0).UTC() }
@@ -91,6 +141,50 @@ func TestOrchestratorFakeJourney(t *testing.T) {
 	if len(events) != 3 || events[0].Kind != "assignment" || events[1].Kind != "result_pending" || events[2].Kind != "result_accepted" {
 		t.Fatalf("unexpected journal: %#v", events)
 	}
+	// V2-089 A17: this journey is the ONE place in the tree where the status
+	// that admits a claim is established by the product's own commands rather
+	// than by a fixture's store write, so the reachability is ASSERTED here
+	// rather than described. RunFakeJourney issues Service.StartFraming and
+	// V2-084's Service.CompleteFraming between the Capture and the Plan, so
+	// the Requirement is `ready` BEFORE the claim -- observed through the
+	// recorded requirement.ready event, which CompleteFraming writes and which
+	// must precede the claim's own increment.claimed event -- and `active`
+	// AFTER it, through V2-084's ready-to-active edge inside Claim.
+	//
+	// Neither half is a store read of a state a fixture assigned: the whole
+	// path is Capture -> StartFraming -> CompleteFraming -> Plan -> Prepare ->
+	// Claim, every step a real command through the real Service.
+	readyAt, claimedAt := -1, -1
+	for i, e := range st.Events() {
+		switch {
+		case e.Type == "requirement.ready" && e.AggregateID == result.RequirementID:
+			if readyAt < 0 {
+				readyAt = i
+			}
+		case e.Type == "increment.claimed" && e.AggregateID == result.IncrementID:
+			if claimedAt < 0 {
+				claimedAt = i
+			}
+		}
+	}
+	if readyAt < 0 {
+		t.Fatalf("the journey recorded no requirement.ready event for %q, so the Requirement never reached `ready` through the product's own commands: %#v", result.RequirementID, st.Events())
+	}
+	if claimedAt < 0 {
+		t.Fatalf("the journey recorded no increment.claimed event for %q: %#v", result.IncrementID, st.Events())
+	}
+	if readyAt >= claimedAt {
+		t.Fatalf("requirement.ready was recorded at index %d and increment.claimed at %d: the Requirement was not `ready` before the claim", readyAt, claimedAt)
+	}
+	parent, ok := st.Requirement(result.RequirementID)
+	if !ok {
+		t.Fatalf("the journey's Requirement %q is absent", result.RequirementID)
+	}
+	if parent.Status != domain.RequirementActive {
+		t.Fatalf("after the claim the journey's Requirement is %q, want %q", parent.Status, domain.RequirementActive)
+	}
+	t.Logf("V2-089 A17 reachability: requirement.ready at event index %d, increment.claimed at %d, and the parent Requirement %q is %q after the claim -- established by Capture, StartFraming, CompleteFraming, Plan, Prepare and Claim with no store write.",
+		readyAt, claimedAt, result.RequirementID, parent.Status)
 }
 
 // TestOrchestratorRefusesAnIncompleteInjectedCaller is V2-086 A8's refusal

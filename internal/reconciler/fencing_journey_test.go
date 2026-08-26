@@ -11,6 +11,52 @@ import (
 	"github.com/takushi/agentic-loop-foundation/v2/internal/store/memory"
 )
 
+// reconcilerSeedRequirementStatus is internal/reconciler's ONE seeding helper,
+// added by V2-089 because this package had none. It moves a Requirement to
+// status directly through the store, bumping its Version exactly as a
+// transition would, and it validates before saving so a fixture cannot reach a
+// record the domain rejects. It exists because V2-089 refuses a claim whose
+// parent Requirement is not in one of the four statuses that admit work --
+// ready, active, waiting, recovering -- and this package's journeys capture,
+// plan, prepare and claim without framing.
+//
+// The status is passed by every call site as a domain constant literal, never a
+// variable and never a string, so the state a fixture establishes is readable
+// at the fixture. The returned Version is the POST-seed version and the Plan
+// that follows must carry it: dropping the ExpectedRequirementVersion, passing
+// zero, or seeding after the Plan would each delete a real assertion.
+//
+// A store write rather than the product's own path is deliberate here and is
+// recorded: these journeys assert reconciliation over fencing and stop, and
+// threading Service.StartFraming plus Service.CompleteFraming through them
+// would add two owner commands and two Control permits to a fixture whose
+// subject is neither. internal/runner/orchestrator.go carries this task's
+// reachability proof through the product's own commands instead.
+func reconcilerSeedRequirementStatus(t *testing.T, st *memory.Store, ctx context.Context, id string, status domain.RequirementStatus) domain.Version {
+	t.Helper()
+	var version domain.Version
+	if err := st.Transact(ctx, func(u application.UnitOfWork) error {
+		r, ok, e := u.Requirement(ctx, id)
+		if e != nil {
+			return e
+		}
+		if !ok {
+			t.Fatalf("seed: requirement %q does not exist", id)
+		}
+		next := r
+		next.Status = status
+		next.Version++
+		if e = domain.Validate(next); e != nil {
+			return e
+		}
+		version = next.Version
+		return u.SaveRequirement(ctx, next, r.Version)
+	}); err != nil {
+		t.Fatalf("seed requirement %q to %q: %v", id, status, err)
+	}
+	return version
+}
+
 // fencingJourneyClock is a small injected clock private to this test
 // function's fixture, advanced explicitly between phases. It is not
 // package-level mutable state: a fresh instance is created inside the test
@@ -66,7 +112,12 @@ func TestJourneyFourPartitionRunnerStaleSubmissionsAreRejected(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan, err := svc.Plan(ownerCtx, application.PlanRequest{RequestID: "fj:plan", RequirementID: cap.RequirementID, ExpectedRequirementVersion: cap.Version})
+	// V2-089: this journey claims, so its parent Requirement is moved to
+	// domain.RequirementReady -- '優先順位評価済みで実行可能',
+	// docs/architecture/domain-model.md:265 -- before the Plan, and the Plan
+	// carries the POST-seed version.
+	readyVersion := reconcilerSeedRequirementStatus(t, st, ownerCtx, cap.RequirementID, domain.RequirementReady)
+	plan, err := svc.Plan(ownerCtx, application.PlanRequest{RequestID: "fj:plan", RequirementID: cap.RequirementID, ExpectedRequirementVersion: readyVersion})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -176,6 +176,53 @@ func TestFirestoreRollbackAndAtomicRecords(t *testing.T) {
 	}
 }
 
+// firestoreSeedRequirementStatus is internal/store/firestore's ONE seeding
+// helper, added by V2-089 because this package had none. It moves a Requirement
+// to status directly through the store under test, bumping its Version exactly
+// as a transition would, and validates before saving so a fixture cannot reach
+// a record the domain rejects. It exists because V2-089 refuses a claim whose
+// parent Requirement is not in one of the four statuses that admit work --
+// ready, active, waiting, recovering -- and this package's integration fixture
+// captured, planned, prepared and claimed without framing.
+//
+// The status is passed by its call site as a domain constant literal, never a
+// variable and never a string. The returned Version is the POST-seed version
+// and the Plan that follows carries it: dropping the
+// ExpectedRequirementVersion, passing zero, or seeding after the Plan would
+// each delete a real assertion.
+//
+// A store write rather than Service.StartFraming plus Service.CompleteFraming
+// is deliberate and recorded: this test's subject is the STORE -- transaction
+// atomicity, optimistic conflict and the control gate against a real emulator
+// -- and threading two owner commands through it would add two unrelated
+// application commands to a store-level fixture. It also adds NO goroutine: the
+// existing pair that claims concurrently is untouched, and the seed runs before
+// either is started.
+func firestoreSeedRequirementStatus(t *testing.T, s *Store, ctx context.Context, id string, status domain.RequirementStatus) domain.Version {
+	t.Helper()
+	var version domain.Version
+	if err := s.Transact(ctx, func(u application.UnitOfWork) error {
+		r, ok, e := u.Requirement(ctx, id)
+		if e != nil {
+			return e
+		}
+		if !ok {
+			t.Fatalf("seed: requirement %q does not exist", id)
+		}
+		next := r
+		next.Status = status
+		next.Version++
+		if e = domain.Validate(next); e != nil {
+			return e
+		}
+		version = next.Version
+		return u.SaveRequirement(ctx, next, r.Version)
+	}); err != nil {
+		t.Fatalf("seed requirement %q to %q: %v", id, status, err)
+	}
+	return version
+}
+
 func TestFirestoreApplicationAtomicityConflictAndControl(t *testing.T) {
 	s := emulatorStore(t)
 	ctx := context.Background()
@@ -257,7 +304,14 @@ func TestFirestoreApplicationAtomicityConflictAndControl(t *testing.T) {
 		t.Fatalf("optimistic conflict successes=%d conflicts=%d", successes, conflicts)
 	}
 
-	prepared, err := svc.Plan(ownerCtx, application.PlanRequest{RequestID: "plan-1", RequirementID: captured.RequirementID, ExpectedRequirementVersion: captured.Version})
+	// V2-089: the two concurrent claims below are refused unless the parent
+	// Requirement is in one of the four statuses that admit work -- ready,
+	// active, waiting, recovering. This fixture left it in `captured`, so it is
+	// moved to domain.RequirementReady -- '優先順位評価済みで実行可能',
+	// docs/architecture/domain-model.md:265 -- and the Plan carries the
+	// POST-seed version, because the seed bumps the Requirement's Version.
+	readyVersion := firestoreSeedRequirementStatus(t, s, ctx, captured.RequirementID, domain.RequirementReady)
+	prepared, err := svc.Plan(ownerCtx, application.PlanRequest{RequestID: "plan-1", RequirementID: captured.RequirementID, ExpectedRequirementVersion: readyVersion})
 	if err != nil {
 		t.Fatal(err)
 	}
