@@ -1171,8 +1171,8 @@ func claimableReadSnapshot(t *testing.T, st *memory.Store, requirementID, increm
 // seedRequirementStatus calls domain.Validate before saving, so the snapshot is
 // written FIRST -- by concatenating a prefix with a suffix, so no secret-shaped
 // literal exists in this file -- and only then is the status set. That write sets
-// no Status field, so it adds nothing to A15's `Status = domain.Requirement`
-// tripwire.
+// no Status field at all, so it adds nothing to A15's status-assignment
+// tripwire over test files.
 func claimableFixture(t *testing.T, tag string, status domain.RequirementStatus) (*application.Service, *memory.Store, string, string, domain.Version) {
 	t.Helper()
 	s, st := service()

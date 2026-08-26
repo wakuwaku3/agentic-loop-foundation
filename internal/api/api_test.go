@@ -5868,7 +5868,7 @@ func TestTheNeedsInputRefusalKeepsItsOwnBodyAtTheTransport(t *testing.T) {
 	id, capturedVersion := captureRequirement(t, h, "a10")
 	// needs-input is reached through the product's OWN routes -- :start-framing
 	// then :request-input -- so this new test adds nothing to V2-089's A15(i)
-	// tripwire, which counts `Status = domain.Requirement` writes in test files
+	// tripwire, which counts direct status assignments in test files
 	// and must only grow by fixtures naming one of the FOUR admitting statuses.
 	w := call(h, http.MethodPost, "/v1/requirements/"+id+startFramingRouteSuffix, startFramingBody("a10-frame", capturedVersion), "owner")
 	if w.Code != http.StatusOK {
