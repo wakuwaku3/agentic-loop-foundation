@@ -800,7 +800,26 @@ func TestTheServiceWritesARequirementOnlyFromCaptureAndPlan(t *testing.T) {
 	// The store-adapter tables still drive Capture and Plan. Nothing else in
 	// this guard changes and the set stays CLOSED: an eleventh writer still fails
 	// here.
-	want := map[string]bool{"Capture": true, "Plan": true, "RequestHumanInput": true, "AnswerHumanInput": true, "StartFraming": true, "CompleteFraming": true, "Claim": true, "PauseRequirement": true, "ResumeRequirement": true, "CancelRequirement": true}
+	// V2-091 widens the closed set from ten to TWELVE, under v2-task-dag.md
+	// 12.12, on the same terms. Two entries are added, both in the ONE new file
+	// internal/application/loop.go, and they share one reason: each issues
+	// exactly one domain.RequirementCommand through domain.DecideRequirement and
+	// therefore necessarily persists a Requirement.
+	//   - loopRequirementTransition persists the waiting and the recovering
+	//     transitions, neither of which had any non-test issuer at all before
+	//     this task.
+	//   - loopCompleteRequirement persists the completed value, and it stages
+	//     exactly ONE SaveRequirement for the evaluate-then-complete pair on
+	//     purpose: two writes describing one atomic step would leave a
+	//     half-state if a store flushed the first and refused the second.
+	// The property this test makes exhaustive is unaffected:
+	// domain.DecideRequirement opens with `next := current` and
+	// domain.CompleteRequirementFromRelease assigns only Status, Version and
+	// StableSnapshot, so neither new writer touches CapturedAt. The
+	// store-adapter tables still drive Capture and Plan. Nothing else in this
+	// guard changes and the set stays CLOSED: a THIRTEENTH writer still fails
+	// here.
+	want := map[string]bool{"Capture": true, "Plan": true, "RequestHumanInput": true, "AnswerHumanInput": true, "StartFraming": true, "CompleteFraming": true, "Claim": true, "PauseRequirement": true, "ResumeRequirement": true, "CancelRequirement": true, "loopRequirementTransition": true, "loopCompleteRequirement": true}
 	if len(writers) != len(want) {
 		t.Fatalf("the service writes a Requirement from %v, want exactly %v", keysSorted(writers), keysSorted(want))
 	}
