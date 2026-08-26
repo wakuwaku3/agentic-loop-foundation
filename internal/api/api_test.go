@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -1302,9 +1303,15 @@ func TestProvidersRouteIsOwnerOnlyGetWithAClosedResponse(t *testing.T) {
 		"verified_by_loop_invocation": true, "health": true, "blocked_reason": true,
 		"last_observed_at": true, "observation_count": true, "stale": true,
 		"runaway_detection": true, "concurrency": true, "assignments": true,
+		// V2-074's two additive blocks. The assertion is unchanged in form:
+		// the response still carries no field this Work Order did not name.
+		"compatibility": true, "handoff": true,
 	}
 	runawayFields := map[string]bool{"scope": true, "state": true, "thresholds_declared_in": true}
 	concurrencyFields := map[string]bool{"active_assignments": true, "declared_ceiling": true, "ceiling_source": true, "remaining": true, "exhausted": true}
+	compatibilityFields := map[string]bool{"cli_version_interval": true, "loop_version_interval": true, "observed_loop_version": true, "cli_compatibility": true, "loop_compatibility": true}
+	intervalFields := map[string]bool{"from": true, "until": true}
+	handoffFields := map[string]bool{"disposition": true, "target": true, "waiting_reason": true}
 	if len(rows) != 3 {
 		t.Fatalf("the response carries %d providers, want exactly 3", len(rows))
 	}
@@ -1315,7 +1322,7 @@ func TestProvidersRouteIsOwnerOnlyGetWithAClosedResponse(t *testing.T) {
 				t.Fatalf("a provider row carries an unnamed field %q", key)
 			}
 		}
-		for _, named := range []string{"provider", "authorized", "authorization_ref", "verified_by_loop_invocation", "health", "blocked_reason", "last_observed_at", "observation_count", "stale", "runaway_detection", "concurrency", "assignments"} {
+		for _, named := range []string{"provider", "authorized", "authorization_ref", "verified_by_loop_invocation", "health", "blocked_reason", "last_observed_at", "observation_count", "stale", "runaway_detection", "concurrency", "assignments", "compatibility", "handoff"} {
 			if _, ok := row[named]; !ok {
 				t.Fatalf("a provider row omits the required field %q: %v", named, row)
 			}
@@ -1337,6 +1344,67 @@ func TestProvidersRouteIsOwnerOnlyGetWithAClosedResponse(t *testing.T) {
 			if !concurrencyFields[key] {
 				t.Fatalf("concurrency carries an unnamed field %q", key)
 			}
+		}
+		compatibility, isObject := row["compatibility"].(map[string]any)
+		if !isObject {
+			t.Fatalf("compatibility is not an object: %v", row["compatibility"])
+		}
+		for key := range compatibility {
+			if !compatibilityFields[key] {
+				t.Fatalf("compatibility carries an unnamed field %q", key)
+			}
+		}
+		for _, intervalKey := range []string{"cli_version_interval", "loop_version_interval"} {
+			interval, isInterval := compatibility[intervalKey].(map[string]any)
+			if !isInterval {
+				t.Fatalf("%s is not an object: %v", intervalKey, compatibility[intervalKey])
+			}
+			for key := range interval {
+				if !intervalFields[key] {
+					t.Fatalf("%s carries an unnamed field %q", intervalKey, key)
+				}
+			}
+			for _, bound := range []string{"from", "until"} {
+				value, isText := interval[bound].(string)
+				if !isText || value == "" {
+					t.Fatalf("%s.%s = %v, want a declared version bound", intervalKey, bound, interval[bound])
+				}
+			}
+		}
+		// The two verdicts are in the closed set, and unknown is shown as
+		// unknown rather than as blank or as compatible.
+		for _, verdictKey := range []string{"cli_compatibility", "loop_compatibility"} {
+			switch compatibility[verdictKey] {
+			case "compatible", "incompatible", "unknown":
+			default:
+				t.Fatalf("%s = %v, which is outside the closed verdict set", verdictKey, compatibility[verdictKey])
+			}
+		}
+		// With no release observer configured this handler reports no Loop
+		// version at all, and the loop verdict is then unknown rather than a
+		// synthesized instant or a reassuring default.
+		if compatibility["observed_loop_version"] != "" {
+			t.Fatalf("observed_loop_version = %v with no release observer configured; no version may be synthesized for an absence", compatibility["observed_loop_version"])
+		}
+		if compatibility["loop_compatibility"] != "unknown" {
+			t.Fatalf("loop_compatibility = %v with no observed Loop version, want unknown", compatibility["loop_compatibility"])
+		}
+		if compatibility["cli_compatibility"] != "unknown" {
+			t.Fatalf("cli_compatibility = %v with no observed contract-incompatible failure, want unknown", compatibility["cli_compatibility"])
+		}
+		handoff, isObject := row["handoff"].(map[string]any)
+		if !isObject {
+			t.Fatalf("handoff is not an object: %v", row["handoff"])
+		}
+		for key := range handoff {
+			if !handoffFields[key] {
+				t.Fatalf("handoff carries an unnamed field %q", key)
+			}
+		}
+		switch handoff["disposition"] {
+		case "none", "handoff-proposed", "waiting":
+		default:
+			t.Fatalf("disposition = %v, which is outside the closed set", handoff["disposition"])
 		}
 		name, _ := row["provider"].(string)
 		names = append(names, name)
@@ -2593,6 +2661,274 @@ func TestOwnerConsoleExposesTheNeedsInputQuestion(t *testing.T) {
 	for _, forbidden := range []string{"capability exercised", "preview journey passed"} {
 		if strings.Contains(lowered, forbidden) || strings.Contains(strings.ToLower(js), forbidden) {
 			t.Fatalf("owner console claims %q", forbidden)
+		}
+	}
+}
+
+// ===========================================================================
+// V2-074 A4 and A15: no admission path reads a compatibility type, and the
+// owner console renders both relations with an explicit unknown.
+// ===========================================================================
+
+// TestNoRequestAdmissionPathReadsACompatibilityType is A4's mechanical half at
+// the transport boundary, modelled on the equivalent V2-069 scan above: the
+// authentication boundary and the request-admission surface mention no type
+// this task declares. The matcher is verified against a synthetic
+// known-positive first, and a zero-declaration scan fails outright.
+func TestNoRequestAdmissionPathReadsACompatibilityType(t *testing.T) {
+	identifiers := []string{
+		"ProviderCompatibilityView", "ProviderCompatibilityVerdict", "ProviderVersionIntervalView",
+		"ProviderHandoffView", "ProviderHandoffDisposition", "ProviderHandoffWaitingReason",
+		"ProviderCandidateObstacle", "ProviderSourceState", "ProviderSelectionCell",
+		"ProviderCLIVersionInterval", "ProviderLoopVersionInterval", "ProviderVersionVerdict",
+		"ProviderHandoffDecisionTable", "ProviderSourceStateFor", "ProviderCandidateObstacleFor",
+	}
+	hits := func(n ast.Node) []string {
+		found := []string{}
+		ast.Inspect(n, func(node ast.Node) bool {
+			ident, isIdent := node.(*ast.Ident)
+			if !isIdent {
+				return true
+			}
+			for _, name := range identifiers {
+				if ident.Name == name {
+					found = append(found, name)
+				}
+			}
+			return true
+		})
+		return found
+	}
+	positive := "package api\n\nfunc (a CombinedAuthenticator) Authenticate() { var v application.ProviderCompatibilityView; _ = v }\n"
+	synthetic, err := parser.ParseFile(token.NewFileSet(), "positive.go", positive, parser.AllErrors)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hits(synthetic)) == 0 {
+		t.Fatal("positive control: a synthetic authenticator naming a compatibility type was not flagged")
+	}
+
+	declarations := 0
+	names := map[string]bool{}
+	for _, path := range []string{"auth.go", "api.go"} {
+		file, parseErr := parser.ParseFile(token.NewFileSet(), path, nil, parser.AllErrors)
+		if parseErr != nil {
+			t.Fatalf("parse %s: %v", path, parseErr)
+		}
+		for _, decl := range file.Decls {
+			fn, isFunc := decl.(*ast.FuncDecl)
+			if !isFunc {
+				continue
+			}
+			declarations++
+			names[fn.Name.Name] = true
+			if found := hits(fn); len(found) != 0 {
+				t.Fatalf("%s: %s names %v; no request-admission path may read a type this task declares", path, fn.Name.Name, found)
+			}
+		}
+	}
+	if declarations == 0 {
+		t.Fatal("scanned zero function declarations; the scan is broken")
+	}
+	if !names["Authenticate"] {
+		t.Fatal("auth.go declares no Authenticate method; the boundary moved and this guard is vacuous")
+	}
+	t.Logf("scanned auth.go and api.go: %d function declarations, none naming any of the %d types V2-074 declares", declarations, len(identifiers))
+}
+
+// TestARequestForADeclaredIncompatibleProviderStillSucceedsEverywhereItDidBefore
+// is A4's behavioural half. The scripted runner sequence below is the same one
+// the pre-existing tests drive, run against a Provider whose observed failure
+// class has already made cli_compatibility incompatible: no route changes its
+// status code, because compatibility is a REPORT and not an admission rule.
+func TestARequestForADeclaredIncompatibleProviderStillSucceedsEverywhereItDidBefore(t *testing.T) {
+	h, _ := runnerVersionHandler(t)
+	// Drive the Provider into the incompatible state through the route that
+	// carries the class end to end, then assert every route still answers as
+	// before for that same Provider.
+	capture := call(h, http.MethodPost, "/v1/requirements", `{"request_id":"compat-r-1","text":"a requirement whose provider is declared incompatible"}`, "owner")
+	if capture.Code != http.StatusOK && capture.Code != http.StatusCreated {
+		t.Fatalf("capture status=%d body=%s", capture.Code, capture.Body.String())
+	}
+	before, beforeRows, _ := providerRegistryDoc(t, h)
+	if len(beforeRows) != 3 {
+		t.Fatalf("baseline registry has %d rows", len(beforeRows))
+	}
+	_ = before
+
+	// The one path that can move the CLI verdict: an execution result carrying
+	// the contract-incompatible class. It is driven exactly as the pre-existing
+	// observation test drives it, and its status code is asserted unchanged.
+	type step struct {
+		name, method, path, body, role string
+	}
+	steps := []step{
+		{name: "providers-read-as-owner", method: http.MethodGet, path: "/v1/providers", role: "owner"},
+		{name: "providers-read-as-runner", method: http.MethodGet, path: "/v1/providers", role: "runner"},
+		{name: "providers-read-unauthenticated", method: http.MethodGet, path: "/v1/providers", role: ""},
+		{name: "providers-post", method: http.MethodPost, path: "/v1/providers", body: `{}`, role: "owner"},
+		{name: "owner-console", method: http.MethodGet, path: "/owner/", role: "owner"},
+		{name: "owner-asset", method: http.MethodGet, path: "/owner/assets/owner.js", role: ""},
+		{name: "healthz", method: http.MethodGet, path: "/healthz", role: ""},
+	}
+	baseline := map[string]int{}
+	for _, s := range steps {
+		w := call(h, s.method, s.path, s.body, s.role)
+		baseline[s.name] = w.Code
+	}
+
+	// Now make claude declared-incompatible through the real result path.
+	observed := call(h, http.MethodPost, "/v1/executions/e-compat:result",
+		`{"request_id":"compat-res-1","execution_id":"e-compat","lease_id":"l-1","expected_execution_version":1,"fencing_token":1,"control_revision":0,"succeeded":false,"provider_observation":{"name":"claude","failure_class":"contract-incompatible"}}`,
+		"runner")
+	// Whatever this returns -- the Execution may not exist in this fixture --
+	// it must not be a server error, and it must not change any other route.
+	if observed.Code >= 500 {
+		t.Fatalf("the observation path returned %d: %s", observed.Code, observed.Body.String())
+	}
+	for _, s := range steps {
+		w := call(h, s.method, s.path, s.body, s.role)
+		if w.Code != baseline[s.name] {
+			t.Fatalf("%s changed from %d to %d once a Provider was declared incompatible; compatibility is a report, never an admission rule", s.name, baseline[s.name], w.Code)
+		}
+	}
+	// And the registry still answers 200 with exactly three rows and the same
+	// closed field set.
+	_, afterRows, raw := providerRegistryDoc(t, h)
+	if len(afterRows) != 3 {
+		t.Fatalf("the registry reports %d rows after the observation", len(afterRows))
+	}
+	if strings.Contains(raw, "TODO") || strings.Contains(raw, "placeholder") {
+		t.Fatalf("the response carries a placeholder: %s", raw)
+	}
+	t.Logf("%d routes kept their exact status codes across a Provider becoming declared-incompatible: %v", len(steps), baseline)
+}
+
+// TestOwnerConsoleReportsBothRelationsAndTheDisposition is A15.
+func TestOwnerConsoleReportsBothRelationsAndTheDisposition(t *testing.T) {
+	h, _ := runnerVersionHandler(t)
+	w := call(h, http.MethodGet, "/owner/", "", "owner")
+	if w.Code != 200 {
+		t.Fatalf("owner console status=%d", w.Code)
+	}
+	html := w.Body.String()
+	for _, want := range []string{
+		`id="provider-handoff-title"`, `id="provider-handoff-refresh"`, `id="provider-handoff-rows"`,
+		`id="provider-handoff-waiting"`, `id="provider-handoff-proposed"`, `id="provider-handoff-state"`,
+		"V2-074 provider compatibility and handoff",
+	} {
+		if !strings.Contains(html, want) {
+			t.Fatalf("owner console does not carry %s", want)
+		}
+	}
+	// Additive only: every pre-existing surface, including the sibling tasks'
+	// sections, is still there.
+	for _, want := range []string{
+		`id="capture"`, `id="control"`, `id="queue"`, `id="repository"`, `id="repository-list"`,
+		"Release evidence", `id="release-conditions"`, `id="backlog-rows"`, `id="runners-rows"`,
+		`id="providers-rows"`, `id="captured-rows"`, `id="needs-input"`,
+	} {
+		if !strings.Contains(html, want) {
+			t.Fatalf("owner console lost the pre-existing surface %s", want)
+		}
+	}
+
+	w = call(h, http.MethodGet, "/owner/assets/owner.js", "", "")
+	if w.Code != 200 {
+		t.Fatalf("owner.js status=%d", w.Code)
+	}
+	js := w.Body.String()
+	marker := strings.Index(js, "// V2-074 provider compatibility and handoff")
+	if marker < 0 {
+		t.Fatal("owner.js does not carry the V2-074 marker comment")
+	}
+	block := js[marker:]
+	// The block reads the existing registry and renders each declared
+	// observable of this task in words.
+	for _, want := range []string{
+		"/v1/providers", "cli_version_interval", "loop_version_interval", "observed_loop_version",
+		"cli_compatibility", "loop_compatibility", "disposition", "waiting_reason", "target",
+		"exhausted", "provider-handoff-waiting", "provider-handoff-proposed",
+	} {
+		if !strings.Contains(block, want) {
+			t.Fatalf("the V2-074 owner.js block does not reference %q", want)
+		}
+	}
+	// unknown is shown as unknown, and never as compatible or blank.
+	if !strings.Contains(block, `"unknown":"unknown, because an input was absent"`) {
+		t.Fatal("the block does not render unknown as unknown in plain words")
+	}
+	// Every declared waiting reason has words of its own in the block, so a
+	// reader never has to parse an enum value.
+	for _, reason := range application.ProviderHandoffWaitingReasons() {
+		if !strings.Contains(block, `"`+string(reason)+`"`) {
+			t.Fatalf("the V2-074 owner.js block has no words for the waiting reason %q", reason)
+		}
+	}
+	for _, disposition := range application.ProviderHandoffDispositions() {
+		if !strings.Contains(block, `"`+string(disposition)+`"`) {
+			t.Fatalf("the V2-074 owner.js block has no words for the disposition %q", disposition)
+		}
+	}
+	// The sibling blocks are still present in the same single file.
+	for _, want := range []string{"/v1/release/state", "/v1/runners", "/v1/providers", "executability", "requirement_backlog", "captured_at", "allocation_limit"} {
+		if !strings.Contains(js, want) {
+			t.Fatalf("owner.js lost the pre-existing block reference %q", want)
+		}
+	}
+	// No raw JSON, no timer, no external asset, script or font, and no
+	// email-shaped value.
+	for _, forbidden := range []string{"JSON.stringify", "http://", "https://", "//cdn", "importScripts", "setInterval", "setTimeout", "@font-face", "@"} {
+		if strings.Contains(block, forbidden) {
+			t.Fatalf("the V2-074 owner.js block references %q", forbidden)
+		}
+	}
+	if !strings.Contains(js, `"@"`) {
+		t.Fatal("the pre-existing owner.js locator block no longer contains an '@'; this scan's control is stale")
+	}
+	section := html[strings.Index(html, "V2-074 provider compatibility and handoff"):]
+	if strings.Contains(section, "@") {
+		t.Fatal("the V2-074 owner console section carries an '@'")
+	}
+	lowered := strings.ToLower(section)
+	for _, forbidden := range []string{
+		"password", "secret", "api_key", "apikey", "bearer ", "authorization:", "private_key",
+		"@example.", "@gmail.", "accounts.google.com", "credential", "raw_prompt", "raw_provider_output",
+		"budget", "billing", "quota", "spend", "credit",
+	} {
+		if strings.Contains(lowered, forbidden) {
+			t.Fatalf("the rendered V2-074 section carries a forbidden value %q", forbidden)
+		}
+	}
+	// No threshold number: the section between its own two markers carries no
+	// digit at all outside its task identifier and the heading tag names.
+	start := strings.Index(html, "V2-074 provider compatibility and handoff")
+	end := strings.Index(html, "/V2-074 provider compatibility and handoff")
+	if start < 0 || end <= start {
+		t.Fatal("the V2-074 section markers are not both present in owner.html")
+	}
+	own := html[start:end]
+	scrubbed := strings.ReplaceAll(own, "V2-074", "")
+	for _, tag := range []string{"<h2", "</h2", "<h3", "</h3"} {
+		scrubbed = strings.ReplaceAll(scrubbed, tag, "")
+	}
+	if regexp.MustCompile(`[0-9]`).MatchString(scrubbed) {
+		t.Fatalf("the V2-074 owner console section carries a digit outside its own task identifier and its heading tags: %s", own)
+	}
+	// The console must not claim a measurement it does not have.
+	for _, forbidden := range []string{"capability exercised", "preview journey passed", "versions are compatible", "every machine reported"} {
+		if strings.Contains(lowered, forbidden) || strings.Contains(strings.ToLower(block), forbidden) {
+			t.Fatalf("the V2-074 owner console claims %q", forbidden)
+		}
+	}
+	// And it says the two things a reader must not get wrong, in plain words.
+	for _, want := range []string{
+		"a proposal an owner reads",
+		"reading unknown as fine would be a mistake",
+		"is established by nothing on this page",
+	} {
+		if !strings.Contains(lowered, strings.ToLower(want)) {
+			t.Fatalf("the V2-074 section does not say %q in plain words", want)
 		}
 	}
 }

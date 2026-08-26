@@ -314,3 +314,44 @@ V2-027 は `.agents/v2/provider-preflight/**` を触らず、live suite を1つ�
 `provider`（roots 自身）、`runner`（provider を dependency として宣言）、`reconciler`（verification dependency）、`api`・`control-plane`・`store-firestore`（いずれも runner 経由で到達）。runbook と台帳の編集で `docs` と `task-ledger` も動く。
 
 発行する evidence record は **`provider` の1件だけ**である。残りの key 移動は G6a の下で測定の note として記録し、V2-027 が検証していない component の record は作らない。
+
+## 10. 宣言された対応 CLI version 区間（V2-074）
+
+**測定した argv surface の隣に、その adapter が対応すると宣言する Provider CLI
+version の半開区間を並べる。** 区間は source 宣言であり、実 CLI の測定結果では
+ない。実 CLI に対して真かどうかは V2-028 が所有する（本文書 §7 と
+docs/operations/provider-registry.md §9 の authority table を参照）。
+
+| adapter | 測定した argv surface（§1 逐語） | `--version` が測った version | 宣言区間（半開） | 上限の根拠 |
+|---|---|---|---|---|
+| codex | `codex exec --json --ephemeral -C <workspace>` | 0.149.1 | `[0.149.0, 0.150.0)` | 0.x なので CLI 自身の versioning が破壊的変更を許すのは次の minor。help のみの測定でも同じ境界になる |
+| claude | `claude --print --output-format json --no-session-persistence` | 2.1.241 | `[2.1.0, 3.0.0)` | 4引数は実 CLI に対して3回の live exercise で wire-compatible が実証済みなので、測定側で狭める理由がない。post-1.0 が破壊を許す最初の境界は次の major |
+| opencode | `opencode run --pure --format json --dir <workspace>` | 1.18.22 | `[1.18.0, 1.19.0)` | post-1.0 だが argv surface は help のみで一度も exercise していないので、semver が許す境界より**意図的に狭く**、測定した minor 線で止める。next major まで広げるのは V2-028 が獲得するもの |
+
+規則は3行すべてに同一である: **区間の下限は測定した version の minor floor、
+上限は「その CLI 自身の versioning が破壊的変更を許す次の境界」と「この
+repository が何も測っていない境界」の**狭い方**。** codex は 0.x なので両者が
+一致し、claude は live 実証があるので後者が狭めず、opencode は help のみなので
+後者が狭める。
+
+`cli_version_declared` は fixture provenance manifest が entry ごとに記録して
+いる値で、`--version` の出力そのものである（version を読むことは Provider usage
+を消費せず認証も要らない）。**その値は区間の権威ではなく、区間が「含むこと」を
+assert される測定値である**（信頼の向きが逆）。区間を parsed fixture bytes から
+代入する code path は `internal/provider` に存在せず、AST scan がそれを固定する。
+
+adapter contract 側の対応 Loop version 区間は `ContractVersion`（= `v1`）に
+紐づく1つだけで、`[0.1.0, 1.0.0)` である。宣言された contract identity を変えて
+よい最初の release は Loop 自身の major であるため。version 比較は数値 triple
+のみで行い、prerelease label は順序入力にしない: この repository の唯一の
+release identity は `0.1.0-baseline` で、厳密な semver 優先順位では prerelease は
+先行する release より下に並ぶので、自分自身の triple を下限に持つあらゆる区間の
+外に落ちてしまう。ここでの label は channel 名であって順序の主張ではない。
+
+**invocation を1回も消費せずに拒否する場所。** `provider.Request` に optional な
+`CLIVersionDeclared` が1つ増え、3 adapter が共通で通る `build` helper が、
+非空かつ宣言区間の外を測った場合に fail-closed で拒否する（argv が出来る前）。
+空または読めない値は unknown で、**絶対に拒否しない**（fail-open）。
+**production の caller はこの field を渡さない。** `internal/runner` は V2-074 が
+意図的に触らないので、この拒否は test でのみ働き production では働かない。
+これを「非互換 CLI は invoke され得ない」と読むのは誤りである。

@@ -32,6 +32,25 @@ func build(executable string, flags []string, includeWorkspaceArg bool, req Requ
 	if hasTraversalSegment(req.Workspace) {
 		return Invocation{}, ErrInvalidRequest
 	}
+	// V2-074 A6: the pre-invocation compatibility refusal, in the one place
+	// all three adapters funnel through, and before any argv exists. executable
+	// is the adapter's own name for all three adapters -- asserted by
+	// TestTheSharedBuildHelperRefusesAMeasuredIncompatibleCLIVersion -- so the
+	// interval consulted is the interval of the adapter actually being built.
+	//
+	// Fail closed on measured-incompatible, fail open on unknown. An empty or
+	// unreadable version yields VerdictUnknown and is never refused, because
+	// refusing on an absence of information would take a Provider out of
+	// service for having reported nothing.
+	if req.CLIVersionDeclared != "" {
+		verdict, err := CLICompatibility(executable, req.CLIVersionDeclared)
+		if err != nil {
+			return Invocation{}, ErrInvalidRequest
+		}
+		if verdict == VerdictIncompatible {
+			return Invocation{}, ErrInvalidRequest
+		}
+	}
 	argv := append([]string{executable}, flags...)
 	if includeWorkspaceArg {
 		argv = append(argv, req.Workspace)

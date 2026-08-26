@@ -560,3 +560,115 @@ const id=()=>crypto.randomUUID();const json=v=>({headers:{"Content-Type":"applic
   var submit=el("needs-input-submit");
   if(submit){submit.onclick=answer;}
 })();
+
+// V2-074 provider compatibility and handoff. Additive, self-contained block
+// appended at the end of the file; nothing above is rewritten. It renders named
+// rows, never raw JSON, adds no timer and references no external asset, script
+// or font. It reads only the existing owner registry read.
+(function(){
+  var el=function(id){return document.getElementById(id);};
+  var words={
+    "compatible":"inside the declared range",
+    "incompatible":"outside the declared range",
+    "unknown":"unknown, because an input was absent"
+  };
+  var reasons={
+    "source-is-probing":"this Loop is spending exactly one invocation to find out whether to resume sending, so nothing is moved until that answer arrives",
+    "chain-bound-reached":"this Increment has already used its stated number of moves, so it is not moved again",
+    "candidate-needs-an-owner-action":"every other Provider needs an action only the owner can take, such as signing in to a CLI or clearing a stop",
+    "candidate-is-measured-incompatible":"every other Provider was measured outside a declared version range",
+    "candidate-already-tried-for-this-increment":"every other Provider has already been tried for this Increment, and it is not handed back",
+    "candidate-is-not-sendable":"no other Provider is one this Loop is sending to right now"
+  };
+  var dispositions={
+    "none":"nothing needs to move",
+    "handoff-proposed":"a destination is proposed",
+    "waiting":"waiting"
+  };
+  var range=function(interval){
+    if(!interval){return "no range was reported";}
+    return "from "+(interval.from||"an unreported bound")+" up to but not including "+(interval.until||"an unreported bound");
+  };
+  var setList=function(id,items,empty){
+    var list=el(id);
+    if(!list){return;}
+    while(list.firstChild){list.removeChild(list.firstChild);}
+    if(!items.length){
+      var none=document.createElement("li");
+      none.className="muted";
+      none.textContent=empty;
+      list.appendChild(none);
+      return;
+    }
+    for(var i=0;i<items.length;i++){
+      var row=document.createElement("li");
+      row.textContent=items[i];
+      list.appendChild(row);
+    }
+  };
+  var describe=function(entry){
+    var compat=entry.compatibility||{};
+    var handoff=entry.handoff||{};
+    var loopVersion=compat.observed_loop_version?("this Loop reports version "+compat.observed_loop_version):"this Loop reports no version, because it was given no explicit release source root";
+    var where=dispositions[handoff.disposition]||"an unreported disposition";
+    if(handoff.disposition==="handoff-proposed"){
+      where="a destination is proposed: "+(handoff.target||"an unreported Provider");
+    }
+    if(handoff.disposition==="waiting"){
+      where="waiting \u2014 "+(reasons[handoff.waiting_reason]||("reason "+(handoff.waiting_reason||"unreported")));
+    }
+    return entry.provider
+      +" \u2014 supported CLI versions "+range(compat.cli_version_interval)
+      +"; CLI state "+(words[compat.cli_compatibility]||"unreported")
+      +". Supported Loop versions "+range(compat.loop_version_interval)
+      +"; "+loopVersion
+      +"; Loop state "+(words[compat.loop_compatibility]||"unreported")
+      +". Allocation is "+((entry.concurrency&&entry.concurrency.exhausted)?"exhausted":"not exhausted")
+      +". Now: "+where+".";
+  };
+  var render=function(v){
+    var rows=(v&&v.providers)||[];
+    if(!rows.length){
+      setList("provider-handoff-rows",[],"The response carried no Provider.");
+      setList("provider-handoff-waiting",[],"The response carried no Provider.");
+      setList("provider-handoff-proposed",[],"The response carried no Provider.");
+      el("provider-handoff-state").textContent="The response carried no Provider row.";
+      return;
+    }
+    var all=[];
+    var waiting=[];
+    var proposed=[];
+    var unknowns=0;
+    for(var i=0;i<rows.length;i++){
+      var entry=rows[i];
+      all.push(describe(entry));
+      var handoff=entry.handoff||{};
+      var compat=entry.compatibility||{};
+      if(compat.cli_compatibility==="unknown"||compat.loop_compatibility==="unknown"){unknowns++;}
+      if(handoff.disposition==="waiting"){
+        waiting.push(entry.provider+" \u2014 "+(reasons[handoff.waiting_reason]||("reason "+(handoff.waiting_reason||"unreported"))));
+      }
+      if(handoff.disposition==="handoff-proposed"){
+        proposed.push(entry.provider+" \u2014 work would go to "+(handoff.target||"an unreported Provider")+". This is a proposal only; nothing here carries it out.");
+      }
+    }
+    setList("provider-handoff-rows",all,"The response carried no Provider.");
+    setList("provider-handoff-waiting",waiting,"No Provider is waiting.");
+    setList("provider-handoff-proposed",proposed,"No destination is proposed.");
+    el("provider-handoff-state").textContent="Read "+rows.length+" Providers; "+unknowns+" of them report at least one state as unknown, which means an input was absent rather than that everything is fine. Every range shown is a declaration this repository owns, and no part of this page establishes that a range is true of a real CLI.";
+  };
+  var failed=function(m){
+    el("provider-handoff-state").textContent=m;
+    setList("provider-handoff-rows",[],m);
+    setList("provider-handoff-waiting",[],m);
+    setList("provider-handoff-proposed",[],m);
+  };
+  var read=function(){
+    return fetch("/v1/providers").then(function(r){
+      if(!r.ok){failed("Unable to read the Provider registry.");return;}
+      return r.json().then(render);
+    }).catch(function(){failed("Unable to read the Provider registry.");});
+  };
+  var refresh=el("provider-handoff-refresh");
+  if(refresh){refresh.onclick=read;}
+})();

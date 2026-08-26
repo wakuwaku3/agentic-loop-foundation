@@ -76,6 +76,33 @@ type Request struct {
 	Packet      WorkPacket    `json:"packet"`
 	Model       string        `json:"model,omitempty"`
 	Timeout     time.Duration `json:"-"`
+	// CLIVersionDeclared is the version the caller measured for the CLI this
+	// Request will be built against (V2-074 A6, dp-v2-074 d9). It is optional
+	// and additive: every existing verdict of Validate is unchanged, and an
+	// empty value means unknown.
+	//
+	// It exists so that an incompatibility can be refused BEFORE an invocation
+	// is spent. Discovering one through Parse costs a real invocation against
+	// a Provider the Loop already knows it cannot parse. The refusal lives in
+	// the shared build helper, which is the one place all three adapters funnel
+	// through and which already performs exactly this kind of pre-argv refusal
+	// for a traversal segment.
+	//
+	// The two fail directions are deliberate and opposite. build fails CLOSED
+	// on a version measured outside the adapter's declared interval, and fails
+	// OPEN on an empty or unreadable one: rounding unknown to incompatible
+	// would take a Provider out of service on an absence of information.
+	//
+	// The authority for the value is the owner-approved, digest-bound
+	// provider-preflight record's own --version measurement (dp-v2-074 d2 row
+	// c), never a version string a Provider printed inside a response envelope,
+	// and never a Runner's self-report.
+	//
+	// No production caller supplies this field today: internal/runner is
+	// deliberately not edited by V2-074, so the refusal is exercised by tests
+	// and not by production. That is recorded as a residual with a named owner
+	// rather than implied away.
+	CLIVersionDeclared string `json:"cli_version_declared,omitempty"`
 }
 
 func (r Request) Validate() error {

@@ -763,10 +763,85 @@ components:
         ceiling, so exceeding the ceiling is reportable before the bound
         truncates. remaining is never negative.
       properties: {active_assignments: {type: integer, minimum: 0}, declared_ceiling: {type: integer, minimum: 0}, ceiling_source: {type: string, enum: [architecture-design-ceiling, owner-declared]}, remaining: {type: integer, minimum: 0}, exhausted: {type: boolean}}
+    ProviderVersionInterval:
+      type: object
+      additionalProperties: false
+      required: [from, until]
+      description: |
+        A half-open interval of versions: from is included, until is excluded.
+        It is a declaration this repository owns and never a measurement of a
+        real CLI. A closed upper bound would have to name the last version that
+        works, which nobody can know before it exists.
+        Neither bound is a threshold and neither is a ceiling.
+      properties: {from: {type: string, description: 'the included lower bound, in the declared semver shape'}, until: {type: string, description: 'the excluded upper bound, in the declared semver shape'}}
+    ProviderCompatibility:
+      type: object
+      additionalProperties: false
+      required: [cli_version_interval, loop_version_interval, observed_loop_version, cli_compatibility, loop_compatibility]
+      description: |
+        Compatibility is TWO relations, both named, neither collapsed into the
+        other. cli_version_interval is the interval of Provider CLI versions the
+        adapter declares support for -- the relation is between the version and
+        the thing that breaks, and the thing that breaks is an adapter, because
+        it is the adapter that emits the argv and the adapter whose envelope
+        shape is parsed. loop_version_interval is the interval of Loop release
+        identities that carry that adapter contract. A relation from a Provider
+        CLI version directly to a Loop version is deliberately not defined: two
+        Loop versions carrying byte-identical adapters would then report
+        different compatibility, which is false.
+        Both intervals are read from source. No self-claim is authority for
+        either: not a version a CLI reports about itself, not a version a
+        Provider prints inside a response envelope, and not a Runner's
+        self-report.
+        observed_loop_version is the empty string when this process was given no
+        explicit release source root and can report no release version. No
+        version is synthesized for that absence, and loop_compatibility is then
+        unknown.
+        There is deliberately no observed_cli_version field. No observed
+        Provider CLI version is transported to the control plane at all, so
+        cli_compatibility is unknown unless the Loop's own execution path has
+        observed a contract-incompatible failure for this Provider.
+        unknown is a sibling value of compatible in the same closed set, never a
+        default and never blank. A reader who takes unknown as compatible would
+        be wrong; that neither interval has been shown true of a real CLI is
+        established by no part of this API.
+      properties:
+        cli_version_interval: {$ref: '#/components/schemas/ProviderVersionInterval'}
+        loop_version_interval: {$ref: '#/components/schemas/ProviderVersionInterval'}
+        observed_loop_version: {type: string, description: 'the Loop release identity this process was assembled from, or the empty string when it can report none'}
+        cli_compatibility: {type: string, enum: [compatible, incompatible, unknown]}
+        loop_compatibility: {type: string, enum: [compatible, incompatible, unknown]}
+    ProviderHandoff:
+      type: object
+      additionalProperties: false
+      required: [disposition, target, waiting_reason]
+      description: |
+        What a single declared decision function says about this Provider now.
+        The decision triggers on the source being not-sendable -- the circuit
+        not sending, or the usage window exhausted, or the pool slot needing an
+        owner action -- and filters candidates by the owner's standing
+        authorization, by declared compatibility and by the attempt history for
+        the Increment the source is carrying.
+        disposition is none when nothing needs to move, handoff-proposed when a
+        target was selected, and waiting when work must move but nothing may
+        receive it. target is the empty string unless the disposition is
+        handoff-proposed, and waiting_reason is the empty string unless it is
+        waiting.
+        handoff-proposed is a PROPOSAL an owner reads. Nothing in this
+        repository executes it: no Provider selection loop exists on the
+        production path, so this surface does not mean that work has moved or
+        will move. Reading it changes nothing.
+        The waiting reasons here are a different vocabulary from the queue
+        waiting reasons on the shared-allocation surface, and the two share no
+        member, so one can never be read as the other.
+      properties:
+        disposition: {type: string, enum: [none, handoff-proposed, waiting]}
+        target: {type: string, enum: ['', codex, claude, opencode], description: 'the proposed target Provider, or the empty string when the disposition is not handoff-proposed'}
+        waiting_reason: {type: string, enum: ['', source-is-probing, chain-bound-reached, candidate-needs-an-owner-action, candidate-is-measured-incompatible, candidate-already-tried-for-this-increment, candidate-is-not-sendable]}
     ProviderRegistryEntry:
       type: object
       additionalProperties: false
-      required: [provider, authorized, authorization_ref, verified_by_loop_invocation, health, blocked_reason, last_observed_at, observation_count, stale, runaway_detection, concurrency, assignments]
+      required: [provider, authorized, authorization_ref, verified_by_loop_invocation, health, blocked_reason, last_observed_at, observation_count, stale, runaway_detection, concurrency, assignments, compatibility, handoff]
       description: |
         One Provider's row.
         authorized and verified_by_loop_invocation are two independent facts.
@@ -804,6 +879,8 @@ components:
         runaway_detection: {$ref: '#/components/schemas/ProviderRunawayDetection'}
         concurrency: {$ref: '#/components/schemas/ProviderConcurrency'}
         assignments: {type: array, maxItems: 24, items: {$ref: '#/components/schemas/ProviderAssignment'}}
+        compatibility: {$ref: '#/components/schemas/ProviderCompatibility'}
+        handoff: {$ref: '#/components/schemas/ProviderHandoff'}
     ProviderRegistryResponse:
       type: object
       additionalProperties: false

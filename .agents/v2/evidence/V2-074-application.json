@@ -1,0 +1,166 @@
+{
+ "schema_version": "v1",
+ "id": "ev-v2-074-application",
+ "kind": "evidence",
+ "created_at": "2026-08-26T12:00:00Z",
+ "correlation_id": "v2-074-version-and-handoff",
+ "task_id": "V2-074",
+ "component": "application",
+ "evidence_key": "180a4d1b41676259e558a532fb30437e08eb2a33a14b30be55a6e3c6e304ad8f",
+ "result": "passed",
+ "checks": [
+  {
+   "name": "a12-decision-table-declared-twice-and-pinned-cell-by-cell",
+   "status": "passed",
+   "argv": [
+    "devbox",
+    "run",
+    "--pure",
+    "--",
+    "go",
+    "test",
+    "-count=1",
+    "-run",
+    "TestTheDecisionTableIsPinnedByValueToTheProviderDeclaration|TestTheFourVocabulariesArePinnedToTheProviderPackageSource",
+    "-v",
+    "./internal/application"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 900,
+   "summary": "MEASURED. The same 30-cell decision table is declared in internal/application over the same shared normalised input tuple, and pinned cell by cell: each side renders its own declared table into the canonical form source|chain-bound|obstacle|disposition|reason and compares it against the same 30-row transcription, which is written in both test files. 30 cells pinned; 6 waiting reasons and 3 dispositions all produced; the rendering is asserted discriminating (a mutated cell no longer matches). The four closed vocabularies plus the verdict set are pinned MECHANICALLY, not by transcription: the test reads internal/provider's own non-test source by AST -- reading a file is not an import and creates no component edge -- and compares the constant values for SourceState (3), CandidateObstacle (5), HandoffDisposition (3), HandoffWaitingReason (6) and CompatibilityVerdict (3). The three R1 interval bounds, the R2 interval bounds and the adapter contract identity are all asserted to appear as string literals in internal/provider's source, checked against 244 literals read from it, with a negative control (a version neither side declares is asserted absent). internal/application imports neither internal/provider nor internal/runner: the pre-existing import scan in source_guard_test.go passes under its own name. No module-path string literal was written into any file; internal/provider's directory is reached by joining path elements. machine=WSL2 host; uname -srm = Linux 6.18.33.2-microsoft-standard-WSL2 x86_64; go version resolved inside devbox run --pure = go1.25.0 linux/amd64; devbox 0.17.2 with --pure; base commit 47b53c994cb4e2d3a7fe35c528d197079c1e7d07."
+  },
+  {
+   "name": "a12-each-mapping-total-over-its-own-closed-enums",
+   "status": "passed",
+   "argv": [
+    "devbox",
+    "run",
+    "--pure",
+    "--",
+    "go",
+    "test",
+    "-count=1",
+    "-run",
+    "TestEachMappingOntoTheSharedTupleIsTotalOverItsOwnClosedEnums|TestTheNewProviderEnumsAreClosedInBothDirections|TestTheVersionVerdictIsTotalOverTheSevenDeclaredPositions",
+    "-v",
+    "./internal/application"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 900,
+   "summary": "MEASURED. The source mapping is enumerated over the FULL cross product of health (6 declared values) x runaway state (3) x concurrency exhausted (2) x authorized (2) = 72 cells, and the candidate mapping over 72 x blocked_reason (7) x verdict (3) x already-tried (2) = 3024 cells; every cell produces a declared member. The enumeration is asserted to be the WHOLE closed set on each axis by counting the constants of each type out of provider_registry.go's own AST, so a new enum member on this side fails a test on this side. The five new enums are closed in both directions by the same AST scan the pre-existing enum test uses: ProviderCompatibilityVerdict 3, ProviderSourceState 3, ProviderCandidateObstacle 5, ProviderHandoffDisposition 3, ProviderHandoffWaitingReason 6, each with constants and Valid() cases the same set; plausible-sounding undeclared values are refused, including V2-068's queue reasons, which are explicitly asserted NOT Valid here. The version verdict is total over the same 7 positions internal/provider enumerates, 4 intervals x 7 = 28 cells plus the 9-cell conjunction product. MEASURED ASYMMETRY, recorded rather than smoothed over: the probing source state is UNREACHABLE from this side and the test asserts it is never produced. A probing circuit is a state of the breaker on the Runner machine and no observation carries a circuit state to the control plane, because ProviderObservationInput has exactly three fields and none is a circuit state. So the shared table's probing rows are exercised only on the internal/provider side, and widening the observation to carry it would turn an existing test red. machine=WSL2 host; uname -srm = Linux 6.18.33.2-microsoft-standard-WSL2 x86_64; go version resolved inside devbox run --pure = go1.25.0 linux/amd64; devbox 0.17.2 with --pure; base commit 47b53c994cb4e2d3a7fe35c528d197079c1e7d07."
+  },
+  {
+   "name": "a10-disjointness-from-v2-068s-queue-waiting-vocabulary",
+   "status": "passed",
+   "argv": [
+    "devbox",
+    "run",
+    "--pure",
+    "--",
+    "go",
+    "test",
+    "-count=1",
+    "-run",
+    "TestTheHandoffWaitingVocabularyIsDisjointFromTheQueueWaitingVocabulary",
+    "-v",
+    "./internal/application"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 900,
+   "summary": "MEASURED against V2-068's real vocabulary rather than a copy of it: the test calls application.WaitingReasonBuckets(). V2-068 has landed, so the other vocabulary exists. QUEUE (7 members, V2-068): already-owned, no-runner-capacity, not-executable, not-ready, repository-unavailable, resource-conflict, unmet-dependency. HANDOFF (6 members, V2-074): source-is-probing, chain-bound-reached, candidate-needs-an-owner-action, candidate-is-measured-incompatible, candidate-already-tried-for-this-increment, candidate-is-not-sendable. The intersection is EMPTY in both directions, neither vocabulary is empty, and the overlap matcher is verified against a member of the set it was built from. Both member lists are recorded side by side in docs/operations/provider-registry.md section 11, so an owner cannot read one as the other. machine=WSL2 host; uname -srm = Linux 6.18.33.2-microsoft-standard-WSL2 x86_64; go version resolved inside devbox run --pure = go1.25.0 linux/amd64; devbox 0.17.2 with --pure; base commit 47b53c994cb4e2d3a7fe35c528d197079c1e7d07."
+  },
+  {
+   "name": "a13-read-surface-both-blocks-with-an-explicit-unknown",
+   "status": "passed",
+   "argv": [
+    "devbox",
+    "run",
+    "--pure",
+    "--",
+    "go",
+    "test",
+    "-count=1",
+    "-run",
+    "TestTheRegistryReportsBothIntervalsWithAnExplicitUnknown|TestAnObservedContractIncompatibleFailureIsTheOnlyThingThatMovesTheCLIVerdict|TestTheDispositionIsReportedPerProviderAndTheTargetIsFiltered",
+    "-v",
+    "./internal/application"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 900,
+   "summary": "MEASURED through the real service read. ProviderEntryView gained exactly two blocks, appended at the END so every pre-existing field keeps its position: compatibility {cli_version_interval, loop_version_interval, observed_loop_version, cli_compatibility, loop_compatibility} and handoff {disposition, target, waiting_reason}. With NO release observer configured, observed_loop_version is the EMPTY STRING for every Provider -- no instant and no version is synthesized for an absence -- and loop_compatibility is unknown; cli_compatibility is unknown too. With an observer configured over the real repository root, observed_loop_version is 0.1.0-baseline and loop_compatibility is compatible, decided by the declared R2 interval rather than by a default. The CLI verdict moves ONLY for an observed contract-incompatible failure class: all 7 declared failure classes were driven and only contract-incompatible produced incompatible; every other class, and an unobserved Provider, reported unknown. The disposition, driven end to end: nothing observed -> none for all three; codex reporting provider-model -> health unavailable and a proposal to claude; all three needing an owner action -> waiting with candidate-needs-an-owner-action and no target; claude already assigned for the Increment codex is carrying -> a proposal to opencode instead, with the terminal Execution correctly absent from the active assignment list, which is what makes the attempt history a HISTORICAL fact rather than a current one. Three repeated reads of the same stored state produced byte-identical documents. machine=WSL2 host; uname -srm = Linux 6.18.33.2-microsoft-standard-WSL2 x86_64; go version resolved inside devbox run --pure = go1.25.0 linux/amd64; devbox 0.17.2 with --pure; base commit 47b53c994cb4e2d3a7fe35c528d197079c1e7d07."
+  },
+  {
+   "name": "a13-no-unnamed-field-no-threshold-and-no-monetary-vocabulary",
+   "status": "passed",
+   "argv": [
+    "devbox",
+    "run",
+    "--pure",
+    "--",
+    "go",
+    "test",
+    "-count=1",
+    "-run",
+    "TestTheNewBlocksCarryNoThresholdAndNoMonetaryVocabulary|TestProviderRegistryNamesNoMonetaryVocabularyAndNoThreshold|TestProviderObservationShapeIsClosedAndCarriesNoText",
+    "-v",
+    "./internal/application"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 900,
+   "summary": "MEASURED. Both pre-existing vocabulary scans pass UNCHANGED with the new blocks in place: V2-067's ban over the emitted read-model JSON keys and over the openapi provider schema block, and internal/provider's ban over declared identifiers (asserted in that package). The new blocks add 12 keys to the marshalled document (36 keys total, 12 of them new) and none matches budget, quota, billing, spend, cost or credit; 47 emitted and declared enum values were scanned the same way. No approved runaway threshold shape -- 16, 10.0, 10.00, 2.0, 2.00, usd, USD -- appears anywhere in the marshalled document, INCLUDING inside the version bounds, which is the one place a digit legitimately appears in the new blocks; the interval bounds were chosen so that this holds (this is why claude's upper bound is the next major rather than the next minor: 2.2.0 would have contained the substring 2.0 and tripped the pre-existing scan). Neither new block republishes the declared concurrency ceiling, and the handoff block carries no digit at all. The pre-existing field-set pin was extended to cover the two new blocks and the three new view types, scanned by the same three deny lists as every block above them; ProviderObservationInput's field list is still exactly [Name FailureClass StoppedForInspection]. machine=WSL2 host; uname -srm = Linux 6.18.33.2-microsoft-standard-WSL2 x86_64; go version resolved inside devbox run --pure = go1.25.0 linux/amd64; devbox 0.17.2 with --pure; base commit 47b53c994cb4e2d3a7fe35c528d197079c1e7d07."
+  },
+  {
+   "name": "a13-a14-read-count-unchanged-and-independent-of-the-requirement-count",
+   "status": "passed",
+   "argv": [
+    "devbox",
+    "run",
+    "--pure",
+    "--",
+    "go",
+    "test",
+    "-count=1",
+    "-run",
+    "TestTheReadCountAndItsIndependenceFromTheRequirementCountAreUnchanged|TestNoStoreAdapterWasEditedAndUnitOfWorkGainedNoMethod",
+    "-v",
+    "./internal/application"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 900,
+   "summary": "MEASURED two ways, and the METHOD is stated because there is no read counter in the memory store to consult. (1) By AST over the functions that perform the read: Providers performs exactly the unit-of-work reads [ProviderAssignments ProviderObservations] per Provider, and activeProviderAssignments exactly [Execution] per retained assignment -- the same set as the baseline, so V2-074 adds NO read. No call on the read path begins with Save, Append or Delete. (2) Behaviourally: after capturing 12 Requirements the marshalled document is byte-identical, so the read is independent of the Requirement count. NO NEW PORT AND NO STORE CHANGE: git status shows neither internal/store/memory nor internal/store/firestore edited; UnitOfWork resolves to 66 methods across 24 embedded repository interfaces and none of them is new, asserted with a positive control proving the resolver actually walks embedded interfaces. The disposition is derived entirely from ProviderObservations, ProviderAssignments and Execution, all of which pre-date this task; the attempt history is a fold over the bounded assignment ring the read already returns, including entries whose Execution has since finished, because ProviderAssignment already carries IncrementID. Nothing was escalated as missing. machine=WSL2 host; uname -srm = Linux 6.18.33.2-microsoft-standard-WSL2 x86_64; go version resolved inside devbox run --pure = go1.25.0 linux/amd64; devbox 0.17.2 with --pure; base commit 47b53c994cb4e2d3a7fe35c528d197079c1e7d07."
+  },
+  {
+   "name": "a18-determinism-on-this-side",
+   "status": "passed",
+   "argv": [
+    "devbox",
+    "run",
+    "--pure",
+    "--",
+    "go",
+    "test",
+    "-count=1",
+    "-race",
+    "./internal/application"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 900,
+   "summary": "MEASURED: three identical sequential runs of the three-package command recorded in the provider record, plus one -race run, all ok. Every instant in the new test file comes from the injected fixedClock or from providerBase; there is no fixed sleep, no wall-clock timer and no goroutine, and every table enumerates its cross product. One measured constraint recorded: each bounded owner read reserves against the same daily Firestore read reservation, so the repeated-read assertion uses a fresh Service rather than accumulating reads on one -- the first attempt exceeded the reservation at 30005 reads against a 25000 hard limit, which is a real property of the store and not a flake. machine=WSL2 host; uname -srm = Linux 6.18.33.2-microsoft-standard-WSL2 x86_64; go version resolved inside devbox run --pure = go1.25.0 linux/amd64; devbox 0.17.2 with --pure; base commit 47b53c994cb4e2d3a7fe35c528d197079c1e7d07."
+  },
+  {
+   "name": "a22-component-evidence-key-measured-on-the-final-tree",
+   "status": "passed",
+   "argv": [
+    "devbox",
+    "run",
+    "--pure",
+    "--",
+    "make",
+    "evidence-keys"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 900,
+   "summary": "MEASURED, not predicted. The evidence_key recorded in this record is this component's key read with make evidence-keys on the final tree with EVERY touched file already git-added, including the three new files, because a new file not yet in the index is invisible to the git ls-files based input set the key derives from. This component's key is 180a4d1b41676259e558a532fb30437e08eb2a33a14b30be55a6e3c6e304ad8f and it was unchanged between the two measurements. THE MEASUREMENT WAS TAKEN TWICE and the first reading was stale, which is recorded rather than hidden: the first reading was taken before two test files were edited again (a per-cell log line was added to internal/provider/handoff_test.go so this record could carry the cross product as a transcript, and the digit scan in internal/api/api_test.go was scoped to the section's own markers), and the provider and api keys both moved as a result while the application key did not. KEY MOVEMENT MEASURED ON THE FINAL TREE, reporting only what this task issues records for and its immediate neighbours rather than all 23: provider 588785a33a5cac3f68d5b3eef5e326d408c3f452b665106e83a50fdad60b5b0a, application 180a4d1b41676259e558a532fb30437e08eb2a33a14b30be55a6e3c6e304ad8f, api e34e1286af85e1e2b937cab731f7ed3d84359ecd802d6d4b5080d612f3e45343, web 0d37d55de28189d2ce94481649f963d2524e21ac1ecb526aa21fcdf922facdd3, contracts 6553f301736350cedb912cd9767bd2535f10ada8d660574f7eb7bd08e7b18208, docs 1d3366723ed4f0d8e794c1fe49778f9eeee0704f391b9cdbaf3061b920ab001b, task-ledger b3317366f4fe11d149af3fc20a1171f90a36c747f14e2c51aa4d047ba6075f7d. make evidence-keys reports selected=all on this tree, so the number of keys the tool prints is not a measurement of the transitive closure of THIS diff; under gate rule G6a per-component key agreement is not a pass condition, and only the provider, application and api records are issued here. V2-045 owns the remaining key movement. DIFFERENCE FROM WHAT THE WORK ORDER IMPLIES: the Work Order predicted the closure would exceed prediction again; measured, this task moves the six component keys its own design names -- provider, application, api, web, contracts, docs -- plus task-ledger for the records themselves, and no others, because the design creates no new import edge. machine=WSL2 host; uname -srm = Linux 6.18.33.2-microsoft-standard-WSL2 x86_64; go version resolved inside devbox run --pure = go1.25.0 linux/amd64; devbox 0.17.2 with --pure; base commit 47b53c994cb4e2d3a7fe35c528d197079c1e7d07."
+  }
+ ]
+}

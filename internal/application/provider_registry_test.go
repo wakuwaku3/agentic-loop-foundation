@@ -1414,6 +1414,9 @@ func TestProviderObservationShapeIsClosedAndCarriesNoText(t *testing.T) {
 		"ProviderObservationInput", "ProviderObservation", "ProviderObservationLog", "ProviderAssignment",
 		"ProviderAssignmentView", "ProviderRunawayDetectionView", "ProviderConcurrencyView",
 		"ProviderEntryView", "ProviderRegistryView",
+		// V2-074's two additive blocks. They are scanned by exactly the same
+		// three deny lists as every block above them.
+		"ProviderVersionIntervalView", "ProviderCompatibilityView", "ProviderHandoffView",
 	}
 	found := structFieldNames(t, files, targets)
 	for _, target := range targets {
@@ -1454,6 +1457,8 @@ func TestProviderObservationShapeIsClosedAndCarriesNoText(t *testing.T) {
 		"ObservationCount", "observation_count", "Stale", "stale",
 		"RunawayDetection", "runaway_detection", "Concurrency", "concurrency",
 		"Assignments", "assignments",
+		// V2-074, appended at the end so every field above keeps its position.
+		"Compatibility", "compatibility", "Handoff", "handoff",
 	}
 	if got := found["ProviderEntryView"]; !reflect.DeepEqual(got, wantEntry) {
 		t.Fatalf("ProviderEntryView fields = %v, want %v", got, wantEntry)

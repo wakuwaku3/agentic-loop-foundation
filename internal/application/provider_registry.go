@@ -59,7 +59,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"sort"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -559,6 +562,11 @@ type ProviderEntryView struct {
 	RunawayDetection         ProviderRunawayDetectionView `json:"runaway_detection"`
 	Concurrency              ProviderConcurrencyView      `json:"concurrency"`
 	Assignments              []ProviderAssignmentView     `json:"assignments"`
+	// Compatibility and Handoff are V2-074's two additive blocks, appended at
+	// the end so every pre-existing field keeps its position and repeated calls
+	// against the same stored state stay byte-identical.
+	Compatibility ProviderCompatibilityView `json:"compatibility"`
+	Handoff       ProviderHandoffView       `json:"handoff"`
 }
 
 // ProviderRegistryView is the whole GET /v1/providers response.
@@ -626,7 +634,7 @@ func providerHealthFromFailure(class ProviderFailureClass) (ProviderHealth, Prov
 // reported no stop. A stale observation that reported no stop yields unknown,
 // because "the detector was within its thresholds a day ago" is not a
 // statement about now -- while a stop is preserved regardless of age.
-func providerEntryView(name ProviderName, log ProviderObservationLog, assignments []ProviderAssignment, now time.Time, ceiling int, ceilingSource ProviderCeilingSource) ProviderEntryView {
+func providerEntryView(name ProviderName, log ProviderObservationLog, assignments []ProviderAssignment, now time.Time, ceiling int, ceilingSource ProviderCeilingSource, observedLoopVersion string) ProviderEntryView {
 	authorized, ref := providerAuthorization(name)
 	entry := ProviderEntryView{
 		Provider:                 name,
@@ -669,6 +677,11 @@ func providerEntryView(name ProviderName, log ProviderObservationLog, assignment
 		Exhausted:         active >= ceiling,
 	}
 
+	// V2-074: the compatibility block. The CLI verdict starts at unknown for
+	// every Provider, because no observed CLI version reaches this surface at
+	// all; only an observed contract-incompatible failure can move it.
+	entry.Compatibility = providerCompatibilityView(name, false, observedLoopVersion)
+
 	if len(log.Observations) == 0 {
 		return entry
 	}
@@ -699,6 +712,12 @@ func providerEntryView(name ProviderName, log ProviderObservationLog, assignment
 			entry.RunawayDetection.State = ProviderRunawayWithinThresholds
 		}
 	}
+	if newest.FailureClass == ProviderFailureContract {
+		// The one observation that can make the CLI verdict anything other than
+		// unknown: the Loop's own execution path reported a class that says the
+		// adapter could not parse what the CLI produced.
+		entry.Compatibility = providerCompatibilityView(name, true, observedLoopVersion)
+	}
 	return entry
 }
 
@@ -722,6 +741,18 @@ func (s *Service) Providers(ctx context.Context) (ProviderRegistryView, error) {
 	if now.IsZero() {
 		return ProviderRegistryView{}, errors.New("clock returned zero time")
 	}
+	// V2-074 R2's input: the Loop's own release identity, read through the
+	// existing release observer and through nothing else. A process that was
+	// given no explicit release source root can report no release version, and
+	// that absence is reported as an absence -- no version is synthesized, and
+	// the loop verdict is then unknown. This read starts no process, opens no
+	// socket and consults no timer: the observer assembled its report once, at
+	// construction.
+	observedLoopVersion := ""
+	if observer, configured := s.releaseObserver(); configured {
+		report, _ := observer.ReleaseSnapshot()
+		observedLoopVersion = report.ReleaseVersion
+	}
 	var out ProviderRegistryView
 	err := s.transact(ctx, func(u UnitOfWork) error {
 		// One keyed side-table read, shared by all three rows: the effective
@@ -735,6 +766,12 @@ func (s *Service) Providers(ctx context.Context) (ProviderRegistryView, error) {
 			ceilingSource = ProviderCeilingOwnerDeclared
 		}
 		rows := make([]ProviderEntryView, 0, len(declaredProviders))
+		// The attempt history for V2-074's revisit filter: a fold over the
+		// bounded assignment ring the read already returns, including the
+		// entries whose Execution has since finished, because "already tried
+		// for this Increment" is a historical fact and not a current one. No
+		// port is added and no stored fact is missing.
+		triedByProvider := make(map[ProviderName]map[string]bool, len(declaredProviders))
 		for _, name := range declaredProviders {
 			log, e := u.ProviderObservations(ctx, name)
 			if e != nil {
@@ -744,12 +781,20 @@ func (s *Service) Providers(ctx context.Context) (ProviderRegistryView, error) {
 			if e != nil {
 				return e
 			}
+			tried := map[string]bool{}
+			for _, assignment := range assignments {
+				if assignment.IncrementID != "" {
+					tried[assignment.IncrementID] = true
+				}
+			}
+			triedByProvider[name] = tried
 			active, e := activeProviderAssignments(ctx, u, assignments)
 			if e != nil {
 				return e
 			}
-			rows = append(rows, providerEntryView(name, log, active, now, ceiling, ceilingSource))
+			rows = append(rows, providerEntryView(name, log, active, now, ceiling, ceilingSource, observedLoopVersion))
 		}
+		applyProviderHandoffDispositions(rows, triedByProvider)
 		out = ProviderRegistryView{Providers: rows}
 		return nil
 	})
@@ -920,5 +965,630 @@ func ProviderRegistryCases() []ProviderRegistryCase {
 			Query:           ProviderClaude,
 			WantAssignments: []ProviderAssignment{assign("execution-a", "increment-1", ProviderClaude, at.Add(time.Minute))},
 		},
+	}
+}
+
+// ===========================================================================
+// V2-074: the two compatibility relations and the handoff disposition
+// ===========================================================================
+//
+// Everything below is declared HERE and not imported. internal/application must
+// import neither internal/provider nor internal/runner: ci/components.json
+// declares this component's dependencies, an undeclared edge turns
+// internal/ci's manifest derivation red, and only V2-045 may declare one. The
+// cost is that the declarations can drift, and the by-value pinning tests in
+// provider_compatibility_test.go are the only thing that will catch it. That is
+// the same shape this repository already used three times: the three Provider
+// names are pinned independently in both packages, the Runner version's semver
+// and 64-hex shapes are re-declared here and pinned to internal/update's, and
+// the circuit breaker keeps its Loop-taxonomy mapping as a declared table
+// rather than as an import.
+//
+// WHAT IS REPORTED, AND WHAT IS NOT.
+//
+// Two relations, never collapsed into one:
+//
+//	R1  Provider CLI version <-> adapter. A declared, half-open interval per
+//	    adapter. The capability's 対応version.
+//	R2  adapter contract <-> Loop version. A declared, half-open interval over
+//	    the Loop's own release identity. The capability's 対応Loop Version.
+//
+// Two verdicts, each in a closed set whose members include unknown, because the
+// two relations have independently-absent inputs. The Loop version is absent
+// whenever this process was given no explicit release source root, and the
+// OBSERVED CLI version never reaches the control plane at all: no observed
+// version is transported here and no request DTO is widened for one, because
+// ProviderObservationInput's field list is pinned to exactly three names by an
+// existing test and a fourth field would turn it red. The observed-CLI side
+// therefore reaches this surface only through the failure class the Loop's own
+// execution path already reports -- contract-incompatible -- and is unknown
+// until it does.
+//
+// A reader may take unknown as compatible, and the only honest mitigation is
+// the one applied here: unknown is a sibling value of compatible in the same
+// closed enum, it is rendered as unknown and never as blank, and it is never a
+// default that a missing input silently falls into.
+
+// ---------------------------------------------------------------------------
+// R1 and R2: the declared intervals, re-declared by value
+// ---------------------------------------------------------------------------
+
+// providerVersionShape is the semver shape a declared or measured version must
+// match to be comparable. It is the same literal internal/provider declares and
+// the same one runner_version.go declares for the Runner version report; the
+// pinning test is what keeps the three in step.
+var providerVersionShape = regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+(?:-[a-z0-9.-]+)?$`)
+
+// ProviderVersionIntervalView is a half-open interval: from is included, until
+// is excluded. There is no threshold and no ceiling in it -- a version bound is
+// neither.
+type ProviderVersionIntervalView struct {
+	From  string `json:"from"`
+	Until string `json:"until"`
+}
+
+// providerCLIVersionIntervals is R1, re-declared by value. Each bound is the
+// same string internal/provider declares.
+var providerCLIVersionIntervals = map[ProviderName]ProviderVersionIntervalView{
+	ProviderCodex:    {From: "0.149.0", Until: "0.150.0"},
+	ProviderClaude:   {From: "2.1.0", Until: "3.0.0"},
+	ProviderOpenCode: {From: "1.18.0", Until: "1.19.0"},
+}
+
+// ProviderAdapterContractVersion is the adapter contract identity R2 is keyed
+// to. It is the same value a Work Packet and a Handoff refuse a mismatch on.
+const ProviderAdapterContractVersion = "v1"
+
+// providerLoopVersionInterval is R2, re-declared by value.
+var providerLoopVersionInterval = ProviderVersionIntervalView{From: "0.1.0", Until: "1.0.0"}
+
+// ProviderCLIVersionInterval returns R1's declared interval for one Provider.
+func ProviderCLIVersionInterval(name ProviderName) (ProviderVersionIntervalView, bool) {
+	interval, declared := providerCLIVersionIntervals[name]
+	return interval, declared
+}
+
+// ProviderLoopVersionInterval returns R2's declared interval.
+func ProviderLoopVersionInterval() ProviderVersionIntervalView {
+	return providerLoopVersionInterval
+}
+
+// ProviderCompatibilityVerdict is the closed verdict set. unknown is a sibling
+// member of the same set as compatible, never a default.
+type ProviderCompatibilityVerdict string
+
+const (
+	ProviderCompatibilityCompatible   ProviderCompatibilityVerdict = "compatible"
+	ProviderCompatibilityIncompatible ProviderCompatibilityVerdict = "incompatible"
+	ProviderCompatibilityUnknown      ProviderCompatibilityVerdict = "unknown"
+)
+
+func (v ProviderCompatibilityVerdict) Valid() bool {
+	switch v {
+	case ProviderCompatibilityCompatible, ProviderCompatibilityIncompatible, ProviderCompatibilityUnknown:
+		return true
+	}
+	return false
+}
+
+// providerVersionTriple reads the numeric triple out of a version that matches
+// the declared shape. The prerelease label is accepted and then discarded: this
+// repository's only release identity carries one, and under strict semver
+// precedence a prerelease sorts below the release it precedes, which would put
+// that identity outside every interval whose lower bound is its own triple.
+func providerVersionTriple(version string) ([3]int64, bool) {
+	var out [3]int64
+	if version == "" || !providerVersionShape.MatchString(version) {
+		return out, false
+	}
+	core := version
+	if dash := strings.IndexByte(core, '-'); dash >= 0 {
+		core = core[:dash]
+	}
+	parts := strings.Split(core, ".")
+	if len(parts) != 3 {
+		return out, false
+	}
+	for index, part := range parts {
+		value, err := strconv.ParseInt(part, 10, 64)
+		if err != nil || value < 0 {
+			return out, false
+		}
+		out[index] = value
+	}
+	return out, true
+}
+
+func providerCompareTriples(left, right [3]int64) int {
+	for index := 0; index < 3; index++ {
+		if left[index] < right[index] {
+			return -1
+		}
+		if left[index] > right[index] {
+			return 1
+		}
+	}
+	return 0
+}
+
+// ProviderVersionVerdict is the verdict for one version against one declared
+// interval. An empty or unreadable version is unknown, and unknown is never
+// rounded to either neighbour.
+func ProviderVersionVerdict(interval ProviderVersionIntervalView, version string) ProviderCompatibilityVerdict {
+	value, parsed := providerVersionTriple(version)
+	from, fromParsed := providerVersionTriple(interval.From)
+	until, untilParsed := providerVersionTriple(interval.Until)
+	if !parsed || !fromParsed || !untilParsed {
+		return ProviderCompatibilityUnknown
+	}
+	if providerCompareTriples(value, from) < 0 || providerCompareTriples(value, until) >= 0 {
+		return ProviderCompatibilityIncompatible
+	}
+	return ProviderCompatibilityCompatible
+}
+
+// ProviderConjoinVerdicts is the declared conjunction. incompatible wins over
+// unknown, because an input measured outside a declared interval is information
+// and must not be diluted by the absence of the other one.
+func ProviderConjoinVerdicts(first, second ProviderCompatibilityVerdict) ProviderCompatibilityVerdict {
+	if first == ProviderCompatibilityIncompatible || second == ProviderCompatibilityIncompatible {
+		return ProviderCompatibilityIncompatible
+	}
+	if first == ProviderCompatibilityUnknown || second == ProviderCompatibilityUnknown {
+		return ProviderCompatibilityUnknown
+	}
+	return ProviderCompatibilityCompatible
+}
+
+// ProviderCompatibilityView is the compatibility block of one Provider's row.
+//
+// observed_loop_version is the empty string when this process was given no
+// explicit release source root and can report no release version. No version is
+// synthesized for that absence, and loop_compatibility is then unknown.
+//
+// There is no observed_cli_version field, and that is deliberate rather than
+// missing: no observed CLI version is transported to the control plane at all.
+type ProviderCompatibilityView struct {
+	CLIVersionInterval  ProviderVersionIntervalView  `json:"cli_version_interval"`
+	LoopVersionInterval ProviderVersionIntervalView  `json:"loop_version_interval"`
+	ObservedLoopVersion string                       `json:"observed_loop_version"`
+	CLICompatibility    ProviderCompatibilityVerdict `json:"cli_compatibility"`
+	LoopCompatibility   ProviderCompatibilityVerdict `json:"loop_compatibility"`
+}
+
+// ---------------------------------------------------------------------------
+// The shared decision table, re-declared by value
+// ---------------------------------------------------------------------------
+
+// ProviderSourceState is the closed set of source-side outcomes.
+type ProviderSourceState string
+
+const (
+	ProviderSourceSendable    ProviderSourceState = "sendable"
+	ProviderSourceProbing     ProviderSourceState = "probing"
+	ProviderSourceNotSendable ProviderSourceState = "not-sendable"
+)
+
+func (s ProviderSourceState) Valid() bool {
+	switch s {
+	case ProviderSourceSendable, ProviderSourceProbing, ProviderSourceNotSendable:
+		return true
+	}
+	return false
+}
+
+// ProviderSourceStates is the closed set in declaration order.
+func ProviderSourceStates() []ProviderSourceState {
+	return []ProviderSourceState{ProviderSourceSendable, ProviderSourceProbing, ProviderSourceNotSendable}
+}
+
+// ProviderCandidateObstacle is the closed set of reasons one candidate is not a
+// permissible handoff target.
+type ProviderCandidateObstacle string
+
+const (
+	ProviderObstacleOwnerAction          ProviderCandidateObstacle = "owner-action-needed"
+	ProviderObstacleMeasuredIncompatible ProviderCandidateObstacle = "measured-incompatible"
+	ProviderObstacleAlreadyTried         ProviderCandidateObstacle = "already-tried-for-this-increment"
+	ProviderObstacleNotSendable          ProviderCandidateObstacle = "not-sendable"
+	ProviderObstacleNone                 ProviderCandidateObstacle = "none"
+)
+
+func (o ProviderCandidateObstacle) Valid() bool {
+	switch o {
+	case ProviderObstacleOwnerAction, ProviderObstacleMeasuredIncompatible,
+		ProviderObstacleAlreadyTried, ProviderObstacleNotSendable, ProviderObstacleNone:
+		return true
+	}
+	return false
+}
+
+// ProviderCandidateObstacles is the closed set in the declared PRECEDENCE
+// order, most actionable first. An owner action is first because it is the only
+// one a person can clear.
+func ProviderCandidateObstacles() []ProviderCandidateObstacle {
+	return []ProviderCandidateObstacle{
+		ProviderObstacleOwnerAction,
+		ProviderObstacleMeasuredIncompatible,
+		ProviderObstacleAlreadyTried,
+		ProviderObstacleNotSendable,
+		ProviderObstacleNone,
+	}
+}
+
+// ProviderHandoffDisposition is the closed disposition set.
+type ProviderHandoffDisposition string
+
+const (
+	ProviderDispositionNone            ProviderHandoffDisposition = "none"
+	ProviderDispositionHandoffProposed ProviderHandoffDisposition = "handoff-proposed"
+	ProviderDispositionWaiting         ProviderHandoffDisposition = "waiting"
+)
+
+func (d ProviderHandoffDisposition) Valid() bool {
+	switch d {
+	case ProviderDispositionNone, ProviderDispositionHandoffProposed, ProviderDispositionWaiting:
+		return true
+	}
+	return false
+}
+
+// ProviderHandoffDispositions is the closed set in declaration order.
+func ProviderHandoffDispositions() []ProviderHandoffDisposition {
+	return []ProviderHandoffDisposition{ProviderDispositionNone, ProviderDispositionHandoffProposed, ProviderDispositionWaiting}
+}
+
+// ProviderHandoffWaitingReason is the closed vocabulary of handoff waiting
+// reasons. It shares NO member with the queue waiting reason V2-068 introduced
+// for shared resource allocation, and a test asserts that both ways round: two
+// enums with overlapping members is how an owner comes to read one as the
+// other, and a single merged enum would have to answer questions from both
+// domains.
+type ProviderHandoffWaitingReason string
+
+const (
+	ProviderWaitingSourceIsProbing             ProviderHandoffWaitingReason = "source-is-probing"
+	ProviderWaitingChainBoundReached           ProviderHandoffWaitingReason = "chain-bound-reached"
+	ProviderWaitingCandidateNeedsAnOwnerAction ProviderHandoffWaitingReason = "candidate-needs-an-owner-action"
+	ProviderWaitingCandidateIncompatible       ProviderHandoffWaitingReason = "candidate-is-measured-incompatible"
+	ProviderWaitingCandidateAlreadyTried       ProviderHandoffWaitingReason = "candidate-already-tried-for-this-increment"
+	ProviderWaitingCandidateNotSendable        ProviderHandoffWaitingReason = "candidate-is-not-sendable"
+)
+
+func (r ProviderHandoffWaitingReason) Valid() bool {
+	switch r {
+	case ProviderWaitingSourceIsProbing, ProviderWaitingChainBoundReached,
+		ProviderWaitingCandidateNeedsAnOwnerAction, ProviderWaitingCandidateIncompatible,
+		ProviderWaitingCandidateAlreadyTried, ProviderWaitingCandidateNotSendable:
+		return true
+	}
+	return false
+}
+
+// ProviderHandoffWaitingReasons is the closed set in declaration order.
+func ProviderHandoffWaitingReasons() []ProviderHandoffWaitingReason {
+	return []ProviderHandoffWaitingReason{
+		ProviderWaitingSourceIsProbing,
+		ProviderWaitingChainBoundReached,
+		ProviderWaitingCandidateNeedsAnOwnerAction,
+		ProviderWaitingCandidateIncompatible,
+		ProviderWaitingCandidateAlreadyTried,
+		ProviderWaitingCandidateNotSendable,
+	}
+}
+
+// providerWaitingReasonForObstacle is the one-to-one mapping from a candidate
+// obstacle to its waiting reason. none has no reason, because a cell whose
+// candidate passed every filter is not a waiting cell.
+func providerWaitingReasonForObstacle(obstacle ProviderCandidateObstacle) (ProviderHandoffWaitingReason, bool) {
+	switch obstacle {
+	case ProviderObstacleOwnerAction:
+		return ProviderWaitingCandidateNeedsAnOwnerAction, true
+	case ProviderObstacleMeasuredIncompatible:
+		return ProviderWaitingCandidateIncompatible, true
+	case ProviderObstacleAlreadyTried:
+		return ProviderWaitingCandidateAlreadyTried, true
+	case ProviderObstacleNotSendable:
+		return ProviderWaitingCandidateNotSendable, true
+	case ProviderObstacleNone:
+		return "", false
+	}
+	return "", false
+}
+
+// ProviderSelectionCell is one cell of the shared decision table.
+type ProviderSelectionCell struct {
+	Source            ProviderSourceState
+	ChainBoundReached bool
+	Obstacle          ProviderCandidateObstacle
+	Disposition       ProviderHandoffDisposition
+	Reason            ProviderHandoffWaitingReason
+}
+
+// Row renders one cell in the canonical, comparable form
+// "source|chain-bound|obstacle|disposition|reason" -- the same form
+// internal/provider's own SelectionCell renders, so the two independent
+// declarations can be compared cell by cell and byte for byte without either
+// package importing the other.
+func (c ProviderSelectionCell) Row() string {
+	bound := "false"
+	if c.ChainBoundReached {
+		bound = "true"
+	}
+	return string(c.Source) + "|" + bound + "|" + string(c.Obstacle) + "|" + string(c.Disposition) + "|" + string(c.Reason)
+}
+
+// ProviderHandoffDecisionTable is the whole decision table, enumerated over the
+// full cross product of the normalised tuple in the same fixed order
+// internal/provider enumerates it in.
+func ProviderHandoffDecisionTable() []ProviderSelectionCell {
+	sources := ProviderSourceStates()
+	obstacles := ProviderCandidateObstacles()
+	out := make([]ProviderSelectionCell, 0, len(sources)*2*len(obstacles))
+	for _, source := range sources {
+		for _, bound := range []bool{false, true} {
+			for _, obstacle := range obstacles {
+				disposition, reason := providerDecideCell(source, bound, obstacle)
+				out = append(out, ProviderSelectionCell{
+					Source:            source,
+					ChainBoundReached: bound,
+					Obstacle:          obstacle,
+					Disposition:       disposition,
+					Reason:            reason,
+				})
+			}
+		}
+	}
+	return out
+}
+
+// providerDecideCell is the rule, stated once, in the same branch order
+// internal/provider states it in.
+func providerDecideCell(source ProviderSourceState, chainBoundReached bool, obstacle ProviderCandidateObstacle) (ProviderHandoffDisposition, ProviderHandoffWaitingReason) {
+	switch source {
+	case ProviderSourceSendable:
+		return ProviderDispositionNone, ""
+	case ProviderSourceProbing:
+		return ProviderDispositionWaiting, ProviderWaitingSourceIsProbing
+	case ProviderSourceNotSendable:
+		if chainBoundReached {
+			return ProviderDispositionWaiting, ProviderWaitingChainBoundReached
+		}
+		if obstacle == ProviderObstacleNone {
+			return ProviderDispositionHandoffProposed, ""
+		}
+		reason, waiting := providerWaitingReasonForObstacle(obstacle)
+		if !waiting {
+			return ProviderDispositionWaiting, ProviderWaitingCandidateNotSendable
+		}
+		return ProviderDispositionWaiting, reason
+	}
+	return ProviderDispositionWaiting, ProviderWaitingCandidateNotSendable
+}
+
+// ---------------------------------------------------------------------------
+// Mapping this package's own observations onto the shared tuple
+// ---------------------------------------------------------------------------
+//
+// The two sides necessarily start from different observations, so the pinning is
+// over the shared normalised tuple and each side's mapping onto it must be
+// total over its OWN closed enums. internal/provider sees a circuit, a usage
+// window and a pool slot. This package sees health, blocked_reason, the
+// runner-local runaway state, the control plane's own concurrency exhaustion,
+// the owner's standing authorization and the bounded assignment ring.
+//
+// MEASURED ASYMMETRY, recorded rather than smoothed over: the probing source
+// state is unreachable from this side. A probing circuit is a state of the
+// breaker on the Runner machine, and no observation carries it to the control
+// plane -- ProviderObservationInput has three fields and none of them is a
+// circuit state. So this surface can report sendable and not-sendable but never
+// probing, and the shared table's probing row is exercised only on the
+// internal/provider side. Widening the observation to carry it would turn an
+// existing test red, so it is reported as an absence and attributed.
+
+// providerHealthAllowsSending is total over the six declared health values.
+func providerHealthAllowsSending(health ProviderHealth) bool {
+	switch health {
+	case ProviderHealthHealthy, ProviderHealthDegraded, ProviderHealthUnknown:
+		// degraded is a retryably-failed last invocation, which is exactly the
+		// count-toward-a-windowed-threshold case: it has not opened anything,
+		// so handing off on it would defeat the threshold that exists to avoid
+		// reacting to one blip. unknown is an absence of observation and is not
+		// rounded to a fault.
+		return true
+	case ProviderHealthUnavailable, ProviderHealthUnauthenticated, ProviderHealthStoppedForInspection:
+		return false
+	}
+	// An undeclared value never reaches here: Validate refuses it at the edge
+	// and the closed-enum test refuses it in source. Not sendable is the
+	// fail-closed answer.
+	return false
+}
+
+// providerRunawayAllowsSending is total over the three declared runaway states.
+func providerRunawayAllowsSending(state ProviderRunawayState) bool {
+	switch state {
+	case ProviderRunawayWithinThresholds, ProviderRunawayUnknown:
+		return true
+	case ProviderRunawayStoppedForInspection:
+		return false
+	}
+	return false
+}
+
+// providerBlockedReasonNeedsAnOwnerAction is total over the seven declared
+// blocked reasons. It names the two whose action no agent can perform.
+func providerBlockedReasonNeedsAnOwnerAction(reason ProviderBlockedReason) bool {
+	switch reason {
+	case ProviderNotBlocked, ProviderBlockedNeverInvoked,
+		ProviderBlockedLastInvocationRetryable, ProviderBlockedLastInvocationPermanent,
+		ProviderBlockedLastInvocationUnclassed:
+		return false
+	case ProviderBlockedOwnerMustAuthenticate, ProviderBlockedOwnerMustClearRunawayStop:
+		return true
+	}
+	return false
+}
+
+// ProviderSourceStateFor maps one Provider's row onto the shared tuple's source
+// axis. Every input is a closed enum or a boolean this package owns.
+func ProviderSourceStateFor(entry ProviderEntryView) ProviderSourceState {
+	if !entry.Authorized {
+		return ProviderSourceNotSendable
+	}
+	if !providerHealthAllowsSending(entry.Health) {
+		return ProviderSourceNotSendable
+	}
+	if !providerRunawayAllowsSending(entry.RunawayDetection.State) {
+		return ProviderSourceNotSendable
+	}
+	if entry.Concurrency.Exhausted {
+		// Exhausting our own allocation is not a Provider fault and is recorded
+		// as no failure class anywhere. It is read here directly, exactly as
+		// internal/provider's Sendable reads the usage window directly.
+		return ProviderSourceNotSendable
+	}
+	return ProviderSourceSendable
+}
+
+// ProviderCandidateObstacleFor maps one Provider's row onto the shared tuple's
+// candidate axis, in the declared precedence order.
+//
+// A candidate whose compatibility is UNKNOWN is not refused. The observed-CLI
+// side of the verdict is permanently unknown on this surface, so rounding
+// unknown to incompatible would take every Provider out of service.
+func ProviderCandidateObstacleFor(entry ProviderEntryView, alreadyTriedForIncrement bool) ProviderCandidateObstacle {
+	if !entry.Authorized || providerBlockedReasonNeedsAnOwnerAction(entry.BlockedReason) {
+		return ProviderObstacleOwnerAction
+	}
+	if entry.Compatibility.CLICompatibility == ProviderCompatibilityIncompatible ||
+		entry.Compatibility.LoopCompatibility == ProviderCompatibilityIncompatible {
+		return ProviderObstacleMeasuredIncompatible
+	}
+	if alreadyTriedForIncrement {
+		return ProviderObstacleAlreadyTried
+	}
+	if ProviderSourceStateFor(entry) != ProviderSourceSendable {
+		return ProviderObstacleNotSendable
+	}
+	return ProviderObstacleNone
+}
+
+// ProviderHandoffView is the handoff block of one Provider's row. target is the
+// empty string unless the disposition is handoff-proposed, and waiting_reason is
+// the empty string unless it is waiting.
+//
+// The disposition is a PROPOSAL an owner reads. Nothing in this repository
+// executes it: no selection loop exists on the production path, and reading this
+// surface moves no work.
+type ProviderHandoffView struct {
+	Disposition   ProviderHandoffDisposition   `json:"disposition"`
+	Target        ProviderName                 `json:"target"`
+	WaitingReason ProviderHandoffWaitingReason `json:"waiting_reason"`
+}
+
+// providerCompatibilityView builds one Provider's compatibility block.
+//
+// The CLI verdict is unknown unless the Loop's own execution path has observed a
+// contract-incompatible failure for this Provider: no observed version reaches
+// this surface, so the only thing that can make the verdict incompatible is the
+// failure class the pipeline already carries end to end.
+func providerCompatibilityView(name ProviderName, observedContractIncompatible bool, observedLoopVersion string) ProviderCompatibilityView {
+	interval, declared := ProviderCLIVersionInterval(name)
+	if !declared {
+		// Unreachable for a declared Provider; reporting an empty interval and
+		// unknown is the fail-closed answer rather than a fabricated bound.
+		interval = ProviderVersionIntervalView{}
+	}
+	view := ProviderCompatibilityView{
+		CLIVersionInterval:  interval,
+		LoopVersionInterval: ProviderLoopVersionInterval(),
+		ObservedLoopVersion: observedLoopVersion,
+		CLICompatibility:    ProviderCompatibilityUnknown,
+		LoopCompatibility:   ProviderVersionVerdict(ProviderLoopVersionInterval(), observedLoopVersion),
+	}
+	if observedContractIncompatible {
+		view.CLICompatibility = ProviderCompatibilityIncompatible
+	}
+	return view
+}
+
+// applyProviderHandoffDispositions fills the handoff block of every row. It is
+// a second pass over rows the read already produced, because a disposition is a
+// statement about one Provider RELATIVE to the other two and cannot be computed
+// from one row alone. It performs no read: every input is already in the rows
+// and in the bounded assignment rings the read already returned.
+//
+// triedByProvider is, per Provider, the set of Increment ids the bounded
+// assignment ring already records for it -- a fold over data one keyed read per
+// Provider already returns, which is why this task adds no port and no store
+// change.
+func applyProviderHandoffDispositions(rows []ProviderEntryView, triedByProvider map[ProviderName]map[string]bool) {
+	byName := make(map[ProviderName]ProviderEntryView, len(rows))
+	for _, row := range rows {
+		byName[row.Provider] = row
+	}
+	for index := range rows {
+		source := rows[index]
+		sourceState := ProviderSourceStateFor(source)
+		if sourceState != ProviderSourceNotSendable {
+			disposition, reason := providerDecideCell(sourceState, false, ProviderObstacleNone)
+			rows[index].Handoff = ProviderHandoffView{Disposition: disposition, WaitingReason: reason}
+			continue
+		}
+		// The Increments this Provider is currently working on are the ones a
+		// handoff would carry, so they are the ones the attempt history is
+		// consulted for.
+		increments := map[string]bool{}
+		for _, assignment := range source.Assignments {
+			if assignment.IncrementID != "" {
+				increments[assignment.IncrementID] = true
+			}
+		}
+		observed := map[ProviderCandidateObstacle]bool{}
+		selected := ProviderName("")
+		for _, name := range declaredProviders {
+			if name == source.Provider {
+				continue
+			}
+			candidate, present := byName[name]
+			if !present {
+				continue
+			}
+			alreadyTried := false
+			for increment := range increments {
+				if triedByProvider[name][increment] {
+					alreadyTried = true
+				}
+			}
+			obstacle := ProviderCandidateObstacleFor(candidate, alreadyTried)
+			if obstacle == ProviderObstacleNone {
+				selected = name
+				break
+			}
+			observed[obstacle] = true
+		}
+		if selected != "" {
+			disposition, reason := providerDecideCell(sourceState, false, ProviderObstacleNone)
+			rows[index].Handoff = ProviderHandoffView{Disposition: disposition, Target: selected, WaitingReason: reason}
+			continue
+		}
+		for _, obstacle := range ProviderCandidateObstacles() {
+			if obstacle == ProviderObstacleNone || !observed[obstacle] {
+				continue
+			}
+			disposition, reason := providerDecideCell(sourceState, false, obstacle)
+			rows[index].Handoff = ProviderHandoffView{Disposition: disposition, WaitingReason: reason}
+			break
+		}
+		if rows[index].Handoff.Disposition == "" {
+			// Unreachable while there are three declared Providers and the
+			// source is one of them. Waiting on the candidate axis is the
+			// fail-closed answer rather than a silent none.
+			rows[index].Handoff = ProviderHandoffView{
+				Disposition:   ProviderDispositionWaiting,
+				WaitingReason: ProviderWaitingCandidateNotSendable,
+			}
+		}
 	}
 }
