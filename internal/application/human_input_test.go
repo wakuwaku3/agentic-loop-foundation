@@ -218,7 +218,23 @@ func TestRequirementTransitionsInTheApplicationLayerAreExactlyTheTwoNewCommands(
 	// entry is what makes that reachable; the set stays CLOSED, and a fourth
 	// caller still fails here. internal/domain was not edited: the transition,
 	// its guard and its target status already existed.
-	want := map[string]bool{"RequestHumanInput": true, "AnswerHumanInput": true, "StartFraming": true}
+	// V2-084 widens the closed set from three to five, and the widening is the
+	// MEASUREMENT rather than a weakening. Two entries are added, each with its
+	// own reason:
+	//   - CompleteFraming issues domain.RequirementReadyCommand from framing.
+	//     Before it, RequirementReadyCommand's only issuer was AnswerHumanInput,
+	//     so `ready` -- the only status the scheduler calls schedulable -- was
+	//     reachable ONLY by asking a Requirement a question and answering it.
+	//   - Claim issues domain.RequirementStart when the claimed Increment's
+	//     parent Requirement is in ready, because
+	//     docs/architecture/domain-model.md:266 DEFINES active as "1つ以上の
+	//     Incrementが進行中", so the parent is active precisely because a
+	//     subordinate Increment is in progress and the issuer must be the
+	//     transaction that creates the progress rather than a caller command.
+	// Nothing else in this guard changes, and the set stays CLOSED: a sixth
+	// caller still fails here. internal/domain was not edited -- model.go:480
+	// -484 and :485-489 already admit both transitions.
+	want := map[string]bool{"RequestHumanInput": true, "AnswerHumanInput": true, "StartFraming": true, "CompleteFraming": true, "Claim": true}
 	if !reflect.DeepEqual(callers, want) {
 		t.Fatalf("domain.DecideRequirement is called from %v, want exactly %v", keysSorted(callers), keysSorted(want))
 	}

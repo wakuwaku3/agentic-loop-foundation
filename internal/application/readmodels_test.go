@@ -765,7 +765,19 @@ func TestTheServiceWritesARequirementOnlyFromCaptureAndPlan(t *testing.T) {
 	// does not touch CapturedAt either, and the store-adapter tables still
 	// drive Capture and Plan. The set stays closed: a sixth writer still fails
 	// here.
-	want := map[string]bool{"Capture": true, "Plan": true, "RequestHumanInput": true, "AnswerHumanInput": true, "StartFraming": true}
+	// V2-084 widens the closed set from five to seven, on the same terms, and
+	// each added entry has its own reason:
+	//   - CompleteFraming issues domain.RequirementReadyCommand from framing and
+	//     therefore necessarily persists a Requirement.
+	//   - Claim issues domain.RequirementStart for the claimed Increment's own
+	//     parent when that parent is in ready, inside the claim's existing
+	//     transaction, and therefore necessarily persists a Requirement too.
+	// The property this test makes exhaustive is again unaffected:
+	// domain.DecideRequirement opens with `next := current`, so neither new
+	// writer touches CapturedAt, and the store-adapter tables still drive
+	// Capture and Plan. Nothing else in this guard changes and the set stays
+	// closed: an eighth writer still fails here.
+	want := map[string]bool{"Capture": true, "Plan": true, "RequestHumanInput": true, "AnswerHumanInput": true, "StartFraming": true, "CompleteFraming": true, "Claim": true}
 	if len(writers) != len(want) {
 		t.Fatalf("the service writes a Requirement from %v, want exactly %v", keysSorted(writers), keysSorted(want))
 	}

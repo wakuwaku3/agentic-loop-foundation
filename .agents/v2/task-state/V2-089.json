@@ -3,18 +3,17 @@
   "id": "ts-v2-089",
   "kind": "canonical-task-state",
   "task_id": "V2-089",
-  "status": "blocked",
+  "status": "running",
   "dependencies": [
     "V2-084"
   ],
-  "block_reason": "V2-084",
   "outcome": "Make claiming refuse when the Requirement it belongs to is not in a state that admits work, and move the fixtures that currently rely on it not asking.",
   "non_goals": [
     "Do not weaken a fixture to avoid the refusal",
     "Do not refuse a claim the Requirement's state actually admits",
     "Do not change what claiming does when the state admits it"
   ],
-  "actor": "sol",
+  "actor": "terra",
   "input_refs": [
     "V2-084",
     "V2-089"
@@ -28,8 +27,8 @@
   "next_owner": "terra",
   "retry_budget": {
     "max_attempts": 2,
-    "attempts_used": 0,
-    "remaining": 2
+    "attempts_used": 1,
+    "remaining": 1
   },
   "release_eligible": false,
   "transitions": [
@@ -80,6 +79,54 @@
         "remaining": 2
       },
       "reason": "the task that measured this defect lands the first edges the rest build on"
+    },
+    {
+      "sequence": 3,
+      "at": "2026-08-27T02:05:00Z",
+      "from_status": "blocked",
+      "to_status": "queued",
+      "actor": "sol",
+      "input_refs": [
+        "V2-084",
+        "V2-089"
+      ],
+      "input_hash": "81024deca606596f23bb26dc5e3e60ecf4f5c3593b6533c82789f8a5f5187acf",
+      "output_refs": [
+        "V2-089"
+      ],
+      "output_hash": "21cc9c757ea8ec0897eda181983c90e04bc36d3a5941f3cc3bb1c2dfd177e0cc",
+      "owner": "terra",
+      "next_owner": "terra",
+      "retry_budget": {
+        "max_attempts": 2,
+        "attempts_used": 0,
+        "remaining": 2
+      },
+      "reason": "V2-084が完了しClaimのready→active edgeが着地したのでblockが解消した。このtaskはそのClaimに親状態の問いを広げる"
+    },
+    {
+      "sequence": 4,
+      "at": "2026-08-27T02:06:00Z",
+      "from_status": "queued",
+      "to_status": "running",
+      "actor": "terra",
+      "input_refs": [
+        "V2-084",
+        "V2-089"
+      ],
+      "input_hash": "81024deca606596f23bb26dc5e3e60ecf4f5c3593b6533c82789f8a5f5187acf",
+      "output_refs": [
+        "V2-089"
+      ],
+      "output_hash": "21cc9c757ea8ec0897eda181983c90e04bc36d3a5941f3cc3bb1c2dfd177e0cc",
+      "owner": "terra",
+      "next_owner": "terra",
+      "retry_budget": {
+        "max_attempts": 2,
+        "attempts_used": 1,
+        "remaining": 1
+      },
+      "reason": "Claimが親Requirementの状態を問うようにし、問わないことに依存していたfixtureを移す作業に着手した。設計の実測では拒否されるclaim試行は64件・distinct Incrementは62件で、parent statusは60/60がcapturedだった。つまり1形状の62回反復であり62種類の問題ではない"
     }
   ]
 }

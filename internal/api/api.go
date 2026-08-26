@@ -493,6 +493,31 @@ func (h *Handler) route(w http.ResponseWriter, r *http.Request) {
 			h.startFraming(w, r.WithContext(ctx), id)
 			return
 		}
+		// V2-084: the verb that reaches the only status the scheduler calls
+		// schedulable. Same prefix-plus-suffix idiom, same role pair, same
+		// collision argument as the branch above, and every one of those claims
+		// is asserted by an api test rather than read: the /v1/executions/
+		// :start branch is prefix-gated and ":complete-framing" does not satisfy
+		// HasSuffix(path, ":start") either, the GET /v1/requirements/ prefix
+		// branch is method-gated, and the two framing suffixes cannot swallow
+		// one another.
+		if strings.HasPrefix(r.URL.Path, requirementsPrefix) && strings.HasSuffix(r.URL.Path, completeFramingSuffix) {
+			id := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, requirementsPrefix), completeFramingSuffix)
+			if id == "" {
+				h.error(w, r, http.StatusNotFound, "not_found", "route not found")
+				return
+			}
+			// Owner or scheduler, exactly the pair :start-framing and the
+			// capture route accept. A Runner is refused: it executes an
+			// Increment it was handed and does not decide that a Requirement's
+			// analysis is finished and that the Requirement is executable.
+			if caller.Role != application.RoleOwner && caller.Role != application.RoleScheduler {
+				h.error(w, r, 403, "forbidden", "owner or scheduler role required")
+				return
+			}
+			h.completeFraming(w, r.WithContext(ctx), id)
+			return
+		}
 		h.error(w, r, http.StatusNotFound, "not_found", "route not found")
 	}
 }
@@ -633,6 +658,14 @@ const (
 	// V2-082: the verb that leaves the captured status, named beside its two
 	// siblings for the same reason they are named.
 	startFramingSuffix = ":start-framing"
+	// V2-084: the verb that reaches the only status the scheduler calls
+	// schedulable. Neither of the two framing suffixes is a suffix of the other
+	// -- ":start-framing" and ":complete-framing" differ in their last eight
+	// bytes -- so the two prefix-plus-suffix branches are mutually exclusive by
+	// construction, and an api test asserts that both routes resolve to their
+	// own handler for the same requirement id in the same run rather than
+	// leaving it to be read.
+	completeFramingSuffix = ":complete-framing"
 )
 
 type humanInputOptionBody struct {
@@ -731,6 +764,34 @@ func (h *Handler) startFraming(w http.ResponseWriter, r *http.Request, id string
 		return
 	}
 	out, err := h.config.Service.StartFraming(r.Context(), application.StartFramingRequest{
+		RequestID:       b.RequestID,
+		RequirementID:   id,
+		ExpectedVersion: b.ExpectedRequirementVersion,
+	})
+	if err != nil {
+		h.domainError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// completeFramingBody is the whole request. Like startFramingBody above it
+// carries no control_revision, no repository_id and no timestamp: the revision
+// is derived from the effective control inside the command's own transaction,
+// the repository comes from the Requirement's own link, and the instant is the
+// transaction authority time. The strict decoder refuses any other field, so a
+// caller cannot smuggle one.
+type completeFramingBody struct {
+	RequestID                  string         `json:"request_id"`
+	ExpectedRequirementVersion domain.Version `json:"expected_requirement_version"`
+}
+
+func (h *Handler) completeFraming(w http.ResponseWriter, r *http.Request, id string) {
+	var b completeFramingBody
+	if !h.decode(w, r, &b) {
+		return
+	}
+	out, err := h.config.Service.CompleteFraming(r.Context(), application.CompleteFramingRequest{
 		RequestID:       b.RequestID,
 		RequirementID:   id,
 		ExpectedVersion: b.ExpectedRequirementVersion,

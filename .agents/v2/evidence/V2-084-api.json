@@ -1,0 +1,164 @@
+{
+  "schema_version": "v1",
+  "id": "ev-v2-084-api",
+  "kind": "evidence",
+  "created_at": "2026-08-26T23:00:00Z",
+  "correlation_id": "v2-084-requirement-lifecycle",
+  "task_id": "V2-084",
+  "component": "api",
+  "evidence_key": "730944a79feeccaa04d32aa24c574644ab6ac2c9b0f4e88aebc2a51aed637b01",
+  "result": "passed",
+  "observed_at": "2026-08-26T11:40:00Z",
+  "checks": [
+    {
+      "name": "scope-boundary",
+      "status": "passed",
+      "argv": [
+        "git",
+        "rev-parse",
+        "HEAD"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 30,
+      "summary": "Scope boundary for V2-084, recorded against base commit 6a6839f9aef126ed1e78563104ea240155a1b2b8 on branch v2-task/V2-084, BEFORE any source file was edited: this record's first commit contains rows 1-4 and the whole A1/A2/A3/A6/A13 baseline, and `git status --porcelain` at that commit showed ONLY .agents/v2/evidence paths, so every source and test file named below was still byte-identical to the base. ROW 1 -- WHAT THIS TASK MAKES TRUE. Exactly TWO Requirement transitions gain a non-test issuer. Edge one: a new command Service.CompleteFraming in the EXISTING file internal/application/framing.go issues domain.RequirementReadyCommand from domain.RequirementFraming -- owner or scheduler via callerActor, idempotent by request_id through s.mutate/u.Idempotency/restoreResponse, gated by ONE domain.Permit of kind domain.PermitClaim with nothing passed to domain.EffectFromPermit, ControlTarget and revision resolved INSIDE the transaction from u.RequirementRepositoryLink and domain.EffectiveControl, At from transactionAuthorityTime, event type requirement.ready, and NO OutboxItem -- reachable over one new route POST /v1/requirements/{requirement_id}:complete-framing added to internal/api/api.go's POST default branch by the existing prefix-plus-suffix idiom with one new suffix constant, and declared in contracts/openapi/openapi-v1.yaml as operationId completeRequirementFraming. Edge two: INSIDE Service.Claim's existing transaction, after domain.DecideIncrement succeeds and before the existing s.record call, the parent Requirement named by the claimed Increment's own inc.RequirementID is read and, when its status is domain.RequirementReady, one domain.DecideRequirement of kind domain.RequirementStart is issued with ExpectedVersion taken from THAT read and saved with u.SaveRequirement; when it is already domain.RequirementActive nothing happens; in every other case nothing happens. The measured before/after is a set: the Requirement statuses reachable through the application layer go from {captured, framing, needs-input, ready} to exactly {captured, framing, needs-input, ready, active}. ROW 2 -- WHAT IT DELIBERATELY DOES NOT DO. internal/domain is byte-unchanged (tree object 84cc02df13e12b818380ebc64af40d730bb19c4b before, and re-measured after): no RequirementCommandKind, no RequirementStatus, no PermitKind, no previous-status field, no resume command, and no allowed() list changes, because model.go:480-484 already admits RequirementReadyCommand from framing and model.go:485-489 already admits RequirementStart from ready. ClaimRequest and ClaimResponse gain NO field and no existing return value, event or outbox item of Claim changes. Claim does NOT begin refusing an Increment whose parent is neither ready nor active -- that residual is MEASURED and LOGGED, never asserted. internal/application/readmodels.go is untouched BY DESIGN, not by omission: nextAction (readmodels.go:309-332 measured, WO says 306-329) branches on completed and cancelled, then on Execution status, then on Increment status, then on whether the Increment list is empty, and never on ready or active. internal/web/**, docs/**, ci/components.json, Makefile, go.mod, go.sum and devbox.* are untouched because this design creates and removes no import edge. contracts/release-contract/**, contracts/schemas/** and contracts/fixtures/** are untouched; the ONLY contracts change is one path block and two schemas in contracts/openapi/openapi-v1.yaml (sha256 ca62ef4c0e1f7dbe357d03209d68f387581ed53aeaa66b0ea8fc5b8b7eea8cdd before). No existing test is deleted, renamed or weakened, and V2-085's seven-mode tables (wantStartFramingAllowed, wantFreshCaptureAllowed, wantStartFramingAllowedTotal = 2, and planning_permit_test.go's Plan/Prepare tables cross-checked against permitAllowedTable) are neither edited nor widened. ROW 3 -- WHAT IT RECORDS BUT DOES NOT FIX. (a) The FIVE transitions this task does not issue, each with the measurement that blocks or refuses it, are recorded in the a13-* checks: pause, cancel, wait, recover, and evaluate/CompleteRequirementFromRelease. (b) Claim still succeeds against a parent Requirement in captured and leaves it in captured; measured and LOGGED for the tech_lead (18 test files across FOUR packages -- not five -- call Claim), not asserted, because asserting a defect pins it in place and turns its repair into a failure in files a repairing task may not own; that is the F1 follow-on. (c) The Increment creation path is severed and this task does NOT widen its scope to fix it: Service.Plan is the only code that creates an Increment, its only non-test caller is internal/runner/orchestrator.go, and Orchestrator is never constructed outside a test, so a running Control Plane can hold no Increment at all and edge two therefore has no non-test caller today. Edge two is built so it works when a caller does exist; the reachability defect belongs to V2-091. (d) internal/runner/orchestrator.go still carries an Increment through Plan, Prepare, Claim and Start; after edge two lands it will also carry its parent, but only when the parent is in ready, and RunFakeJourney never frames its Requirement, so its parent stays captured and its journey test is untouched. (e) The loop caller V2-086 put on the reconcile branch's context is consumed by no command inside the tick, because neither reconciler.Reconciler.Tick (reconciler.go:43) nor reconciler.VerificationReconciler.Tick (control_verifier.go:18) takes an application.Caller and internal/reconciler contains ZERO non-test occurrences of application.Caller; recorded, adjacent, not fixed. (f) internal/store/firestore's suite prints ok while skipping everything without an emulator; the figure is recorded WITH ITS PATTERN in the a21-* checks and never counted as a pass (G7). ROW 4 -- THIS TASK PASSES NO RELEASE GATE. Exactly three evidence records are issued (application, api, contracts), result and release_eligible are recorded honestly, no capability id is cited anywhere, no phrase 'capability exercised' or 'preview journey passed' appears, contracts/release-contract/** is untouched, .agents/v2/evidence/V2-022-release-live-dogfood.json is untouched, no Provider CLI was started and no Google Cloud resource was touched. Editing contracts/openapi/openapi-v1.yaml moves the contracts component evidence key and the release BundleDigest and enrols this task in the api-contract chain; that is expected and is recorded in the contracts record. REVISION HISTORY (docs/operations/v2-task-dag.md 12.3): none. The boundary above was not revised during implementation."
+    },
+    {
+      "name": "execution-environment",
+      "status": "passed",
+      "argv": [
+        "sh",
+        "-c",
+        "uname -srm; devbox version; devbox run --pure -- sh -c 'go version'; git rev-parse HEAD; git rev-parse --abbrev-ref HEAD"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 300,
+      "summary": "Execution environment for every check in this record. uname -srm = 'Linux 6.18.33.2-microsoft-standard-WSL2 x86_64'. go version resolved inside `devbox run --pure` = 'go version go1.25.0 linux/amd64'. devbox version = 0.17.2. worktree = /home/takushi/repos/agentic-loop-foundation-worktrees/v2-task-084. branch = v2-task/V2-084. base commit = 6a6839f9aef126ed1e78563104ea240155a1b2b8. Commits issued by this task, oldest first: 789c44610537d4aae6aabcbaa1d9a0368cd41286 (the scope boundary and the A1/A2/A3/A6/A13 baseline, BEFORE any source edit), 2a81ea9d338474b374fef53761e451391df277ec (the reproduction, tests only), d2eca0699e0c1ebb2b70691ae77bd0c332b362aa (the two edges plus the route and the contract), 94a275af009cc35115fb70b6695b79ecbb63a291 (the assertions), 5c78bc2c0327dcc3a11513988f7e3f9c7a18845f (the quota measurement), plus this evidence commit. Every argv below was executed from the worktree root, and every devbox run is judged by its VERDICT LINE rather than by the shell exit status."
+    },
+    {
+      "name": "a1-baseline-api-not-yet-edited",
+      "status": "passed",
+      "argv": [
+        "git",
+        "status",
+        "--porcelain"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 30,
+      "summary": "Baseline for the api component, recorded BEFORE any source file was edited. internal/api top-level test count at 6a6839f9aef126ed1e78563104ea240155a1b2b8 is 71, measured with `devbox run --pure -- go test -list '.*' ./internal/api`. internal/api/api.go's POST default branch holds the :start-framing route at api.go:480-495 and the suffix constant block at api.go:629-636 with startFramingSuffix at :635 -- BOTH DISAGREE with the Work Order, which says api.go:454-472 for the route and api.go:609 for the constant. The route this task adds goes beside them. internal/api/live_local_test.go is 597 lines and its :start-framing segment ends at line 358; the :complete-framing segment is inserted there. This record's remaining checks are filled in after the implementation, and its result stays 'partial' until the A12 live-local run is actually executed."
+    },
+    {
+      "name": "a9-route-is-unambiguous-and-role-gated",
+      "status": "passed",
+      "argv": [
+        "devbox",
+        "run",
+        "--pure",
+        "--",
+        "go",
+        "test",
+        "-race",
+        "-count=1",
+        "-v",
+        "-run",
+        "TestCompleteFramingRouteIsUnambiguousAndRoleGated",
+        "./internal/api"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 900,
+      "summary": "A9. POST /v1/requirements/{requirement_id}:complete-framing was added to internal/api/api.go's POST switch DEFAULT branch by the same prefix-plus-suffix idiom the file already uses, with a named suffix constant completeFramingSuffix = \":complete-framing\" beside startFramingSuffix. MEASURED LINE NUMBERS, and BOTH DISAGREE with the Work Order: the :start-framing route branch this one copies is at api.go:480-495 (the Work Order says 454-472) and the suffix constant block is api.go:629-636 with startFramingSuffix at :635 (the Work Order says :609). The route is gated to application.RoleOwner or application.RoleScheduler and returns 403 for a runner. EVERY ROUTING CLAIM IS ASSERTED, NOT READ, in TestCompleteFramingRouteIsUnambiguousAndRoleGated: the new suffix is not swallowed by the /v1/executions/{id}:start branch (an executions path carrying :complete-framing is 404, in both directions); it is not swallowed by the method-gated GET /v1/requirements/ prefix branch (a GET to the path is not the route and is asserted not to return 200); it is not confused with :start-framing -- BOTH routes are driven against the SAME requirement id in the SAME run and each reaches its own command (:start-framing produces framing, :complete-framing then produces ready), and the two literals are additionally asserted not to be suffixes of one another; an empty id yields 404 rather than a command with an empty target; and 401 is asserted for an unauthenticated caller over HTTP. Also asserted: 403 for a runner, 404 for an unknown Requirement id (from the command, not the router), 409 for a stale expected version, 400 for a Requirement still in captured naming domain.ErrInvalidTransition, 400 for each of three smuggled body fields (control_revision, repository_id, at) refused by the strict decoder, 200 for the owner, 200 for the scheduler on its own Requirement, and a response body carrying exactly requirement_id, status and version and no other key. Every refusal leaves the Requirement reflect.DeepEqual-unchanged. VERDICT: '--- PASS: TestCompleteFramingRouteIsUnambiguousAndRoleGated (0.00s)' / 'ok github.com/takushi/agentic-loop-foundation/v2/internal/api 1.019s'."
+    },
+    {
+      "name": "a11-full-chain-over-http",
+      "status": "passed",
+      "argv": [
+        "devbox",
+        "run",
+        "--pure",
+        "--",
+        "go",
+        "test",
+        "-race",
+        "-count=1",
+        "-v",
+        "-run",
+        "TestTheWholeChainReachesReadyAndTheClaimCarriesTheParentToActive",
+        "./internal/api"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 900,
+      "summary": "A11. ONE test over the composed api.Handler asserts the whole outcome in one run. VERBATIM LOG: 'api_test.go:5570: A11: one Requirement \"requirement-b\" walked captured(v1) -> framing(v2) -> ready(v3) -> [plan+prepare moved it to v4] -> active(v5) on the first claim over HTTP, and stayed active(v6) across a second Increment's claim, with the Requirement count unchanged at 1' / '--- PASS: TestTheWholeChainReachesReadyAndTheClaimCarriesTheParentToActive (0.00s)'. Step by step, all over real HTTP with real role gates: POST /v1/requirements as the owner returns 201 at version 1; the detail reports captured; POST :start-framing returns framing at exactly one more; POST :complete-framing returns ready at exactly one more and the detail agrees; Plan and Prepare create the Increment through the Service, because NO /v1 route creates an Increment -- a measured fact -- and Plan bumps the parent to v4 without a domain command, which is what makes the claim's in-transaction read of the parent distinguishable from any response value and is asserted explicitly; POST /v1/runner/claims:acquire as a RUNNER returns 200; the detail then reports the parent ACTIVE with the SAME requirement_id and its version incremented by EXACTLY ONE from the pre-claim value; a SECOND Increment is planned, prepared and claimed and the parent is still active with its version UNCHANGED BY THAT CLAIM, asserted with reflect.DeepEqual over the whole stored aggregate. The Requirement count is 1 before and 1 after, so the chain created no second Requirement. ClaimResponse gained no field: the response is asserted to carry none of requirement_id, requirement_status, requirement_version or parent_status. A14 is asserted inside the same run: next_action after reaching ready equals next_action after capture, so the read model was genuinely untouched. The detail route is read six times and the requirement page twice, so the injected framingClock is stepped a whole UTC day between reads -- an injected clock advanced explicitly, never a sleep, a timer, a goroutine or a wall-clock read, and no assertion depends on the values it returns."
+    },
+    {
+      "name": "a12-live-local-against-real-persistence",
+      "status": "passed",
+      "argv": [
+        "devbox",
+        "run",
+        "--pure",
+        "-e",
+        "AGENTIC_LOOP_LIVE_LOCAL=1",
+        "--",
+        "scripts/firestore-emulator.sh",
+        "go",
+        "test",
+        "-count=1",
+        "-v",
+        "-run",
+        "TestControlPlanePreviewLocalLive",
+        "./internal/api"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 2400,
+      "summary": "A12. EXECUTED, not skipped. The real cmd/control-plane binary was started against the real Firestore emulator and driven over real HTTP; no Provider was involved. TestControlPlanePreviewLocalLive in internal/api/live_local_test.go was extended to capture a Requirement, POST :start-framing, POST :complete-framing, and read GET /v1/requirements/{id} back asserting status ready and the version incremented by exactly TWO from capture, plus a SECOND identical :complete-framing with the SAME request_id replaying the same response rather than transitioning again (asserted on both the response version and the stored version read back through the detail route), plus a fresh-request-id repeat being refused 400 by the domain transition table. VERBATIM VERDICT: '--- PASS: TestControlPlanePreviewLocalLive (10.60s)' and 'ok github.com/takushi/agentic-loop-foundation/v2/internal/api 10.609s'. VERBATIM LOG LINES from the run: 'live_local_test.go:187: preview-local live exercise: Firestore emulator host=127.0.0.1:18939 project=agentic-loop-test'; 'live_local_test.go:325: V2-082 live-local: requirement_id=requirement-6d0dac584910e540-1 left captured for framing at version 2 against the real Firestore emulator'; 'live_local_test.go:410: V2-084 live-local: requirement_id=requirement-6d0dac584910e540-1 reached ready at version 3 against the real Firestore emulator, two versions above capture; the claim-to-active segment is NOT proven here because this file has no runner enrolment'; 'live_local_test.go:481: emulator direct read: installation=v2-051-live-local-dkyu060n22qo collection=requirements documents=3' and the same for controls=1, events=6, outbox=1, quota=1. AGENTIC_LOOP_LIVE_LOCAL was passed with -e and never as a shell prefix, because devbox run --pure strips environment variables. BOUNDARY, STATED PLAINLY AND NOT BLURRED: the claim-to-active segment -- edge two -- is NOT proven against real persistence. internal/api/live_local_test.go composes LocalOwnerBearerAuthenticator from AGENTIC_LOOP_LOCAL_OWNER_TOKENS and drives owner-authenticated routes only, while Service.Claim requires a verified runner session, and NO runner enrolment was added to that file. That is a LIMIT OF THIS TASK rather than a gap in the assertion: edge two is asserted over the composed handler with real role gates in the a11 check above."
+    },
+    {
+      "name": "a10-contract-declared-and-asserted",
+      "status": "passed",
+      "argv": [
+        "devbox",
+        "run",
+        "--pure",
+        "--",
+        "go",
+        "test",
+        "-count=1",
+        "-run",
+        "TestCompleteFramingRouteIsUnambiguousAndRoleGated",
+        "./internal/api"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 60,
+      "summary": "A10 asserted from internal/api. The same test that pins the routing reads contracts/openapi/openapi-v1.yaml and asserts that it declares the path '/v1/requirements/{requirement_id}:complete-framing', 'operationId: completeRequirementFraming', 'CompleteRequirementFramingRequest:' and 'CompleteRequirementFramingResponse:', that the sibling :start-framing declaration and the GET /v1/requirements/{requirement_id} read surface are STILL declared, and that the new path declares the SAME response-code set as the sibling -- compared as sorted sets with reflect.DeepEqual by a scanner that reads only the block between the path key and the next path key, and that fails outright if the set is empty. The request schema is asserted to carry additionalProperties: false and 'required: [request_id, expected_requirement_version]'; the response schema additionalProperties: false and 'required: [requirement_id, status, version]'. The forbidden-name check runs against the declared PROPERTIES rather than the whole block, because the block's description says in prose which three fields the request deliberately does not carry and that sentence must not be deleted to satisfy a substring check: control_revision, repository_id, timestamp, password, credential, token, secret, raw_prompt and raw_provider_output are all asserted absent from the properties, and request_id and expected_requirement_version asserted present."
+    },
+    {
+      "name": "a21-verification-api",
+      "status": "passed",
+      "argv": [
+        "devbox",
+        "run",
+        "--pure",
+        "--",
+        "make",
+        "component-api"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 1800,
+      "summary": "A21's api-side verification, verdict lines verbatim. `devbox run --pure -- make component-api`: 'ok github.com/takushi/agentic-loop-foundation/v2/internal/api 0.071s'. `devbox run --pure -- go test -race -count=1 ./internal/api`: 'ok github.com/takushi/agentic-loop-foundation/v2/internal/api 1.438s'. The A12 live-local run: '--- PASS: TestControlPlanePreviewLocalLive (10.60s)' / 'ok github.com/takushi/agentic-loop-foundation/v2/internal/api 10.609s'. internal/api top-level test count 71 -> 74, with `comm -23` over the sorted name sets showing ZERO removed names; the three added are TestARequirementLeftInReadyOrActiveStillReadsAfterTheChangeIsReverted, TestCompleteFramingRouteIsUnambiguousAndRoleGated and TestTheWholeChainReachesReadyAndTheClaimCarriesTheParentToActive. internal/api/auth.go, internal/api/auth_test.go, internal/api/repositories.go, internal/api/repositories_test.go and internal/api/live_dogfood_test.go are all untouched. The full `make check` was NOT run. No Provider CLI was started and TestFoundationPreviewLocalDogfood was not run."
+    },
+    {
+      "name": "a20-evidence-key",
+      "status": "passed",
+      "argv": [
+        "devbox",
+        "run",
+        "--pure",
+        "--",
+        "make",
+        "evidence-keys"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 900,
+      "summary": "A20. Measured on the FINAL tree with every touched file already `git add`ed, and ONLY the three keys of the three records this task issues were read -- not all 23. api BEFORE = 688732cb399d3aef9bde74935bf7e23a5de5b7417944659ef423f16f038cf334, AFTER = 730944a79feeccaa04d32aa24c574644ab6ac2c9b0f4e88aebc2a51aed637b01. Under gate rule G6a per-component key equality is provenance and not a pass/fail condition; these checks are re-run by make check at integration. The other two keys this task issues are recorded in their own records, and no key was copied from an earlier record. ci/components.json gives the contracts component the single root contracts/**, so writing these evidence records under .agents/v2/evidence moves none of the three keys."
+    }
+  ]
+}

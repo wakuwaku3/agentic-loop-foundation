@@ -5,9 +5,10 @@
   "task_id": "V2-091",
   "status": "blocked",
   "dependencies": [
-    "V2-084"
+    "V2-084",
+    "V2-089"
   ],
-  "block_reason": "V2-084",
+  "block_reason": "V2-089",
   "outcome": "Give the transitions the domain already models a caller outside a test: let the reconcile pass issue waiting and recovering, let promotion evaluate and complete a Requirement, and let the shipped Runner drive the journey. These were three tasks; they are one defect with three appearances.",
   "non_goals": [
     "Do not give any of the three paths a caller identity it is not",
@@ -179,6 +180,54 @@
         "remaining": 2
       },
       "reason": "design packetとwork orderが揃った(decisions 16、acceptance 26、constraints 25)。実装はV2-084の着地待ち。設計が私の枠組み自体を正した。「3つの経路にcallerを与える」は誤りで、identityは既に存在し既にtickに載っている——api.go:114がapplication.LoopCallerを呼び:119がContextWithCallerで渡している(V2-086の成果)。無いのはそれを使うpassである。前者で設計するとidentityが3つ生まれ、3つ作る最短路は各経路の自己命名で、それは非目標1そのものかつorchestrator.go:54が既にRoleRunnerでやっていることだった。waitのreason集合は選ばず導出した。scheduler.AllReasonsは閉じた7要素で、BuildAllocationSnapshotが実際に生成しうるものと突き合わせると3つが到達不能、意味で2つを除いて2/7になる。len(AllReasons)==7もassertさせる。outcomeに対するnarrowingを1件、正直に報告してきた。AllocationSchedulerStatusはready以外のRequirementにcapacity/contention reasonを付けられないので、waitはreadyからのみ発行され、active→waitingとrecovering→waitingは測定つきで未発行のまま記録される。briefに無かった構造的blockerを2件実測した。runner roleにclaim可能Incrementを教えるrouteが1本も無く(claims:acquireはcallerがincrement_idを渡す設計)、internal/runnerにnet/httpをimportするfileが0件である。よってreal driverにはroute 1本とclient 1本が要り、最大のriskとしてcommit順の最後に置き、達成不能ならin-process driverで代替せずSTOPしてescalateすると明記されている。G6bの交わりについて重要な判定を1つ記録する。literal pathの交わりは0だがclosureの交わりは103のうち60で、internal/applicationとinternal/runnerにfileを追加するだけでexercise file集合そのものが動く。ただしこれは再観測taskを起こす理由にならない。§8.2のとおりgateごとに守る記録が違い、動くのはM3liveのprovider-live-claudeであってM5liveのrelease-live-dogfoodではない。そしてM3はV2-076がその判定commitで通しており、§12.4により規則も判定も遡及しない。M5の残作業はV2-095の4つのproduct gapで、そこにprovider-live-claudeは入らない。remediation予算は5/5なので6件目を作らない"
+    },
+    {
+      "sequence": 7,
+      "at": "2026-08-27T02:07:00Z",
+      "from_status": "blocked",
+      "to_status": "queued",
+      "actor": "sol",
+      "input_refs": [
+        "V2-084",
+        "V2-091"
+      ],
+      "input_hash": "09b54b99bdbbdc4447ad84e677153e10f15907da2b18757d3122d0fe0824d658",
+      "output_refs": [
+        "V2-091"
+      ],
+      "output_hash": "6ff4357079914d899b24f3283d8db67b0b7c265ad2046a608ada0887985b08d4",
+      "owner": "terra",
+      "next_owner": "terra",
+      "retry_budget": {
+        "max_attempts": 2,
+        "attempts_used": 0,
+        "remaining": 2
+      },
+      "reason": "V2-084が完了したのでblockが解消した"
+    },
+    {
+      "sequence": 8,
+      "at": "2026-08-27T02:08:00Z",
+      "from_status": "queued",
+      "to_status": "blocked",
+      "actor": "sol",
+      "input_refs": [
+        "V2-084",
+        "V2-091"
+      ],
+      "input_hash": "09b54b99bdbbdc4447ad84e677153e10f15907da2b18757d3122d0fe0824d658",
+      "output_refs": [
+        "V2-091"
+      ],
+      "output_hash": "6ff4357079914d899b24f3283d8db67b0b7c265ad2046a608ada0887985b08d4",
+      "owner": "terra",
+      "next_owner": "terra",
+      "retry_budget": {
+        "max_attempts": 2,
+        "attempts_used": 0,
+        "remaining": 2
+      },
+      "reason": "並列度を実装1体に抑える方針なので、鎖の順序どおり待たせる。packet済み実装3件のallowed_pathsは総当たりで衝突する(api.goとapi_test.goを共有)ため、実装同士を並走させると必ずconflictする"
     }
   ]
 }

@@ -206,3 +206,186 @@ func (s *Service) StartFraming(ctx context.Context, req StartFramingRequest) (ou
 	})
 	return out, err
 }
+
+// ===========================================================================
+// V2-084 edge one: the edge that reaches the only schedulable status.
+// ===========================================================================
+//
+// Measured on the parent tree with a fresh grep rather than from any earlier
+// record: domain.RequirementReadyCommand appeared in exactly one non-test line
+// outside internal/domain that constructs a command with it --
+// human_input.go:648, inside Service.AnswerHumanInput. So the ONLY way a
+// Requirement could reach `ready` was for something to ask it a question and
+// for the owner to answer, even though internal/application/allocation.go
+// calls ready the only schedulable status and
+// docs/architecture/domain-model.md:265 defines it as
+// "優先順位評価済みで実行可能" -- the completion of framing. A Requirement that
+// needed no question could not become executable at all.
+//
+// CompleteFraming below issues that one transition and nothing else. After it
+// the reachable set is {captured, framing, needs-input, ready, active}, the
+// last member coming from the parent transition inside Service.Claim. The five
+// remaining domain Requirement commands (wait, recover, evaluate, pause,
+// cancel) and domain.CompleteRequirementFromRelease stay unissued, each for a
+// measurement recorded in this task's evidence rather than for a scope
+// sentence: pause has no exit the domain models, cancel is an owner control
+// verb whose Control-Intent semantics are a separate design, wait and recover
+// are automatic and their issuer -- the bounded reconcile tick -- holds no
+// application.Caller, and the completion needs a domain.StableReleaseProof
+// whose producer has no non-test caller in any running process.
+//
+// internal/domain is not edited: model.go:480-484 already admits
+// RequirementReadyCommand from RequirementFraming and sets RequirementReady.
+// The whole repair is that this layer finally calls it.
+//
+// Why this is a separate caller command rather than an advance inside
+// StartFraming. Framing is analysis -- "課題、価値、制約、関連Repositoryを分析中"
+// -- and declaring the analysis finished is a different decision from starting
+// it. Fusing them would make `framing` a status no observer can ever see,
+// would leave the domain's framing->ready edge reachable only through a
+// question, and would fuse two transitions into one idempotency key so a
+// partial retry could not be reasoned about.
+
+// CompleteFramingRequest names the Requirement and the version the caller
+// believes it is at, and carries nothing else.
+//
+// Like StartFramingRequest it deliberately has NO control_revision field, NO
+// repository_id field and NO timestamp field, for the same three reasons: a
+// caller-supplied revision is a trap because domain.Permit refuses unless the
+// supplied value is EXACTLY the authoritative one; the repository comes from
+// the Requirement's own link; and the instant comes from the transaction
+// authority accessor Service.record also uses, so it is byte-identical to the
+// recorded event's At and does not move if the transaction is retried.
+type CompleteFramingRequest struct {
+	RequestID       string
+	RequirementID   string
+	ExpectedVersion domain.Version
+}
+
+type CompleteFramingResponse struct {
+	RequirementID string                   `json:"requirement_id"`
+	Status        domain.RequirementStatus `json:"status"`
+	Version       domain.Version           `json:"version"`
+}
+
+// CompleteFraming declares an already-framed Requirement executable, moving it
+// from framing to ready.
+//
+// Roles: owner and scheduler, exactly the pair StartFraming accepts and
+// exactly the pair Capture, Plan, Prepare, Control and RegisterRepository
+// accept. A runner is refused: a Runner executes an Increment it was handed and
+// does not decide that a Requirement's analysis is finished, and letting it
+// would make the recorded actor unusable as attribution.
+//
+// The gate is domain.Permit with Kind domain.PermitClaim, evaluated with
+// domain.Permit alone, and NOTHING is passed to domain.EffectFromPermit. That
+// omission is load-bearing rather than incidental, for the same reason
+// StartFraming gives: EffectFromPermit requires the current effective mode to
+// be exactly domain.ControlAllow, so routing this command through it would deny
+// completing framing under pause-intake, which is wrong.
+//
+// The seven-mode behaviour that follows from PermitClaim is identical to
+// StartFraming's and is asserted in framing_test.go rather than described here:
+// allow ALLOWS, pause-intake ALLOWS, pause-claim DENIES, graceful-stop DENIES,
+// immediate-stop DENIES, emergency-stop DENIES, cancel DENIES -- 2 of 7.
+//
+//   - pause-intake ALLOWS it while the same control revision still DENIES a
+//     fresh Capture. "Take no new work in, finish what you already have" is
+//     exactly that asymmetry (docs/product/definition.md:142-143), and
+//     finishing the framing of something already captured is finishing what you
+//     have.
+//   - pause-claim DENIES, and this is the boundary the kind was chosen for:
+//     declaring an already-framed Requirement executable is the moment it
+//     becomes claimable, which is precisely what pause-claim exists to
+//     withhold.
+//
+// It stages no outbox item: nothing outside the control plane is asked to do
+// anything by a Requirement becoming executable. domain.PermitClaim's own
+// SideEffect() is false for the same reason.
+func (s *Service) CompleteFraming(ctx context.Context, req CompleteFramingRequest) (out CompleteFramingResponse, err error) {
+	_, actor, err := callerActor(ctx, RoleOwner, RoleScheduler)
+	if err != nil {
+		return out, err
+	}
+	if err = requireRequest(req.RequestID); err != nil {
+		return out, err
+	}
+	fingerprint, err := requestFingerprint("complete-framing", req)
+	if err != nil {
+		return out, err
+	}
+	eventID, err := s.ids.Next("event")
+	if err != nil {
+		return out, err
+	}
+	operationID, err := s.ids.Next("operation")
+	if err != nil {
+		return out, err
+	}
+	err = s.mutate(ctx, "complete-framing:"+req.RequestID, func(u UnitOfWork) error {
+		// The idempotency replay stays FIRST, ahead of the Permit: a request
+		// that already executed must replay its recorded response rather than
+		// be re-judged against a control revision that may have moved since.
+		if prior, ok, e := u.Idempotency(ctx, req.RequestID, "complete-framing"); e != nil {
+			return e
+		} else if ok {
+			if prior.Fingerprint != fingerprint {
+				return ErrIdempotencyConflict
+			}
+			return restoreResponse(prior, &out)
+		}
+		r, ok, e := u.Requirement(ctx, req.RequirementID)
+		if e != nil {
+			return e
+		}
+		if !ok {
+			return ErrNotFound
+		}
+		// The ControlTarget's RepositoryID comes from the Requirement's own
+		// link, read inside this same transaction, exactly as StartFraming and
+		// Plan resolve it. A Requirement with no link yields an empty
+		// RepositoryID, which is not an error.
+		link, hasLink, e := u.RequirementRepositoryLink(ctx, req.RequirementID)
+		if e != nil {
+			return e
+		}
+		linkedRepository := ""
+		if hasLink {
+			linkedRepository = link.RepositoryID.String()
+		}
+		controls, e := u.Controls(ctx)
+		if e != nil {
+			return e
+		}
+		target := domain.ControlTarget{InstallationID: s.config.InstallationID, RepositoryID: linkedRepository, RequirementID: r.ID}
+		effective := domain.EffectiveControl(controls, target)
+		revision := domain.Revision(0)
+		if effective.Found {
+			revision = effective.Revision
+		}
+		if _, e = domain.Permit(effective, domain.PermitRequest{Kind: domain.PermitClaim, Target: target, ControlRevision: revision, Resource: req.RequirementID}); e != nil {
+			return e
+		}
+		at, e := transactionAuthorityTime(ctx, u)
+		if e != nil {
+			return e
+		}
+		next, e := domain.DecideRequirement(r, domain.RequirementCommand{
+			Kind:            domain.RequirementReadyCommand,
+			Actor:           actor,
+			At:              at,
+			ExpectedVersion: req.ExpectedVersion,
+		})
+		if e != nil {
+			return e
+		}
+		if e = u.SaveRequirement(ctx, next, r.Version); e != nil {
+			return e
+		}
+		out = CompleteFramingResponse{RequirementID: req.RequirementID, Status: next.Status, Version: next.Version}
+		// The nil outbox argument is the assertion in code that this command
+		// stages no durable effect; framing_test.go asserts it from the store.
+		return s.record(ctx, u, eventID, operationID, fingerprint, req.RequestID, "complete-framing", "requirement", req.RequirementID, next.Version, "requirement.ready", actor.String(), nil, out)
+	})
+	return out, err
+}

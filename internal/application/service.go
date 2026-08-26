@@ -1328,6 +1328,78 @@ func (s *Service) Claim(ctx context.Context, req ClaimRequest) (out ClaimRespons
 		if e = u.SaveExecution(ctx, exec, 0); e != nil {
 			return e
 		}
+		// V2-084 edge two: the claimed Increment carries its parent Requirement
+		// into `active`, inside THIS transaction and nowhere else.
+		//
+		// docs/architecture/domain-model.md:266 DEFINES the Requirement status
+		// active as "1つ以上のIncrementが進行中" -- one or more Increments in
+		// progress. That is a definition, not a hint: the parent is active
+		// precisely because a subordinate Increment is in progress, so the
+		// ready->active edge is licensed by Increment progress and by nothing
+		// else, and its issuer must be the transaction that CREATES the
+		// progress. This is that transaction: it is where an Increment leaves
+		// ready and an Execution and a Lease are created, it is already gated
+		// by the strictest permit in the system (domain.PermitClaim above, and
+		// the effect below), and it is reached by a caller a real transport
+		// produces.
+		//
+		// It is NOT a caller command and ClaimRequest gains no field: a caller
+		// must not be able to assert that work is in progress when none is, and
+		// must not be able to make a derived transition fail for a reason
+		// unrelated to its intent. So the parent is read HERE, by the claimed
+		// Increment's own inc.RequirementID, and the expected version comes
+		// from THAT read -- never from the request. Service.Plan bumps the
+		// parent's Version without a domain command, so any version a caller
+		// could have remembered is already stale by the time a claim runs; a
+		// second transaction or a read taken outside this one would be a
+		// lost-update bug wearing a fix's clothes.
+		//
+		// Three branches, and only the first writes:
+		//   - ready   -> issue domain.RequirementStart and save.
+		//   - active  -> do nothing. "One or more Increments in progress" is
+		//               already true, so a second claim must be idempotent
+		//               with respect to the parent.
+		//   - anything else -> do nothing, and the claim proceeds exactly as it
+		//               did before. This third branch is what keeps the change
+		//               additive: every pre-existing capture-then-plan-then-
+		//               claim path has a parent in `captured` and is untouched.
+		//
+		// What this deliberately does NOT do is refuse a claim whose parent is
+		// neither ready nor active. That refusal is the right end state and it
+		// is measured and logged rather than taken here: 18 test files across
+		// four packages claim Increments whose parents are captured, so the
+		// refusal is not additive and cannot be verified as leaving existing
+		// behaviour intact in the same change that introduces these two edges.
+		//
+		// The opposite direction is forbidden by the same documents that
+		// license this one, so nothing here advances the parent any further:
+		// domain-model.md:101 says an Increment succeeding does NOT auto-
+		// complete its Requirement, and this block is reached from Claim only
+		// -- never from Prepare, Start, Checkpoint, AcceptResult or release.
+		if parentID := inc.RequirementID.String(); parentID != "" {
+			parent, parentFound, e2 := u.Requirement(ctx, parentID)
+			if e2 != nil {
+				return e2
+			}
+			if parentFound && parent.Status == domain.RequirementReady {
+				at, e3 := transactionAuthorityTime(ctx, u)
+				if e3 != nil {
+					return e3
+				}
+				started, e3 := domain.DecideRequirement(parent, domain.RequirementCommand{
+					Kind:            domain.RequirementStart,
+					Actor:           actor,
+					At:              at,
+					ExpectedVersion: parent.Version,
+				})
+				if e3 != nil {
+					return e3
+				}
+				if e3 = u.SaveRequirement(ctx, started, parent.Version); e3 != nil {
+					return e3
+				}
+			}
+		}
 		out = ClaimResponse{IncrementID: req.IncrementID, ExecutionID: executionID, LeaseID: leaseID, RunnerID: runner.String(), Version: next.Version, FencingToken: lease.FencingToken}
 		effectOutbox, e := s.effectOutbox(ctx, u, outboxID, operationID, req.RequestID, domain.PermitClaim, canonical, next.Version, lease.FencingToken, req.ControlRevision, "claim-issued", runner.String(), nil)
 		if e != nil {
