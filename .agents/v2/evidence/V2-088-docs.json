@@ -6,9 +6,9 @@
   "correlation_id": "v2-088-operator-record",
   "task_id": "V2-088",
   "component": "docs",
-  "evidence_key": "2811aecff4738c14f024b449062e8d207d7adc0a0233f53c3c112b2b412b04f9",
-  "result": "partial",
-  "observed_at": "2026-08-26T23:00:00Z",
+  "evidence_key": "5f7d90507e65669911f42d0a092c06335c090ea88443160b58d07851e5cb926a",
+  "result": "passed",
+  "observed_at": "2026-08-26T15:10:00Z",
   "checks": [
     {
       "name": "scope-boundary",
@@ -66,6 +66,243 @@
       "working_directory": ".",
       "timeout_seconds": 60,
       "summary": "A3, the measured premise, re-confirmed on this worktree at base 6e8a30a7ed5474b42bd89e36db0523067db84c77 before any edit. (a) `grep -rn '\"log\"\\|\"log/slog\"' --include=*.go internal cmd | grep -v _test.go` returns NOTHING (exit status 1, zero lines); the same grep WITHOUT the _test.go exclusion also returns nothing, so this repository has no logging idiom at all, in source or in tests, and nothing had to be escalated as a second mechanism. (b) domainError's unclassified branch passes a CONSTANT and never err.Error(): measured at api.go:1250-1257, the branch body is `h.error(w, r, http.StatusInternalServerError, \"internal_error\", \"internal server error\")` followed by `return`, while the already-classified tail at api.go:1262 does pass err.Error(); the err value is therefore dropped on the floor at 1255. (c) ServeHTTP's recover branch does not even BIND the recovered value: measured at api.go:51, the statement is `if recover() != nil {`. (d) ci/components.json declares api's dependencies as exactly [application, domain, infra, runner, web] and api's verification_dependencies as exactly [control-plane, provider, release, store-firestore, store-memory, update] -- both AGREE with the Work Order verbatim. Additional measurement the Work Order did not state: internal/api/api.go ALREADY imports internal/quota (api.go:21), and internal/quota belongs to the `infra` component (roots [infra/**, internal/quota/**]), which is already in api's dependencies, so that pre-existing import is accounted for and A10's requirement is that no NEW import of internal/quota or internal/store appear."
+    },
+    {
+      "name": "completed-by-coordinator",
+      "status": "passed",
+      "argv": [
+        "git",
+        "log",
+        "--oneline",
+        "-6"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 600,
+      "summary": "PROVENANCE, recorded because it changes who measured what. The implementing agent for V2-088 was terminated mid-run by an infrastructure spend limit, immediately after committing the wiring commit and before reaching A15. Four commits survived (42e0797 the scope-boundary records, 691e2ab the recorder, 3a7d6bf the HTTP seam test, 13f7fce the production wiring and the runbook section) with a clean working tree and nothing lost. Every check below this one was executed and measured by the COORDINATOR on the same worktree after merging v2 into the task branch (merge commit 80e7262), not by the implementing agent, and no result recorded here was carried over from the agent's own report -- the agent produced no final report at all. The scope-boundary, environment-identifier, baseline-before and measured-premise checks above this one are the implementer's own and are left exactly as it wrote them."
+    },
+    {
+      "name": "recorder-proved-alone",
+      "status": "passed",
+      "argv": [
+        "devbox",
+        "run",
+        "--pure",
+        "--",
+        "sh",
+        "-c",
+        "go test -race -count=1 -v -run 'TestTheOperatorRecordIsAClosedBoundedLine|TestTheOperatorRecordIsBoundedInRate' ./internal/api"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 600,
+      "summary": "A4/A5. The recorder is proved with no HTTP involved. Verdict lines: `--- PASS: TestTheOperatorRecordIsAClosedBoundedLine (0.01s)` and `--- PASS: TestTheOperatorRecordIsBoundedInRate (0.00s)`, then `ok github.com/takushi/agentic-loop-foundation/v2/internal/api 1.212s`. internal/api/operator_record.go is 261 lines and internal/api/operator_record_test.go is 407 lines, both measured with wc -l. The emitted line is a closed struct: `grep -cE 'map\\[string\\]' internal/api/operator_record.go` returns 0, so there is no free-form field a body could go in -- the guarantee is the absence of a field rather than a promise not to fill one. Run with -race because the recorder holds a sync.Mutex and HTTP handlers are concurrent. uname -srm = Linux 6.18.33.2-microsoft-standard-WSL2 x86_64; go version as resolved inside devbox run --pure = go version go1.25.0 linux/amd64; devbox 0.17.2 with --pure, which strips environment variables so AGENTIC_LOOP_LIVE_LOCAL was passed with -e and never as a shell prefix. Every devbox run below was judged by its verdict line, never by the shell exit status."
+    },
+    {
+      "name": "http-seam-and-negative-half",
+      "status": "passed",
+      "argv": [
+        "devbox",
+        "run",
+        "--pure",
+        "--",
+        "sh",
+        "-c",
+        "go test -race -count=1 -v -run 'TestAnUnclassifiedErrorReachesTheOperatorAndNotTheCaller' ./internal/api"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 600,
+      "summary": "A7. Verdict line: `--- PASS: TestAnUnclassifiedErrorReachesTheOperatorAndNotTheCaller (0.04s)`. This is the only top-level test this task adds: the set of `^func Test` names in internal/api/api_test.go went from 49 to 50, the added name is exactly TestAnUnclassifiedErrorReachesTheOperatorAndNotTheCaller, and the removed set is EMPTY -- no existing test was deleted or renamed. The negative half is present and is what separates this change from the defect it exists to avoid: recording on a classified branch would bury the only records that carry information the caller does not already have."
+    },
+    {
+      "name": "v2-083-not-weakened",
+      "status": "passed",
+      "argv": [
+        "git",
+        "diff",
+        "--numstat",
+        "6e8a30a",
+        "HEAD",
+        "--",
+        "internal/api/api_test.go"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 600,
+      "summary": "A8, measured rather than promised. internal/api/api_test.go changed by 269 insertions and 1 deletion against the task's base commit 6e8a30a. There are six hunks and their headers place every one of them outside the pinned material. Each pinned function was extracted from `git show <rev>:internal/api/api_test.go` by matching `^func <name>(` through its closing brace at column 0, and hashed: TestEveryRouteStillAnswersTheStatusItAnsweredBefore 47 lines, sha256 d359008db45eb0b7... IDENTICAL; TestAStorageFaultIsNotReportedAsTheCallersMistake 58 lines, sha256 418381afdf3f9e08... IDENTICAL; TestTheBacklogStillRefusesACursorItDidNotIssue 69 lines, sha256 51b14bcb4b03f937... IDENTICAL; pinRows 277 lines, sha256 ecf37a26076feef4... IDENTICAL with its `wantStatus:` row count 202 before and 202 after; faultRoutes 32 lines, sha256 4cb780cc424029f7... IDENTICAL. The ONLY changed helper is newFaultFixture, 60 lines to 66 lines, which is exactly the additive recorder field A7 permits. The whole-file `wantStatus:` count rose 202 to 212 and the extra ten are inside the NEW test, one per distinct classified status the negative half covers. injectedStoreFaultFragments was re-measured and is byte-identical: injectedStoreFaultText, InvalidArgument, StartAfter, projects/agentic-loop-local, install-7f3a, byte offset, cmVxdWlyZW1lbnQtYg, rpc error -- the list was NOT shortened. All three pinned tests re-run green: `--- PASS` on each."
+    },
+    {
+      "name": "response-neutrality-and-no-new-surface",
+      "status": "passed",
+      "argv": [
+        "git",
+        "diff",
+        "--stat",
+        "6e8a30a",
+        "HEAD",
+        "--",
+        "contracts"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 600,
+      "summary": "A11 and A16's response-neutrality claim, both by measurement. `git diff --stat 6e8a30a..HEAD -- contracts` produces NO output, so contracts/** is byte-unchanged. The router's path list is identical: the sorted unique set of `\"/v1...\"` and `\"/internal...\"` string literals in internal/api/api.go is the same set before and after, so no GET or POST path was added. internal/contracts and internal/ci both re-run green. The response-neutrality claim rests on structure rather than on inspection: the recorder's only input is a five-value string tuple, it never receives the http.ResponseWriter or the *http.Request, and h.error's argument list at both call sites is unchanged -- verified by reading the diff of internal/api/api.go, which adds exactly one Config field and one recorder call per branch and changes no h.error argument."
+    },
+    {
+      "name": "no-firestore-write-and-no-new-import",
+      "status": "passed",
+      "argv": [
+        "git",
+        "diff",
+        "6e8a30a",
+        "HEAD",
+        "--",
+        "internal/api/api.go",
+        "cmd/control-plane/main.go"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 600,
+      "summary": "A10 and A19, measured. The import block of internal/api/api.go is byte-identical between 6e8a30a and HEAD, and so is the import block of cmd/control-plane/main.go -- diff produces no output for either. internal/api therefore gained NO import: the pre-existing internal/quota import at api.go:21 was already there for the 429 branch and is not this task's. internal/api/operator_record.go imports only encoding/json, errors, fmt, io, net/http, sync, time plus internal/application and internal/runner, and both of those edges are already declared in ci/components.json. No document is created, no collection is added, firestore.indexes.json is untouched, and internal/store/** and internal/quota/** are prohibited and byte-unchanged. THE MEASURED REASON Firestore was refused as a destination: a Firestore write consumes the daily write budget that domainError's FIRST branch answers 429 quota_exhausted for, so a caller who can provoke a 500 could drain the installation's write budget through the error path and stop every mutation -- observability would become a denial-of-service amplifier. The fault most worth recording is itself usually a Firestore fault, so a Firestore-backed record would also be lost exactly when it is needed. ci/components.json, Makefile, go.mod, go.sum and devbox.* are untouched and `go test ./internal/ci` is green, which is the manifest's own confirmation that no edge moved."
+    },
+    {
+      "name": "credential-guarantee-cross-checked",
+      "status": "passed",
+      "argv": [
+        "devbox",
+        "run",
+        "--pure",
+        "--",
+        "sh",
+        "-c",
+        "make secrets"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 600,
+      "summary": "A12, structural and cross-checked. `make secrets` verdict: `no leaks found` over 511 commits and ~14.45 MB. The only redaction mechanism used is runner.RedactLog, called once at internal/api/operator_record.go:227 -- the same deny-list internal/runner/log.go's BoundedLog already applies to every diagnostic write, reached over the already-declared api -> runner edge. internal/api holds NO second copy of any secret regular expression: the only `regexp.MustCompile` anywhere in internal/api is at api_test.go:2923 and it is the pre-existing digit check, so no non-test file in the package compiles a pattern at all. The cross-check is done from the test only and is NON-VACUOUS: operator_record_test.go imports internal/provider (an edge already declared in verification_dependencies and already derived from internal/api/live_dogfood_test.go), asserts at line 245 that provider.SecretPatternMatches is false for every emitted line in the corpus, and then asserts at line 251 that the same function DOES match the bearer fixture -- without that second assertion the cross-check would prove nothing. Two independently authored deny-lists are therefore measured to agree instead of one being trusted. A prompt and a raw provider response are structurally unreachable at this seam: internal/api holds no provider material, imports internal/provider in no non-test file, and the recorder's input is a five-value string tuple."
+    },
+    {
+      "name": "determinism-as-a-source-property",
+      "status": "passed",
+      "argv": [
+        "devbox",
+        "run",
+        "--pure",
+        "--",
+        "sh",
+        "-c",
+        "go test -race -count=1 ./internal/api"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 600,
+      "summary": "A13. Time enters the recorder ONLY through the application.Clock passed to NewJSONOperatorRecorder, which refuses nil, and this is proved as a source property rather than asserted as behaviour: operator_record_test.go parses internal/api/operator_record.go with go/ast, go/parser and go/token (token.NewFileSet at line 257, parser.ParseFile at 258) and asserts the absence of the forbidden constructs. Re-measured independently by grep over the file: `time.Now` appears ONCE and that occurrence is inside a comment at line 126 ('there is no fallback to time.Now to fall back'), so there is no call; `time.Timer`, `time.Ticker`, `time.After`, `time.Sleep`, `math/rand` and `crypto/rand` each appear ZERO times; the four matches for a bare `go ` are all inside comments referring to api.go. No goroutine, no timer, no sleep and no randomness. The whole api suite runs green under -race."
+    },
+    {
+      "name": "production-wiring-and-smoke",
+      "status": "passed",
+      "argv": [
+        "devbox",
+        "run",
+        "--pure",
+        "--",
+        "sh",
+        "-c",
+        "make smoke"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 600,
+      "summary": "A9. cmd/control-plane/main.go builds the recorder with os.Stdout and the productionClock{} value run() already constructs, returns its error the way every other constructor's error is returned, and passes it in the api.Config literal. `make smoke` passes: it greps `go run ./cmd/control-plane --version` stdout against an anchored version regex, so the measurement confirms that NO record and no debug line appears on the version path -- the --version branch returns before run() reaches the recorder. `make component-control-plane` passes: `cmd/control-plane [no test files]`, `ok internal/api (cached)`, `ok internal/domain (cached)`. No environment variable, no flag and no configuration knob was added for the recorder; the window, the record cap and the byte limits are unexported constants in internal/api."
+    },
+    {
+      "name": "full-suite-vet-gofmt",
+      "status": "passed",
+      "argv": [
+        "devbox",
+        "run",
+        "--pure",
+        "--",
+        "sh",
+        "-c",
+        "go test -race -count=1 ./... && go vet ./... && gofmt -l ."
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 600,
+      "summary": "A2's after-state and the implementer's verification set, all executed. `go test -race -count=1 ./...`: every package ok. `go vet ./...`: no output, clean. `gofmt -l .`: no file listed outside build/. `make component-api`: ok. `make component-docs`: exit 0 (its body is an rg for TODO(ci) over docs and README.md). ONE FAILURE was seen on the first sweep and it was exactly the gap the terminated agent had not yet closed: `--- FAIL: TestActiveEvidenceIndex` reporting that the three V2-088 evidence records existed on disk but were absent from .agents/v2/evidence/index.json. That is A17, closed by the registration check below; it re-runs green. Nothing else was red at any point."
+    },
+    {
+      "name": "live-local-real-emulator",
+      "status": "passed",
+      "argv": [
+        "devbox",
+        "run",
+        "--pure",
+        "-e",
+        "AGENTIC_LOOP_LIVE_LOCAL=1",
+        "--",
+        "sh",
+        "-c",
+        "scripts/firestore-emulator.sh go test -count=1 -v -run TestControlPlanePreviewLocalLive ./internal/api"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 600,
+      "summary": "A15, executed rather than reasoned about, against a real Firestore emulator and the real shipped binary. Verdict lines: `--- PASS: TestControlPlanePreviewLocalLive (10.88s)` then `ok github.com/takushi/agentic-loop-foundation/v2/internal/api 10.888s`. The run really measured something: emulator host 127.0.0.1:18839, project agentic-loop-test, real documents read directly out of the emulator (requirements 3, controls 1, events 5, outbox 1, quota 1), the backlog paged to exhaustion at page_size=1 over real HTTP with 3 captured requirement_ids each covered exactly once, and the budget hard guard tripping as HTTP 429 quota_exhausted after 1990 real capture mutations in 9.355225014s. `grep -c SKIP` over the output returns 0, so gate rule G7's failure mode -- a green run that measured nothing -- does not apply here. internal/api/live_local_test.go is PROHIBITED and was run, not edited. THE OBSERVATION, recorded as an observation and never as an assertion because the file that would have to assert it is prohibited: ZERO record lines appeared in the -v output (`grep -c '\"kind\":\"'` returns 0). That is the EXPECTED result and it is a second, independent confirmation of A7's negative half: the live exercise drives only paths that answer classified statuses, and the most interesting of them is the 429 budget guard, which is precisely a classified branch and must therefore produce no record. The mechanism was re-measured and the Work Order's premise holds with a correction worth stating: live_local_test.go:159 builds runner.ProcessSupervisor with no Stdout field, and internal/runner/supervisor.go:111-112 only assigns cmd.Stdout when s.Stdout is non-nil, so a nil Stdout leaves the child's stdout exactly as INHERITED -- the child control plane's records would land on the test process's own stdout and be visible under -v. They are absent because none was emitted, not because they were discarded."
+    },
+    {
+      "name": "rollback-property",
+      "status": "passed",
+      "argv": [
+        "git",
+        "diff",
+        "--stat",
+        "6e8a30a",
+        "HEAD"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 600,
+      "summary": "A16. Rollback is: delete internal/api/operator_record.go and internal/api/operator_record_test.go; revert one branch in domainError, one branch in ServeHTTP and one api.Config field in internal/api/api.go; revert the additive faultFixture field and the one new test in internal/api/api_test.go; revert one constructor call plus one struct field in cmd/control-plane/main.go; and remove one markdown section from docs/operations/gcp-runbook.md. NOTHING ELSE must be undone, and the reason is a property rather than an inspection: this change writes no document, reads no document, alters no stored field, adds no route, changes no request or response field, changes no error's Error() text and touches no contract -- each of those is separately measured in the checks above. Records already emitted are inert: each carries its own schema_version and no code in this repository reads one back."
+    },
+    {
+      "name": "evidence-registration",
+      "status": "passed",
+      "argv": [
+        "devbox",
+        "run",
+        "--pure",
+        "--",
+        "sh",
+        "-c",
+        "go test -count=1 ./internal/contracts && gitleaks dir .agents --config .gitleaks.toml"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 600,
+      "summary": "A17. Three records are issued -- ev-v2-088-api, ev-v2-088-control-plane, ev-v2-088-docs -- each with task_id V2-088, the PRODUCING task, and correlation_id v2-088-operator-record. No fourth record was created and no other task's record or index entry was touched. All three are registered by appended compact one-line entries in .agents/v2/evidence/index.json whose evidence_hash is the sha256 of each artifact's final committed bytes. internal/contracts is green with the records in place, which is the check that had failed while the registration was missing. gitleaks was run as `gitleaks dir .agents --config .gitleaks.toml` and never as `gitleaks dir .`, which reports 26 findings out of the gitignored build/evidence/** subtree."
+    },
+    {
+      "name": "evidence-keys-for-issued-records-only",
+      "status": "passed",
+      "argv": [
+        "devbox",
+        "run",
+        "--pure",
+        "--",
+        "sh",
+        "-c",
+        "make evidence-keys"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 600,
+      "summary": "A18. Exactly THREE keys were measured, on the final tree with every touched file already git-added, because internal/ci's manifest checks read git ls-files and an unstaged file is invisible to them: api 9922d967952b7f4fc083accf3ee09a7170312916b8333ea5680fa9d01ef2d1c0, control-plane 75f97216268855e8261b7028555c3cbfb6d24ffac2b57bae9c1402e99ec87282, docs 5f7d90507e65669911f42d0a092c06335c090ea88443160b58d07851e5cb926a. All 23 keys were NOT measured and none was copied from an earlier record. Under gate rule G6a these checks are re-run by make check, so per-component key equality is a record of provenance and NOT a pass/fail condition; the api key moved away from the value 60ab1a074948da8e7af299432c9eb08da762fef76332330d7e19e82fb3bef22a that the scope-boundary commit recorded, which is the expected consequence of editing api.go and api_test.go and is NOT treated as a verdict in either direction."
+    },
+    {
+      "name": "operator-read-path-documented",
+      "status": "passed",
+      "argv": [
+        "devbox",
+        "run",
+        "--pure",
+        "--",
+        "sh",
+        "-c",
+        "make component-docs"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 600,
+      "summary": "A14. docs/operations/gcp-runbook.md went from 118 lines to 194 lines, one appended section, written in the file's existing language and style. Re-measured on the base commit: `grep -rni log docs/operations/gcp-runbook.md` returned NO match at all before this task, so an operator had no documented read path whatsoever -- the file did not mention logging anywhere. The section gives the Cloud Logging filter that selects these records on Cloud Run by kind and severity; the preview-local answer, which is that the records are on the process's own stdout in the owner's terminal, together with the measured caveat about TestControlPlanePreviewLocalLive; the field list; and an explicit sentence naming what a record NEVER contains -- no request body, no response body, no header, no Authorization value, no query string, no prompt, no provider response and no credential value. No link was added to any document excluded by the Makefile's docs target regexes, and `make component-docs` and `make docs` both pass."
     }
   ]
 }
