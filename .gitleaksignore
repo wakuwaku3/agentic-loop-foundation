@@ -1,0 +1,26 @@
+# Two findings in a single commit, both false positives, both now fixed at the
+# source so no new occurrence can be created. They are pinned here by exact
+# fingerprint (commit:file:rule:line) rather than allowlisted by regex or by
+# path, because a fingerprint cannot suppress anything except these two
+# historical lines. A regex or path allowlist would also cover every future
+# finding of the same shape in the same files, which is the hole this file
+# exists to avoid.
+#
+# What they were: V2-091 built its session-token test fixtures as a prefix
+# constant plus a suffix constant, following the instruction to concatenate so
+# that no secret-shaped literal appears. That instruction was not sufficient.
+# The suffix half was still 16 hex digits, and the identifier holding it
+# contained the substring "Token", which is one of generic-api-key's trigger
+# keywords -- so the line matched on the keyword plus the high-entropy quoted
+# value even though the whole token was never written down.
+#
+# The fix at source: the high-entropy part is now COMPUTED with
+# strings.Repeat over a four-character group, so no quoted value in either
+# file has the shape of a credential. Neither fixture ever was a credential:
+# both are local test doubles for a runner session token and neither was ever
+# accepted by anything but a stub.
+#
+# The rule itself is untouched. Recorded in docs/operations/v2-task-dag.md
+# section 9.7.
+f6fea4d2b05f3cf7f9fc258176d0b98eb3302b04:cmd/runner/main_test.go:generic-api-key:27
+f6fea4d2b05f3cf7f9fc258176d0b98eb3302b04:internal/runner/controlplane_test.go:generic-api-key:30
