@@ -5081,3 +5081,570 @@ func TestReconcileStillFailsClosedWithoutAnIdentityAndCarriesNoCallerThen(t *tes
 		})
 	}
 }
+
+// ===========================================================================
+// V2-084: a Requirement can reach the only status the scheduler calls
+// schedulable, and an Increment that goes into progress carries its parent.
+// ===========================================================================
+
+// completeFramingRouteSuffix is the route suffix, built here rather than
+// imported because internal/api's constant is unexported. It is a literal path
+// segment and not a module path, so it is invisible to the manifest derivation.
+const completeFramingRouteSuffix = ":complete-framing"
+
+// completeFramingBody builds the whole request body for the new verb. Like
+// startFramingBody it carries exactly request_id and expected_requirement_version:
+// no control_revision, no repository_id and no timestamp.
+func completeFramingBody(requestID string, version domain.Version) string {
+	return `{"request_id":"` + requestID + `","expected_requirement_version":` + strconv.FormatInt(int64(version), 10) + `}`
+}
+
+// v2084Handler composes the same handler framingHandler composes -- owner,
+// runner and scheduler bearer tokens over a memory store with a steppable
+// injected clock -- and additionally returns the Service, because no /v1 route
+// creates an Increment: Plan and Prepare are driven through the Service
+// directly, the way newPinFixture and internal/api/live_dogfood_test.go's
+// planAndPrepare already do. It is a separate builder rather than an edit to
+// framingHandler, whose signature several pre-existing tests depend on.
+func v2084Handler(t *testing.T) (http.Handler, *memory.Store, *framingClock, *application.Service) {
+	t.Helper()
+	st := memory.New()
+	c := &framingClock{at: time.Unix(1700000000, 0).UTC()}
+	svc, err := application.NewServiceWithConfig(st, c, &ids{}, application.ServiceConfig{InstallationID: "install", LeaseTTL: time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	auth := api.BearerAuthenticator{
+		"owner":     {Role: application.RoleOwner, Subject: "owner"},
+		"runner":    {Role: application.RoleRunner, Subject: "runner", RunnerID: "runner-1"},
+		"scheduler": {Role: application.RoleScheduler, Subject: "scheduler.self"},
+	}
+	return api.New(api.Config{Authenticator: auth, Service: svc, AllowedOrigins: []string{"https://console.example"}}), st, c, svc
+}
+
+// TestCompleteFramingRouteIsUnambiguousAndRoleGated is V2-084 A9, plus A10's
+// contract half.
+//
+// Every routing claim is ASSERTED rather than read. The new suffix cannot be
+// swallowed by the /v1/executions/{id}:start branch (that branch is prefix-gated
+// on /v1/executions/, and ":complete-framing" does not satisfy
+// HasSuffix(path, ":start") either -- both directions are checked); it cannot be
+// swallowed by the method-gated GET /v1/requirements/ prefix branch; and it
+// cannot be confused with :start-framing, which is proven by driving BOTH routes
+// against the SAME requirement id in the SAME run and watching each one reach
+// its own command. An empty id is a 404 rather than a route to the command with
+// an empty target.
+func TestCompleteFramingRouteIsUnambiguousAndRoleGated(t *testing.T) {
+	h, st, _, _ := v2084Handler(t)
+	id, capturedVersion := captureRequirement(t, h, "v2084a9")
+	path := "/v1/requirements/" + id + completeFramingRouteSuffix
+
+	// Neither suffix is a suffix of the other, asserted as arithmetic on the
+	// two literals rather than trusted.
+	if strings.HasSuffix(completeFramingRouteSuffix, startFramingRouteSuffix) || strings.HasSuffix(startFramingRouteSuffix, completeFramingRouteSuffix) {
+		t.Fatalf("one framing suffix is a suffix of the other: %q and %q", startFramingRouteSuffix, completeFramingRouteSuffix)
+	}
+
+	// 401 unauthenticated.
+	if w := call(h, http.MethodPost, path, completeFramingBody("v2084a9-unauth", capturedVersion), ""); w.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated status=%d body=%s", w.Code, w.Body.String())
+	}
+	// 403 for a runner.
+	if w := call(h, http.MethodPost, path, completeFramingBody("v2084a9-runner", capturedVersion), "runner"); w.Code != http.StatusForbidden {
+		t.Fatalf("runner status=%d body=%s", w.Code, w.Body.String())
+	}
+	// An empty requirement id is a 404, not a command with an empty target.
+	if w := call(h, http.MethodPost, "/v1/requirements/"+completeFramingRouteSuffix, completeFramingBody("v2084a9-empty", capturedVersion), "owner"); w.Code != http.StatusNotFound {
+		t.Fatalf("empty id status=%d body=%s", w.Code, w.Body.String())
+	}
+	// The execution-scoped :start branch does not claim this suffix.
+	if w := call(h, http.MethodPost, "/v1/executions/"+id+completeFramingRouteSuffix, completeFramingBody("v2084a9-exec", capturedVersion), "owner"); w.Code != http.StatusNotFound {
+		t.Fatalf("an executions path with the complete-framing suffix status=%d body=%s; it must not reach either handler", w.Code, w.Body.String())
+	}
+	// A GET to the same path is not this route: it falls through to the
+	// method-gated read branch, where the suffix is part of an id no Requirement
+	// has, and it changes nothing.
+	if w := call(h, http.MethodGet, path, "", "owner"); w.Code == http.StatusOK {
+		t.Fatalf("a GET to the complete-framing path returned 200: %s", w.Body.String())
+	}
+	// A body field the contract does not declare is refused by the strict
+	// decoder rather than ignored.
+	for _, smuggled := range []string{
+		`{"request_id":"v2084a9-smuggle-a","expected_requirement_version":1,"control_revision":0}`,
+		`{"request_id":"v2084a9-smuggle-b","expected_requirement_version":1,"repository_id":"repository-a"}`,
+		`{"request_id":"v2084a9-smuggle-c","expected_requirement_version":1,"at":"2026-01-01T00:00:00Z"}`,
+	} {
+		if w := call(h, http.MethodPost, path, smuggled, "owner"); w.Code != http.StatusBadRequest {
+			t.Fatalf("a smuggled field was accepted: status=%d body=%s request=%s", w.Code, w.Body.String(), smuggled)
+		}
+	}
+	// An unknown Requirement id is a 404 from the command, not from the router.
+	if w := call(h, http.MethodPost, "/v1/requirements/requirement-does-not-exist"+completeFramingRouteSuffix, completeFramingBody("v2084a9-unknown", 1), "owner"); w.Code != http.StatusNotFound {
+		t.Fatalf("an unknown Requirement status=%d body=%s", w.Code, w.Body.String())
+	}
+	// Every refusal above left the Requirement byte-unchanged, still captured.
+	beforeFraming, ok := st.Requirement(id)
+	if !ok {
+		t.Fatal("the Requirement disappeared")
+	}
+	if beforeFraming.Status != domain.RequirementCaptured || beforeFraming.Version != capturedVersion {
+		t.Fatalf("a refused request changed the Requirement: %+v", beforeFraming)
+	}
+	// A Requirement still in captured is refused by the domain transition: this
+	// route reached the command, and framing is the only admitted source.
+	if w := call(h, http.MethodPost, path, completeFramingBody("v2084a9-from-captured", capturedVersion), "owner"); w.Code != http.StatusBadRequest {
+		t.Fatalf("complete-framing from captured status=%d body=%s", w.Code, w.Body.String())
+	}
+	if after, _ := st.Requirement(id); !reflect.DeepEqual(after, beforeFraming) {
+		t.Fatalf("the refused complete-framing changed the Requirement: %+v", after)
+	}
+
+	// The two framing routes resolve to their OWN handler for the SAME
+	// requirement id, in this same run. :start-framing first.
+	w := call(h, http.MethodPost, "/v1/requirements/"+id+startFramingRouteSuffix, startFramingBody("v2084a9-frame", capturedVersion), "owner")
+	if w.Code != http.StatusOK {
+		t.Fatalf("start-framing status=%d body=%s", w.Code, w.Body.String())
+	}
+	if doc := decodeBody(t, w.Body.Bytes()); doc["status"] != "framing" {
+		t.Fatalf(":start-framing reached the wrong handler: %s", w.Body.String())
+	}
+	framed, _ := st.Requirement(id)
+	if framed.Status != domain.RequirementFraming || framed.Version != capturedVersion+1 {
+		t.Fatalf("the start-framing POST did not reach its command; the Requirement is %+v", framed)
+	}
+	// A stale expected version on the new route is a 409.
+	if w = call(h, http.MethodPost, path, completeFramingBody("v2084a9-stale", framed.Version+7), "owner"); w.Code != http.StatusConflict {
+		t.Fatalf("a stale expected version status=%d body=%s", w.Code, w.Body.String())
+	}
+	if again, _ := st.Requirement(id); !reflect.DeepEqual(again, framed) {
+		t.Fatalf("the refused stale request changed the Requirement: %+v", again)
+	}
+	// Then :complete-framing, on the same id.
+	w = call(h, http.MethodPost, path, completeFramingBody("v2084a9-owner", framed.Version), "owner")
+	if w.Code != http.StatusOK {
+		t.Fatalf("owner complete-framing status=%d body=%s", w.Code, w.Body.String())
+	}
+	doc := decodeBody(t, w.Body.Bytes())
+	for key := range doc {
+		if key != "requirement_id" && key != "status" && key != "version" {
+			t.Fatalf("the complete-framing response carries an unnamed field %q", key)
+		}
+	}
+	if doc["requirement_id"] != id || doc["status"] != "ready" {
+		t.Fatalf("the complete-framing response is %s", w.Body.String())
+	}
+	ready, _ := st.Requirement(id)
+	if ready.Status != domain.RequirementReady || ready.Version != framed.Version+1 {
+		t.Fatalf("the complete-framing POST did not reach its command; the Requirement is %+v", ready)
+	}
+	// A second complete-framing with a fresh request id is refused by the domain
+	// transition table: framing is the only admitted source.
+	if w = call(h, http.MethodPost, path, completeFramingBody("v2084a9-again", ready.Version), "owner"); w.Code != http.StatusBadRequest {
+		t.Fatalf("completing the framing of a ready Requirement status=%d body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), domain.ErrInvalidTransition.Error()) {
+		t.Fatalf("the second complete-framing was not refused by the domain transition: %s", w.Body.String())
+	}
+	if unchanged, _ := st.Requirement(id); !reflect.DeepEqual(unchanged, ready) {
+		t.Fatalf("a refused second complete-framing changed the Requirement: %+v", unchanged)
+	}
+
+	// The scheduler is accepted too, on its own Requirement: the route gates
+	// exactly the pair the capture and :start-framing routes gate.
+	otherID, otherVersion := captureRequirement(t, h, "v2084a9-scheduler")
+	if w = call(h, http.MethodPost, "/v1/requirements/"+otherID+startFramingRouteSuffix, startFramingBody("v2084a9-sched-frame", otherVersion), "scheduler"); w.Code != http.StatusOK {
+		t.Fatalf("scheduler start-framing status=%d body=%s", w.Code, w.Body.String())
+	}
+	otherFramed, _ := st.Requirement(otherID)
+	if w = call(h, http.MethodPost, "/v1/requirements/"+otherID+completeFramingRouteSuffix, completeFramingBody("v2084a9-sched-complete", otherFramed.Version), "scheduler"); w.Code != http.StatusOK {
+		t.Fatalf("scheduler complete-framing status=%d body=%s", w.Code, w.Body.String())
+	}
+
+	// A10: the route is declared in the transport contract, with the operation
+	// id and the two schemas this task names, and the sibling declaration and
+	// the read surface are still declared too.
+	data, err := os.ReadFile(filepath.Join("..", "..", "contracts", "openapi", "openapi-v1.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	yaml := string(data)
+	for _, want := range []string{
+		"  /v1/requirements/{requirement_id}" + completeFramingRouteSuffix + ":",
+		"operationId: completeRequirementFraming",
+		"CompleteRequirementFramingRequest:",
+		"CompleteRequirementFramingResponse:",
+		"  /v1/requirements/{requirement_id}" + startFramingRouteSuffix + ":",
+		"operationId: startRequirementFraming",
+		"  /v1/requirements/{requirement_id}:",
+	} {
+		if !strings.Contains(yaml, want) {
+			t.Fatalf("openapi-v1.yaml does not declare %q", want)
+		}
+	}
+	// The new path declares the SAME response codes the sibling declares.
+	completeResponses := openAPIResponseCodes(t, yaml, "  /v1/requirements/{requirement_id}"+completeFramingRouteSuffix+":")
+	startResponses := openAPIResponseCodes(t, yaml, "  /v1/requirements/{requirement_id}"+startFramingRouteSuffix+":")
+	if !reflect.DeepEqual(completeResponses, startResponses) {
+		t.Fatalf("the new route declares response codes %v, the sibling declares %v", completeResponses, startResponses)
+	}
+	if len(completeResponses) == 0 {
+		t.Fatal("the response-code scan found nothing; it is measuring the wrong block")
+	}
+	// The declared request carries exactly the two fields the command accepts.
+	block := yaml[strings.Index(yaml, "CompleteRequirementFramingRequest:"):]
+	block = block[:strings.Index(block, "CompleteRequirementFramingResponse:")]
+	if !strings.Contains(block, "additionalProperties: false") || !strings.Contains(block, "required: [request_id, expected_requirement_version]") {
+		t.Fatalf("the declared request schema is not closed to exactly two required fields: %s", block)
+	}
+	// The forbidden-name check runs against the declared PROPERTIES rather than
+	// the whole block: the block's description says in prose which three fields
+	// the request deliberately does not carry, and that sentence must not be
+	// deleted to satisfy a substring check.
+	properties := block[strings.Index(block, "properties:"):]
+	for _, forbidden := range []string{"control_revision", "repository_id", "timestamp", "password", "credential", "token", "secret", "raw_prompt", "raw_provider_output"} {
+		if strings.Contains(properties, forbidden) {
+			t.Fatalf("the declared request properties carry %q", forbidden)
+		}
+	}
+	if !strings.Contains(properties, "request_id") || !strings.Contains(properties, "expected_requirement_version") {
+		t.Fatalf("the declared request properties are not the two fields the command accepts: %s", properties)
+	}
+	// The response schema is closed too.
+	responseBlock := yaml[strings.Index(yaml, "CompleteRequirementFramingResponse:"):]
+	responseBlock = responseBlock[:strings.Index(responseBlock, "ControlRead:")]
+	if !strings.Contains(responseBlock, "additionalProperties: false") || !strings.Contains(responseBlock, "required: [requirement_id, status, version]") {
+		t.Fatalf("the declared response schema is not closed to exactly three required fields: %s", responseBlock)
+	}
+}
+
+// openAPIResponseCodes returns the sorted set of quoted response codes declared
+// on the single `post:` operation under the given path key. It reads the block
+// from the path key to the next line that starts at the same indentation, so it
+// cannot silently measure a neighbouring path.
+func openAPIResponseCodes(t *testing.T, document, pathKey string) []string {
+	t.Helper()
+	start := strings.Index(document, pathKey)
+	if start < 0 {
+		t.Fatalf("openapi-v1.yaml declares no path %q", pathKey)
+	}
+	rest := document[start+len(pathKey):]
+	lines := strings.Split(rest, "\n")
+	codes := map[string]bool{}
+	for _, line := range lines {
+		if strings.HasPrefix(line, "  /") || strings.HasPrefix(line, "components:") {
+			break
+		}
+		if !strings.Contains(line, "responses:") {
+			continue
+		}
+		for _, field := range strings.Split(line, "'") {
+			if len(field) == 3 && field[0] >= '1' && field[0] <= '5' {
+				digits := true
+				for _, r := range field {
+					if r < '0' || r > '9' {
+						digits = false
+					}
+				}
+				if digits {
+					codes[field] = true
+				}
+			}
+		}
+	}
+	out := make([]string, 0, len(codes))
+	for code := range codes {
+		out = append(out, code)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// TestTheWholeChainReachesReadyAndTheClaimCarriesTheParentToActive is V2-084
+// A11: the whole outcome asserted in ONE run over the composed handler.
+//
+// capture -> :start-framing -> :complete-framing -> the detail reports ready ->
+// Plan -> Prepare -> the claim as a RUNNER -> the detail reports the parent
+// ACTIVE, with the SAME requirement_id and its version up by exactly one ->
+// Plan, Prepare and claim a SECOND Increment -> the parent is still active with
+// its version UNCHANGED by that claim. The Requirement count never changes
+// after the first capture.
+//
+// Nothing here writes a status into the store by hand: every status the
+// Requirement passes through is produced by an application command, and the two
+// framing verbs and the claim are reached over real HTTP with real role gates.
+// Plan and Prepare are driven through the Service because no /v1 route creates
+// an Increment, which is itself a measured fact recorded in this task's
+// evidence.
+//
+// The detail route is read more than four times, so the injected clock is
+// stepped a whole UTC day between reads (the existing framingClock idiom). That
+// is an injected clock advanced explicitly -- never a sleep, a timer, a
+// goroutine or a wall-clock read -- and no assertion depends on the values it
+// returns.
+func TestTheWholeChainReachesReadyAndTheClaimCarriesTheParentToActive(t *testing.T) {
+	h, st, c, svc := v2084Handler(t)
+
+	// 1. Capture, over the real route, as the owner.
+	id, capturedVersion := captureRequirement(t, h, "v2084a11")
+	if capturedVersion != 1 {
+		t.Fatalf("capture reported version %d; the capture response contract is version 1", capturedVersion)
+	}
+
+	requirementCount := func(step string) int {
+		c.nextDay()
+		w := call(h, http.MethodGet, "/v1/requirements?page_size=100", "", "owner")
+		if w.Code != http.StatusOK {
+			t.Fatalf("%s: the requirement page status=%d body=%s", step, w.Code, w.Body.String())
+		}
+		var page struct {
+			Requirements []struct {
+				RequirementID string `json:"requirement_id"`
+			} `json:"requirements"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &page); err != nil {
+			t.Fatalf("%s: %v", step, err)
+		}
+		return len(page.Requirements)
+	}
+	detail := func(step string) map[string]any {
+		c.nextDay()
+		w := call(h, http.MethodGet, "/v1/requirements/"+id, "", "owner")
+		if w.Code != http.StatusOK {
+			t.Fatalf("%s: the detail status=%d body=%s", step, w.Code, w.Body.String())
+		}
+		return decodeBody(t, w.Body.Bytes())
+	}
+
+	countAfterCapture := requirementCount("after capture")
+	if countAfterCapture != 1 {
+		t.Fatalf("the fixture holds %d Requirements, want exactly 1", countAfterCapture)
+	}
+
+	// 2. The detail reports captured.
+	afterCapture := detail("after capture")
+	if afterCapture["status"] != "captured" {
+		t.Fatalf("the detail reports %v after capture", afterCapture["status"])
+	}
+	if afterCapture["version"] != float64(capturedVersion) {
+		t.Fatalf("the detail reports version %v after capture", afterCapture["version"])
+	}
+
+	// 3. :start-framing, as the owner: framing, at exactly one more.
+	w := call(h, http.MethodPost, "/v1/requirements/"+id+startFramingRouteSuffix, startFramingBody("v2084a11-frame", capturedVersion), "owner")
+	if w.Code != http.StatusOK {
+		t.Fatalf("start-framing status=%d body=%s", w.Code, w.Body.String())
+	}
+	framingResponse := decodeBody(t, w.Body.Bytes())
+	if framingResponse["requirement_id"] != id || framingResponse["status"] != "framing" || framingResponse["version"] != float64(capturedVersion+1) {
+		t.Fatalf("the start-framing response is %s", w.Body.String())
+	}
+	framingVersion := domain.Version(framingResponse["version"].(float64))
+
+	// 4. :complete-framing, as the owner: ready, at exactly one more again.
+	w = call(h, http.MethodPost, "/v1/requirements/"+id+completeFramingRouteSuffix, completeFramingBody("v2084a11-complete", framingVersion), "owner")
+	if w.Code != http.StatusOK {
+		t.Fatalf("complete-framing status=%d body=%s", w.Code, w.Body.String())
+	}
+	readyResponse := decodeBody(t, w.Body.Bytes())
+	if readyResponse["requirement_id"] != id {
+		t.Fatalf("complete-framing named a different Requirement: %s", w.Body.String())
+	}
+	if readyResponse["status"] != "ready" {
+		t.Fatalf("complete-framing reports %v, want ready", readyResponse["status"])
+	}
+	if readyResponse["version"] != float64(framingVersion+1) {
+		t.Fatalf("complete-framing reports version %v, want %d", readyResponse["version"], framingVersion+1)
+	}
+	readyVersion := domain.Version(readyResponse["version"].(float64))
+	afterReady := detail("after complete-framing")
+	if afterReady["status"] != "ready" || afterReady["version"] != float64(readyVersion) {
+		t.Fatalf("the detail after complete-framing is %+v", afterReady)
+	}
+	// A14: nextAction branches on completed and cancelled and on Execution and
+	// Increment status, never on ready or active, so a ready Requirement with no
+	// Increment still reports what a captured one reports. This is why
+	// readmodels.go is prohibited by design rather than by omission.
+	if afterReady["next_action"] != afterCapture["next_action"] {
+		t.Fatalf("reaching ready changed next_action from %v to %v; the read model was supposed to be untouched", afterCapture["next_action"], afterReady["next_action"])
+	}
+
+	// 5. The first Increment. Plan bumps the parent's Version WITHOUT a domain
+	// command, which is exactly what makes the claim's in-transaction read of
+	// the parent load-bearing: no value any earlier response reported is still
+	// current by the time the claim runs.
+	ownerCtx := application.ContextWithCaller(context.Background(), application.Caller{Role: application.RoleOwner, Subject: "owner"})
+	c.nextDay()
+	planned, err := svc.Plan(ownerCtx, application.PlanRequest{RequestID: "v2084a11:plan", RequirementID: id, ExpectedRequirementVersion: readyVersion})
+	if err != nil {
+		t.Fatalf("plan (through the Service, because no /v1 route creates an Increment): %v", err)
+	}
+	c.nextDay()
+	prepared, err := svc.Prepare(ownerCtx, application.PrepareRequest{RequestID: "v2084a11:prepare", IncrementID: planned.IncrementID, ExpectedVersion: planned.Version})
+	if err != nil {
+		t.Fatalf("prepare (through the Service): %v", err)
+	}
+	beforeClaim, ok := st.Requirement(id)
+	if !ok {
+		t.Fatal("the Requirement is not in the store")
+	}
+	if beforeClaim.Status != domain.RequirementReady {
+		t.Fatalf("Plan or Prepare moved the parent's status to %q; neither may", beforeClaim.Status)
+	}
+	if beforeClaim.Version == readyVersion {
+		t.Fatal("Plan did not move the parent's Version; the claim's in-transaction read would then be indistinguishable from the response value")
+	}
+
+	// 6. The claim, over the real route, as a RUNNER.
+	claimBody := `{"request_id":"v2084a11-claim","increment_id":"` + planned.IncrementID +
+		`","expected_increment_version":` + strconv.FormatInt(int64(prepared.Version), 10) +
+		`,"target":{"installation_id":"install","requirement_id":"` + id + `","increment_id":"` + planned.IncrementID + `"}}`
+	c.nextDay()
+	w = call(h, http.MethodPost, "/v1/runner/claims:acquire", claimBody, "runner")
+	if w.Code != http.StatusOK {
+		t.Fatalf("claim status=%d body=%s", w.Code, w.Body.String())
+	}
+	claimResponse := decodeBody(t, w.Body.Bytes())
+	if claimResponse["increment_id"] != planned.IncrementID {
+		t.Fatalf("the claim response names %v", claimResponse["increment_id"])
+	}
+	// ClaimResponse gained no field: the parent transition is derived, never
+	// reported back to the caller.
+	for _, absent := range []string{"requirement_id", "requirement_status", "requirement_version", "parent_status"} {
+		if _, present := claimResponse[absent]; present {
+			t.Fatalf("the claim response carries a new field %q; ClaimRequest and ClaimResponse gain none", absent)
+		}
+	}
+
+	// 7. The detail now reports the parent ACTIVE, the SAME requirement_id, and
+	// its version up by exactly one.
+	afterClaim := detail("after the claim")
+	if afterClaim["requirement_id"] != id {
+		t.Fatalf("the detail after the claim names %v, want the same Requirement %q", afterClaim["requirement_id"], id)
+	}
+	if afterClaim["status"] != "active" {
+		t.Fatalf("the detail after the claim reports %v, want active; domain-model.md:266 defines active as one or more Increments in progress", afterClaim["status"])
+	}
+	if afterClaim["version"] != float64(beforeClaim.Version+1) {
+		t.Fatalf("the claim moved the parent's version to %v, want exactly %d", afterClaim["version"], beforeClaim.Version+1)
+	}
+
+	// 8. A SECOND Increment on the SAME parent. The parent is already active, so
+	// the second claim must leave it untouched.
+	activeBeforeSecondPlan, _ := st.Requirement(id)
+	c.nextDay()
+	planned2, err := svc.Plan(ownerCtx, application.PlanRequest{RequestID: "v2084a11:plan-2", RequirementID: id, ExpectedRequirementVersion: activeBeforeSecondPlan.Version})
+	if err != nil {
+		t.Fatalf("plan 2: %v", err)
+	}
+	c.nextDay()
+	prepared2, err := svc.Prepare(ownerCtx, application.PrepareRequest{RequestID: "v2084a11:prepare-2", IncrementID: planned2.IncrementID, ExpectedVersion: planned2.Version})
+	if err != nil {
+		t.Fatalf("prepare 2: %v", err)
+	}
+	beforeSecondClaim, _ := st.Requirement(id)
+	if beforeSecondClaim.Status != domain.RequirementActive {
+		t.Fatalf("the parent is %q before the second claim", beforeSecondClaim.Status)
+	}
+	claimBody2 := `{"request_id":"v2084a11-claim-2","increment_id":"` + planned2.IncrementID +
+		`","expected_increment_version":` + strconv.FormatInt(int64(prepared2.Version), 10) +
+		`,"target":{"installation_id":"install","requirement_id":"` + id + `","increment_id":"` + planned2.IncrementID + `"}}`
+	c.nextDay()
+	w = call(h, http.MethodPost, "/v1/runner/claims:acquire", claimBody2, "runner")
+	if w.Code != http.StatusOK {
+		t.Fatalf("claim 2 status=%d body=%s", w.Code, w.Body.String())
+	}
+	afterSecondClaim, _ := st.Requirement(id)
+	if !reflect.DeepEqual(afterSecondClaim, beforeSecondClaim) {
+		t.Fatalf("the second claim changed the already-active parent: before=%+v after=%+v", beforeSecondClaim, afterSecondClaim)
+	}
+	stillActive := detail("after the second claim")
+	if stillActive["status"] != "active" || stillActive["version"] != float64(beforeSecondClaim.Version) {
+		t.Fatalf("the detail after the second claim is %+v, want active at version %d", stillActive, beforeSecondClaim.Version)
+	}
+
+	// 9. The Requirement count never changed after the first capture: the whole
+	// chain created no second Requirement.
+	if got := requirementCount("after the second claim"); got != countAfterCapture {
+		t.Fatalf("the chain changed the number of Requirements from %d to %d", countAfterCapture, got)
+	}
+	t.Logf("A11: one Requirement %q walked captured(v%d) -> framing(v%d) -> ready(v%d) -> [plan+prepare moved it to v%d] -> active(v%d) on the first claim over HTTP, and stayed active(v%d) across a second Increment's claim, with the Requirement count unchanged at %d",
+		id, capturedVersion, framingVersion, readyVersion, beforeClaim.Version, beforeClaim.Version+1, afterSecondClaim.Version, countAfterCapture)
+}
+
+// TestARequirementLeftInReadyOrActiveStillReadsAfterTheChangeIsReverted is
+// V2-084 A17's verification clause.
+//
+// Rollback is a revert of the new command in internal/application/framing.go,
+// the parent-transition block in Service.Claim, one branch plus one suffix
+// constant in internal/api/api.go, and one path block plus two schemas in
+// contracts/openapi/openapi-v1.yaml -- and nothing else, because the change adds
+// no port, no stored field, no document kind, no index and no request or
+// response field, and writes only documents the existing Capture and
+// StartFraming paths already write.
+//
+// The claim that needs verifying is the last one: that no data exists which only
+// the new code can read. ready and active are statuses the domain already
+// accepts and every read model already reports, so a Requirement left in either
+// by reverted code still reads. That is asserted here by putting Requirements
+// into ready and into active WITHOUT the new command -- writing the status
+// directly, exactly as the pre-existing needs-input fixture writes active -- and
+// reading them back through the pre-existing detail route AND the export.
+func TestARequirementLeftInReadyOrActiveStillReadsAfterTheChangeIsReverted(t *testing.T) {
+	h, st, c, _ := v2084Handler(t)
+	for _, tc := range []struct {
+		tag    string
+		status domain.RequirementStatus
+		want   string
+	}{
+		{"v2084a17-ready", domain.RequirementReady, "ready"},
+		{"v2084a17-active", domain.RequirementActive, "active"},
+	} {
+		id, version := captureRequirement(t, h, tc.tag)
+		// The state a reverted tree would be left holding, written without any
+		// V2-084 code path.
+		if err := st.Transact(context.Background(), func(u application.UnitOfWork) error {
+			r, ok, e := u.Requirement(context.Background(), id)
+			if e != nil || !ok {
+				t.Fatalf("seed: ok=%v err=%v", ok, e)
+			}
+			next := r
+			next.Status = tc.status
+			next.Version++
+			return u.SaveRequirement(context.Background(), next, r.Version)
+		}); err != nil {
+			t.Fatal(err)
+		}
+		c.nextDay()
+		w := call(h, http.MethodGet, "/v1/requirements/"+id, "", "owner")
+		if w.Code != http.StatusOK {
+			t.Fatalf("a Requirement stored in %s does not read: status=%d body=%s", tc.want, w.Code, w.Body.String())
+		}
+		doc := decodeBody(t, w.Body.Bytes())
+		if doc["status"] != tc.want {
+			t.Fatalf("the detail reports %v for a Requirement stored in %s", doc["status"], tc.want)
+		}
+		if doc["version"] != float64(version+1) {
+			t.Fatalf("the detail reports version %v", doc["version"])
+		}
+		// The read model reports the same next action it reports for a captured
+		// Requirement with no Increment, which is why readmodels.go is
+		// prohibited by design rather than by omission.
+		if doc["next_action"] != "plan increments" {
+			t.Fatalf("a %s Requirement with no Increment reports next_action %v", tc.want, doc["next_action"])
+		}
+		c.nextDay()
+		if w = call(h, http.MethodGet, "/v1/requirements?page_size=100", "", "owner"); w.Code != http.StatusOK {
+			t.Fatalf("the requirement page does not read with a %s Requirement in it: status=%d body=%s", tc.want, w.Code, w.Body.String())
+		}
+		if !strings.Contains(w.Body.String(), id) {
+			t.Fatalf("the requirement page omits the %s Requirement: %s", tc.want, w.Body.String())
+		}
+		c.nextDay()
+		if w = call(h, http.MethodGet, "/v1/export", "", "owner"); w.Code != http.StatusOK {
+			t.Fatalf("the export does not read with a %s Requirement in it: status=%d body=%s", tc.want, w.Code, w.Body.String())
+		}
+		if !strings.Contains(w.Body.String(), id) {
+			t.Fatalf("the export omits the %s Requirement", tc.want)
+		}
+	}
+}
