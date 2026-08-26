@@ -6,8 +6,8 @@
   "correlation_id": "v2-086-scheduler-role",
   "task_id": "V2-086",
   "component": "api",
-  "evidence_key": "e4b1306adc57bf9ca4c8f70224599fce2c91511c4288cb92ea77aeb361d361b8",
-  "result": "passed",
+  "evidence_key": "9f68f17fd9fb371c92f623a03b2ff9b33a1f5c2915b6f4b9eec742a5ddf5205a",
+  "result": "partial",
   "observed_at": "2026-08-26T22:00:00Z",
   "checks": [
     {
@@ -81,6 +81,260 @@
       "working_directory": ".",
       "timeout_seconds": 60,
       "summary": "Gate ordering, recorded because it is itself an acceptance item (hard rule 2, and V2-087 had to report the opposite). The scope-boundary table above and every a1-* and a2-* baseline check in these three records were written and COMMITTED as the FIRST commit on branch v2-task/V2-086, on top of base commit a0622910d493cadd94c6d819690dbab0232a44ab, at which point `git status --porcelain` listed only .agents/v2/evidence/V2-086-application.json, .agents/v2/evidence/V2-086-api.json, .agents/v2/evidence/V2-086-runner.json and .agents/v2/evidence/index.json. No file under internal/ or cmd/ was modified before that commit. The commits that follow are, in order: the A3 reproduction test (test files only, run against the UNREPAIRED non-test tree), then the repair, then the proof, then the verification results appended to these records."
+    },
+    {
+      "name": "a5-scheduler-checked-before-the-owner-map",
+      "status": "passed",
+      "argv": [
+        "devbox",
+        "run",
+        "--pure",
+        "--",
+        "sh",
+        "-c",
+        "go test -race -count=1 -v -run 'TestCombinedAuthenticatorResolvesTheSchedulerBeforeTheOwnerMap' ./internal/api"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 900,
+      "summary": "A5 MEASURED. internal/api/CombinedAuthenticator gains exactly one field, SchedulerIdentity string. Authenticate's order is unchanged where it matters and the new branch sits in exactly one place: (1) the runner-session header branch, BYTE-UNCHANGED (verified by `git diff` over auth.go, which touches only the struct declaration and the block between parseIAPEmail and the OwnerEmails lookup); (2) parseIAPEmail; (3) NEW -- if the trimmed lowercased SchedulerIdentity is non-empty, refuse an overlap with OwnerEmails, then return application.LoopCaller(email) when it equals the asserted email; (4) the existing OwnerEmails lookup and RoleOwner return, unchanged. Checking BEFORE the owner map is load-bearing, not stylistic: an identity that resolved as owner first would silently acquire every owner-only route. ASSERTED, executed: the same authenticator resolves the scheduler address to RoleScheduler with the asserted email as Subject and an empty RunnerID, resolves the allowlisted owner to RoleOwner, refuses a stranger, folds case on both sides (an upper-case assertion of the scheduler address still resolves, and the Subject is the normalised lowercase form, which is what makes it usable as a domain ActorID), and -- with the field left empty -- behaves exactly as it did at a0622910d493cadd94c6d819690dbab0232a44ab: the scheduler's own address is simply not an owner and is refused. Verdict: '--- PASS: TestCombinedAuthenticatorResolvesTheSchedulerBeforeTheOwnerMap'."
+    },
+    {
+      "name": "a5-a6-an-identity-configured-as-both-is-refused",
+      "status": "passed",
+      "argv": [
+        "devbox",
+        "run",
+        "--pure",
+        "--",
+        "sh",
+        "-c",
+        "go test -race -count=1 -v -run 'TestCombinedAuthenticatorRefusesAnIdentityConfiguredAsBothSchedulerAndOwner' ./internal/api"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 900,
+      "summary": "A5's and A6's REFUSAL PROOF, executed. An email present in BOTH OwnerEmails and SchedulerIdentity makes Authenticate return an ERROR naming the misconfiguration -- 'misconfigured identity: the scheduler identity is also an owner email; an asserted identity must have exactly one role' -- and never a Caller: the test asserts, for the overlapping address AND for the separate owner address AND for a stranger, that err is non-nil, that the returned Caller is the zero value, and that the message contains 'scheduler identity is also an owner email'. The refusal is deliberately UNCONDITIONAL on the asserted identity rather than scoped to the overlapping one, because a deployment in that state has no defensible answer for any IAP caller; it is not resolved by precedence, because a single asserted email must produce exactly one role or an error. Case folding and padding do not let the overlap slip through: SchedulerIdentity '  RECONCILER@Example.IAM.gserviceaccount.COM  ' against an OwnerEmails entry of the lowercase form is refused too. Verdict: '--- PASS: TestCombinedAuthenticatorRefusesAnIdentityConfiguredAsBothSchedulerAndOwner'."
+    },
+    {
+      "name": "a5-a-runner-session-still-resolves-as-the-runner",
+      "status": "passed",
+      "argv": [
+        "devbox",
+        "run",
+        "--pure",
+        "--",
+        "sh",
+        "-c",
+        "go test -race -count=1 -v -run 'TestARunnerSessionStillResolvesAsTheRunnerWithASchedulerIdentityConfigured' ./internal/api"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 900,
+      "summary": "A5's third assertion, executed against a REAL session rather than a forged one: the enrollment protocol is driven end to end (IssueEnrollment, Begin with an ed25519 key derived from an all-zero seed, runner.ChallengeMessage, ed25519.Sign, Complete) and the resulting session token is sent together with the scheduler's IAP assertion. The result is RoleRunner with Subject and RunnerID both 'runner-1', so configuring a scheduler identity can neither promote nor demote a runner: the runner-session branch still runs first and is byte-unchanged. The pre-existing TestCombinedAuthenticatorDoesNotFallbackFromRunnerHeader still passes in the same run, so an INVALID session still refuses rather than falling through to either the scheduler or the owner branch. Verdict: '--- PASS: TestARunnerSessionStillResolvesAsTheRunnerWithASchedulerIdentityConfigured'."
+    },
+    {
+      "name": "a5-localownerbearer-has-no-scheduler-path",
+      "status": "passed",
+      "argv": [
+        "sh",
+        "-c",
+        "git diff a0622910d493cadd94c6d819690dbab0232a44ab -- internal/api/auth.go | grep -c LocalOwnerBearerAuthenticator || true"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 60,
+      "summary": "A5's STATED RESIDUAL, recorded rather than omitted. LocalOwnerBearerAuthenticator (internal/api/auth.go:71-100 at a0622910d493cadd94c6d819690dbab0232a44ab) is NOT changed: the diff over auth.go touches only the CombinedAuthenticator struct and the block inside CombinedAuthenticator.Authenticate, and no line of LocalOwnerBearerAuthenticator or of parseIAPEmail moves. No environment variable was added for a preview-local scheduler token either (cmd/control-plane/main.go's only change is the SchedulerIdentity assignment; os.Getenv is called on exactly the same names as before). CONSEQUENCE, stated plainly: the preview-local composition can produce an owner and a runner but NOT a scheduler, because that authenticator establishes identity from bearer tokens and a scheduler there would need a new local-only variable and a new token map. The outcome sentence asks for the role to be reachable, and the production IAP boundary -- the only authenticator cmd/control-plane selects for a real deployment -- now satisfies it."
+    },
+    {
+      "name": "a6-the-composition-is-one-line-and-adds-no-variable",
+      "status": "passed",
+      "argv": [
+        "sh",
+        "-c",
+        "git diff a0622910d493cadd94c6d819690dbab0232a44ab -- cmd/control-plane/main.go"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 60,
+      "summary": "A6 MEASURED, and reported as a PARTIAL with the reason. What was done: cmd/control-plane/main.go's single changed line is the CombinedAuthenticator literal, which now reads `api.CombinedAuthenticator{Runner: runnerEnrollment, OwnerEmails: owners, SchedulerIdentity: strings.ToLower(reconcileIdentity)}`. It takes the SAME strings.ToLower(reconcileIdentity) value the api.Config literal already passes as ReconcileIdentity, read from the already-required RECONCILE_IDENTITY environment variable; the diff over that file is one line, no environment variable was added, and nothing else in the file changed. MEASURED line-number DISAGREEMENTS: the Work Order cites main.go:168-170 for the RECONCILE_IDENTITY read and :179 for the authenticator selection; measured, requiredEnv(\"RECONCILE_IDENTITY\") is main.go:168-171 and the authenticator line is main.go:191, so the second citation is stale by +12. The reconcilers the closure drives are main.go:198 and :201 inside the InternalReconcile closure at :195-203, not :184-189. The unmet half of A6 is recorded as its own check below, with status failed, rather than folded into this one."
+    },
+    {
+      "name": "a6-no-start-time-refusal-was-added-UNMET",
+      "status": "failed",
+      "argv": [
+        "sh",
+        "-c",
+        "grep -n 'OWNER_EMAILS\\|SchedulerIdentity\\|reconcileIdentity' cmd/control-plane/main.go"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 60,
+      "summary": "A6, THE UNMET HALF, recorded as failed and escalated to the tech_lead rather than reinterpreted, weakened or written as a pass. A6 asks for THREE things that cannot all hold: (i) 'If RECONCILE_IDENTITY also appears in OWNER_EMAILS the process must fail to start with a message naming the conflict'; (ii) 'Add NO new environment variable and change nothing else in that file'; (iii) 'assert that by unit-testing the authenticator's refusal, since cmd/control-plane has no test package'. (i) can only be satisfied by a second added guard in cmd/control-plane/main.go's run(), which (ii) forbids, and which would be an UNTESTED guard because (iii) states the package has no test target -- and an untested guard is not a guard. WHAT WAS DONE INSTEAD: the refusal lives in CombinedAuthenticator.Authenticate, where it is asserted by TestCombinedAuthenticatorRefusesAnIdentityConfiguredAsBothSchedulerAndOwner for the overlapping address, for the separate owner address and for a stranger, with the message naming the misconfiguration and the returned Caller being the zero value in every case. WHAT IS THEREFORE NOT TRUE: a control-plane process configured with RECONCILE_IDENTITY inside OWNER_EMAILS still STARTS. It then refuses every IAP-authenticated request, so it is fail-closed at the request boundary and not at startup, and an operator sees the conflict named in every 401 rather than once on stderr. MEASURED, so the gap is precise: cmd/control-plane/main.go calls ownerAllowlist(emails) at :120 and requiredEnv(\"RECONCILE_IDENTITY\") at :168, and between them there is no comparison of the two; adding one is a one-line change this task did not make. Escalated for the tech_lead to decide whether (i) or (ii) wins."
+    },
+    {
+      "name": "a7-the-reconcile-identity-check-is-byte-unchanged",
+      "status": "passed",
+      "argv": [
+        "sh",
+        "-c",
+        "sed -n '99,104p' internal/api/api.go | sha256sum ; git diff -U0 a0622910d493cadd94c6d819690dbab0232a44ab -- internal/api/api.go"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 60,
+      "summary": "A7's central constraint, MEASURED two ways. (1) DIGEST: sha256 of internal/api/api.go lines 99-104 -- the whole /internal/reconcile identity check, from `if r.URL.Path == \"/internal/reconcile\"` through its 401 and its return -- is 3bd6a7c9e3414fa1248f892c549fffa6eee994ac51644c2cc2955ae7e411eb32 AFTER the change, identical to the value measured at a0622910d493cadd94c6d819690dbab0232a44ab. (2) DIFF: `git diff -U0` over api.go reports exactly one hunk, '@@ -105 +105,15 @@', so the first changed line is 105 and every line of the check at 99-104 is untouched. The branch is NOT re-routed through h.config.Authenticator: it still reads the IAP header directly and still runs BEFORE the `h.config.Authenticator == nil || h.config.Service == nil` guard (MEASURED at api.go:128-131 before the change and :142-145 after; the Work Order's :113-116 is stale by +15), so it keeps working under LocalOwnerBearerAuthenticator, which cannot resolve an IAP email at all. api.Config gains no field and loses none -- the diff touches no type declaration. The ONLY change is that, having verified the identity it already verified, the branch builds application.LoopCaller(h.config.ReconcileIdentity) and passes application.ContextWithCaller(r.Context(), loop) to h.config.InternalReconcile."
+    },
+    {
+      "name": "a7-every-existing-reconcile-negative-keeps-its-status-and-body",
+      "status": "passed",
+      "argv": [
+        "devbox",
+        "run",
+        "--pure",
+        "--",
+        "sh",
+        "-c",
+        "go test -race -count=1 -v -run 'TestInternalReconcileRequiresDedicatedIAPIdentity|TestReconcileStillFailsClosedWithoutAnIdentityAndCarriesNoCallerThen|TestTheApiSurfaceIsPinned' ./internal/api"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 900,
+      "summary": "A7's negatives, executed. The pre-existing TestInternalReconcileRequiresDedicatedIAPIdentity still passes unchanged: the correct identity is 202 with the hook called, and the same identity plus a runner-session header is 401 with the hook not called. The V2-083 pin table's six reconcile rows still pass with their exact status codes and error codes: reconcile-with-nothing-configured 401 unauthorized, reconcile-without-the-scheduler-identity 401 unauthorized, reconcile-with-a-runner-session-header 401 unauthorized, reconcile-with-a-foreign-identity 401 unauthorized, reconcile-accepted 202, reconcile-rejects-get 405 method_not_allowed. Both existing test functions keep their names and no existing assertion changed. NEW, and it is the fail-closed proof A7 needs: an EMPTY ReconcileIdentity still yields 401 with the body 'reconcile scheduler identity required' and the hook never runs, and a WHITESPACE-ONLY ReconcileIdentity -- the one shape the branch's own unchanged check ADMITS, because it trims both sides before comparing, so 'accounts.google.com:' asserted against an identity of spaces compares equal -- also yields 401, because application.LoopCaller refuses it. That attribution is measured rather than assumed: the test re-evaluates the branch's own predicate on the same inputs and requires it to ADMIT the request, then requires LoopCaller to REFUSE the same identity, so the 401 can only come from the new guard. An owner IAP identity is still refused there, and so is a request carrying a runner-session header and one carrying no identity at all -- all three asserted in the A9 proof. Verdict: 'ok github.com/takushi/agentic-loop-foundation/v2/internal/api'."
+    },
+    {
+      "name": "a9-the-executed-proof-over-the-composed-handler",
+      "status": "passed",
+      "argv": [
+        "devbox",
+        "run",
+        "--pure",
+        "--",
+        "sh",
+        "-c",
+        "go test -race -count=1 -v -run 'TestTheSchedulerIdentityCapturesALoopAttributedRequirementAndIsRefusedOnEveryOwnerOnlyRoute' ./internal/api"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 900,
+      "summary": "A9, executed over the composed HTTP handler with a REAL api.CombinedAuthenticator -- not a bearer map -- configured with an owner email, a DIFFERENT scheduler email, and the scheduler email as ReconcileIdentity, which is exactly how cmd/control-plane wires it. Verdict: '--- PASS: TestTheSchedulerIdentityCapturesALoopAttributedRequirementAndIsRefusedOnEveryOwnerOnlyRoute'. What it asserts, in order. (a) ATTRIBUTION, the centre: POST /v1/requirements asserting the scheduler identity returns 201; the response's requested_by reads actor_type 'loop' with the asserted identity as subject; the STORED domain.Requirement read straight out of the memory store has RequestedBy.ActorType == domain.ActorTypeLoop and RequestedBy.Subject == the scheduler identity; the same capture as the owner reads 'owner' in the response and domain.ActorTypeOwner in the store. GET /v1/requirements/{id} reports the same for both, read AS THE OWNER because that route is owner-only (api.go:194, an unchanged gate) -- the point being that the value the Loop wrote is what the owner sees -- and the scheduler is 403 on that read. (b) POST /v1/requirements/{id}:start-framing as the scheduler returns 200, the stored Requirement moves to domain.RequirementFraming, and its RequestedBy still reads loop after the transition. (c) POST /v1/requirements/{id}:request-input as the scheduler returns 200. (d) POST /v1/repositories as the scheduler returns 403 and POST /v1/requirements/{id}:answer-input as the scheduler returns 403 -- both owner-only at the transport, and both refused before any command runs. (e) POST /internal/reconcile with the OWNER identity returns 401 and the hook never runs; with the SCHEDULER identity it returns 202, the hook runs exactly once, and application.CallerFromContext on the context it was handed returns RoleScheduler with the reconcile identity as Subject -- so the carried caller is verified as present and correctly attributed. Three further reconcile refusals are asserted in the same run (a runner-session header, a foreign identity, no identity at all: all 401, hook count still one). The injected clock is stepped a whole UTC day three times because the memory adapter admits only four read transactions per budget day."
+    },
+    {
+      "name": "a10-no-gate-changed-and-the-openapi-document-is-byte-unchanged",
+      "status": "passed",
+      "argv": [
+        "sh",
+        "-c",
+        "sha256sum contracts/openapi/openapi-v1.yaml ; git diff --stat a0622910d493cadd94c6d819690dbab0232a44ab -- contracts internal/domain ; grep -n 'caller.Role != application.Role' internal/api/api.go"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 60,
+      "summary": "A10 MEASURED. contracts/openapi/openapi-v1.yaml sha256 is ca62ef4c0e1f7dbe357d03209d68f387581ed53aeaa66b0ea8fc5b8b7eea8cdd, identical to a0622910d493cadd94c6d819690dbab0232a44ab; `git diff --stat` over contracts/ and internal/domain/ is EMPTY. The eighteen transport role gates enumerated in this record's baseline check are at the same lines with the same roles after the change -- the api.go diff is one hunk at line 105, inside the reconcile branch, and touches no gate. No callerActor role list changed (internal/application/service.go, repository.go, framing.go and human_input.go are byte-unchanged). No PermitKind changed (internal/domain byte-unchanged). No route was added. THE TENSION, recorded for the tech_lead and NOT resolved: contracts/openapi/openapi-v1.yaml lines 5-8 declare that 'Increment decomposition/planning is intentionally not a public owner operation; it remains a loop scheduler responsibility', while internal/application/service.go's Plan (:888) and Prepare (:1023) both accept RoleOwner, and 23 test files call one of the two (MEASURED 23 by `grep -rln '\\.Plan(\\|\\.Prepare(' --include='*_test.go' .`; the Work Order says 22, a DISAGREEMENT, and the 23rd is internal/api/live_dogfood_test.go which is build-tag gated and was not run). The declaration is a statement about the PUBLIC HTTP surface, where neither command has a route at all, so narrowing either command to scheduler-only would remove the owner from two commands and break every existing fixture. Recorded, not acted on."
+    },
+    {
+      "name": "a11-api-test-name-sets",
+      "status": "passed",
+      "argv": [
+        "devbox",
+        "run",
+        "--pure",
+        "--",
+        "sh",
+        "-c",
+        "go test -list '.*' ./internal/api | grep -E '^Test' | sort"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 900,
+      "summary": "A11 for internal/api. BEFORE 63 top-level tests, AFTER 69. Set difference: ADDITIONS ONLY -- TestARunnerSessionStillResolvesAsTheRunnerWithASchedulerIdentityConfigured, TestCombinedAuthenticatorRefusesAnIdentityConfiguredAsBothSchedulerAndOwner, TestCombinedAuthenticatorResolvesTheSchedulerBeforeTheOwnerMap, TestNoOwnerOrRunnerTransportCanRecordALoopRequester, TestReconcileStillFailsClosedWithoutAnIdentityAndCarriesNoCallerThen and TestTheSchedulerIdentityCapturesALoopAttributedRequirementAndIsRefusedOnEveryOwnerOnlyRoute. Removals: ZERO -- `comm -23` over the sorted before and after name sets is empty. No existing assertion was edited: the diff over internal/api/api_test.go and auth_test.go is append-only apart from each file's import block. All 63 pre-existing api tests pass in the same run, including the V2-083 pin table and TestInternalReconcileRequiresDedicatedIAPIdentity."
+    },
+    {
+      "name": "a12-the-carried-caller-is-not-yet-consumed",
+      "status": "passed",
+      "argv": [
+        "sh",
+        "-c",
+        "grep -n 'func (r \\*Reconciler) Tick\\|func (r \\*VerificationReconciler) Tick' internal/reconciler/*.go ; sed -n '195,203p' cmd/control-plane/main.go"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 60,
+      "summary": "A12, the residual stated plainly and not softened. The loop caller POST /internal/reconcile now carries is verified as present and correctly attributed -- the A9 proof reads it back out of the context the hook received -- but it is NOT yet consumed by any command inside the tick, because both reconcilers the cmd/control-plane closure drives take NO Caller: their signatures are `func (r *Reconciler) Tick(ctx context.Context, scope string) (int, int, error)` and `func (r *VerificationReconciler) Tick(ctx context.Context) (int, error)`, and the closure at cmd/control-plane/main.go:195-203 calls them with a timeout context derived from the one it was handed and nothing else. The Requirement transitions that WILL consume it -- wait and recover, which docs/architecture/domain-model.md defines as automatic -- belong to the V2-084 follow-on, and internal/reconciler/** is prohibited to this task. LocalOwnerBearerAuthenticator has no scheduler path at all. No capability id is cited in this record and the phrases the Work Order forbids do not appear in it."
+    },
+    {
+      "name": "a18-api-evidence-key",
+      "status": "passed",
+      "argv": [
+        "devbox",
+        "run",
+        "--pure",
+        "--",
+        "make",
+        "evidence-keys"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 900,
+      "summary": "A18. Measured on the FINAL tree with everything git-added. The api component key is 9f68f17fd9fb371c92f623a03b2ff9b33a1f5c2915b6f4b9eec742a5ddf5205a; it was e4b1306adc57bf9ca4c8f70224599fce2c91511c4288cb92ea77aeb361d361b8 at a0622910d493cadd94c6d819690dbab0232a44ab. Recorded as a FACT for the coordinator and not as a fourth record: cmd/control-plane/** is the control-plane component's root and that key also moves, from 360ae7cfc903454c1ef00f46f0e18ead197cce712b900af33e18c83e0ef6a548 to a954dadeeb5f13350d969ecfe6dee93ad5a0c477ef6eb9d3d3d465ddbbfb4bf4. Under gate rule G6a key movement is provenance, not a verdict."
+    },
+    {
+      "name": "a19-verification-component-api",
+      "status": "passed",
+      "argv": [
+        "devbox",
+        "run",
+        "--pure",
+        "--",
+        "make",
+        "component-api"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 1800,
+      "summary": "A19. Verdict line: 'ok github.com/takushi/agentic-loop-foundation/v2/internal/api 0.071s'."
+    },
+    {
+      "name": "a19-verification-make-smoke",
+      "status": "passed",
+      "argv": [
+        "devbox",
+        "run",
+        "--pure",
+        "--",
+        "sh",
+        "-c",
+        "make smoke && echo SMOKE_OK || echo SMOKE_FAILED"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 1800,
+      "summary": "A19, run because cmd/control-plane changed. `make smoke` prints nothing of its own (each of its three lines is a silent `go run ... --version | grep -Eq`), so the verdict was made explicit with a sentinel: the run printed SMOKE_OK, meaning all three binaries -- cmd/runner, cmd/bootstrap and cmd/control-plane -- printed a version matching '^[0-9]+\\.[0-9]+\\.[0-9]+-dev$'. Measured directly as well: `go run ./cmd/control-plane --version` prints '0.1.0-dev'. The --version branch returns before run() is reached, so the new SchedulerIdentity assignment is compiled but not executed by smoke, and no environment variable is required for it to pass."
+    },
+    {
+      "name": "a17-execution-environment",
+      "status": "passed",
+      "argv": [
+        "sh",
+        "-c",
+        "uname -srm ; devbox version ; git rev-parse HEAD"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 300,
+      "summary": "Execution environment, recorded so every verdict above is attributable. uname -srm: 'Linux 6.18.33.2-microsoft-standard-WSL2 x86_64'. go version as resolved INSIDE devbox run --pure: 'go version go1.25.0 linux/amd64'. devbox version: 0.17.2 (devbox itself reports an available upgrade to v0.18.0 on every invocation; it was not taken, because devbox.json and devbox.lock are prohibited to this task). Worktree path: /home/takushi/repos/agentic-loop-foundation-worktrees/v2-task-086. Branch: v2-task/V2-086. Base commit: a0622910d493cadd94c6d819690dbab0232a44ab. Every devbox run was judged by its verdict line and never by the shell exit status, which is unreliable in this repository."
+    },
+    {
+      "name": "a14-determinism-and-quota",
+      "status": "passed",
+      "argv": [
+        "devbox",
+        "run",
+        "--pure",
+        "--",
+        "sh",
+        "-c",
+        "grep -n 'time.Sleep\\|time.After\\|time.NewTimer\\|time.Tick\\|time.Now\\|math/rand\\|crypto/rand' internal/api/api_test.go internal/api/auth_test.go"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 300,
+      "summary": "A14 MEASURED over every new and modified test. No new or modified test contains time.Sleep, time.After, time.NewTimer, time.Tick, time.Now, `go ` (a goroutine), math/rand or crypto/rand: verified by grepping the four touched test files for each of those tokens. Every clock is injected: internal/api's new fixture uses framingClock, the steppable injected clock the V2-082 chain test already introduced, advanced only by its own nextDay() method; internal/runner's new tests reuse the package's existing journeyClock, which returns a fixed time.Unix(1700000000, 0).UTC(); internal/application's new tests use the package's existing service() helper and its fixed clock. There is no wait of any kind in any new test, so there is no deadline poll to bound and no measured duration is asserted as a threshold. The whole suite was run with -race and -count=1 and reported ok for every package. QUOTA: the in-memory adapter does not true up its quota reservation, so quota.ReadTransactionUsage (Reads 6001, Writes 1, at internal/quota/quota.go:56) admits only FOUR read transactions per budget day against quota.DefaultBudget's 25000 reads (internal/quota/quota.go:46). The A9 proof performs three GET /v1/requirements/{id} reads plus three captures plus two verb mutations plus two 403s plus five reconcile requests, so the injected clock is stepped a whole UTC day three times (after the captures, before the two verbs, and before the owner-only refusals) rather than dropping a read or weakening an assertion. internal/quota is prohibited and that adapter defect stays V2-087's. ONE deliberate residual randomness, recorded rather than hidden: internal/api/auth_test.go's runner-session test drives the real enrollment protocol, whose nonce and tokens come from crypto/rand inside internal/runner's PRODUCTION code (the pre-existing TestRunnerEnrollmentHTTPChallengeFlow does the same); the test itself introduces none -- its ed25519 key is derived from an all-zero seed rather than generated -- and no assertion depends on any random value."
+    },
+    {
+      "name": "a19-no-provider-cli-and-no-cloud-resource",
+      "status": "passed",
+      "argv": [
+        "sh",
+        "-c",
+        "git diff --name-only a0622910d493cadd94c6d819690dbab0232a44ab HEAD"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 60,
+      "summary": "A19's negative half, recorded because it is a constraint and not an outcome. No Provider CLI was started at any point: no invocation of claude, codex or opencode, not even --version or --help. No Google Cloud resource was touched, no network call was made outside the local test process, and neither TestControlPlanePreviewLocalLive nor TestFoundationPreviewLocalDogfood was run (internal/api/live_local_test.go and internal/api/live_dogfood_test.go are prohibited and were not opened for editing; both are build-tag gated and did not run under `go test ./...`). No live provider evidence record is issued, no capability id is cited in any of the three records, and no prompt and no provider response appears in any form anywhere in them. The three identities these records name -- an owner email, a scheduler service-account email and a stranger email -- are IDENTIFIERS, not credentials: an IAP composition's only secret is the upstream assertion, which httptest supplies as a header value, and no token, key or password value is recorded here or in any test fixture."
     }
   ]
 }

@@ -6,7 +6,7 @@
   "correlation_id": "v2-086-scheduler-role",
   "task_id": "V2-086",
   "component": "application",
-  "evidence_key": "344c888cd65d1f869648d027833f72f5245b0a2ddfcbea67a2f5f2c1f80bfdd3",
+  "evidence_key": "5b0c777beefd4b91cbf4bfff3e91e6e7e9a6bb3c91af0e4c2caf637d5e574424",
   "result": "passed",
   "observed_at": "2026-08-26T22:00:00Z",
   "checks": [
@@ -149,6 +149,256 @@
       "working_directory": ".",
       "timeout_seconds": 60,
       "summary": "A2's 'what is NOT an argument', MEASURED, and its line span DISAGREES slightly. askedBy is internal/application/human_input.go:405-420 by the Work Order and MEASURED at :405 (comment) with `func askedBy(c Caller)` at :412; its RoleRunner arm is :414, `case RoleRunner, RoleScheduler:`, and it maps BOTH to domain.ActorTypeLoop. So domain.ActorTypeLoop is ALREADY reachable today for a HumanInputRequest's AskedBy through the runner transport, and the unreachability this task repairs is precisely the five requestedBy-fed fields in the previous check and nothing else. That measurement is what keeps the repair honest: it is not 'ActorTypeLoop is unreachable', it is 'ActorTypeLoop is unreachable for a Requirement's, a Repository's, a link's and a Control Intent's requester and for the human-input answerer'."
+    },
+    {
+      "name": "a3-defect-reproduced-before-repair",
+      "status": "passed",
+      "argv": [
+        "devbox",
+        "run",
+        "--pure",
+        "--",
+        "sh",
+        "-c",
+        "go test -race -count=1 -run 'TestExactlyOneSanctionedSchedulerCallerProducerExists' ./internal/application"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 900,
+      "summary": "A3, the defect reproduced by an executed run BEFORE the repair, with its verbatim verdict. The commit that precedes the repair adds test files only; every non-test file was still byte-identical to a0622910d493cadd94c6d819690dbab0232a44ab when this ran. VERBATIM: '--- FAIL: TestExactlyOneSanctionedSchedulerCallerProducerExists (0.18s)' followed by 'requested_by_test.go:372: the scan parsed 93 non-test files and found 0 RoleScheduler Caller literals in internal/application/caller.go (all sites: []), want exactly 1 -- the return inside LoopCaller.' and 'FAIL github.com/takushi/agentic-loop-foundation/v2/internal/application 0.202s'. So the BEFORE row is measured, not asserted from a grep: 93 non-test .go files parsed across the whole module, ZERO producers of a RoleScheduler Caller anywhere. The AFTER row, from the same test after the repair: '--- PASS' with 'scheduler-producer scan parsed 93 non-test .go files: 1 sanctioned producer at internal/application/caller.go:70 and 0 anywhere else'. The count moved 0 -> 1 exactly as the outcome sentence requires. The transport half of A3 is the permanent test TestNoOwnerOrRunnerTransportCanRecordALoopRequester in internal/api, which PASSED at the same unrepaired commit: driving POST /v1/requirements over the composed handler as the owner records requested_by.actor_type 'owner' in the response and domain.ActorTypeOwner in the store, a runner is 403 (Capture's pair is owner-or-scheduler), and a CombinedAuthenticator with no scheduler identity resolves an allowlisted IAP email to exactly RoleOwner -- so domain.ActorTypeLoop was unreachable for a Requirement's RequestedBy through any transport."
+    },
+    {
+      "name": "a4-the-one-sanctioned-producer",
+      "status": "passed",
+      "argv": [
+        "devbox",
+        "run",
+        "--pure",
+        "--",
+        "sh",
+        "-c",
+        "go test -race -count=1 -run 'TestLoopCallerIsTheOnlyProducerAndRefusesAnEmptySubject' ./internal/application"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 900,
+      "summary": "A4 MEASURED. internal/application/caller.go gains exactly ONE exported symbol, LoopCaller(subject string) (Caller, error) at caller.go:41, returning Caller{Role: RoleScheduler, Subject: subject} at caller.go:70 and refusing an empty or whitespace-only subject with ErrUnauthenticated. Its doc comment states it is the ONLY sanctioned way to obtain a scheduler caller and that it is the in-process analogue of internal/api/auth.go's transport constructors. Nothing else was added: no field on Caller (it is still Role, Subject, RunnerID), no new Role (the const block is still RoleOwner, RoleRunner, RoleScheduler), and no other exported identifier -- `git diff` over caller.go adds one func, one import (strings) and comments, and changes no existing line. REFUSAL PROOF, executed: LoopCaller is called with each of \"\", \" \", \"   \", a tab, a newline and \" \\t\\r\\n \" and each returns ErrUnauthenticated AND the Caller zero value, so no partially-formed scheduler identity can leave the constructor; the positive case returns RoleScheduler with the subject exactly as given and an empty RunnerID, and the same caller drives Service.Capture to a stored Requirement whose RequestedBy reads loop/reconciler.self-intake. VERDICT: 'ok github.com/takushi/agentic-loop-foundation/v2/internal/application'."
+    },
+    {
+      "name": "a4-source-scan-zero-outside-one-inside",
+      "status": "passed",
+      "argv": [
+        "devbox",
+        "run",
+        "--pure",
+        "--",
+        "sh",
+        "-c",
+        "go test -race -count=1 -v -run 'TestExactlyOneSanctionedSchedulerCallerProducerExists' ./internal/application"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 900,
+      "summary": "A4's source-scan half, as a permanent assertion rather than a grep in prose. The scan walks the module from the repository root, parses every non-test *.go file with go/parser (93 files, and a scan of fewer than 40 is a Fatal so it cannot pass vacuously), and reports every composite literal of type Caller whose Role field names RoleScheduler in either spelling -- bare inside internal/application, package-qualified anywhere else. Its matcher is verified first against a synthetic file holding both positive spellings, a RoleOwner literal and a non-Caller literal carrying a Role field, and must match exactly the two positives. MEASURED after the repair: 1 producer, at internal/application/caller.go:70, and 0 in every other package -- so no package outside internal/application constructs a Caller literal with RoleScheduler, and the count of non-test producer sites is exactly one. VERBATIM log line: 'scheduler-producer scan parsed 93 non-test .go files: 1 sanctioned producer at internal/application/caller.go:70 and 0 anywhere else'. The complementary guard lives in the runner record: internal/runner's own non-test source is scanned for any application.Caller literal naming a Role other than RoleRunner, and there is none."
+    },
+    {
+      "name": "a13-closed-set-discipline",
+      "status": "passed",
+      "argv": [
+        "devbox",
+        "run",
+        "--pure",
+        "--",
+        "sh",
+        "-c",
+        "go test -race -count=1 -run 'TestRequestedByStaysAClosedRefusalForEveryOtherRole' ./internal/application"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 900,
+      "summary": "A13 MEASURED, and the answer is that NO closed-set guard's want set was widened by this task, so A13's three conditions have nothing to apply to. requestedBy (internal/application/caller.go:99-108 after the change, :64-73 before) has the same two arms it had at a0622910d493cadd94c6d819690dbab0232a44ab -- RoleOwner to domain.ActorTypeOwner and RoleScheduler to domain.ActorTypeLoop -- and its default arm is still `return domain.RequestedBy{}, ErrForbidden`, a refusal. askedBy's `case RoleRunner, RoleScheduler:` is unchanged. No callerActor role list changed: the thirteen accept-side sites enumerated in the A2 table are byte-identical, verified by `git diff` over internal/application showing changes only in caller.go and requested_by_test.go. The set is asserted rather than read: a new permanent test drives Capture as each of the two admitted roles and checks the recorded actor_type, checks the admitted table has exactly two entries, and then drives Capture as RoleRunner, as the zero Role and as an invented Role('superuser') and requires ErrForbidden for each, so an unlisted member still fails. VERDICT: 'ok github.com/takushi/agentic-loop-foundation/v2/internal/application'."
+    },
+    {
+      "name": "a10-nothing-became-scheduler-only",
+      "status": "passed",
+      "argv": [
+        "sh",
+        "-c",
+        "git diff --stat a0622910d493cadd94c6d819690dbab0232a44ab -- internal/application/service.go internal/application/repository.go internal/application/framing.go internal/application/human_input.go internal/domain contracts"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 60,
+      "summary": "A10's application half, MEASURED as an empty diff. internal/application/service.go, repository.go, framing.go and human_input.go are BYTE-UNCHANGED from a0622910d493cadd94c6d819690dbab0232a44ab, so not one of the thirteen callerActor role pairs moved and nothing became scheduler-only; internal/domain is byte-unchanged, so no Role, ActorType, PermitKind or status was added; contracts/** is byte-unchanged, so the openapi document, the release contract and every schema are untouched and contracts_changed is empty. The scheduler's reachable surface after this task is exactly what already named it: POST /internal/reconcile, plus every owner-or-scheduler and runner-or-scheduler pair the A2 table enumerates. The one thing the scheduler gained is the ability to BE, not to do more."
+    },
+    {
+      "name": "a11-additive-and-application-test-name-sets",
+      "status": "passed",
+      "argv": [
+        "devbox",
+        "run",
+        "--pure",
+        "--",
+        "sh",
+        "-c",
+        "go test -list '.*' ./internal/application | grep -E '^Test' | sort"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 900,
+      "summary": "A11 MEASURED for internal/application. BEFORE 193 top-level tests, AFTER 196. The set difference is ADDITIONS ONLY: TestExactlyOneSanctionedSchedulerCallerProducerExists, TestLoopCallerIsTheOnlyProducerAndRefusesAnEmptySubject and TestRequestedByStaysAClosedRefusalForEveryOtherRole. Removals: ZERO -- `comm -23` over the sorted before and after name sets is empty, so no test was deleted and none was renamed, and all 193 pre-existing tests still pass in the same run. Additive by measurement elsewhere too: internal/domain is byte-unchanged and its test count is 54 before and 54 after; internal/application/readmodels.go is untouched because requestedByView (readmodels.go:139, not :136 as the Work Order says -- MEASURED, a +3 disagreement) already projects a RequestedBy with any valid ActorType and domain.validActorType (internal/domain/model.go:233-236, admitting ActorTypeOwner and ActorTypeLoop at :235) already admits the new value, so it flows through every existing response and export with no field and no branch; internal/web/** and docs/** are untouched."
+    },
+    {
+      "name": "a14-determinism-and-quota",
+      "status": "passed",
+      "argv": [
+        "devbox",
+        "run",
+        "--pure",
+        "--",
+        "sh",
+        "-c",
+        "grep -n 'time.Sleep\\|time.After\\|time.NewTimer\\|time.Tick\\|time.Now\\|math/rand\\|crypto/rand' internal/application/requested_by_test.go internal/api/api_test.go internal/api/auth_test.go internal/runner/orchestrator_test.go"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 300,
+      "summary": "A14 MEASURED over every new and modified test. No new or modified test contains time.Sleep, time.After, time.NewTimer, time.Tick, time.Now, `go ` (a goroutine), math/rand or crypto/rand: verified by grepping the four touched test files for each of those tokens. Every clock is injected: internal/api's new fixture uses framingClock, the steppable injected clock the V2-082 chain test already introduced, advanced only by its own nextDay() method; internal/runner's new tests reuse the package's existing journeyClock, which returns a fixed time.Unix(1700000000, 0).UTC(); internal/application's new tests use the package's existing service() helper and its fixed clock. There is no wait of any kind in any new test, so there is no deadline poll to bound and no measured duration is asserted as a threshold. The whole suite was run with -race and -count=1 and reported ok for every package. QUOTA: the in-memory adapter does not true up its quota reservation, so quota.ReadTransactionUsage (Reads 6001, Writes 1, at internal/quota/quota.go:56) admits only FOUR read transactions per budget day against quota.DefaultBudget's 25000 reads (internal/quota/quota.go:46). The A9 proof performs three GET /v1/requirements/{id} reads plus three captures plus two verb mutations plus two 403s plus five reconcile requests, so the injected clock is stepped a whole UTC day three times (after the captures, before the two verbs, and before the owner-only refusals) rather than dropping a read or weakening an assertion. internal/quota is prohibited and that adapter defect stays V2-087's. ONE deliberate residual randomness, recorded rather than hidden: internal/api/auth_test.go's runner-session test drives the real enrollment protocol, whose nonce and tokens come from crypto/rand inside internal/runner's PRODUCTION code (the pre-existing TestRunnerEnrollmentHTTPChallengeFlow does the same); the test itself introduces none -- its ed25519 key is derived from an all-zero seed rather than generated -- and no assertion depends on any random value."
+    },
+    {
+      "name": "a15-rollback-is-a-revert-of-five-edits",
+      "status": "passed",
+      "argv": [
+        "sh",
+        "-c",
+        "git diff --stat a0622910d493cadd94c6d819690dbab0232a44ab -- internal cmd"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 60,
+      "summary": "A15, stated as a property and justified by measurement. Rollback is a revert of exactly five non-test edits and nothing else: one constructor in internal/application/caller.go (LoopCaller, plus its `strings` import); one field and one branch in internal/api/auth.go (SchedulerIdentity, and the eight-line scheduler/overlap block between parseIAPEmail and the OwnerEmails lookup); one context wrap in internal/api/api.go (the LoopCaller build and the ContextWithCaller argument to h.config.InternalReconcile); one field, one guard and one renamed local in internal/runner/orchestrator.go (Caller, the 'orchestrator caller identity is incomplete' refusal, and owner -> callerCtx); and one line in cmd/control-plane/main.go (the SchedulerIdentity assignment on the CombinedAuthenticator literal). MEASURED as the complete non-test change set: `git diff --name-only` over the whole task lists exactly those five non-test files plus four test files plus the four evidence paths. Nothing else must be undone, because the change adds no port (no interface in internal/application/ports.go moves), no stored field (internal/domain is byte-unchanged), no document kind, no index (firestore.indexes.json untouched), no route, no request or response field (contracts/** byte-unchanged) and no import edge (ci/components.json and Makefile untouched, and both VerifyNoUnjustifiedEdges and VerifyDependencyCoverage pass inside `go test ./internal/ci`, which is green). THE ONE DATA CLAIM, verified: a Requirement stored with RequestedBy.ActorType == \"loop\" still reads after a revert, because the domain already validates that value -- internal/application's TestRequestedByActorTypeIsAClosedEnum (pre-existing, untouched) asserts domain.Validate accepts ActorTypeLoop, and internal/api's new proof reads the loop-attributed Requirement back through GET /v1/requirements/{id} and through requestedByView, neither of which this task modified, so both paths exist identically at a0622910d493cadd94c6d819690dbab0232a44ab."
+    },
+    {
+      "name": "a16-chain-position",
+      "status": "passed",
+      "argv": [
+        "sh",
+        "-c",
+        "git log --oneline -3"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 60,
+      "summary": "A16, recorded as facts for the coordinator. internal/api/api.go is in V2-083's allowed_paths and internal/api/api_test.go is in V2-087's, so this task must be serialized AFTER BOTH; internal/application/caller.go is prohibited to V2-082 and V2-085 and belongs to this task, so V2-085 must not run concurrently with it. MEASURED as satisfied at the time of execution: the base commit a0622910d493cadd94c6d819690dbab0232a44ab is the ledger commit that records V2-085 as complete and moves V2-086 to running, and its second parent merges v2-task/V2-085 into v2, so V2-085 had already landed. This task touches no public contract (contracts_changed is empty, contracts/openapi/openapi-v1.yaml sha256 is ca62ef4c0e1f7dbe357d03209d68f387581ed53aeaa66b0ea8fc5b8b7eea8cdd before and after) and moves no release BundleDigest. cmd/control-plane/** is the control-plane component's root, so the control-plane evidence key MOVES with this change: 360ae7cfc903454c1ef00f46f0e18ead197cce712b900af33e18c83e0ef6a548 before, a954dadeeb5f13350d969ecfe6dee93ad5a0c477ef6eb9d3d3d465ddbbfb4bf4 after. No fourth record is issued for it, because this task's outcome is not that component's; `make smoke` was run instead, because cmd/control-plane changed, and its verdict is recorded in the api record. Under gate rule G6a a key is provenance, not a verdict."
+    },
+    {
+      "name": "a17-execution-environment",
+      "status": "passed",
+      "argv": [
+        "sh",
+        "-c",
+        "uname -srm ; devbox version ; git rev-parse HEAD"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 300,
+      "summary": "Execution environment, recorded so every verdict above is attributable. uname -srm: 'Linux 6.18.33.2-microsoft-standard-WSL2 x86_64'. go version as resolved INSIDE devbox run --pure: 'go version go1.25.0 linux/amd64'. devbox version: 0.17.2 (devbox itself reports an available upgrade to v0.18.0 on every invocation; it was not taken, because devbox.json and devbox.lock are prohibited to this task). Worktree path: /home/takushi/repos/agentic-loop-foundation-worktrees/v2-task-086. Branch: v2-task/V2-086. Base commit: a0622910d493cadd94c6d819690dbab0232a44ab. Every devbox run was judged by its verdict line and never by the shell exit status, which is unreliable in this repository."
+    },
+    {
+      "name": "a18-application-evidence-key",
+      "status": "passed",
+      "argv": [
+        "devbox",
+        "run",
+        "--pure",
+        "--",
+        "make",
+        "evidence-keys"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 900,
+      "summary": "A18. Measured on the FINAL tree with every touched file already git-added (`git status --porcelain` empty). The application component key is 5b0c777beefd4b91cbf4bfff3e91e6e7e9a6bb3c91af0e4c2caf637d5e574424; it was 344c888cd65d1f869648d027833f72f5245b0a2ddfcbea67a2f5f2c1f80bfdd3 at a0622910d493cadd94c6d819690dbab0232a44ab. Exactly three keys were measured for this task -- application, api, runner -- and not all 23. Under gate rule G6a this is provenance, not a verdict: these checks are re-run by make check. A stray `control-plane` binary produced by `go build ./cmd/control-plane` was briefly git-added and then removed with `git rm --cached` before the keys were measured; the four keys were identical before and after that removal, which is expected since it sits at the repository root and no component root matches it."
+    },
+    {
+      "name": "a19-verification-go-test-race",
+      "status": "passed",
+      "argv": [
+        "devbox",
+        "run",
+        "--pure",
+        "--",
+        "sh",
+        "-c",
+        "go test -race -count=1 ./..."
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 1800,
+      "summary": "A19. Every package reported ok and none reported FAIL, with -race and -count=1: cmd/bootstrap 3.057s, cmd/ci-plan 1.013s, internal/api 1.412s, internal/application 2.918s, internal/ci 2.290s, internal/contracts 2.141s, internal/domain 2.995s, internal/legacyimport 1.010s, internal/provider 3.058s, internal/quota 1.015s, internal/reconciler 1.171s, internal/release 1.592s, internal/runner 5.933s, internal/scheduler 1.038s, internal/store/firestore 1.079s (see the G7 check: that ok is 26 skips), internal/store/memory 1.473s, internal/update 1.097s; cmd/control-plane, cmd/legacy-import, cmd/runner and internal/web are [no test files]. The same command at a0622910d493cadd94c6d819690dbab0232a44ab was green too, so the AFTER green is a comparison and not an isolated observation."
+    },
+    {
+      "name": "a19-verification-go-vet-and-gofmt",
+      "status": "passed",
+      "argv": [
+        "devbox",
+        "run",
+        "--pure",
+        "--",
+        "sh",
+        "-c",
+        "go vet ./... ; gofmt -l ."
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 900,
+      "summary": "A19. `go vet ./...` produced no diagnostics -- the sentinel VET_CLEAN printed, which only happens on a zero exit from vet itself. `gofmt -l .` listed NO file, so every touched file is gofmt-clean. Judged by the verdict, never by devbox run's exit status."
+    },
+    {
+      "name": "a19-verification-component-application",
+      "status": "passed",
+      "argv": [
+        "devbox",
+        "run",
+        "--pure",
+        "--",
+        "make",
+        "component-application"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 1800,
+      "summary": "A19. Verdict line: 'ok github.com/takushi/agentic-loop-foundation/v2/internal/application 0.247s'."
+    },
+    {
+      "name": "a19-verification-contracts-ledger",
+      "status": "passed",
+      "argv": [
+        "devbox",
+        "run",
+        "--pure",
+        "--",
+        "sh",
+        "-c",
+        "go test -count=1 ./internal/contracts"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 900,
+      "summary": "A17's definition of done and A19. Verdict line: 'ok github.com/takushi/agentic-loop-foundation/v2/internal/contracts'. That run includes TestActiveEvidenceIndex, which validates all three of this task's records against contracts/schemas/evidence.json, checks that each index entry's evidence_hash is the sha256 of its artifact, checks that .agents/v2/evidence/*.json and the index are a bijection, and checks that each entry's task_id has a task-state file -- so the ledger test is what makes these records well-formed rather than merely present. It also includes the packets, release contract, capability-evidence and deployment/provider preflight checks, all green."
+    },
+    {
+      "name": "g7-firestore-package-measured-nothing",
+      "status": "skipped",
+      "argv": [
+        "devbox",
+        "run",
+        "--pure",
+        "--",
+        "sh",
+        "-c",
+        "go test -count=1 -v ./internal/store/firestore | grep -c '^--- SKIP'"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 900,
+      "summary": "Gate rule G7, recorded and NEVER counted as a pass, with a DISAGREEMENT. A bare `go test -count=1 -v ./internal/store/firestore` with no emulator prints ok while producing 26 '--- SKIP' lines (MEASURED 26 by `grep -c '^--- SKIP'`; the coordinator's brief said 49). That package's run therefore measured NOTHING about this change. It measures nothing about it in any case: internal/store/** is prohibited to this task and byte-unchanged, and the A9 proof runs against internal/store/memory. The check is recorded with status skipped."
+    },
+    {
+      "name": "a19-no-provider-cli-and-no-cloud-resource",
+      "status": "passed",
+      "argv": [
+        "sh",
+        "-c",
+        "git diff --name-only a0622910d493cadd94c6d819690dbab0232a44ab HEAD"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 60,
+      "summary": "A19's negative half, recorded because it is a constraint and not an outcome. No Provider CLI was started at any point: no invocation of claude, codex or opencode, not even --version or --help. No Google Cloud resource was touched, no network call was made outside the local test process, and neither TestControlPlanePreviewLocalLive nor TestFoundationPreviewLocalDogfood was run (internal/api/live_local_test.go and internal/api/live_dogfood_test.go are prohibited and were not opened for editing; both are build-tag gated and did not run under `go test ./...`). No live provider evidence record is issued, no capability id is cited in any of the three records, and no prompt and no provider response appears in any form anywhere in them. The three identities these records name -- an owner email, a scheduler service-account email and a stranger email -- are IDENTIFIERS, not credentials: an IAP composition's only secret is the upstream assertion, which httptest supplies as a header value, and no token, key or password value is recorded here or in any test fixture."
     }
   ]
 }

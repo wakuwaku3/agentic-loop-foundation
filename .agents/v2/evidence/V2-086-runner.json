@@ -6,7 +6,7 @@
   "correlation_id": "v2-086-scheduler-role",
   "task_id": "V2-086",
   "component": "runner",
-  "evidence_key": "5e529f01ca98aaff1cb48f1a7dfd58a148a099eed7cc0f2f77f84f72d3e9730a",
+  "evidence_key": "746691c788865898baa3a9c72bff5ce0975bfa79da12a15c6811949773cf43d6",
   "result": "passed",
   "observed_at": "2026-08-26T22:00:00Z",
   "checks": [
@@ -73,6 +73,148 @@
       "working_directory": ".",
       "timeout_seconds": 60,
       "summary": "Gate ordering, recorded because it is itself an acceptance item (hard rule 2, and V2-087 had to report the opposite). The scope-boundary table above and every a1-* and a2-* baseline check in these three records were written and COMMITTED as the FIRST commit on branch v2-task/V2-086, on top of base commit a0622910d493cadd94c6d819690dbab0232a44ab, at which point `git status --porcelain` listed only .agents/v2/evidence/V2-086-application.json, .agents/v2/evidence/V2-086-api.json, .agents/v2/evidence/V2-086-runner.json and .agents/v2/evidence/index.json. No file under internal/ or cmd/ was modified before that commit. The commits that follow are, in order: the A3 reproduction test (test files only, run against the UNREPAIRED non-test tree), then the repair, then the proof, then the verification results appended to these records."
+    },
+    {
+      "name": "a8-the-fabrication-stops-by-injection",
+      "status": "passed",
+      "argv": [
+        "sh",
+        "-c",
+        "git diff a0622910d493cadd94c6d819690dbab0232a44ab -- internal/runner/orchestrator.go"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 60,
+      "summary": "A8 MEASURED. internal/runner.Orchestrator gains a REQUIRED field, `Caller application.Caller`, and RunFakeJourney's fabricated literal at orchestrator.go:39 is gone: the owner-side context is now `callerCtx := application.ContextWithCaller(ctx, o.Caller)` and the local was renamed from `owner` to `callerCtx` at all four of its uses (the binding plus Capture, Plan and Prepare), because the identity is no longer the owner by construction. The literal was NOT relabelled RoleScheduler -- that would have been the same self-naming one word over and is non_goals item 2 -- and the field has NO default, because a defaulted identity is the fabrication again. The refusal is in the same style as the existing guard: immediately after `if o.Service == nil || ... || o.RunnerID == \"\" { return JourneyResult{}, errors.New(\"orchestrator dependencies are incomplete\") }` there is now `if o.Caller.Role == \"\" || o.Caller.Subject == \"\" { return JourneyResult{}, errors.New(\"orchestrator caller identity is incomplete\") }`. internal/runner/orchestrator_test.go supplies the field explicitly at its single construction site, with the same owner identity the literal used to invent, so every pre-existing assertion of TestOrchestratorFakeJourney is unchanged and still passes -- what changed is WHO names the identity."
+    },
+    {
+      "name": "a8-fail-closed-is-proven-by-refusal",
+      "status": "passed",
+      "argv": [
+        "devbox",
+        "run",
+        "--pure",
+        "--",
+        "sh",
+        "-c",
+        "go test -race -count=1 -v -run 'TestOrchestratorRefusesAnIncompleteInjectedCaller' ./internal/runner"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 900,
+      "summary": "A8's REFUSAL PROOF, executed: a guard with no refusal test is not a guard, so the ABSENCE case is asserted for five shapes and each is refused before any effect. The shapes: the zero value (no role, no subject); a role with no subject (RoleOwner); a subject with no role; a scheduler role with no subject; and a RunnerID with no role. For each, RunFakeJourney returns an error whose message is exactly 'orchestrator caller identity is incomplete', the Provider boundary is never reached (len(provider.Calls) == 0) and the Journal records nothing (Replay() is empty) -- so the refusal happens before the first external effect, not after a partial journey. Verdict: '--- PASS: TestOrchestratorRefusesAnIncompleteInjectedCaller' with all five subtests passing: the_zero_value:_no_role_and_no_subject, a_role_with_no_subject, a_subject_with_no_role, a_scheduler_role_with_no_subject, a_runner_id_but_still_no_role."
+    },
+    {
+      "name": "a8-the-component-can-no-longer-name-an-identity-of-its-own",
+      "status": "passed",
+      "argv": [
+        "devbox",
+        "run",
+        "--pure",
+        "--",
+        "sh",
+        "-c",
+        "go test -race -count=1 -v -run 'TestOrchestratorNamesNoIdentityOfItsOwn' ./internal/runner"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 900,
+      "summary": "A8's durable half: the component must not be able to reacquire the fabrication by reintroducing a literal, so that is asserted from source rather than reviewed. A new permanent test parses internal/runner's own non-test *.go files with go/parser (20 files; a zero-file scan is a Fatal) and reports every application.Caller composite literal whose Role field names anything other than RoleRunner -- the one identity this component may assert, whose subject is o.RunnerID rather than a string. MEASURED: zero such literals. VERBATIM log line: 'identity scan parsed 20 non-test files of internal/runner and found no fabricated Caller role'. So neither RoleOwner nor RoleScheduler can be minted in internal/runner again without failing this test. The repository-wide complement is in the application record: exactly one RoleScheduler Caller literal exists anywhere, and it is inside application.LoopCaller."
+    },
+    {
+      "name": "a8-finding-the-driver-is-test-only",
+      "status": "passed",
+      "argv": [
+        "sh",
+        "-c",
+        "grep -rn 'RunFakeJourney' --include='*.go' . ; grep -c Orchestrator cmd/runner/main.go || true"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 60,
+      "summary": "A8's FINDING, recorded and NOT fixed. Orchestrator.RunFakeJourney -- the only code that drives a whole Capture-to-AcceptResult journey -- has NO non-test caller in the repository: its only two call sites are internal/runner/orchestrator_test.go:56 and :63, both inside TestOrchestratorFakeJourney (a DISAGREEMENT with the Work Order, which says exactly one caller at :56). cmd/runner/main.go names Orchestrator zero times and wires no control plane at all. So the fabricated owner existed solely to let a test driver through a role gate. A later task may decide to move the driver into a _test.go file; it is NOT moved here, because doing so would delete a non-test exported method other tasks' evidence names, and because the outcome sentence asks for the fabrication to stop, not for the driver to move. No non-test construction of an Orchestrator exists, so the risk register's escalation condition ('if any non-test construction is found, escalate rather than defaulting the field') did not fire."
+    },
+    {
+      "name": "a11-runner-test-name-sets",
+      "status": "passed",
+      "argv": [
+        "devbox",
+        "run",
+        "--pure",
+        "--",
+        "sh",
+        "-c",
+        "go test -list '.*' ./internal/runner | grep -E '^Test' | sort"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 900,
+      "summary": "A11 for internal/runner. BEFORE 118 top-level tests, AFTER 120. Set difference: ADDITIONS ONLY -- TestOrchestratorNamesNoIdentityOfItsOwn and TestOrchestratorRefusesAnIncompleteInjectedCaller. Removals: ZERO -- `comm -23` over the sorted before and after name sets is empty. TestOrchestratorFakeJourney keeps its name, keeps every assertion it had, and passes: it SUPPLIES the new injected caller rather than having it defaulted for it, which is what the constraint requires. internal/domain, whose tests `make component-runner` also runs, is byte-unchanged with 54 tests before and after."
+    },
+    {
+      "name": "a14-determinism-in-the-new-runner-tests",
+      "status": "passed",
+      "argv": [
+        "devbox",
+        "run",
+        "--pure",
+        "--",
+        "sh",
+        "-c",
+        "grep -n 'time.Sleep\\|time.After\\|time.NewTimer\\|time.Tick\\|time.Now\\|math/rand\\|crypto/rand\\|go func' internal/runner/orchestrator_test.go"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 300,
+      "summary": "A14 MEASURED over every new and modified test. No new or modified test contains time.Sleep, time.After, time.NewTimer, time.Tick, time.Now, `go ` (a goroutine), math/rand or crypto/rand: verified by grepping the four touched test files for each of those tokens. Every clock is injected: internal/api's new fixture uses framingClock, the steppable injected clock the V2-082 chain test already introduced, advanced only by its own nextDay() method; internal/runner's new tests reuse the package's existing journeyClock, which returns a fixed time.Unix(1700000000, 0).UTC(); internal/application's new tests use the package's existing service() helper and its fixed clock. There is no wait of any kind in any new test, so there is no deadline poll to bound and no measured duration is asserted as a threshold. The whole suite was run with -race and -count=1 and reported ok for every package. QUOTA: the in-memory adapter does not true up its quota reservation, so quota.ReadTransactionUsage (Reads 6001, Writes 1, at internal/quota/quota.go:56) admits only FOUR read transactions per budget day against quota.DefaultBudget's 25000 reads (internal/quota/quota.go:46). The A9 proof performs three GET /v1/requirements/{id} reads plus three captures plus two verb mutations plus two 403s plus five reconcile requests, so the injected clock is stepped a whole UTC day three times (after the captures, before the two verbs, and before the owner-only refusals) rather than dropping a read or weakening an assertion. internal/quota is prohibited and that adapter defect stays V2-087's. ONE deliberate residual randomness, recorded rather than hidden: internal/api/auth_test.go's runner-session test drives the real enrollment protocol, whose nonce and tokens come from crypto/rand inside internal/runner's PRODUCTION code (the pre-existing TestRunnerEnrollmentHTTPChallengeFlow does the same); the test itself introduces none -- its ed25519 key is derived from an all-zero seed rather than generated -- and no assertion depends on any random value."
+    },
+    {
+      "name": "a18-runner-evidence-key",
+      "status": "passed",
+      "argv": [
+        "devbox",
+        "run",
+        "--pure",
+        "--",
+        "make",
+        "evidence-keys"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 900,
+      "summary": "A18. Measured on the FINAL tree with everything git-added. The runner component key is 746691c788865898baa3a9c72bff5ce0975bfa79da12a15c6811949773cf43d6; it was 5e529f01ca98aaff1cb48f1a7dfd58a148a099eed7cc0f2f77f84f72d3e9730a at a0622910d493cadd94c6d819690dbab0232a44ab. The runner component's roots are cmd/runner/**, cmd/bootstrap/** and internal/runner/**, and only internal/runner/** changed. Exactly three keys were measured for this task and not all 23; under gate rule G6a this is provenance, not a verdict."
+    },
+    {
+      "name": "a19-verification-component-runner",
+      "status": "passed",
+      "argv": [
+        "devbox",
+        "run",
+        "--pure",
+        "--",
+        "make",
+        "component-runner"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 1800,
+      "summary": "A19. Verdict lines: '? github.com/takushi/agentic-loop-foundation/v2/cmd/runner [no test files]', 'ok github.com/takushi/agentic-loop-foundation/v2/cmd/bootstrap 0.013s', 'ok github.com/takushi/agentic-loop-foundation/v2/internal/domain 0.628s', 'ok github.com/takushi/agentic-loop-foundation/v2/internal/runner 3.454s'. internal/runner also reported ok under `go test -race -count=1 ./...` at 5.933s."
+    },
+    {
+      "name": "a17-execution-environment",
+      "status": "passed",
+      "argv": [
+        "sh",
+        "-c",
+        "uname -srm ; devbox version ; git rev-parse HEAD"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 300,
+      "summary": "Execution environment, recorded so every verdict above is attributable. uname -srm: 'Linux 6.18.33.2-microsoft-standard-WSL2 x86_64'. go version as resolved INSIDE devbox run --pure: 'go version go1.25.0 linux/amd64'. devbox version: 0.17.2 (devbox itself reports an available upgrade to v0.18.0 on every invocation; it was not taken, because devbox.json and devbox.lock are prohibited to this task). Worktree path: /home/takushi/repos/agentic-loop-foundation-worktrees/v2-task-086. Branch: v2-task/V2-086. Base commit: a0622910d493cadd94c6d819690dbab0232a44ab. Every devbox run was judged by its verdict line and never by the shell exit status, which is unreliable in this repository."
+    },
+    {
+      "name": "a19-no-provider-cli-and-no-cloud-resource",
+      "status": "passed",
+      "argv": [
+        "sh",
+        "-c",
+        "git diff --name-only a0622910d493cadd94c6d819690dbab0232a44ab HEAD"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 60,
+      "summary": "A19's negative half, recorded because it is a constraint and not an outcome. No Provider CLI was started at any point: no invocation of claude, codex or opencode, not even --version or --help. No Google Cloud resource was touched, no network call was made outside the local test process, and neither TestControlPlanePreviewLocalLive nor TestFoundationPreviewLocalDogfood was run (internal/api/live_local_test.go and internal/api/live_dogfood_test.go are prohibited and were not opened for editing; both are build-tag gated and did not run under `go test ./...`). No live provider evidence record is issued, no capability id is cited in any of the three records, and no prompt and no provider response appears in any form anywhere in them. The three identities these records name -- an owner email, a scheduler service-account email and a stranger email -- are IDENTIFIERS, not credentials: an IAP composition's only secret is the upstream assertion, which httptest supplies as a header value, and no token, key or password value is recorded here or in any test fixture."
     }
   ]
 }
