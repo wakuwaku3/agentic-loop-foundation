@@ -382,7 +382,8 @@
         "firebase.json",
         ".github/**",
         "Containerfile",
-        ".gitleaks.toml"
+        ".gitleaks.toml",
+        ".gitleaksignore"
       ],
       "public_contracts": [],
       "contract_dependencies": [],

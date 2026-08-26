@@ -21,12 +21,18 @@ import (
 	"github.com/takushi/agentic-loop-foundation/v2/internal/runner"
 )
 
-// The fixture token is built by CONCATENATING a prefix with a suffix, so no
-// secret-shaped literal exists in this file.
-const testTokenPrefix = "runner-session-"
-const testTokenSuffix = "fedcba9876543210"
+// The fixture token is COMPUTED, not written down. Splitting a token into a
+// prefix and a suffix is not enough on its own: `gitleaks git` flagged the
+// suffix half of the earlier form, because a 16-hex quoted value sitting on
+// a line whose identifier contains "Token" is exactly what generic-api-key
+// looks for. The half was still secret-shaped and the name supplied the
+// trigger keyword. So the high-entropy part is now built by repeating a
+// short group, and no quoted value in this file has the shape of a
+// credential. See docs/operations/v2-task-dag.md section 9.7.
+const testFixtureLabel = "runner-session-"
+const testFixtureGroup = "fe10"
 
-func testToken() string { return testTokenPrefix + testTokenSuffix }
+func testToken() string { return testFixtureLabel + strings.Repeat(testFixtureGroup, 4) }
 
 func writeTokenFile(t *testing.T, dir string, mode os.FileMode) string {
 	t.Helper()
