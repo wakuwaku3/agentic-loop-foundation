@@ -942,6 +942,43 @@ testが残った。
 記録が許すのは「名前が実態に合わなくなったこと」の訂正だけで、
 「実態を変えたこと」の隠蔽ではない。
 
+### 12.12 閉集合guardは、後続taskのoutcomeが広げるべきものなら「広げる」。消さない
+
+**同じ形が4回出たので規則にする。** 先行taskが書いた閉集合guardが、
+後続taskの**outcomeそのもの**によって偽になる。
+
+| task | 当たったguard |
+|---|---|
+| V2-084 | `TestRequirementTransitionsInTheApplicationLayerAreExactlyTheTwoNewCommands`、`TestTheServiceWritesARequirementOnlyFromCaptureAndPlan` |
+| V2-089 | 上記2件（予告したが発火せず。新codeがcommand kindを名指さなかったため） |
+| V2-090 | 上記1件（§12.3で境界を広げて対応）、および`TestTheUntouchablePackagesAreUntouched` |
+
+**規則**: taskのoutcomeが閉集合guardの集合を変えるなら、**guardを広げる。消さない。**
+そして広げ方に3つの条件を課す。
+
+1. **集合は閉じたまま。** 次の要素——広げた集合の外側の1つ——が今も落ちることを実測する。
+   「6人目のcallerは今も落ちる」という形で記録する。
+2. **assertionを1つも消さない。** 削除ではなく置換であること、そして
+   **置換後のassertion数が減っていないこと**を示す。
+3. **entryごとに理由commentを書く。** なぜその要素が集合に入るのかを、
+   製品文かdomainの規則で1行ずつ。
+
+**「untouchable」型のguardには特別な注意がある。** V2-090が当たった
+`TestTheUntouchablePackagesAreUntouched`は`internal/domain`の`git diff`が空であることを
+主張していた。**あるpackageを触ることがoutcomeであるtaskに対して、
+そのpackageのdiffが空であるという主張は原理的に両立しない。**
+V2-090の解は、ディレクトリ全体の「変更0」を**4 pathの閉allowlist**（work treeとindexの両方）に
+置き換え、そのうえで`internal/domain/control.go`——permit closureの所在で、
+**それまで名指しされていなかった**——と`internal/domain/source_guard_test.go`の
+per-file byte不変を足したことである。**assertion数は純増した。**
+
+これは正しい。**「触れない」を「何が触れたかを1件ずつ数える」に替えるのは弱化ではなく、
+名指しされていなかったfileが名指しされた分だけ強化である。**
+
+**逆向きの拘束**: 集合を開いてはならない。allowlistが「任意のfile」に緩む、
+per-file断定が消える、次の要素が落ちなくなる——このどれかが起きたら、
+それは広げたのではなく壊したのである。
+
 
 ## 11. 現在地と残作業の切り分け（2026-08-25）
 
