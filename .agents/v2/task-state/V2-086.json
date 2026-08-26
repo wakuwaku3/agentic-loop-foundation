@@ -1,0 +1,85 @@
+{
+  "schema_version": "v1",
+  "id": "ts-v2-086",
+  "kind": "canonical-task-state",
+  "task_id": "V2-086",
+  "status": "blocked",
+  "dependencies": [
+    "V2-082"
+  ],
+  "block_reason": "V2-082",
+  "outcome": "Make the scheduler an actor a real caller can be, or stop declaring it as one: today no code outside a test constructs it, and the Runner's own path fabricates an owner instead.",
+  "non_goals": [
+    "Do not grant the scheduler more than the operations that name it",
+    "Do not let a component call itself owner in order to get through",
+    "Do not keep a role no transport can produce"
+  ],
+  "actor": "sol",
+  "input_refs": [
+    "V2-082",
+    "V2-086"
+  ],
+  "input_hash": "862972bfc613751c1d4c426c32dbf33859dc3d7b44f2b0273468697684b0956c",
+  "output_refs": [
+    "V2-086"
+  ],
+  "output_hash": "fafcc8d3832eaf04a14ec439e9ec1f1a0541de6ce0e2a8f708a702398a7ffb31",
+  "owner": "terra",
+  "next_owner": "terra",
+  "retry_budget": {
+    "max_attempts": 2,
+    "attempts_used": 0,
+    "remaining": 2
+  },
+  "release_eligible": false,
+  "transitions": [
+    {
+      "sequence": 1,
+      "at": "2026-08-26T07:00:00Z",
+      "from_status": null,
+      "to_status": "queued",
+      "actor": "sol",
+      "input_refs": [
+        "V2-082",
+        "V2-086"
+      ],
+      "input_hash": "862972bfc613751c1d4c426c32dbf33859dc3d7b44f2b0273468697684b0956c",
+      "output_refs": [
+        "V2-086"
+      ],
+      "output_hash": "fafcc8d3832eaf04a14ec439e9ec1f1a0541de6ce0e2a8f708a702398a7ffb31",
+      "owner": "terra",
+      "next_owner": "terra",
+      "retry_budget": {
+        "max_attempts": 2,
+        "attempts_used": 0,
+        "remaining": 2
+      },
+      "reason": "the framing-entry design measured that no non-test code constructs a caller in the scheduler role: the authenticator produces only the runner and the owner, and the Runner's orchestrator fabricates an owner it labels runner-local-owner. Every appearance of the role outside tests is on the accepting side, so any command given to the scheduler alone would be unreachable from a real request, which is the same shape of defect as the one the framing-entry task exists to fix"
+    },
+    {
+      "sequence": 2,
+      "at": "2026-08-26T07:00:01Z",
+      "from_status": "queued",
+      "to_status": "blocked",
+      "actor": "sol",
+      "input_refs": [
+        "V2-082",
+        "V2-086"
+      ],
+      "input_hash": "862972bfc613751c1d4c426c32dbf33859dc3d7b44f2b0273468697684b0956c",
+      "output_refs": [
+        "V2-086"
+      ],
+      "output_hash": "fafcc8d3832eaf04a14ec439e9ec1f1a0541de6ce0e2a8f708a702398a7ffb31",
+      "owner": "terra",
+      "next_owner": "terra",
+      "retry_budget": {
+        "max_attempts": 2,
+        "attempts_used": 0,
+        "remaining": 2
+      },
+      "reason": "the first status a caller can move a Requirement out of is the input every one of these needs"
+    }
+  ]
+}

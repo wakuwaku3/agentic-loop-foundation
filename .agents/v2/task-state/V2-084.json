@@ -1,0 +1,85 @@
+{
+  "schema_version": "v1",
+  "id": "ts-v2-084",
+  "kind": "canonical-task-state",
+  "task_id": "V2-084",
+  "status": "blocked",
+  "dependencies": [
+    "V2-082"
+  ],
+  "block_reason": "V2-082",
+  "outcome": "Drive the rest of a Requirement's life: give every transition the domain already models an issuer a caller can reach, and stop an Increment from running to completion while its Requirement is still recorded as merely captured.",
+  "non_goals": [
+    "Do not add a transition the domain does not already model",
+    "Do not advance a Requirement because a subordinate Increment moved, without the rule that says it should",
+    "Do not give a transition an issuer no real caller can be"
+  ],
+  "actor": "sol",
+  "input_refs": [
+    "V2-082",
+    "V2-084"
+  ],
+  "input_hash": "be802a401ccb7f95e97aa77ee623d728e29a5082951942eaa892a8eddb05b9e9",
+  "output_refs": [
+    "V2-084"
+  ],
+  "output_hash": "10e7d12522a40dc2f3b97fabfcba3d130723ef76928081bc0abb86ff29116ae4",
+  "owner": "terra",
+  "next_owner": "terra",
+  "retry_budget": {
+    "max_attempts": 2,
+    "attempts_used": 0,
+    "remaining": 2
+  },
+  "release_eligible": false,
+  "transitions": [
+    {
+      "sequence": 1,
+      "at": "2026-08-26T07:00:00Z",
+      "from_status": null,
+      "to_status": "queued",
+      "actor": "sol",
+      "input_refs": [
+        "V2-082",
+        "V2-084"
+      ],
+      "input_hash": "be802a401ccb7f95e97aa77ee623d728e29a5082951942eaa892a8eddb05b9e9",
+      "output_refs": [
+        "V2-084"
+      ],
+      "output_hash": "10e7d12522a40dc2f3b97fabfcba3d130723ef76928081bc0abb86ff29116ae4",
+      "owner": "terra",
+      "next_owner": "terra",
+      "retry_budget": {
+        "max_attempts": 2,
+        "attempts_used": 0,
+        "remaining": 2
+      },
+      "reason": "the framing-entry design measured that the set of Requirement statuses reachable through the application layer is the single status a Requirement is captured in: start, wait, evaluate, recover, pause, cancel and completion-from-release each have no issuer at all, and the two that do have one require a status nothing can reach. It also measured that the Runner's orchestrator carries an Increment through planning, preparation, claiming and starting while the parent Requirement stays recorded as captured, so the lifecycle the product describes is not merely partly wired but almost entirely undriven"
+    },
+    {
+      "sequence": 2,
+      "at": "2026-08-26T07:00:01Z",
+      "from_status": "queued",
+      "to_status": "blocked",
+      "actor": "sol",
+      "input_refs": [
+        "V2-082",
+        "V2-084"
+      ],
+      "input_hash": "be802a401ccb7f95e97aa77ee623d728e29a5082951942eaa892a8eddb05b9e9",
+      "output_refs": [
+        "V2-084"
+      ],
+      "output_hash": "10e7d12522a40dc2f3b97fabfcba3d130723ef76928081bc0abb86ff29116ae4",
+      "owner": "terra",
+      "next_owner": "terra",
+      "retry_budget": {
+        "max_attempts": 2,
+        "attempts_used": 0,
+        "remaining": 2
+      },
+      "reason": "the first status a caller can move a Requirement out of is the input every one of these needs"
+    }
+  ]
+}
