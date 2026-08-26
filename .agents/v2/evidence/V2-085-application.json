@@ -430,6 +430,22 @@
       "working_directory": ".",
       "timeout_seconds": 600,
       "summary": "A18. Exactly ONE component key is measured -- application, the component of the record this task issues -- and it is read on the FINAL tree with every touched file already git-added and committed, so the new file internal/application/planning_permit_test.go is visible to the git ls-files based input set the key derives from. MEASURED application evidence key: 344c888cd65d1f869648d027833f72f5245b0a2ddfcbea67a2f5f2c1f80bfdd3. For provenance only, the same key on the base tree before any edit was 90bf5603092b4cc28e3f0ba27c8c89d7c9d0c417a46225b21627a3135990189a. Under gate rule G6a this movement is NOT a verdict: these checks are re-run by make check at integration, so the key is a record of provenance. The other 22 component keys were deliberately not measured, and no key was copied from an earlier record."
+    },
+    {
+      "name": "a19-verification-gitleaks-agents",
+      "status": "passed",
+      "argv": [
+        "devbox",
+        "run",
+        "--pure",
+        "--",
+        "sh",
+        "-c",
+        "gitleaks dir .agents --config .gitleaks.toml"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 600,
+      "summary": "A19's post-commit secret scan, run AFTER the evidence record was committed as required, and scoped to .agents as required. Verbatim verdict lines: 'INF scanned ~4607175 bytes (4.61 MB) in 343ms' then 'INF no leaks found'. `gitleaks dir .` was deliberately NOT run: it reports 26 findings from the gitignored build/evidence/** tree, none of which belongs to this task."
     }
   ]
 }
