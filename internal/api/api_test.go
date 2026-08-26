@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -6539,5 +6540,197 @@ func clearPauseMemory(t *testing.T, st *memory.Store, id string) {
 		return u.SaveRequirement(ctx, next, r.Version)
 	}); err != nil {
 		t.Fatalf("clear the pause memory of %q: %v", id, err)
+	}
+}
+
+// --- V2-091: the one runner-role read route ---------------------------------
+
+// TestRunnerWorkRouteIsRunnerOnlyGetAndIsNotSwallowedByAnyPrefix is v12's
+// transport half. Measured before this task: internal/api declared NO
+// runner-readable GET route at all, so a separate-process Runner could not
+// discover claimable work by any means -- POST /v1/runner/claims:acquire
+// requires the caller to already know the increment id, and GET
+// /v1/queue/summary and GET /v1/export are owner-only.
+func TestRunnerWorkRouteIsRunnerOnlyGetAndIsNotSwallowedByAnyPrefix(t *testing.T) {
+	h := testHandler(t)
+	const path = "/v1/runner/work"
+
+	if w := call(h, http.MethodGet, path, "", ""); w.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated GET status = %d, want 401 (body %s)", w.Code, w.Body.String())
+	}
+	if w := call(h, http.MethodGet, path, "", "owner"); w.Code != http.StatusForbidden {
+		t.Fatalf("owner GET status = %d, want 403: this is a runner read, not an owner one (body %s)", w.Code, w.Body.String())
+	}
+	// A POST to this path is a METHOD error, not the route and not a 404. That
+	// is what proves the path is not being handled by the runner POST switch
+	// further down and that no reporting endpoint was accidentally created.
+	for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodDelete, http.MethodPatch} {
+		w := call(h, method, path, `{}`, "runner")
+		if w.Code != http.StatusMethodNotAllowed {
+			t.Fatalf("%s %s status = %d, want 405 (body %s)", method, path, w.Code, w.Body.String())
+		}
+	}
+	w := call(h, http.MethodGet, path, "", "runner")
+	if w.Code != http.StatusOK {
+		t.Fatalf("runner GET status = %d, want 200 (body %s)", w.Code, w.Body.String())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range []string{"schema_version", "cap", "increments"} {
+		if _, ok := body[field]; !ok {
+			t.Fatalf("the offer body is missing required field %q: %s", field, w.Body.String())
+		}
+	}
+	if len(body) != 3 {
+		t.Fatalf("the offer body carries %d fields, want exactly the three the contract declares: %s", len(body), w.Body.String())
+	}
+	// An empty store offers an EMPTY LIST, never null: a Runner must be able to
+	// tell "nothing to claim" from "the field is missing".
+	items, ok := body["increments"].([]any)
+	if !ok {
+		t.Fatalf("increments is not an array: %s", w.Body.String())
+	}
+	if len(items) != 0 {
+		t.Fatalf("an empty installation offered %d Increments: %s", len(items), w.Body.String())
+	}
+	// The neighbouring runner paths still answer exactly as before: the new
+	// full-string match neither swallows them nor is swallowed by them.
+	if w := call(h, http.MethodPost, "/v1/runner/enrollment", `{"runner_id":"runner-1"}`, "owner"); w.Code == http.StatusMethodNotAllowed {
+		t.Fatalf("POST /v1/runner/enrollment became a method error after the new route was added: %s", w.Body.String())
+	}
+	if w := call(h, http.MethodGet, "/v1/runner/works", "", "runner"); w.Code == http.StatusOK {
+		t.Fatalf("GET /v1/runner/works answered 200; the new route must be a FULL-STRING match, not a prefix: %s", w.Body.String())
+	}
+	// No credential-shaped field name, no digest, no text, no packet.
+	lowered := strings.ToLower(w.Body.String())
+	for _, forbidden := range []string{"password", "credential", "token", "secret", "raw_prompt", "raw_provider_output", "digest", "packet"} {
+		if strings.Contains(lowered, forbidden) {
+			t.Fatalf("the offer body contains %q: %s", forbidden, w.Body.String())
+		}
+	}
+}
+
+// TestTheOfferedRouteAnswersWithWorkTheLoopPassItselfPlanned is the end-to-end
+// transport assertion of the whole reachability repair: an owner captures a
+// Requirement and drives it to ready over the composed handler, the Loop pass
+// plans an Increment, and a RUNNER reads that Increment over
+// GET /v1/runner/work and claims it over POST /v1/runner/claims:acquire.
+// Before this task the Increment could not exist and the route did not exist,
+// so neither half of this was reachable.
+func TestTheOfferedRouteAnswersWithWorkTheLoopPassItselfPlanned(t *testing.T) {
+	st := memory.New()
+	svc, err := application.NewServiceWithConfig(st, clock{}, &ids{}, application.ServiceConfig{InstallationID: "install", LeaseTTL: time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	auth := api.BearerAuthenticator{
+		"owner":  {Role: application.RoleOwner, Subject: "owner"},
+		"runner": {Role: application.RoleRunner, Subject: "runner", RunnerID: "runner-1"},
+	}
+	enrollment, err := runner.NewService(runner.NewMemoryStore())
+	if err != nil {
+		t.Fatal(err)
+	}
+	const reconcileIdentity = "reconciler@example.iam.gserviceaccount.com"
+	h := api.New(api.Config{
+		Authenticator: auth, Service: svc, RunnerEnrollment: enrollment,
+		AllowedOrigins: []string{"https://console.example"}, ReconcileIdentity: reconcileIdentity,
+		InternalReconcile: func(ctx context.Context) error {
+			// The scheduler identity is already on ctx: api.go mints it with
+			// application.LoopCaller and attaches it before calling this
+			// closure. Nothing is constructed here, exactly as in
+			// cmd/control-plane.
+			_, passErr := svc.LoopPass(ctx, application.LoopPassRequest{RequestID: "api-loop-pass-1"})
+			return passErr
+		},
+	})
+
+	capture := call(h, http.MethodPost, "/v1/requirements", `{"request_id":"cap-1","text":"the loop plans this"}`, "owner")
+	if capture.Code != http.StatusCreated {
+		t.Fatalf("capture status = %d body=%s", capture.Code, capture.Body.String())
+	}
+	var captured map[string]any
+	if err = json.Unmarshal(capture.Body.Bytes(), &captured); err != nil {
+		t.Fatal(err)
+	}
+	requirementID, _ := captured["requirement_id"].(string)
+	version, _ := captured["version"].(float64)
+	framed := call(h, http.MethodPost, "/v1/requirements/"+requirementID+":start-framing", fmt.Sprintf(`{"request_id":"frame-1","expected_requirement_version":%d}`, int(version)), "owner")
+	if framed.Code != http.StatusOK {
+		t.Fatalf("start-framing status = %d body=%s", framed.Code, framed.Body.String())
+	}
+	ready := call(h, http.MethodPost, "/v1/requirements/"+requirementID+":complete-framing", fmt.Sprintf(`{"request_id":"ready-1","expected_requirement_version":%d}`, int(version)+1), "owner")
+	if ready.Code != http.StatusOK {
+		t.Fatalf("complete-framing status = %d body=%s", ready.Code, ready.Body.String())
+	}
+
+	// Before the tick, the Runner is offered nothing: no Increment exists.
+	before := call(h, http.MethodGet, "/v1/runner/work", "", "runner")
+	if before.Code != http.StatusOK {
+		t.Fatalf("offer before the tick: status = %d body=%s", before.Code, before.Body.String())
+	}
+	if strings.Contains(before.Body.String(), `"increment_id"`) {
+		t.Fatalf("the Runner was offered work before any tick planned it: %s", before.Body.String())
+	}
+
+	// The tick, over the real /internal/reconcile route and its real identity
+	// check -- so the scheduler caller the pass runs as is the one the transport
+	// established, not one this test built.
+	req := httptest.NewRequest(http.MethodPost, "/internal/reconcile", nil)
+	req.Header.Set("X-Goog-Authenticated-User-Email", "accounts.google.com:"+reconcileIdentity)
+	tick := httptest.NewRecorder()
+	h.ServeHTTP(tick, req)
+	if tick.Code != http.StatusAccepted {
+		t.Fatalf("/internal/reconcile status = %d body=%s", tick.Code, tick.Body.String())
+	}
+
+	after := call(h, http.MethodGet, "/v1/runner/work", "", "runner")
+	if after.Code != http.StatusOK {
+		t.Fatalf("offer after the tick: status = %d body=%s", after.Code, after.Body.String())
+	}
+	var offer struct {
+		Increments []struct {
+			RequirementID            string `json:"requirement_id"`
+			IncrementID              string `json:"increment_id"`
+			ExpectedIncrementVersion int    `json:"expected_increment_version"`
+		} `json:"increments"`
+	}
+	if err = json.Unmarshal(after.Body.Bytes(), &offer); err != nil {
+		t.Fatal(err)
+	}
+	if len(offer.Increments) != 1 {
+		t.Fatalf("the offer carried %d Increments after one tick, want exactly 1: %s", len(offer.Increments), after.Body.String())
+	}
+	head := offer.Increments[0]
+	if head.RequirementID != requirementID {
+		t.Fatalf("the offered Increment belongs to %q, want the captured %q", head.RequirementID, requirementID)
+	}
+	claim := call(h, http.MethodPost, "/v1/runner/claims:acquire",
+		fmt.Sprintf(`{"request_id":"claim-1","increment_id":%q,"expected_increment_version":%d,"control_revision":0}`, head.IncrementID, head.ExpectedIncrementVersion), "runner")
+	if claim.Code != http.StatusOK {
+		t.Fatalf("claims:acquire for the Increment the Loop pass planned: status = %d body=%s", claim.Code, claim.Body.String())
+	}
+	// The consequence the declaration-gap ledger names: /v1/executions/*:start
+	// is now reachable too, because an Execution exists.
+	var claimed map[string]any
+	if err = json.Unmarshal(claim.Body.Bytes(), &claimed); err != nil {
+		t.Fatal(err)
+	}
+	executionID, _ := claimed["execution_id"].(string)
+	if executionID == "" {
+		t.Fatalf("the claim response carried no execution_id: %s", claim.Body.String())
+	}
+	start := call(h, http.MethodPost, "/v1/executions/"+executionID+":start", `{"request_id":"start-1","expected_execution_version":1,"control_revision":0}`, "runner")
+	if start.Code != http.StatusOK {
+		t.Fatalf("/v1/executions/{id}:start status = %d body=%s", start.Code, start.Body.String())
+	}
+	detail := call(h, http.MethodGet, "/v1/requirements/"+requirementID, "", "owner")
+	if detail.Code != http.StatusOK {
+		t.Fatalf("requirement detail status = %d body=%s", detail.Code, detail.Body.String())
+	}
+	if !strings.Contains(detail.Body.String(), `"status":"active"`) {
+		t.Fatalf("the Requirement is not active after the claim: %s", detail.Body.String())
 	}
 }

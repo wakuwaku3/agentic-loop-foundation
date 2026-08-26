@@ -141,6 +141,25 @@ paths:
         route. 503 is returned when the process was not given an explicit
         release source root, in which case no version is reported at all.
       responses: {'200': {description: the release surface of this process, content: {application/json: {schema: {$ref: '#/components/schemas/ReleaseStateResponse'}}}}, '401': {$ref: '#/components/responses/Error'}, '403': {$ref: '#/components/responses/Error'}, '405': {$ref: '#/components/responses/Error'}, '500': {$ref: '#/components/responses/Error'}, '503': {$ref: '#/components/responses/Error'}}
+  /v1/runner/work:
+    get:
+      operationId: offeredWork
+      security: [{runnerSession: []}]
+      description: |
+        Read-only, runner-role only, and the only runner-readable route.
+        It exists because of a measurement: POST /v1/runner/claims:acquire
+        requires a caller-supplied increment_id and expected_increment_version,
+        every other runner route is a POST, and GET /v1/queue/summary and
+        GET /v1/export are owner-only -- so before this route a
+        separate-process Runner could not discover claimable work by any means.
+        It returns at most a declared cap of triples naming Increments in the
+        ready status whose parent Requirement is in a state that admits work,
+        derived from the same bounded page the Loop's own pass reads. It
+        carries no work packet, no requirement text, no digest and no
+        credential-shaped field, and it mutates nothing: an offer is not a
+        reservation, and the claim that follows is still judged on its own.
+        There is deliberately no POST.
+      responses: {'200': {description: the bounded set of Increments this Runner may claim, content: {application/json: {schema: {$ref: '#/components/schemas/OfferedWorkResponse'}}}}, '401': {$ref: '#/components/responses/Error'}, '403': {$ref: '#/components/responses/Error'}, '405': {$ref: '#/components/responses/Error'}, '500': {$ref: '#/components/responses/Error'}, '503': {$ref: '#/components/responses/Error'}}
   /v1/runner/claims:acquire:
     post:
       operationId: claim
@@ -859,6 +878,16 @@ components:
       additionalProperties: false
       required: [revision, mode, requested_by]
       properties: {revision: {type: integer}, mode: {type: string}, state: {type: string, enum: [requested, acknowledged, effective, verified]}, requested_by: {$ref: '#/components/schemas/RequestedBy'}}
+    OfferedWorkResponse:
+      type: object
+      additionalProperties: false
+      required: [schema_version, cap, increments]
+      properties: {schema_version: {type: string}, cap: {type: integer}, increments: {type: array, items: {$ref: '#/components/schemas/OfferedIncrement'}}}
+    OfferedIncrement:
+      type: object
+      additionalProperties: false
+      required: [requirement_id, increment_id, expected_increment_version]
+      properties: {requirement_id: {type: string}, increment_id: {type: string}, expected_increment_version: {type: integer}}
     ClaimResponse:
       type: object
       additionalProperties: false
