@@ -728,6 +728,20 @@ L268cとL271cの行として `WIDER-THAN-CODE` で記録した。`internal/domai
 同じ走査で、文書だけが許す遷移がさらに3件見つかった（L268b `needs-input → framing`、
 L269 `paused → 直前の安全な非終端状態`、L270c `recovering → needs-input`）。
 
+### 追記（2026-08-27、V2-091が実装中に実測）
+
+台帳は分母なので、**新しく測れた乖離は行として足す。taskは起こさない。**
+
+| 行 | 主張 | 分類 | codeの実測 |
+| --- | --- | --- | --- |
+| 新1 | orphan scanが孤児Incrementを見つけて処理する | **UNREACHABLE**（出荷adapterに対して実質no-op） | `IncrementsForRequirements`が2つのadapterで**違う問いに答える**。memory（`internal/store/memory/store.go:466`）はrequirement idでもincrement idでも答えるが、firestore（`internal/store/firestore/store.go:707`）は`increments` collectionのbatch GETなので**increment idにしか答えない**。既存2 callerも食い違っており、`internal/application/readmodels.go:307`はincrement idを渡し、`internal/reconciler/orphan.go:67`は**requirement idを渡す**。したがってorphan scanはfirestore adapterに対して**空を返す**。testはmemory adapterで通るので緑のまま、出荷挙動だけが空である。V2-091は自分の呼び出しをincrement id側に直した（両adapterが答える形）が、`internal/reconciler/**`・`internal/store/**`・`ports.go`はいずれも許可外だったのでorphan scan自身は直していない |
+
+**この行の性質を明記しておく。** これは宣言と実装の乖離ではなく**2つの実装の乖離**で、
+しかも**testが緑のまま出荷挙動だけが空になる**種類である。
+`DEFERRED.md` D1が記録した3件（`IncrementsForRequirements`の空id list、`Outboxes`のready判定、
+`SaveIdempotency`のreplay write）と同じ族で、**4件目**にあたる。
+D1を消し込むときに一緒に測ること。
+
 ## 19. この台帳が扱わないもの（境界）
 
 以下は意図的に測定対象から外した。境界を知らずに本台帳を「全部」と読むと誤る。

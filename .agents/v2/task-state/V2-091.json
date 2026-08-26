@@ -3,7 +3,7 @@
   "id": "ts-v2-091",
   "kind": "canonical-task-state",
   "task_id": "V2-091",
-  "status": "running",
+  "status": "complete",
   "dependencies": [
     "V2-084",
     "V2-090"
@@ -28,7 +28,7 @@
   ],
   "output_hash": "6ff4357079914d899b24f3283d8db67b0b7c265ad2046a608ada0887985b08d4",
   "owner": "terra",
-  "next_owner": "terra",
+  "next_owner": null,
   "retry_budget": {
     "max_attempts": 2,
     "attempts_used": 1,
@@ -323,6 +323,30 @@
         "remaining": 1
       },
       "reason": "到達性の欠陥1件の実装に着手した。reconcile passのwaiting/recovering、promotionの評価と完了、出荷Runnerのjourney driverの3つの現れを1つのpassで閉じる。V2-090が記録して直さなかったF7「waiting/recoveringはjourney到達不可」がこのtaskの入口である"
+    },
+    {
+      "sequence": 13,
+      "at": "2026-08-27T11:00:00Z",
+      "from_status": "running",
+      "to_status": "complete",
+      "actor": "terra",
+      "input_refs": [
+        "V2-084",
+        "V2-091"
+      ],
+      "input_hash": "09b54b99bdbbdc4447ad84e677153e10f15907da2b18757d3122d0fe0824d658",
+      "output_refs": [
+        "V2-091"
+      ],
+      "output_hash": "6ff4357079914d899b24f3283d8db67b0b7c265ad2046a608ada0887985b08d4",
+      "owner": "terra",
+      "next_owner": null,
+      "retry_budget": {
+        "max_attempts": 2,
+        "attempts_used": 1,
+        "remaining": 1
+      },
+      "reason": "到達性の欠陥が閉じた。3つの現れを1つのpassにまとめ、internal/application/loop.goの4 stage(waiting、recovering、Increment生成、completion)で扱う。最大のriskだったroute+clientの半分は到達可能だった。GET /v1/runner/workを足し、preview-localで第2の実processが実際にそれを読んでclaimしExecutionをstartした。in-process driverへの代替もtestがincrement idを渡す形も使っていない。第2processのstdoutは「runner: pass complete offered=2 claimed=2 deferred=0 heartbeats=1 stopped_at_provider_boundary=true」で、control planeはProcessSupervisor起動の独自process group、runnerは自身がprocess group leaderである。completion proofのguardは非空虚性を実行証明した。実call siteを削除して赤verdictを2本逐語取得し(0 non-test sites across 96 parsed files, want exactly 1)、事前copyからbyte-exactに復元した。2 passのcursor証明も実測で、101件をcaller指定idでseedしてpage順を推測にせず、1本目が100件検査・遷移0・MoreRequirementsExist=trueで、2本目がそのcursorで1本目が見なかったRequirementをrecoveringへ動かした。1 passの読みはread transaction 1本でreads=334/writes=1、予算の1.3%と0.01%である。飽和時の書き込み上限も512(日次5.1%)と計算されており、予算に収まらない事象は無かった。§12.12でguardを3本広げ、非空虚性を一時probe関数の注入で3本すべて赤にして実証した。guard 3は広げると同時に強化されており、総数だけでなくfile単位のcall siteを比較するようになった。assertionの削除はゼロで数は8→10、10→12、1→2と増えている。V2-090のpin(edge 29、reached status 10)は動いていない。V2-089の許可集合も無変更で、しかもこのpassが作るwaitingとrecoveringの両方で実Service.Claimが通ることをbehaviourでassertしている。gradeの表が正直である。Increment生成・別processのclaim・Execution startはpreview-localで実行済み、waiting遷移とrecovering遷移とcompletion遷移はcomponent(in-process)に留まる。recoveringをpreview-localで出すにはLeaseTTL 1分を実時間で待つ必要があり、それはA18が禁じる壁時計待ちなので、preview-localでは不在観測negativeのみ実行した。completionは出荷構成がcapability evidenceを記録しないためfully-evidenced candidateを組めず、このtaskはそれを捏造しない。Cloud Runとdeployed environmentについての主張はゼロで、Provider CLIは--versionすら実行していない。Work Orderの不一致は23件。実装中に実測で欠陥を1件見つけ、自分の呼び出しは範囲内で直した。IncrementsForRequirementsが2つのadapterで違う問いに答える——memoryはrequirement idでもincrement idでも答えるがfirestoreはincrement idにしか答えず、既存2 callerも食い違っている。帰結としてreconciler/orphan.goのorphan scanはfirestore adapterに対して実質no-opで、testは緑のまま出荷挙動だけが空になる。該当pathはいずれも許可外なのでorphan scan自身は直さず、DECLARATION-GAP.mdに行として足した。task idの提案はしていない。escalationは0件だが、逐語要求からの明示的な逸脱を2点、部分達成として判定に反映している。1点目はA7の「on its own event」で、application.Eventは8 fieldでpayloadを持たずports.goとinternal/store/**が禁止なのでfield追加も永続化も構造的に不可能である。同一s.recordが同一transactionで書くdurable record(idempotency ResponseJSON)とEvent.Typeに載せ、storeから読み戻してassertした。2点目はA18で、live_local_test.goの既存idiom自体が有界deadline pollと50ms probe間sleep、そしてsupervisor goroutineである。A18は同fileの既存idiomの再利用を指示しているのでその形をそのまま使い、新たな固定時間待ちは導入せず経過時間を閾値としてassertもしていない。新規unit test側はsleep・timer・goroutine・randomnessいずれもゼロである。どちらも私の2つの指示が衝突した箇所で、実装は「新しいpatternを発明しない」側を選んだ。是認する。なおinternal/runner/supervisor_test.goのTestSupervisorCancelsProcessGroupTERMThenKILLが中間runで1回flakeし単体再実行で通った。当該fileは触っていない"
     }
   ]
 }
