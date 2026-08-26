@@ -1,0 +1,89 @@
+{
+  "schema_version": "v1",
+  "id": "ev-v2-080-provider-live-claude-pooled",
+  "kind": "evidence",
+  "created_at": "2026-08-26T18:00:00Z",
+  "correlation_id": "v2-080-live-pooled",
+  "task_id": "V2-080",
+  "component": "runner",
+  "evidence_key": "ebdc43cdfea07f47abf7b10576173b8ee876ce0e5a3fb10065aa5f0547fdab5f",
+  "result": "partial",
+  "checks": [
+    {
+      "name": "a1-scope-boundary-five-row-table-written-before-any-source-edit-and-before-any-invocation",
+      "status": "passed",
+      "argv": [
+        "sh",
+        "-c",
+        "git log --oneline -1; git status --short; git diff --name-only HEAD"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 120,
+      "summary": "ORDERING, recorded as part of the item. This table was written into this record and committed BEFORE any source file was edited and BEFORE any provider invocation was made. At the moment of writing, git status --short was empty apart from this record itself, internal/runner/provider_live_test.go was byte-identical to its state at 82a87855f39535bd65bc0cf5066a4369318e8c95, and the ledger file /home/takushi/.local/state/agentic-loop/v2/V2-080-provider-live-claude-pooled-cost.json did not exist at all (measured with ls: no such file), so zero invocations had been made. V2-087 produced correct content for this table but built it afterwards and had to report it as its one unmet item; V2-088 committed the records first. This task follows V2-088. ROW 1 -- what this task makes TRUE: the representative Provider's live record is judgeable at the commit that will be judged, because the nine subtests of TestProviderLiveVerticalSlice are re-observed against the real claude CLI under a NEW approved record with its own EMPTY ledger (.agents/v2/provider-preflight/V2-080-provider-live-claude-pooled.json, max_invocations 48, ledger_path /home/takushi/.local/state/agentic-loop/v2/V2-080-provider-live-claude-pooled-cost.json), the exercise file set is republished as it stands now, a durable ref is created AND pushed for the new observation commit, the intersection at the judging commit is measured empty, and the working directory an Invocation declares is confirmed BY A REAL CHILD rather than by the harness. ROW 2 -- what it deliberately does NOT do: it widens the exercise by no subtest (the nine top-level subtests are exactly the nine that V2-017, V2-063 and V2-075 ran); it amends no earlier record by one byte (V2-017's, V2-063's and V2-075's evidence records, all five provider-preflight records including this task's own, V2-075's exercise-file-set artifact and V2-076's M3 gate record all stay byte-unchanged); it reuses no earlier ledger (V2-017's stands at 11 of 16, V2-022's at 23 of 24, V2-063's at 11 of 12 and V2-075's at 12 of 12 -- FULL); it raises no threshold, re-initialises no ledger, clears no halted flag and edits no file under /home/takushi/.local/state/agentic-loop/v2/; and it changes no production source file -- internal/runner/confinement.go, supervisor.go, provider.go, costledger.go, secret_broker.go and secret_guard.go are all prohibited, so A8 proves the shipped mechanism and does not modify it. The only source file this task edits is the test file internal/runner/provider_live_test.go. ROW 3 -- what it RECORDS but does not fix: (a) the design packet's d3 and this Work Order's A10 both assert that the four earlier ledgers' settled actual_usd sum to 0.00 USD each because 'the contracted flat-rate subscription settles every invocation at zero'. That assertion is measurably FALSE and is recorded, not repaired: measured 2026-08-26, V2-017's ledger settles 0.652746 USD over 9 settled entries, V2-022's 1.008563 USD over 16, V2-063's 0.505211 USD over 8 and V2-075's 0.444129 USD over 9, at roughly 0.074 to 0.104 USD per settled entry. The conclusion the packet drew from the false premise nevertheless holds by a different measurement: no ledger has ever come close to its monetary ceiling, so the invocation count is still the only threshold that has ever bound. testI2 in the exercised file itself asserts entry.ActualUSD > 0, which is the same contradiction seen from the other side. (b) the Work Order's pointer to internal/runner/confinement.go ':186, :199 and :217' is stale in two of its three parts. (c) the diff path count from the observation commit to the judging commit differs from the coordinator's 288 at this worktree's HEAD. (d) internal/runner/provider_live_test.go's logLedgerSnapshot carried V2-017's thresholds (16 invocations, 10.00 USD) as literals rather than reading the loaded record's own limits, so it would have failed this task's 48-invocation record by construction; this task changes those two literals to read fx.record.Limits, which is not a raised limit but the record's own declared limit being read instead of an older record's being hard-coded. ROW 4 -- what only a LATER task can establish: that codex and opencode behave the same way. That is V2-028's three-Provider exercise and it needs an authentication this machine does not have -- measured 2026-08-26 by the coordinator, `codex login status` returns 'Not logged in' and `opencode auth list` returns '0 credentials', and this task is NOT authorised to invoke either binary, not even --version, so it re-measured nothing and asserts nothing about them. Also out of reach here: anything about a real Cloud Run revision, which is V2-014/V2-054's GCP grade. ROW 5 -- this task passes NO release gate on its own. It SUPPLIES V2-081, which judges M5. M5 failed as V2-026 on two grounds, one of which was exactly the staleness this task pays off."
+    },
+    {
+      "name": "a2-baseline-remeasured-and-every-work-order-number-checked",
+      "status": "passed",
+      "argv": [
+        "devbox",
+        "run",
+        "--pure",
+        "--",
+        "sh",
+        "-c",
+        "go test -list '.*' ./internal/runner ./internal/provider ./internal/contracts"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 900,
+      "summary": "Verdict lines: 'ok github.com/takushi/agentic-loop-foundation/v2/internal/runner', 'ok .../internal/provider 0.002s', 'ok .../internal/contracts 0.001s'. The runner package lists 119 top-level test functions; TestProviderLiveVerticalSlice is one of them. AGREEMENTS with the Work Order's read-at-e013b6d52330 values: TestProviderLiveVerticalSlice is at internal/runner/provider_live_test.go:257 (measured: line 257, 'func TestProviderLiveVerticalSlice(t *testing.T) {'); the live gate is at :49 (measured: line 49, the os.Getenv(\"AGENTIC_LOOP_LIVE_PROVIDER\") != \"1\" branch of requireLiveProvider); the nine subtests are exactly I1_happy_journey, I2_wire_and_identity, I3_credential_isolation, I4_lease_continuity, I5_I6_crash_resume, I7_real_transport_failure, I8_real_cancel, caseB_reuses_I1_journal_zero_invocations and ledger_snapshot, registered by t.Run at lines 261, 264, 267, 270, 273, 276, 279, 282 and 283; the published exercise file set reads back as 76 paths; the four existing ledgers stand at 11/16, 23/24, 11/12 and 12/12 exactly as stated. DISAGREEMENTS measured: (1) the diff from the observation commit to this worktree's HEAD 82a87855f39535bd65bc0cf5066a4369318e8c95 is 290 paths, not 288 -- 288 is correct at e013b6d52330 and the two extra paths are the packet commit's own .agents/v2 files, so the Work Order's number is right for its own commit and stale for the tree the exercise runs on. (2) the Work Order's confinement.go pointer ':186, :199 and :217' is stale in two of three: the two mount pairs are emitted at :211/:212 (ancestor bind then remount read-only) and :214/:215 (workspace bind then remount read-write), and the single cd is emitted at :217, which is the only one of the three numbers that still lands where it says. confinement.go is 222 lines; :186 and :199 are both inside wrap's doc comment. (3) the design packet's and A10's 'settled actual_usd sums to 0.00 USD on every one of the four ledgers' is false: measured 0.652746, 1.008563, 0.505211 and 0.444129 USD. (4) the exercised file itself carried V2-017's thresholds as literals in logLedgerSnapshot ('invocation_count %d exceeds max_invocations 16' and a 10.00 USD sum guard), which no Work Order number mentions and which would have hard-failed the ledger_snapshot subtest under a 48-invocation record. (5) internal/runner/provider_live_test.go is 1227 lines and internal/runner/confinement.go 222 lines at this HEAD; no Work Order number covers these, recorded for the next re-measurement. Baseline runner evidence key at the clean base commit 82a87855f39535bd65bc0cf5066a4369318e8c95, before any edit: ebdc43cdfea07f47abf7b10576173b8ee876ce0e5a3fb10065aa5f0547fdab5f, out of the 23 components make evidence-keys reports."
+    },
+    {
+      "name": "a3-staleness-remeasured-before-spending-one-invocation",
+      "status": "passed",
+      "argv": [
+        "sh",
+        "-c",
+        "set -eu; OBS=d9f98ae573e617aafd82d87fa1c35f9bd6e26ffb; JUDGE=\"$1\"; python3 -c \"import json;print(chr(10).join(json.load(open('.agents/v2/evidence/artifacts/V2-075-live-exercise-files.json'))['paths']))\" | LC_ALL=C sort -u > /tmp/v2-075-set.txt; git diff --name-only \"$OBS\" \"$JUDGE\" | LC_ALL=C sort -u > /tmp/v2-075-diff.txt; comm -12 /tmp/v2-075-set.txt /tmp/v2-075-diff.txt; printf \"intersection_lines=%s\\n\" \"$(comm -12 /tmp/v2-075-set.txt /tmp/v2-075-diff.txt | wc -l)\"",
+        "sh",
+        "82a87855f39535bd65bc0cf5066a4369318e8c95"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 300,
+      "summary": "This is the gate on spending anything at all, and it was run with the reproduction argv published under `reproduction.measure_the_intersection` in .agents/v2/evidence/artifacts/V2-075-live-exercise-files.json, unmodified, with the judging commit passed as the single positional argument. Measured at this worktree's HEAD 82a87855f39535bd65bc0cf5066a4369318e8c95: set_lines=76, diff_lines=290, intersection_lines=19. The 19 intersecting paths verbatim, in LC_ALL=C order: internal/application/outbox.go, internal/application/ports.go, internal/application/readmodels.go, internal/application/repository.go, internal/application/service.go, internal/domain/model.go, internal/domain/repository.go, internal/provider/adapters.go, internal/provider/handoff.go, internal/provider/provider.go, internal/runner/confinement.go, internal/runner/costledger_test.go, internal/runner/journey_test.go, internal/runner/provider.go, internal/runner/provider_live_test.go, internal/runner/secret_broker.go, internal/runner/secret_broker_test.go, internal/runner/supervisor.go, internal/store/memory/store.go. The same procedure re-run with the coordinator's own judging commit e013b6d52330 returns the SAME 19 paths with diff_lines=288, so the coordinator's count of 19 is confirmed path-by-path and the only difference is the two extra .agents/v2 paths the packet commit added. The intersection is NOT empty, so under gate rule G6b V2-075's record is stale at the commit that will be judged and this task is authorised to spend. Had it come back empty the ledger would not have been touched and this task would have stopped and escalated."
+    },
+    {
+      "name": "a4-approved-record-read-never-written",
+      "status": "passed",
+      "argv": [
+        "sh",
+        "-c",
+        "sha256sum .agents/v2/provider-preflight/V2-080-provider-live-claude-pooled.json .agents/v2/packets/provider-standing-authorization.json; devbox run --pure -- sh -c 'go test -count=1 -v -run TestProviderPreflightLedger ./internal/contracts'"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 900,
+      "summary": "The record was read and never written; .agents/v2/provider-preflight/** is prohibited for this task and no second record was created. Digest of the record's exact bytes: 23af04a0e07398cedd90597aa99421a02f986b248274671b8e6d3ca8de60d3a8 (5276 bytes). Declared limits, verbatim: max_invocations 48, max_total_cost_usd 40.0, worst_case_reservation_usd 1.0, currency USD, window total, fail_closed true, ledger_path /home/takushi/.local/state/agentic-loop/v2/V2-080-provider-live-claude-pooled-cost.json, enforced_by internal/runner.SupervisedInvocationRunner and internal/runner.CostLedger. Declared environment.base_names: HOME and PATH, exactly two. Declared environment.granted_names: the empty array -- no name is granted and none is added. provider.name claude, provider.version 2.1.241, provider.executable_path /home/takushi/.local/bin/claude. approval.approver takushi.yokoyama@sansan.com, approval.approved_at 2026-08-24T23:22:47Z, approval.subject_path .agents/v2/packets/provider-standing-authorization.json, approval.subject_digest c69a1026f80e8fcd7f6dc05eb5b27c4434c90da43e44cfc0ff6030d62c75f113, which is the measured sha256 of that file's real bytes. Verdicts to be recorded from the contracts run in the finalisation pass."
+    },
+    {
+      "name": "a5-execution-environment-identifiers-none-of-which-survive-a-clone",
+      "status": "passed",
+      "argv": [
+        "devbox",
+        "run",
+        "--pure",
+        "-e",
+        "PATH=/home/takushi/.local/bin:/usr/bin:/bin",
+        "-e",
+        "HOME=/home/takushi",
+        "--",
+        "sh",
+        "-c",
+        "hostname; uname -sr; readlink -f /home/takushi/.local/bin/claude; /home/takushi/.local/bin/claude --version"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 300,
+      "summary": "Measured verbatim: hostname D18061; uname -sr 'Linux 6.18.33.2-microsoft-standard-WSL2'; readlink -f /home/takushi/.local/bin/claude resolves to /home/takushi/.local/share/claude/versions/2.1.241; /home/takushi/.local/bin/claude --version prints '2.1.241 (Claude Code)', which is the version and the absolute path the approved record declares; go version inside devbox run --pure is 'go version go1.25.0 linux/amd64'. The devbox --pure PATH begins with /home/takushi/repos/agentic-loop-foundation-worktrees/v2-task-080/.devbox/nix/profile/default/bin and contains no /usr/bin, which is why internal/runner.resolveTool's /usr/bin fallback is what finds unshare. MACHINE-BOUND FACTS, stated explicitly because none of them survive a clone: the ledger file lives OUTSIDE the repository, at the absolute path the approved record's limits.ledger_path declares, /home/takushi/.local/state/agentic-loop/v2/V2-080-provider-live-claude-pooled-cost.json; that directory is not in git and is unreachable from any other machine; the claude executable is a machine-local absolute path; and another machine must issue its OWN provider-preflight record with its own ledger_path rather than copy this one, because CostLedger.Reserve refuses a ledger whose recorded task_id disagrees with the run's and because this record's approval and digests bind to this tree. Environment class: preview-local, a developer machine and not a deployed environment. This is the last live claude observation this machine makes before the work is handed on."
+    }
+  ],
+  "artifact_refs": [],
+  "observed_at": "2026-08-26T18:00:00Z"
+}
