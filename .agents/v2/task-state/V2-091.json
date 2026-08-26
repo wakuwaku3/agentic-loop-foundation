@@ -6,9 +6,9 @@
   "status": "blocked",
   "dependencies": [
     "V2-084",
-    "V2-089"
+    "V2-090"
   ],
-  "block_reason": "V2-089",
+  "block_reason": "V2-090",
   "outcome": "Give the transitions the domain already models a caller outside a test: let the reconcile pass issue waiting and recovering, let promotion evaluate and complete a Requirement, and let the shipped Runner drive the journey. These were three tasks; they are one defect with three appearances.",
   "non_goals": [
     "Do not give any of the three paths a caller identity it is not",
@@ -228,6 +228,54 @@
         "remaining": 2
       },
       "reason": "並列度を実装1体に抑える方針なので、鎖の順序どおり待たせる。packet済み実装3件のallowed_pathsは総当たりで衝突する(api.goとapi_test.goを共有)ため、実装同士を並走させると必ずconflictする"
+    },
+    {
+      "sequence": 9,
+      "at": "2026-08-27T05:07:00Z",
+      "from_status": "blocked",
+      "to_status": "queued",
+      "actor": "sol",
+      "input_refs": [
+        "V2-084",
+        "V2-091"
+      ],
+      "input_hash": "09b54b99bdbbdc4447ad84e677153e10f15907da2b18757d3122d0fe0824d658",
+      "output_refs": [
+        "V2-091"
+      ],
+      "output_hash": "6ff4357079914d899b24f3283d8db67b0b7c265ad2046a608ada0887985b08d4",
+      "owner": "terra",
+      "next_owner": "terra",
+      "retry_budget": {
+        "max_attempts": 2,
+        "attempts_used": 0,
+        "remaining": 2
+      },
+      "reason": "V2-089が完了したのでblockが解消した"
+    },
+    {
+      "sequence": 10,
+      "at": "2026-08-27T05:08:00Z",
+      "from_status": "queued",
+      "to_status": "blocked",
+      "actor": "sol",
+      "input_refs": [
+        "V2-084",
+        "V2-091"
+      ],
+      "input_hash": "09b54b99bdbbdc4447ad84e677153e10f15907da2b18757d3122d0fe0824d658",
+      "output_refs": [
+        "V2-091"
+      ],
+      "output_hash": "6ff4357079914d899b24f3283d8db67b0b7c265ad2046a608ada0887985b08d4",
+      "owner": "terra",
+      "next_owner": "terra",
+      "retry_budget": {
+        "max_attempts": 2,
+        "attempts_used": 0,
+        "remaining": 2
+      },
+      "reason": "実装を1体に抑える方針なので鎖の順序どおりV2-090の後に置く"
     }
   ]
 }

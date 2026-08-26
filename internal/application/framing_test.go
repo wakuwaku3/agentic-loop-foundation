@@ -800,10 +800,16 @@ func TestAClaimedIncrementCarriesItsReadyParentIntoActive(t *testing.T) {
 		captured.RequirementID, beforeClaim.Version, afterClaim.Version, afterSecondClaim.Version)
 }
 
-// TestClaimAgainstACapturedParentStillSucceeds was V2-084's A6 MEASUREMENT and
-// V2-089 INVERTED ITS POLARITY. Its name is kept deliberately: renaming a
-// pre-existing test is prohibited, and the name is now the record of what
-// changed rather than a description of the assertion.
+// TestClaimAgainstACapturedParentIsRefused was V2-084's A6 MEASUREMENT under
+// the name TestClaimAgainstACapturedParentStillSucceeds, and V2-089 INVERTED
+// ITS POLARITY. The coordinator renamed it at integration and recorded the
+// history here, under the rule added as docs/operations/v2-task-dag.md section
+// 12.11: a test may be renamed when the task's own outcome inverts what it
+// asserts, provided the old name, the new name and the assertion-level diff
+// are all recorded. The no-rename rule exists to stop a deleted assertion
+// hiding behind a new name; a name that asserts the OPPOSITE of its body is a
+// trap for the next reader, and keeping it serves nobody. Nothing was dropped:
+// the assertions below are V2-089's, unchanged by the rename.
 //
 // V2-084 recorded, and deliberately did not repair, that Service.Claim accepted
 // an Increment whose parent Requirement was still `captured`, and logged the
@@ -817,7 +823,7 @@ func TestAClaimedIncrementCarriesItsReadyParentIntoActive(t *testing.T) {
 // Everything else this test measured still holds and is still asserted: a
 // refused claim is a no-op, so the captured parent is byte-unchanged, and it
 // stays captured. What changed is the sign of the claim's own result.
-func TestClaimAgainstACapturedParentStillSucceeds(t *testing.T) {
+func TestClaimAgainstACapturedParentIsRefused(t *testing.T) {
 	svc, st := service()
 	ctx := owner(context.Background())
 	runnerCtx := runner(context.Background(), "runner-1")

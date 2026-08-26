@@ -3,7 +3,7 @@
   "id": "ts-v2-089",
   "kind": "canonical-task-state",
   "task_id": "V2-089",
-  "status": "running",
+  "status": "complete",
   "dependencies": [
     "V2-084"
   ],
@@ -24,7 +24,7 @@
   ],
   "output_hash": "21cc9c757ea8ec0897eda181983c90e04bc36d3a5941f3cc3bb1c2dfd177e0cc",
   "owner": "terra",
-  "next_owner": "terra",
+  "next_owner": null,
   "retry_budget": {
     "max_attempts": 2,
     "attempts_used": 1,
@@ -127,6 +127,30 @@
         "remaining": 1
       },
       "reason": "Claimが親Requirementの状態を問うようにし、問わないことに依存していたfixtureを移す作業に着手した。設計の実測では拒否されるclaim試行は64件・distinct Incrementは62件で、parent statusは60/60がcapturedだった。つまり1形状の62回反復であり62種類の問題ではない"
+    },
+    {
+      "sequence": 5,
+      "at": "2026-08-27T05:00:00Z",
+      "from_status": "running",
+      "to_status": "complete",
+      "actor": "terra",
+      "input_refs": [
+        "V2-084",
+        "V2-089"
+      ],
+      "input_hash": "81024deca606596f23bb26dc5e3e60ecf4f5c3593b6533c82789f8a5f5187acf",
+      "output_refs": [
+        "V2-089"
+      ],
+      "output_hash": "21cc9c757ea8ec0897eda181983c90e04bc36d3a5941f3cc3bb1c2dfd177e0cc",
+      "owner": "terra",
+      "next_owner": null,
+      "retry_budget": {
+        "max_attempts": 2,
+        "attempts_used": 1,
+        "remaining": 1
+      },
+      "reason": "claimが親Requirementの状態を問うようになった。admitting setは選ばず導出した——{ready, active, waiting, recovering}の4状態で、claimable.goの1つのswitchだけに書かれている。go/astで../domainから軸を導出し11要素を得たうえで、全11状態についてrequirementStatusAdmitsClaim(s)がDecideRequirement(s, RequirementStart)==nil または s==active と同値であることをassertした。matcherはsynthetic positiveとnegativeの両方で検証してから使っている。11セルすべてseed可能で全部実行しskipは0、4成功7拒否である。completedセルが空虚に通らないよう全候補に完全なStableReleaseSnapshotを与えている。transportはbefore 500 internal_errorからafter 409 conflictへ、両方verbatimで記録された。fixture移行は39サイトすべてreadyで、すべてversionをthreadしている。引用は全行domain-model.md:265である。移行の質が高い。applicationはstore書き込みゼロの既存allocReady(domain.DecideRequirement経由)を使い、apiは製品の実route:start-framingと:complete-framingで到達し、runnerのorchestrator.goは製品commandのみを使う。第2波は意図的に再現された。lease_test.goの:84/:114/:125でstale domain versionが出て、修復はversionのthreadだけである。第3波も1箇所で実測し、already-ownedのsubtestでclaim後の親がactiveになりStartFramingが不正遷移になるのを、RequirementWaitとRequirementReadyCommandの実domain遷移に置換して閉じた。assert対象の最終状態は不変である。reconcilerのstop_journey_test.go:81では、stop下で新規claimが拒否されるassertがcapturedのままだと誤った拒否理由で通ってしまうことを見つけ、両親をreadyにしたうえでErrRequirementNotClaimableならt.Fatalfする腕を追加した。緩和ではなくassertの追加である。tripwireは4つすべて減少ゼロで、comm -23は8 packageすべて空、V2-085の7 mode表とV2-084の閉集合guard2本はbyte不変で緑だった。予告した赤化が起きなかった理由も測られている——新codeはRequirementCommandKindを名指さずswitchはRequirementStatusの値を見るので、両scanの計数が変わらない。§12.3の境界改訂は不要だった。Work Orderの不一致は27件で過去最多。V2-084の「予算日あたりread transaction 4回」も実測で少なくとも10回に変わっていた(V2-087のTrueUpが予約を実使用量にクランプするため)。escalationは1件で是認した。Goのimport cycle規則によりA7とA8が同一fileに両立しない——A7はunexportedなrequirementStatusAdmitsClaimを呼ぶのでclaimable_testはpackage applicationでなければならず、その場合internal/store/memoryをimportできないが、A8は実Serviceと実memory storeを要求する。requested assertを1つも落とさず、A7とA20を in-package のclaimable_test.goに、Service altitudeのA8/A9後半/A11/A12をpackage application_testのservice_test.goに置いた。両方allowed_paths内である。もう1件の判断を仰いできた点にはcoordinatorが規則を足して答えた。V2-084のA6が測定として置いたtestの極性を反転させたが改名禁止規則に従って名前を残した結果、名前が本文の否定を述べるtestが残っていた。§12.11を足して改名を許し(旧名・新名・assertion単位のdiffを記録する条件つき)、統合時にTestClaimAgainstACapturedParentIsRefusedへ改名して履歴をdoc commentに残した。改名禁止規則が防ぎたかったのは消したassertionが新しい名前の陰に隠れることで、名前が本文の否定を述べるtestは次に読む人に対する罠である。assertionは1つも消していない"
     }
   ]
 }

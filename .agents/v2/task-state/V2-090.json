@@ -3,19 +3,18 @@
   "id": "ts-v2-090",
   "kind": "canonical-task-state",
   "task_id": "V2-090",
-  "status": "blocked",
+  "status": "running",
   "dependencies": [
     "V2-084",
     "V2-089"
   ],
-  "block_reason": "V2-089",
   "outcome": "Give the owner a way to pause and cancel a Requirement, and give the paused state a way out, because today pausing would be a trap with no exit.",
   "non_goals": [
     "Do not add a transition the product does not describe",
     "Do not let a pause be lifted by anyone the product does not name",
     "Do not resume into a state the Requirement was not in"
   ],
-  "actor": "sol",
+  "actor": "terra",
   "input_refs": [
     "V2-084",
     "V2-090"
@@ -29,8 +28,8 @@
   "next_owner": "terra",
   "retry_budget": {
     "max_attempts": 2,
-    "attempts_used": 0,
-    "remaining": 2
+    "attempts_used": 1,
+    "remaining": 1
   },
   "release_eligible": false,
   "transitions": [
@@ -129,6 +128,54 @@
         "remaining": 2
       },
       "reason": "並列度を実装1体に抑える方針なので、鎖の順序どおり待たせる。packet済み実装3件のallowed_pathsは総当たりで衝突する(api.goとapi_test.goを共有)ため、実装同士を並走させると必ずconflictする"
+    },
+    {
+      "sequence": 5,
+      "at": "2026-08-27T05:05:00Z",
+      "from_status": "blocked",
+      "to_status": "queued",
+      "actor": "sol",
+      "input_refs": [
+        "V2-084",
+        "V2-090"
+      ],
+      "input_hash": "efa554c440e4475c61793f8d1c8d1f9548600e4c2037fb44242830e9c36807c3",
+      "output_refs": [
+        "V2-090"
+      ],
+      "output_hash": "b3f57aa72ab77eac9f3ae3722685e9f988b970d601b564eb2d4d33836ba0f468",
+      "owner": "terra",
+      "next_owner": "terra",
+      "retry_budget": {
+        "max_attempts": 2,
+        "attempts_used": 0,
+        "remaining": 2
+      },
+      "reason": "V2-089が完了しinternal/api/api.goとapi_test.goの占有が解けたのでblockが解消した"
+    },
+    {
+      "sequence": 6,
+      "at": "2026-08-27T05:06:00Z",
+      "from_status": "queued",
+      "to_status": "running",
+      "actor": "terra",
+      "input_refs": [
+        "V2-084",
+        "V2-090"
+      ],
+      "input_hash": "efa554c440e4475c61793f8d1c8d1f9548600e4c2037fb44242830e9c36807c3",
+      "output_refs": [
+        "V2-090"
+      ],
+      "output_hash": "b3f57aa72ab77eac9f3ae3722685e9f988b970d601b564eb2d4d33836ba0f468",
+      "owner": "terra",
+      "next_owner": "terra",
+      "retry_budget": {
+        "max_attempts": 2,
+        "attempts_used": 1,
+        "remaining": 1
+      },
+      "reason": "ownerのpause/cancelとpausedの出口の実装に着手した。V2-084が「pauseはresume commandがdomainに無く直前状態を持つfieldも無いので出口がcancelだけの一方通行になる」と測って据え置いた点が、このtaskの中心である"
     }
   ]
 }
