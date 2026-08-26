@@ -3,9 +3,9 @@
   "id": "ts-v2-086",
   "kind": "canonical-task-state",
   "task_id": "V2-086",
-  "status": "queued",
+  "status": "blocked",
   "dependencies": [
-    "V2-082"
+    "V2-085"
   ],
   "outcome": "Make the scheduler an actor a real caller can be, or stop declaring it as one: today no code outside a test constructs it, and the Runner's own path fabricates an owner instead.",
   "non_goals": [
@@ -103,6 +103,31 @@
         "remaining": 2
       },
       "reason": "every task this one depends on is complete, so the block has cleared"
+    },
+    {
+      "sequence": 4,
+      "at": "2026-08-26T11:00:02Z",
+      "from_status": "queued",
+      "to_status": "blocked",
+      "actor": "sol",
+      "input_refs": [
+        "V2-082",
+        "V2-086"
+      ],
+      "input_hash": "862972bfc613751c1d4c426c32dbf33859dc3d7b44f2b0273468697684b0956c",
+      "output_refs": [
+        "V2-086"
+      ],
+      "output_hash": "fafcc8d3832eaf04a14ec439e9ec1f1a0541de6ce0e2a8f708a702398a7ffb31",
+      "owner": "terra",
+      "next_owner": "terra",
+      "retry_budget": {
+        "max_attempts": 2,
+        "attempts_used": 0,
+        "remaining": 2
+      },
+      "reason": "the measured file overlap orders these: the error classification and the quota true-up hold the api handler and its test, the planning permit is the smallest and touches no contract, the scheduler identity touches the authenticator, and the lifecycle edges touch all of them plus the api contract"
     }
-  ]
+  ],
+  "block_reason": "V2-085"
 }

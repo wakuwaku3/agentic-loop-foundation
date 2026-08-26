@@ -1,0 +1,85 @@
+{
+  "schema_version": "v1",
+  "id": "ts-v2-092",
+  "kind": "canonical-task-state",
+  "task_id": "V2-092",
+  "status": "blocked",
+  "dependencies": [
+    "V2-084"
+  ],
+  "block_reason": "V2-084",
+  "outcome": "Wire promotion so that a Requirement can be evaluated and completed at all: today the only thing that can construct the proof completion requires has no caller outside a test.",
+  "non_goals": [
+    "Do not complete a Requirement on the strength of an Increment succeeding",
+    "Do not construct the proof anywhere other than the promotion path that earns it",
+    "Do not claim a capability is exercised because the wiring exists"
+  ],
+  "actor": "sol",
+  "input_refs": [
+    "V2-084",
+    "V2-092"
+  ],
+  "input_hash": "f5f15dcb1f86a675e395572a090a0cda285568e8ec8af2b0df0b6b6d0069caaf",
+  "output_refs": [
+    "V2-092"
+  ],
+  "output_hash": "ea155b9d2aa256e76169ca689914655543fbc3e55e43fb40540b5fd19cb1db38",
+  "owner": "terra",
+  "next_owner": "terra",
+  "retry_budget": {
+    "max_attempts": 2,
+    "attempts_used": 0,
+    "remaining": 2
+  },
+  "release_eligible": false,
+  "transitions": [
+    {
+      "sequence": 1,
+      "at": "2026-08-26T11:00:00Z",
+      "from_status": null,
+      "to_status": "queued",
+      "actor": "sol",
+      "input_refs": [
+        "V2-084",
+        "V2-092"
+      ],
+      "input_hash": "f5f15dcb1f86a675e395572a090a0cda285568e8ec8af2b0df0b6b6d0069caaf",
+      "output_refs": [
+        "V2-092"
+      ],
+      "output_hash": "ea155b9d2aa256e76169ca689914655543fbc3e55e43fb40540b5fd19cb1db38",
+      "owner": "terra",
+      "next_owner": "terra",
+      "retry_budget": {
+        "max_attempts": 2,
+        "attempts_used": 0,
+        "remaining": 2
+      },
+      "reason": "the lifecycle work measured that the proof a completed Requirement requires can only be constructed through the promotion pipeline, and that the pipeline has zero non-test callers, so a running process cannot build the input at all. Evaluation and completion are therefore not merely unissued but impossible, and the product is explicit that an Increment succeeding must not complete a Requirement by itself"
+    },
+    {
+      "sequence": 2,
+      "at": "2026-08-26T11:00:01Z",
+      "from_status": "queued",
+      "to_status": "blocked",
+      "actor": "sol",
+      "input_refs": [
+        "V2-084",
+        "V2-092"
+      ],
+      "input_hash": "f5f15dcb1f86a675e395572a090a0cda285568e8ec8af2b0df0b6b6d0069caaf",
+      "output_refs": [
+        "V2-092"
+      ],
+      "output_hash": "ea155b9d2aa256e76169ca689914655543fbc3e55e43fb40540b5fd19cb1db38",
+      "owner": "terra",
+      "next_owner": "terra",
+      "retry_budget": {
+        "max_attempts": 2,
+        "attempts_used": 0,
+        "remaining": 2
+      },
+      "reason": "the task that measured this defect lands the first edges the rest build on"
+    }
+  ]
+}

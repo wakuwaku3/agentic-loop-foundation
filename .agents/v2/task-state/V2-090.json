@@ -1,0 +1,85 @@
+{
+  "schema_version": "v1",
+  "id": "ts-v2-090",
+  "kind": "canonical-task-state",
+  "task_id": "V2-090",
+  "status": "blocked",
+  "dependencies": [
+    "V2-084"
+  ],
+  "block_reason": "V2-084",
+  "outcome": "Give the owner a way to pause and cancel a Requirement, and give the paused state a way out, because today pausing would be a trap with no exit.",
+  "non_goals": [
+    "Do not add a transition the product does not describe",
+    "Do not let a pause be lifted by anyone the product does not name",
+    "Do not resume into a state the Requirement was not in"
+  ],
+  "actor": "sol",
+  "input_refs": [
+    "V2-084",
+    "V2-090"
+  ],
+  "input_hash": "efa554c440e4475c61793f8d1c8d1f9548600e4c2037fb44242830e9c36807c3",
+  "output_refs": [
+    "V2-090"
+  ],
+  "output_hash": "b3f57aa72ab77eac9f3ae3722685e9f988b970d601b564eb2d4d33836ba0f468",
+  "owner": "terra",
+  "next_owner": "terra",
+  "retry_budget": {
+    "max_attempts": 2,
+    "attempts_used": 0,
+    "remaining": 2
+  },
+  "release_eligible": false,
+  "transitions": [
+    {
+      "sequence": 1,
+      "at": "2026-08-26T11:00:00Z",
+      "from_status": null,
+      "to_status": "queued",
+      "actor": "sol",
+      "input_refs": [
+        "V2-084",
+        "V2-090"
+      ],
+      "input_hash": "efa554c440e4475c61793f8d1c8d1f9548600e4c2037fb44242830e9c36807c3",
+      "output_refs": [
+        "V2-090"
+      ],
+      "output_hash": "b3f57aa72ab77eac9f3ae3722685e9f988b970d601b564eb2d4d33836ba0f468",
+      "owner": "terra",
+      "next_owner": "terra",
+      "retry_budget": {
+        "max_attempts": 2,
+        "attempts_used": 0,
+        "remaining": 2
+      },
+      "reason": "the lifecycle work measured that the domain admits pausing but models no resume: the ready status is not admitted from paused, no field records what the Requirement was doing before, and so a pause that could be issued could never be lifted. Pausing and cancelling are the two transitions the product describes as a person's action, and neither has an issuer"
+    },
+    {
+      "sequence": 2,
+      "at": "2026-08-26T11:00:01Z",
+      "from_status": "queued",
+      "to_status": "blocked",
+      "actor": "sol",
+      "input_refs": [
+        "V2-084",
+        "V2-090"
+      ],
+      "input_hash": "efa554c440e4475c61793f8d1c8d1f9548600e4c2037fb44242830e9c36807c3",
+      "output_refs": [
+        "V2-090"
+      ],
+      "output_hash": "b3f57aa72ab77eac9f3ae3722685e9f988b970d601b564eb2d4d33836ba0f468",
+      "owner": "terra",
+      "next_owner": "terra",
+      "retry_budget": {
+        "max_attempts": 2,
+        "attempts_used": 0,
+        "remaining": 2
+      },
+      "reason": "the task that measured this defect lands the first edges the rest build on"
+    }
+  ]
+}

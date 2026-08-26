@@ -1,0 +1,85 @@
+{
+  "schema_version": "v1",
+  "id": "ts-v2-089",
+  "kind": "canonical-task-state",
+  "task_id": "V2-089",
+  "status": "blocked",
+  "dependencies": [
+    "V2-084"
+  ],
+  "block_reason": "V2-084",
+  "outcome": "Make claiming refuse when the Requirement it belongs to is not in a state that admits work, and move the fixtures that currently rely on it not asking.",
+  "non_goals": [
+    "Do not weaken a fixture to avoid the refusal",
+    "Do not refuse a claim the Requirement's state actually admits",
+    "Do not change what claiming does when the state admits it"
+  ],
+  "actor": "sol",
+  "input_refs": [
+    "V2-084",
+    "V2-089"
+  ],
+  "input_hash": "81024deca606596f23bb26dc5e3e60ecf4f5c3593b6533c82789f8a5f5187acf",
+  "output_refs": [
+    "V2-089"
+  ],
+  "output_hash": "21cc9c757ea8ec0897eda181983c90e04bc36d3a5941f3cc3bb1c2dfd177e0cc",
+  "owner": "terra",
+  "next_owner": "terra",
+  "retry_budget": {
+    "max_attempts": 2,
+    "attempts_used": 0,
+    "remaining": 2
+  },
+  "release_eligible": false,
+  "transitions": [
+    {
+      "sequence": 1,
+      "at": "2026-08-26T11:00:00Z",
+      "from_status": null,
+      "to_status": "queued",
+      "actor": "sol",
+      "input_refs": [
+        "V2-084",
+        "V2-089"
+      ],
+      "input_hash": "81024deca606596f23bb26dc5e3e60ecf4f5c3593b6533c82789f8a5f5187acf",
+      "output_refs": [
+        "V2-089"
+      ],
+      "output_hash": "21cc9c757ea8ec0897eda181983c90e04bc36d3a5941f3cc3bb1c2dfd177e0cc",
+      "owner": "terra",
+      "next_owner": "terra",
+      "retry_budget": {
+        "max_attempts": 2,
+        "attempts_used": 0,
+        "remaining": 2
+      },
+      "reason": "the lifecycle work advanced a Requirement to active from inside claiming but deliberately did not add the matching refusal, because eighteen test files across five packages claim without putting the parent in a state that admits it, and migrating them is not an additive change. Until the refusal exists, claiming succeeds against a Requirement whose recorded state says no work should be running"
+    },
+    {
+      "sequence": 2,
+      "at": "2026-08-26T11:00:01Z",
+      "from_status": "queued",
+      "to_status": "blocked",
+      "actor": "sol",
+      "input_refs": [
+        "V2-084",
+        "V2-089"
+      ],
+      "input_hash": "81024deca606596f23bb26dc5e3e60ecf4f5c3593b6533c82789f8a5f5187acf",
+      "output_refs": [
+        "V2-089"
+      ],
+      "output_hash": "21cc9c757ea8ec0897eda181983c90e04bc36d3a5941f3cc3bb1c2dfd177e0cc",
+      "owner": "terra",
+      "next_owner": "terra",
+      "retry_budget": {
+        "max_attempts": 2,
+        "attempts_used": 0,
+        "remaining": 2
+      },
+      "reason": "the task that measured this defect lands the first edges the rest build on"
+    }
+  ]
+}

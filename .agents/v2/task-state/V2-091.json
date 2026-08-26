@@ -1,0 +1,85 @@
+{
+  "schema_version": "v1",
+  "id": "ts-v2-091",
+  "kind": "canonical-task-state",
+  "task_id": "V2-091",
+  "status": "blocked",
+  "dependencies": [
+    "V2-084"
+  ],
+  "block_reason": "V2-084",
+  "outcome": "Let the reconcile pass issue the two transitions that describe waiting and recovering, which today nothing can reach because the pass has no caller identity.",
+  "non_goals": [
+    "Do not give the pass a caller it is not",
+    "Do not let the pass advance a Requirement for a reason it did not observe",
+    "Do not make the pass unbounded in order to reach every Requirement"
+  ],
+  "actor": "sol",
+  "input_refs": [
+    "V2-084",
+    "V2-091"
+  ],
+  "input_hash": "09b54b99bdbbdc4447ad84e677153e10f15907da2b18757d3122d0fe0824d658",
+  "output_refs": [
+    "V2-091"
+  ],
+  "output_hash": "6ff4357079914d899b24f3283d8db67b0b7c265ad2046a608ada0887985b08d4",
+  "owner": "terra",
+  "next_owner": "terra",
+  "retry_budget": {
+    "max_attempts": 2,
+    "attempts_used": 0,
+    "remaining": 2
+  },
+  "release_eligible": false,
+  "transitions": [
+    {
+      "sequence": 1,
+      "at": "2026-08-26T11:00:00Z",
+      "from_status": null,
+      "to_status": "queued",
+      "actor": "sol",
+      "input_refs": [
+        "V2-084",
+        "V2-091"
+      ],
+      "input_hash": "09b54b99bdbbdc4447ad84e677153e10f15907da2b18757d3122d0fe0824d658",
+      "output_refs": [
+        "V2-091"
+      ],
+      "output_hash": "6ff4357079914d899b24f3283d8db67b0b7c265ad2046a608ada0887985b08d4",
+      "owner": "terra",
+      "next_owner": "terra",
+      "retry_budget": {
+        "max_attempts": 2,
+        "attempts_used": 0,
+        "remaining": 2
+      },
+      "reason": "the lifecycle work measured that waiting and recovering are described as the loop's own automatic states, that their issuer is therefore the bounded reconcile pass, and that the pass takes no caller at all, so neither transition has any way to be issued"
+    },
+    {
+      "sequence": 2,
+      "at": "2026-08-26T11:00:01Z",
+      "from_status": "queued",
+      "to_status": "blocked",
+      "actor": "sol",
+      "input_refs": [
+        "V2-084",
+        "V2-091"
+      ],
+      "input_hash": "09b54b99bdbbdc4447ad84e677153e10f15907da2b18757d3122d0fe0824d658",
+      "output_refs": [
+        "V2-091"
+      ],
+      "output_hash": "6ff4357079914d899b24f3283d8db67b0b7c265ad2046a608ada0887985b08d4",
+      "owner": "terra",
+      "next_owner": "terra",
+      "retry_budget": {
+        "max_attempts": 2,
+        "attempts_used": 0,
+        "remaining": 2
+      },
+      "reason": "the task that measured this defect lands the first edges the rest build on"
+    }
+  ]
+}
