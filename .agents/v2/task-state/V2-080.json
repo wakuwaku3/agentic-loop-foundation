@@ -3,7 +3,7 @@
   "id": "ts-v2-080",
   "kind": "canonical-task-state",
   "task_id": "V2-080",
-  "status": "blocked",
+  "status": "running",
   "dependencies": [
     "V2-072",
     "V2-074",
@@ -13,10 +13,7 @@
     "V2-082",
     "V2-083",
     "V2-087",
-    "V2-088",
-    "V2-084",
-    "V2-085",
-    "V2-086"
+    "V2-088"
   ],
   "outcome": "Pay the representative Provider's live re-observation once for all the source changes that have accumulated since the last one, under a fresh approved record with room for the transient failures every previous observation actually hit, and prove the corrected working directory reaches the real child.",
   "non_goals": [
@@ -24,7 +21,7 @@
     "Do not widen the exercise beyond what the earlier live records covered plus the working directory",
     "Do not accept an argument in place of the measured intersection"
   ],
-  "actor": "sol",
+  "actor": "luna",
   "input_refs": [
     "V2-072",
     "V2-074",
@@ -41,8 +38,8 @@
   "next_owner": "luna",
   "retry_budget": {
     "max_attempts": 2,
-    "attempts_used": 0,
-    "remaining": 2
+    "attempts_used": 1,
+    "remaining": 1
   },
   "release_eligible": false,
   "transitions": [
@@ -261,7 +258,60 @@
         "remaining": 2
       },
       "reason": "この待ち行列を過剰に直列化していたので詰める。今日この記録に足した9件のうちV2-089からV2-093は、この観測が供給する相手であるV2-081には要らない。理由はgateの判定単位である。G6bはobservation commitからjudging commitまでのdiffがexercise setと交わらないことを要求するが、判定は常にある1つのcommitで行われる。V2-084・V2-085・V2-086が着地したあとに観測し、その直後のcommitでV2-081が判定すれば、その間のdiffは.agents/**だけでexercise setと交わらないのでfreshである。V2-089からV2-093があとで着地するとこの記録はそれ以降のgateに対して陳腐化するが、それは正しい挙動で、M3がV2-076で通ったときと同じようにM5の判定はその判定commitで有効なままである。M6は3 provider全部を要求する別のexerciseで、自前の新しい観測を持つ。よって待つ相手はexercise setと交わる近傍の3件だけに詰める。交わりの実測: V2-084とV2-085はinternal/application/service.go、V2-086はcaller.goとrunner/orchestrator.go"
+    },
+    {
+      "sequence": 9,
+      "at": "2026-08-26T17:10:00Z",
+      "from_status": "blocked",
+      "to_status": "queued",
+      "actor": "sol",
+      "input_refs": [
+        "V2-072",
+        "V2-074",
+        "V2-077",
+        "V2-078",
+        "V2-080"
+      ],
+      "input_hash": "49618d51e38212352c822c793cc9222358564d144b6b9181d5e70bf37b57806c",
+      "output_refs": [
+        "V2-080"
+      ],
+      "output_hash": "da26fc874fe69f2403589b48d37db428415f34a81d02c88c890eb9f13ec48c6d",
+      "owner": "luna",
+      "next_owner": "luna",
+      "retry_budget": {
+        "max_attempts": 2,
+        "attempts_used": 0,
+        "remaining": 2
+      },
+      "reason": "このmachineが唯一claudeを試せる環境で、以降の修正は別machineに渡ることが決まったので、待ち相手からV2-084・V2-085・V2-086を外す。あれらを待っていたのは1回の支払いにより多くの変更をまとめる最適化で、要件ではなかった。gateの判定単位は常に1つのcommitなので、いま観測して直後のcommitでV2-081が判定すればその間のdiffは.agents/**だけになりfreshである。実測: observation commit d9f98aeからjudging commit e013b6dまでのdiffは288 pathで、公表済み76 pathのexercise setとの交わりは19 path(application 5、domain 2、provider 3、runner 8、store-memory 1)。つまりV2-075の記録は現HEADで陳腐化しており、M5がV2-026で落ちた2つの根拠のうち1つがこれである。あとで084・086と5つの壁が着地すればこの記録はそれ以降のgateに対して陳腐化するが、M3がV2-076で通ったのと同じでM5の判定はその判定commitで有効なまま残る。M6は3 provider全部を要求する別のexerciseで、それらを持つmachineが自前の観測を起こす"
+    },
+    {
+      "sequence": 10,
+      "at": "2026-08-26T17:11:00Z",
+      "from_status": "queued",
+      "to_status": "running",
+      "actor": "luna",
+      "input_refs": [
+        "V2-072",
+        "V2-074",
+        "V2-077",
+        "V2-078",
+        "V2-080"
+      ],
+      "input_hash": "49618d51e38212352c822c793cc9222358564d144b6b9181d5e70bf37b57806c",
+      "output_refs": [
+        "V2-080"
+      ],
+      "output_hash": "da26fc874fe69f2403589b48d37db428415f34a81d02c88c890eb9f13ec48c6d",
+      "owner": "luna",
+      "next_owner": "luna",
+      "retry_budget": {
+        "max_attempts": 2,
+        "attempts_used": 1,
+        "remaining": 1
+      },
+      "reason": "新しい承認recordV2-080-provider-live-claude-pooled(max_invocations 48、専用の空ledger)のもとでpooled観測に着手した。exerciseは9 subtestに、V2-077が入れたworking directoryが実際の子processに届くことの証明を1本加えたぶんだけ"
     }
-  ],
-  "block_reason": "V2-084,V2-085,V2-086"
+  ]
 }

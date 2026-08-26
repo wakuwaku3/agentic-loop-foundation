@@ -1,0 +1,72 @@
+{
+  "schema_version": "v1",
+  "id": "dp-v2-080",
+  "kind": "design-packet",
+  "created_at": "2026-08-26T17:00:00Z",
+  "correlation_id": "v2-080-live-pooled",
+  "problem_brief_id": "pb-v2-080",
+  "components": [
+    "runner",
+    "provider"
+  ],
+  "decisions": [
+    {
+      "id": "d1",
+      "decision": "The live record is treated as stale by measurement, so the remedy is a new observation rather than an argument about whether the changed files could matter.",
+      "rationale": "Measured at judging commit e013b6d52330 against observation commit d9f98ae573e617aafd82d87fa1c35f9bd6e26ffb: the published 76-path exercise file set intersects the 288-path diff in EXACTLY 19 paths -- internal/application/{outbox,ports,readmodels,repository,service}.go, internal/domain/{model,repository}.go, internal/provider/{adapters,handoff,provider}.go, internal/runner/{confinement,costledger_test,journey_test,provider,provider_live_test,secret_broker,secret_broker_test,supervisor}.go and internal/store/memory/store.go. Under gate rule G6b a non-empty intersection makes the record unjudgeable at this commit, and that staleness is one of the two grounds on which the M5 gate failed as V2-026."
+    },
+    {
+      "id": "d2",
+      "decision": "One pooled observation under a NEW approved record with its own empty ledger, because reusing any existing ledger is prohibited and impossible.",
+      "rationale": "The four existing ledgers stand at 11/16, 23/24, 11/12 and 12/12; V2-075's is FULL, so borrowing it would leave zero headroom for a nine-subtest exercise. Raising a spent record's thresholds, reinitialising a ledger, clearing halted and editing a ledger file are each prohibited. The record issued for this task carries max_invocations 48, which is arithmetic rather than a guess: V2-075's vertical slice consumed 12 and V2-022's dogfood consumed 23, giving a measured floor of 35, plus the working-directory proof, plus roughly the one-to-three transient failures every past observation actually hit."
+    },
+    {
+      "id": "d3",
+      "decision": "The invocation count is the operative threshold and the monetary ceiling is carried only as a second, so-far-inert stop.",
+      "rationale": "Summing settled actual_usd across all four existing ledgers gives 0.00 USD on every one, because the contracted flat-rate subscription settles each invocation at zero. So max_total_cost_usd has never bound; the count is what halts an exercise, which is exactly how V2-075 ended at 12/12. Any report framing a halt as a budget overrun would describe something that has never happened."
+    },
+    {
+      "id": "d4",
+      "decision": "The exercise is exactly what the earlier records covered plus the working-directory proof, and not one subtest wider.",
+      "rationale": "TestProviderLiveVerticalSlice's nine subtests in execution order are I1_happy_journey, I2_wire_and_identity, I3_credential_isolation, I4_lease_continuity, I5_I6_crash_resume, I7_real_transport_failure, I8_real_cancel, caseB_reuses_I1_journal_zero_invocations and ledger_snapshot. Widening costs more invocations AND enlarges the published file set, which enlarges the surface later work can invalidate. The working-directory addition is in scope because this task's own outcome names it and because V2-077 changed the mechanism -- confinement.go emits a cd INSIDE the wrap script after the mounts, since ProcessSupervisor's cmd.Dir would chdir before unshare runs -- without a live child ever having confirmed it."
+    },
+    {
+      "id": "d5",
+      "decision": "The observation commit gets a durable ref and that ref is PUSHED, as an acceptance item rather than a courtesy.",
+      "rationale": "This is a lesson paid for on 2026-08-26: refs/live-observations/v2-075-provider-live-claude pointed at d9f98ae, which is not reachable from v2, and the ref had never been pushed. Six files reference that commit, including V2-076's M3 gate record. A clone on any other machine would have lost the commit and made G6b's diff permanently unmeasurable for the record M3's gate rests on. The ref was pushed once the gap was measured."
+    },
+    {
+      "id": "d6",
+      "decision": "Nothing the exercise compiles may be edited after the file set is measured.",
+      "rationale": "This is the trap that failed the M3 gate as V2-018: a single doc-comment line in internal/runner/provider_live_test.go, edited after V2-063 measured the runner key, moved the key and made the live record stale by its own declaration. The completion convention is therefore part of acceptance -- measure the set, publish it, commit, and then touch nothing inside it."
+    },
+    {
+      "id": "d7",
+      "decision": "No prompt and no provider response text is recorded in any form, including truncated or hashed excerpts; execution identifiers may be.",
+      "rationale": "What may be recorded is the provider-issued session_id, the settled ledger accounting, the subtest verdicts and the count of transient failures. This is not a style preference: the repository's secret scan flags the adjacency of a high-entropy value to certain keywords, which is why V2-075's published artifact wrapped each subtest name in an object rather than a bare string, and that shape must be preserved."
+    },
+    {
+      "id": "d8",
+      "decision": "A halt is neither a success nor a failure.",
+      "rationale": "If the ledger reaches 48 invocations or trips the anomaly threshold, the exercise stops for inspection, the record is written with result partial, and the only remedy is a new owner-issued record -- never a raised limit and never a re-initialised ledger. An implementer who reports a halt as a pass, or who edits the ledger to continue, has produced the one outcome this whole mechanism exists to prevent."
+    },
+    {
+      "id": "d9",
+      "decision": "This is the last live claude observation this machine makes before the work is handed to another machine, and the record must state the machine-bound facts explicitly.",
+      "rationale": "The ledger files live at /home/takushi/.local/state/agentic-loop/v2/ and are OUTSIDE the repository; the claude executable is /home/takushi/.local/bin/claude at version 2.1.241; and .agents/v2 contains 72 absolute paths under /home/takushi that no other machine can resolve. None of that survives a clone, so the evidence must record the machine identifiers and must state that another machine issues its OWN preflight record rather than copying this one. Measured 2026-08-26: codex login status returns Not logged in and opencode auth list returns 0 credentials, so the three-Provider exercise cannot run here at all."
+    }
+  ],
+  "risks": [
+    "The observation is spent and then invalidated again by later work. It is judged at the commit immediately following the evidence commit, whose diff touches only .agents/**, so the intersection is empty by construction. V2-084, V2-086 and the five measured walls will later move files inside the set and make this record stale for LATER gates; that is correct and expected, because a gate judges at a commit, exactly as M3 did through V2-076, and M6 requires all three Providers and gets its own observation on the machine that has them.",
+    "A transient provider failure is mistaken for a defect or hidden. Every past observation hit one to three, so the count is recorded as an observation together with the ledger sequence numbers it consumed, and such a failure is never reported as a subtest failure nor omitted.",
+    "The working-directory proof passes without a real child. The assertion must read a value the CHILD produced under confinement, not one the harness already knows; if it cannot be obtained from the child it is recorded as UNPROVEN rather than asserted.",
+    "The ledger is exhausted mid-exercise. That is a fail-closed stop for inspection: the record is written with result partial and reported as neither a success nor a failure, and no threshold is raised."
+  ],
+  "verification": [
+    "Measure the intersection at the judging commit with the reproduction argv published in V2-075's artifact and record it as empty, plus at least one positive control showing the same procedure reports a non-empty intersection against a deliberately constructed diff list.",
+    "Read the final ledger state verbatim from cat of the declared ledger path and report the invocation count, the settled total and the halted flag without raising anything.",
+    "Confirm both durable refs are present on the remote with git ls-remote origin 'refs/live-observations/*'.",
+    "Run the nine subtests of TestProviderLiveVerticalSlice with the live gate opened via -e AGENTIC_LOOP_LIVE_PROVIDER=1 and record each verdict line, after a zero-invocation gate probe.",
+    "Re-run go test -race on internal/runner, internal/provider and internal/contracts, go vet, gofmt -l internal/runner, make component-runner, and gitleaks dir .agents after the evidence commit."
+  ]
+}
