@@ -3,7 +3,7 @@
   "id": "ts-v2-078",
   "kind": "canonical-task-state",
   "task_id": "V2-078",
-  "status": "blocked",
+  "status": "queued",
   "dependencies": [
     "V2-074",
     "V2-077"
@@ -128,7 +128,30 @@
         "remaining": 2
       },
       "reason": "the measured file overlap places this after the version-and-handoff task: both edit internal/provider/provider.go and adapters_test.go"
+    },
+    {
+      "sequence": 5,
+      "at": "2026-08-26T02:00:00Z",
+      "from_status": "blocked",
+      "to_status": "queued",
+      "actor": "sol",
+      "input_refs": [
+        "V2-077",
+        "V2-078"
+      ],
+      "input_hash": "a9bb7dd436845b74bfcd233b41c75bfcdee3e6ee0251619c323884e5b280ef37",
+      "output_refs": [
+        "V2-078"
+      ],
+      "output_hash": "acda04e43ebd941a8fb4c50d95eb4ea7f8e902fb62e8fa2863cd2731674ee414",
+      "owner": "luna",
+      "next_owner": "luna",
+      "retry_budget": {
+        "max_attempts": 2,
+        "attempts_used": 0,
+        "remaining": 2
+      },
+      "reason": "every task this one depends on is complete, so the block has cleared"
     }
-  ],
-  "block_reason": "V2-074"
+  ]
 }
