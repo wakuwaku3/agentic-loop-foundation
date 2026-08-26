@@ -485,6 +485,72 @@ capture timestampを持たないこと、よって全候補が一律zeroの`Crea
 なるので、これはbugの回避ではなく規則である。`internal/scheduler`はproduction codeに
 `Snapshot`を組む場所を持たないので、builderの所有者はV2-068である。
 
+## 9.3 live観測を鎖のどこに置くかは、議論ではなくexercise file setとの交わりで決まる
+
+G6bは**観測commitと、そこからjudging commitまでのdiffがexercise file setと交わらない
+ことの実測**の両方を要求する。したがってlive観測の順序は好みでは決められない。手続きは
+次のとおりで、2026-08-26にV2-080の待ち相手を決めるとき実際にこれで測った。
+
+1. `.agents/v2/evidence/artifacts/V2-075-live-exercise-files.json`が公表している
+   **76 path**のexercise file setを読む。
+2. 残っている各taskのWork Orderの`allowed_paths`を読み、setとの交わりを取る。
+3. 交わりが空でないtaskは、live観測より**前**に置く。空のtaskは待つ理由にならない。
+
+このとき測れた値をそのまま残す。
+
+| task | 交わり |
+|---|---|
+| V2-088 | **空**（`internal/api/**`はexercise setに1 pathも含まれない） |
+| V2-084 | `internal/application/service.go` |
+| V2-085 | `internal/application/service.go` |
+| V2-086 | `internal/application/caller.go`, `internal/runner/orchestrator.go`, `internal/runner/orchestrator_test.go` |
+
+**V2-088を待つ理由は無かった**——V2-080の依存に載っていたのは順序の見込みであって
+実測ではない。逆にV2-084・V2-085・V2-086は交わるので、先にlive観測を払えば
+同じ理由でまた無効になる。これはV2-018がM3 gateで落ちたときと同型の罠で、
+そのときは**私自身のdoc comment 1行**がkeyを動かした。
+
+**設計未了のtaskは実測できないので、構成上あとに置く。** V2-089からV2-093は
+packetがまだ無くfile setが確定していない。「たぶん交わらない」で前に出すのは
+未測定の交わりでG6bを通そうとするのと同じことなので、確定するまで後段に置く。
+
+## 9.4 scope boundaryは編集の**前**に書く（V2-087の唯一の未達）
+
+各Work OrderのA1はscope boundaryの5行表をevidence recordに書くことを求めるが、
+**要求はcode編集前に書くこと**である。V2-087はこの表を完備した内容で書き、4件全
+recordに載せ、実測もすべて済ませたが、順序はpacket読了→baseline実測→defect再現→
+実装→evidence執筆だった。実装者は自分でこれを唯一の未達として申告した。
+
+順序が要求である理由は、**表が事前の約束か事後の説明かで意味が変わる**ことにある。
+事後に書けば、実装が触った範囲がそのまま「触らないと決めた範囲」の否定形として
+書ける——つまり何を書いても整合してしまい、境界を守ったことの証拠にならない。
+以後のWork Orderは A1 に「BEFORE any source file is edited」を明記し、
+V2-087が申告した事実を根拠として添える。
+
+## 9.5 flat-rate契約ではledgerは**回数でしか**止まらない
+
+V2-080の記録を起こすときに4本のledgerを全部読んで測った事実。
+settled `actual_usd`の総和は**4本すべてで0.00 USD**である。契約が定額なので
+1回1回の決済額が0で、`max_total_cost_usd`はこれまで一度も効いたことがない。
+効いてきたのは`max_invocations`だけで、V2-075は**12/12**で止まった。
+
+| ledger | invocations | limit | 総額 |
+|---|---|---|---|
+| V2-017 | 11 | 16 | 0.00 |
+| V2-022 | 23 | 24 | 0.00 |
+| V2-063 | 11 | 12 | 0.00 |
+| V2-075 | **12** | **12** | 0.00 |
+
+したがってpooled観測の見積りは金額ではなく**回数**で立てる。V2-080の48回は、
+V2-075のvertical slice 12回とV2-022のdogfood 23回を足した**実測の下限35回**に、
+working directory証明と、過去の観測が毎回1〜3回消費した一過性失敗ぶんの余裕を
+加えた値である。金額側の40.00 USDは第二の、これまで不活性な停止線として残す。
+
+**上限を上げる・ledgerを再初期化する・`halted`を消す・ledger fileを編集する**のは
+どれも禁止で、救済は常に新しいrecordを起こすことである。この規則は今回も守った:
+V2-075のledgerは12/12のまま1 byteも触っていない。
+
+
 ## 10. checkpoint pushの手順と既知のdeploy workflow defect
 
 ### checkpointは1本ずつpushする
