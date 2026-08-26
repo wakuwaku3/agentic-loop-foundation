@@ -45,6 +45,49 @@ type CombinedAuthenticator struct {
 	SchedulerIdentity string
 }
 
+// NewCombinedAuthenticator validates an identity configuration and returns the
+// production transport boundary, refusing a scheduler identity that is also an
+// owner email. It exists so the misconfiguration is caught at START-UP and not
+// only at the request boundary: cmd/control-plane's run() calls it and returns
+// its error the way it returns every other constructor's, exactly the shape
+// NewJSONOperatorRecorder established, so a control-plane whose
+// RECONCILE_IDENTITY is also in OWNER_EMAILS fails to start and names the
+// conflict. A process that started and then rejected every IAP request would
+// present to an operator as an authentication outage; the same fault caught at
+// start-up presents as what it is, at the only moment anyone is positioned to
+// fix it.
+//
+// The predicate lives here rather than in cmd/control-plane because this
+// package has a test package and that one does not: the logic is asserted by
+// unit test and the untested part is one call site. Authenticate keeps its own
+// refusal too -- defence in depth against a CombinedAuthenticator built as a
+// composite literal, which every test in this repository still does.
+func NewCombinedAuthenticator(runnerService *runner.Service, ownerEmails map[string]struct{}, schedulerIdentity string) (CombinedAuthenticator, error) {
+	a := CombinedAuthenticator{Runner: runnerService, OwnerEmails: ownerEmails, SchedulerIdentity: schedulerIdentity}
+	if err := a.IdentityConfigurationError(); err != nil {
+		return CombinedAuthenticator{}, err
+	}
+	return a, nil
+}
+
+// IdentityConfigurationError reports the one way an identity configuration can
+// be self-contradictory: a single asserted email that would have to be both the
+// owner and the Loop. It is the SINGLE source of truth for that rule -- both
+// NewCombinedAuthenticator and Authenticate call it, so the start-time refusal
+// and the request-time refusal cannot drift apart or disagree on the message.
+// An empty SchedulerIdentity is not a misconfiguration: the field is opt-in and
+// a composition without it asserts an owner and a runner and nothing else.
+func (a CombinedAuthenticator) IdentityConfigurationError() error {
+	scheduler := strings.ToLower(strings.TrimSpace(a.SchedulerIdentity))
+	if scheduler == "" {
+		return nil
+	}
+	if _, ok := a.OwnerEmails[scheduler]; ok {
+		return errors.New("misconfigured identity: the scheduler identity is also an owner email; an asserted identity must have exactly one role")
+	}
+	return nil
+}
+
 func (a CombinedAuthenticator) Authenticate(r *http.Request) (application.Caller, error) {
 	if value := strings.TrimSpace(r.Header.Get(RunnerSessionHeader)); value != "" {
 		if a.Runner == nil {
@@ -72,13 +115,11 @@ func (a CombinedAuthenticator) Authenticate(r *http.Request) (application.Caller
 	// resolved by precedence. A single asserted email must produce exactly one
 	// role, or an error; silently picking one would hand whichever role lost
 	// the tie to an operator who believes they configured the other.
-	if scheduler := strings.ToLower(strings.TrimSpace(a.SchedulerIdentity)); scheduler != "" {
-		if _, ok := a.OwnerEmails[scheduler]; ok {
-			return application.Caller{}, errors.New("misconfigured identity: the scheduler identity is also an owner email; an asserted identity must have exactly one role")
-		}
-		if scheduler == email {
-			return application.LoopCaller(email)
-		}
+	if err := a.IdentityConfigurationError(); err != nil {
+		return application.Caller{}, err
+	}
+	if scheduler := strings.ToLower(strings.TrimSpace(a.SchedulerIdentity)); scheduler != "" && scheduler == email {
+		return application.LoopCaller(email)
 	}
 	if _, ok := a.OwnerEmails[email]; !ok {
 		return application.Caller{}, errors.New("IAP identity is not an owner")

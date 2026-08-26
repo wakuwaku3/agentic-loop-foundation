@@ -197,3 +197,100 @@ func TestARunnerSessionStillResolvesAsTheRunnerWithASchedulerIdentityConfigured(
 		t.Fatalf("a valid runner session resolved to %#v, want the runner identity", caller)
 	}
 }
+
+// TestNewCombinedAuthenticatorRefusesAnIdentityConfiguredAsBothSchedulerAndOwner
+// is V2-086 A6's START-TIME refusal, asserted here because this is where the
+// predicate lives and where a test package exists. cmd/control-plane's run()
+// calls this constructor and returns its error, so the refusal proven here is
+// the one that stops the process from starting; the untested part is one call
+// site rather than the logic.
+//
+// The returned value on refusal is the ZERO CombinedAuthenticator, which
+// matters: a caller that ignored the error must not end up holding a working
+// authenticator. That is asserted, not assumed.
+func TestNewCombinedAuthenticatorRefusesAnIdentityConfiguredAsBothSchedulerAndOwner(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		owners    map[string]struct{}
+		scheduler string
+	}{
+		{
+			name:      "the scheduler identity is the only owner",
+			owners:    map[string]struct{}{authSchedulerEmail: {}},
+			scheduler: authSchedulerEmail,
+		},
+		{
+			name:      "the scheduler identity is one of several owners",
+			owners:    map[string]struct{}{authOwnerEmail: {}, authSchedulerEmail: {}},
+			scheduler: authSchedulerEmail,
+		},
+		{
+			name:      "the overlap differs only in case and padding",
+			owners:    map[string]struct{}{authOwnerEmail: {}, authSchedulerEmail: {}},
+			scheduler: "  RECONCILER@Example.IAM.gserviceaccount.COM  ",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			auth, err := NewCombinedAuthenticator(nil, tc.owners, tc.scheduler)
+			if err == nil {
+				t.Fatal("NewCombinedAuthenticator accepted an identity configured as both scheduler and owner; the process must fail to start")
+			}
+			if !strings.Contains(err.Error(), "scheduler identity is also an owner email") {
+				t.Fatalf("the refusal does not name the conflict: %v", err)
+			}
+			if auth.OwnerEmails != nil || auth.SchedulerIdentity != "" || auth.Runner != nil {
+				t.Fatalf("a refused configuration returned a usable authenticator: %#v", auth)
+			}
+			// The start-time refusal and the request-time refusal are the same
+			// rule and the same message, because both call one predicate.
+			literal := CombinedAuthenticator{OwnerEmails: tc.owners, SchedulerIdentity: tc.scheduler}
+			_, requestErr := literal.Authenticate(authIAPRequest(authSchedulerEmail))
+			if requestErr == nil || requestErr.Error() != err.Error() {
+				t.Fatalf("the request-time refusal (%v) and the start-time refusal (%v) disagree; they must be one predicate", requestErr, err)
+			}
+			if literal.IdentityConfigurationError() == nil {
+				t.Fatal("IdentityConfigurationError reported no problem for a configuration both other paths refuse")
+			}
+		})
+	}
+}
+
+// TestNewCombinedAuthenticatorAcceptsADistinctSchedulerIdentity is the positive
+// half: a non-conflicting configuration constructs, and the authenticator it
+// returns is the working one -- so the start-time guard refuses exactly the
+// misconfiguration and nothing else. An absent scheduler identity is also
+// accepted, because the field is opt-in and that is the shape every deployment
+// had before V2-086.
+func TestNewCombinedAuthenticatorAcceptsADistinctSchedulerIdentity(t *testing.T) {
+	auth, err := NewCombinedAuthenticator(nil, map[string]struct{}{authOwnerEmail: {}}, authSchedulerEmail)
+	if err != nil {
+		t.Fatalf("a distinct scheduler identity was refused: %v", err)
+	}
+	if auth.SchedulerIdentity != authSchedulerEmail {
+		t.Fatalf("the constructed authenticator carries SchedulerIdentity %q", auth.SchedulerIdentity)
+	}
+	if auth.IdentityConfigurationError() != nil {
+		t.Fatalf("a valid configuration reports an error: %v", auth.IdentityConfigurationError())
+	}
+	caller, err := auth.Authenticate(authIAPRequest(authSchedulerEmail))
+	if err != nil || caller.Role != application.RoleScheduler || caller.Subject != authSchedulerEmail {
+		t.Fatalf("the constructed authenticator resolved the scheduler to %#v (err=%v)", caller, err)
+	}
+	caller, err = auth.Authenticate(authIAPRequest(authOwnerEmail))
+	if err != nil || caller.Role != application.RoleOwner {
+		t.Fatalf("the constructed authenticator resolved the owner to %#v (err=%v)", caller, err)
+	}
+
+	// No scheduler identity at all: accepted, and it asserts owner and runner
+	// only.
+	bare, err := NewCombinedAuthenticator(nil, map[string]struct{}{authOwnerEmail: {}}, "")
+	if err != nil {
+		t.Fatalf("an absent scheduler identity was refused; the field is opt-in: %v", err)
+	}
+	if bare.IdentityConfigurationError() != nil {
+		t.Fatalf("an absent scheduler identity reports an error: %v", bare.IdentityConfigurationError())
+	}
+	if _, err := bare.Authenticate(authIAPRequest(authSchedulerEmail)); err == nil {
+		t.Fatal("an unconfigured scheduler address authenticated")
+	}
+}

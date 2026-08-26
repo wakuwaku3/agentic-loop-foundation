@@ -188,7 +188,11 @@ func run() error {
 	}
 	leaseReconciler := &reconciler.Reconciler{Tx: store, Clock: clock}
 	verificationReconciler := &reconciler.VerificationReconciler{Tx: store, Clock: clock, Deadline: time.Minute}
-	var authenticator api.Authenticator = api.CombinedAuthenticator{Runner: runnerEnrollment, OwnerEmails: owners, SchedulerIdentity: strings.ToLower(reconcileIdentity)}
+	combined, err := api.NewCombinedAuthenticator(runnerEnrollment, owners, strings.ToLower(reconcileIdentity))
+	if err != nil {
+		return err
+	}
+	var authenticator api.Authenticator = combined
 	if ownerTokens != nil {
 		authenticator = api.LocalOwnerBearerAuthenticator{Runner: runnerEnrollment, OwnerTokens: ownerTokens}
 	}
