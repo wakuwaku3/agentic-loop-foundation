@@ -1,0 +1,49 @@
+{
+  "schema_version": "v1",
+  "id": "ev-v2-084-contracts",
+  "kind": "evidence",
+  "created_at": "2026-08-26T23:00:00Z",
+  "correlation_id": "v2-084-requirement-lifecycle",
+  "task_id": "V2-084",
+  "component": "contracts",
+  "evidence_key": "eb88b24caa7ff94c8b51afbc30fdc77988acd5492346542016c841c33745cc68",
+  "result": "partial",
+  "observed_at": "2026-08-26T23:00:00Z",
+  "checks": [
+    {
+      "name": "scope-boundary",
+      "status": "passed",
+      "argv": [
+        "git",
+        "rev-parse",
+        "HEAD"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 30,
+      "summary": "Scope boundary for V2-084, recorded against base commit 6a6839f9aef126ed1e78563104ea240155a1b2b8 on branch v2-task/V2-084, BEFORE any source file was edited: this record's first commit contains rows 1-4 and the whole A1/A2/A3/A6/A13 baseline, and `git status --porcelain` at that commit showed ONLY .agents/v2/evidence paths, so every source and test file named below was still byte-identical to the base. ROW 1 -- WHAT THIS TASK MAKES TRUE. Exactly TWO Requirement transitions gain a non-test issuer. Edge one: a new command Service.CompleteFraming in the EXISTING file internal/application/framing.go issues domain.RequirementReadyCommand from domain.RequirementFraming -- owner or scheduler via callerActor, idempotent by request_id through s.mutate/u.Idempotency/restoreResponse, gated by ONE domain.Permit of kind domain.PermitClaim with nothing passed to domain.EffectFromPermit, ControlTarget and revision resolved INSIDE the transaction from u.RequirementRepositoryLink and domain.EffectiveControl, At from transactionAuthorityTime, event type requirement.ready, and NO OutboxItem -- reachable over one new route POST /v1/requirements/{requirement_id}:complete-framing added to internal/api/api.go's POST default branch by the existing prefix-plus-suffix idiom with one new suffix constant, and declared in contracts/openapi/openapi-v1.yaml as operationId completeRequirementFraming. Edge two: INSIDE Service.Claim's existing transaction, after domain.DecideIncrement succeeds and before the existing s.record call, the parent Requirement named by the claimed Increment's own inc.RequirementID is read and, when its status is domain.RequirementReady, one domain.DecideRequirement of kind domain.RequirementStart is issued with ExpectedVersion taken from THAT read and saved with u.SaveRequirement; when it is already domain.RequirementActive nothing happens; in every other case nothing happens. The measured before/after is a set: the Requirement statuses reachable through the application layer go from {captured, framing, needs-input, ready} to exactly {captured, framing, needs-input, ready, active}. ROW 2 -- WHAT IT DELIBERATELY DOES NOT DO. internal/domain is byte-unchanged (tree object 84cc02df13e12b818380ebc64af40d730bb19c4b before, and re-measured after): no RequirementCommandKind, no RequirementStatus, no PermitKind, no previous-status field, no resume command, and no allowed() list changes, because model.go:480-484 already admits RequirementReadyCommand from framing and model.go:485-489 already admits RequirementStart from ready. ClaimRequest and ClaimResponse gain NO field and no existing return value, event or outbox item of Claim changes. Claim does NOT begin refusing an Increment whose parent is neither ready nor active -- that residual is MEASURED and LOGGED, never asserted. internal/application/readmodels.go is untouched BY DESIGN, not by omission: nextAction (readmodels.go:309-332 measured, WO says 306-329) branches on completed and cancelled, then on Execution status, then on Increment status, then on whether the Increment list is empty, and never on ready or active. internal/web/**, docs/**, ci/components.json, Makefile, go.mod, go.sum and devbox.* are untouched because this design creates and removes no import edge. contracts/release-contract/**, contracts/schemas/** and contracts/fixtures/** are untouched; the ONLY contracts change is one path block and two schemas in contracts/openapi/openapi-v1.yaml (sha256 ca62ef4c0e1f7dbe357d03209d68f387581ed53aeaa66b0ea8fc5b8b7eea8cdd before). No existing test is deleted, renamed or weakened, and V2-085's seven-mode tables (wantStartFramingAllowed, wantFreshCaptureAllowed, wantStartFramingAllowedTotal = 2, and planning_permit_test.go's Plan/Prepare tables cross-checked against permitAllowedTable) are neither edited nor widened. ROW 3 -- WHAT IT RECORDS BUT DOES NOT FIX. (a) The FIVE transitions this task does not issue, each with the measurement that blocks or refuses it, are recorded in the a13-* checks: pause, cancel, wait, recover, and evaluate/CompleteRequirementFromRelease. (b) Claim still succeeds against a parent Requirement in captured and leaves it in captured; measured and LOGGED for the tech_lead (18 test files across FOUR packages -- not five -- call Claim), not asserted, because asserting a defect pins it in place and turns its repair into a failure in files a repairing task may not own; that is the F1 follow-on. (c) The Increment creation path is severed and this task does NOT widen its scope to fix it: Service.Plan is the only code that creates an Increment, its only non-test caller is internal/runner/orchestrator.go, and Orchestrator is never constructed outside a test, so a running Control Plane can hold no Increment at all and edge two therefore has no non-test caller today. Edge two is built so it works when a caller does exist; the reachability defect belongs to V2-091. (d) internal/runner/orchestrator.go still carries an Increment through Plan, Prepare, Claim and Start; after edge two lands it will also carry its parent, but only when the parent is in ready, and RunFakeJourney never frames its Requirement, so its parent stays captured and its journey test is untouched. (e) The loop caller V2-086 put on the reconcile branch's context is consumed by no command inside the tick, because neither reconciler.Reconciler.Tick (reconciler.go:43) nor reconciler.VerificationReconciler.Tick (control_verifier.go:18) takes an application.Caller and internal/reconciler contains ZERO non-test occurrences of application.Caller; recorded, adjacent, not fixed. (f) internal/store/firestore's suite prints ok while skipping everything without an emulator; the figure is recorded WITH ITS PATTERN in the a21-* checks and never counted as a pass (G7). ROW 4 -- THIS TASK PASSES NO RELEASE GATE. Exactly three evidence records are issued (application, api, contracts), result and release_eligible are recorded honestly, no capability id is cited anywhere, no phrase 'capability exercised' or 'preview journey passed' appears, contracts/release-contract/** is untouched, .agents/v2/evidence/V2-022-release-live-dogfood.json is untouched, no Provider CLI was started and no Google Cloud resource was touched. Editing contracts/openapi/openapi-v1.yaml moves the contracts component evidence key and the release BundleDigest and enrols this task in the api-contract chain; that is expected and is recorded in the contracts record. REVISION HISTORY (docs/operations/v2-task-dag.md 12.3): none. The boundary above was not revised during implementation."
+    },
+    {
+      "name": "execution-environment",
+      "status": "passed",
+      "argv": [
+        "sh",
+        "-c",
+        "uname -srm; devbox version; devbox run --pure -- sh -c 'go version'"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 300,
+      "summary": "Execution environment for every check in this record. uname -srm = 'Linux 6.18.33.2-microsoft-standard-WSL2 x86_64'. go version resolved inside `devbox run --pure` = 'go version go1.25.0 linux/amd64'. devbox version = 0.17.2. worktree = /home/takushi/repos/agentic-loop-foundation-worktrees/v2-task-084. branch = v2-task/V2-084. base commit = 6a6839f9aef126ed1e78563104ea240155a1b2b8. Every argv below was executed from that worktree root unless the check says otherwise, and every devbox run is judged by its verdict line rather than by the shell exit status."
+    },
+    {
+      "name": "a1-baseline-contracts-digest",
+      "status": "passed",
+      "argv": [
+        "sha256sum",
+        "contracts/openapi/openapi-v1.yaml"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 30,
+      "summary": "Baseline for the contracts component, recorded BEFORE any file was edited. contracts/openapi/openapi-v1.yaml sha256 BEFORE = ca62ef4c0e1f7dbe357d03209d68f387581ed53aeaa66b0ea8fc5b8b7eea8cdd. The sibling this task copies is declared at openapi-v1.yaml:222-249 (path /v1/requirements/{requirement_id}:start-framing, operationId startRequirementFraming) with its two schemas at :562-575 (StartRequirementFramingRequest) and :576-583 (StartRequirementFramingResponse). Nothing else under contracts/** moves: contracts/release-contract/**, contracts/schemas/** and contracts/fixtures/** are all prohibited and untouched."
+    }
+  ]
+}

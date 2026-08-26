@@ -1,0 +1,207 @@
+{
+  "schema_version": "v1",
+  "id": "ev-v2-084-application",
+  "kind": "evidence",
+  "created_at": "2026-08-26T23:00:00Z",
+  "correlation_id": "v2-084-requirement-lifecycle",
+  "task_id": "V2-084",
+  "component": "application",
+  "evidence_key": "5b0c777beefd4b91cbf4bfff3e91e6e7e9a6bb3c91af0e4c2caf637d5e574424",
+  "result": "partial",
+  "observed_at": "2026-08-26T23:00:00Z",
+  "checks": [
+    {
+      "name": "scope-boundary",
+      "status": "passed",
+      "argv": [
+        "git",
+        "rev-parse",
+        "HEAD"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 30,
+      "summary": "Scope boundary for V2-084, recorded against base commit 6a6839f9aef126ed1e78563104ea240155a1b2b8 on branch v2-task/V2-084, BEFORE any source file was edited: this record's first commit contains rows 1-4 and the whole A1/A2/A3/A6/A13 baseline, and `git status --porcelain` at that commit showed ONLY .agents/v2/evidence paths, so every source and test file named below was still byte-identical to the base. ROW 1 -- WHAT THIS TASK MAKES TRUE. Exactly TWO Requirement transitions gain a non-test issuer. Edge one: a new command Service.CompleteFraming in the EXISTING file internal/application/framing.go issues domain.RequirementReadyCommand from domain.RequirementFraming -- owner or scheduler via callerActor, idempotent by request_id through s.mutate/u.Idempotency/restoreResponse, gated by ONE domain.Permit of kind domain.PermitClaim with nothing passed to domain.EffectFromPermit, ControlTarget and revision resolved INSIDE the transaction from u.RequirementRepositoryLink and domain.EffectiveControl, At from transactionAuthorityTime, event type requirement.ready, and NO OutboxItem -- reachable over one new route POST /v1/requirements/{requirement_id}:complete-framing added to internal/api/api.go's POST default branch by the existing prefix-plus-suffix idiom with one new suffix constant, and declared in contracts/openapi/openapi-v1.yaml as operationId completeRequirementFraming. Edge two: INSIDE Service.Claim's existing transaction, after domain.DecideIncrement succeeds and before the existing s.record call, the parent Requirement named by the claimed Increment's own inc.RequirementID is read and, when its status is domain.RequirementReady, one domain.DecideRequirement of kind domain.RequirementStart is issued with ExpectedVersion taken from THAT read and saved with u.SaveRequirement; when it is already domain.RequirementActive nothing happens; in every other case nothing happens. The measured before/after is a set: the Requirement statuses reachable through the application layer go from {captured, framing, needs-input, ready} to exactly {captured, framing, needs-input, ready, active}. ROW 2 -- WHAT IT DELIBERATELY DOES NOT DO. internal/domain is byte-unchanged (tree object 84cc02df13e12b818380ebc64af40d730bb19c4b before, and re-measured after): no RequirementCommandKind, no RequirementStatus, no PermitKind, no previous-status field, no resume command, and no allowed() list changes, because model.go:480-484 already admits RequirementReadyCommand from framing and model.go:485-489 already admits RequirementStart from ready. ClaimRequest and ClaimResponse gain NO field and no existing return value, event or outbox item of Claim changes. Claim does NOT begin refusing an Increment whose parent is neither ready nor active -- that residual is MEASURED and LOGGED, never asserted. internal/application/readmodels.go is untouched BY DESIGN, not by omission: nextAction (readmodels.go:309-332 measured, WO says 306-329) branches on completed and cancelled, then on Execution status, then on Increment status, then on whether the Increment list is empty, and never on ready or active. internal/web/**, docs/**, ci/components.json, Makefile, go.mod, go.sum and devbox.* are untouched because this design creates and removes no import edge. contracts/release-contract/**, contracts/schemas/** and contracts/fixtures/** are untouched; the ONLY contracts change is one path block and two schemas in contracts/openapi/openapi-v1.yaml (sha256 ca62ef4c0e1f7dbe357d03209d68f387581ed53aeaa66b0ea8fc5b8b7eea8cdd before). No existing test is deleted, renamed or weakened, and V2-085's seven-mode tables (wantStartFramingAllowed, wantFreshCaptureAllowed, wantStartFramingAllowedTotal = 2, and planning_permit_test.go's Plan/Prepare tables cross-checked against permitAllowedTable) are neither edited nor widened. ROW 3 -- WHAT IT RECORDS BUT DOES NOT FIX. (a) The FIVE transitions this task does not issue, each with the measurement that blocks or refuses it, are recorded in the a13-* checks: pause, cancel, wait, recover, and evaluate/CompleteRequirementFromRelease. (b) Claim still succeeds against a parent Requirement in captured and leaves it in captured; measured and LOGGED for the tech_lead (18 test files across FOUR packages -- not five -- call Claim), not asserted, because asserting a defect pins it in place and turns its repair into a failure in files a repairing task may not own; that is the F1 follow-on. (c) The Increment creation path is severed and this task does NOT widen its scope to fix it: Service.Plan is the only code that creates an Increment, its only non-test caller is internal/runner/orchestrator.go, and Orchestrator is never constructed outside a test, so a running Control Plane can hold no Increment at all and edge two therefore has no non-test caller today. Edge two is built so it works when a caller does exist; the reachability defect belongs to V2-091. (d) internal/runner/orchestrator.go still carries an Increment through Plan, Prepare, Claim and Start; after edge two lands it will also carry its parent, but only when the parent is in ready, and RunFakeJourney never frames its Requirement, so its parent stays captured and its journey test is untouched. (e) The loop caller V2-086 put on the reconcile branch's context is consumed by no command inside the tick, because neither reconciler.Reconciler.Tick (reconciler.go:43) nor reconciler.VerificationReconciler.Tick (control_verifier.go:18) takes an application.Caller and internal/reconciler contains ZERO non-test occurrences of application.Caller; recorded, adjacent, not fixed. (f) internal/store/firestore's suite prints ok while skipping everything without an emulator; the figure is recorded WITH ITS PATTERN in the a21-* checks and never counted as a pass (G7). ROW 4 -- THIS TASK PASSES NO RELEASE GATE. Exactly three evidence records are issued (application, api, contracts), result and release_eligible are recorded honestly, no capability id is cited anywhere, no phrase 'capability exercised' or 'preview journey passed' appears, contracts/release-contract/** is untouched, .agents/v2/evidence/V2-022-release-live-dogfood.json is untouched, no Provider CLI was started and no Google Cloud resource was touched. Editing contracts/openapi/openapi-v1.yaml moves the contracts component evidence key and the release BundleDigest and enrols this task in the api-contract chain; that is expected and is recorded in the contracts record. REVISION HISTORY (docs/operations/v2-task-dag.md 12.3): none. The boundary above was not revised during implementation."
+    },
+    {
+      "name": "execution-environment",
+      "status": "passed",
+      "argv": [
+        "sh",
+        "-c",
+        "uname -srm; devbox version; devbox run --pure -- sh -c 'go version'"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 300,
+      "summary": "Execution environment for every check in this record. uname -srm = 'Linux 6.18.33.2-microsoft-standard-WSL2 x86_64'. go version resolved inside `devbox run --pure` = 'go version go1.25.0 linux/amd64'. devbox version = 0.17.2. worktree = /home/takushi/repos/agentic-loop-foundation-worktrees/v2-task-084. branch = v2-task/V2-084. base commit = 6a6839f9aef126ed1e78563104ea240155a1b2b8. Every argv below was executed from that worktree root unless the check says otherwise, and every devbox run is judged by its verdict line rather than by the shell exit status."
+    },
+    {
+      "name": "a1-i-issuer-census",
+      "status": "passed",
+      "argv": [
+        "sh",
+        "-c",
+        "for n in RequirementStartFraming RequirementReadyCommand RequirementStart RequirementWait RequirementNeedInput RequirementRecover RequirementEvaluate RequirementPause RequirementCancel CompleteRequirementFromRelease; do grep -rn \"\\\\b$n\\\\b\" --include='*.go' . | grep -v _test.go; done"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 60,
+      "summary": "A1(i) MEASURED at 6a6839f9aef126ed1e78563104ea240155a1b2b8. Non-test hit lists, one per name. RequirementStartFraming: 5 hits -- internal/domain/model.go:437 (declaration), :475 (switch case), internal/application/framing.go:14 and :35 (comments), framing.go:191 (THE ISSUER). RequirementReadyCommand: 5 hits -- model.go:438, :480, internal/application/human_input.go:18 and :563 (comments), human_input.go:648 (THE ISSUER -- AGREES with the Work Order's human_input.go:648 exactly). RequirementStart: 2 hits, model.go:439 and :485, both inside internal/domain -- ZERO issuers. RequirementWait: 2 hits, model.go:440 and :490 -- ZERO issuers. RequirementNeedInput: 4 hits -- model.go:441, :495, human_input.go:17 (comment), human_input.go:519 (THE ISSUER -- AGREES with the Work Order). RequirementRecover: 2 hits, model.go:442 and :500 -- ZERO issuers. RequirementEvaluate: 2 hits, model.go:443 and :505 -- ZERO issuers. RequirementPause: 2 hits, model.go:444 and :510 -- ZERO issuers. RequirementCancel: 2 hits, model.go:445 and :515 -- ZERO issuers. CompleteRequirementFromRelease: 3 hits -- model.go:199 (comment), model.go:529 (the function itself), internal/application/framing.go:30 (comment) -- ZERO callers. So six of the nine commands and the release-bound completion have no non-test issuer at all, exactly as the Work Order says, and the two line numbers it gives for the issuers it does name are both CORRECT."
+    },
+    {
+      "name": "a1-ii-domain-admits-both-edges",
+      "status": "passed",
+      "argv": [
+        "sh",
+        "-c",
+        "grep -n 'case RequirementReadyCommand:' -A 4 internal/domain/model.go; grep -n 'case RequirementStart:' -A 4 internal/domain/model.go"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 60,
+      "summary": "A1(ii) MEASURED and it AGREES with the Work Order's line numbers exactly. internal/domain/model.go:480-484 verbatim: 'case RequirementReadyCommand:' / 'if !allowed(RequirementFraming, RequirementWaiting, RequirementNeedsInput) {' / 'return current, ErrInvalidTransition' / '}' / 'next.Status = RequirementReady'. model.go:485-489 verbatim: 'case RequirementStart:' / 'if !allowed(RequirementReady, RequirementRecovering, RequirementWaiting) {' / 'return current, ErrInvalidTransition' / '}' / 'next.Status = RequirementActive'. Both edges, both guards and both target statuses already exist, so both of this task's transitions are CALLS and not model changes -- which is the honesty check on the size of the repair."
+    },
+    {
+      "name": "a1-iii-plan-writes-parent-without-a-command",
+      "status": "passed",
+      "argv": [
+        "sh",
+        "-c",
+        "grep -n SaveRequirement internal/application/service.go; sed -n '985,995p' internal/application/service.go"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 60,
+      "summary": "A1(iii) CONFIRMED as a behaviour, DISAGREES on the line numbers. The Work Order says internal/application/service.go:936-941; MEASURED it is service.go:987-991: 'next := r' / 'next.Increments = append(append([]domain.IncrementID(nil), r.Increments...), iid)' / 'next.Version++' / 'if e = u.SaveRequirement(ctx, next, r.Version); e != nil {'. So Service.Plan does write the parent Requirement WITHOUT any domain.DecideRequirement call, appending an Increment id and incrementing Version, and it never touches Status. The only four SaveRequirement call sites in that file are :850 (Capture, initial write), :853/:861 (the text and link side tables), and :990 (Plan). This task adds a fifth inside Claim and a sixth inside framing.go's new command; unlike Plan's, both go through domain.DecideRequirement."
+    },
+    {
+      "name": "a1-iv-runfakejourney-callers",
+      "status": "passed",
+      "argv": [
+        "sh",
+        "-c",
+        "grep -rn RunFakeJourney --include='*.go' .; wc -l internal/runner/orchestrator.go"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 60,
+      "summary": "A1(iv) CONFIRMED in substance, DISAGREES on both numbers. The Work Order says Orchestrator.RunFakeJourney is at internal/runner/orchestrator.go:35 with exactly one caller at internal/runner/orchestrator_test.go:56. MEASURED: the method is declared at orchestrator.go:46, and it has THREE call sites, all inside the single file internal/runner/orchestrator_test.go, at :68, :75 and :140 -- one caller FILE, three call sites, and none of the three is line 56. The substance stands: the only code that drives a whole Capture-to-AcceptResult journey is a test driver. Separately measured for row 3(c): cmd/runner/main.go constructs no Orchestrator and wires no control plane, so Service.Plan -- the only code that creates an Increment -- has no non-test caller in any running process, and edge two therefore has no non-test caller today either. That defect is V2-091's and this task does not widen its scope to fix it."
+    },
+    {
+      "name": "a1-v-pipeline-promote-has-no-non-test-caller",
+      "status": "passed",
+      "argv": [
+        "sh",
+        "-c",
+        "grep -rn '\\.Promote(' --include='*.go' . ; grep -rn PromotionGate --include='*.go' . | grep -v _test.go; grep -rn 'StableReleaseProof{' --include='*.go' . | grep -v _test.go; grep -rn CompletePromotionWithProof --include='*.go' ."
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 60,
+      "summary": "A1(v) CONFIRMED. 19 '.Promote(' hits in total. Every hit on release.Pipeline.Promote is in a _test.go file (internal/release/pipeline_test.go x5, internal/release/journey_test.go x3, internal/api/live_dogfood_test.go x2); the only non-test '.Promote(' hit anywhere is internal/release/pipeline.go:59, which calls p.Router.Promote -- a DIFFERENT method on the forge router, not Pipeline.Promote. So release.Pipeline.Promote has ZERO non-test callers. The chain above it: domain.StableReleaseProof's only constructor is internal/domain/release.go:155 inside domain.CompletePromotionWithProof (release.go:150 -- the Work Order's line number is CORRECT); its only non-test caller is internal/release/release.go:261 inside release.PromotionGate (release.go:248); PromotionGate's only non-test caller is internal/release/pipeline.go:52 inside Pipeline.Promote. Therefore no running process can obtain a domain.StableReleaseProof, and domain.CompleteRequirementFromRelease's input cannot be constructed at all. This is A13(v)'s blocking measurement."
+    },
+    {
+      "name": "a1-vi-baseline-top-level-test-counts",
+      "status": "passed",
+      "argv": [
+        "devbox",
+        "run",
+        "--pure",
+        "--",
+        "go",
+        "test",
+        "-list",
+        ".*",
+        "./internal/application",
+        "./internal/api",
+        "./internal/domain",
+        "./internal/reconciler",
+        "./internal/runner",
+        "./internal/contracts",
+        "./internal/store/memory",
+        "./internal/store/firestore"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 900,
+      "summary": "A1(vi) BASELINE top-level test counts, measured at 6a6839f9aef126ed1e78563104ea240155a1b2b8 with `devbox run --pure -- go test -list '.*' ./internal/<pkg>` and counting lines matching ^Test: internal/application 196, internal/api 71, internal/domain 54, internal/reconciler 16, internal/runner 120, internal/contracts 33, internal/store/memory 16, internal/store/firestore 36. The Work Order gives no figures for these, so there is nothing to disagree with; these are the numbers the after-counts in the a14-* checks are compared against, and the full sorted name sets were written to files outside the worktree so `comm -23` can prove no name was deleted or renamed."
+    },
+    {
+      "name": "a2-issuance-table-before",
+      "status": "passed",
+      "argv": [
+        "sh",
+        "-c",
+        "grep -n 'case Requirement' -A 4 internal/domain/model.go; grep -rn 'Kind: *domain.Requirement' --include='*.go' . | grep -v _test.go"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 60,
+      "summary": "A2 THE ISSUANCE TABLE, MEASURED BEFORE. One row per domain Requirement command: command / statuses domain.DecideRequirement admits it from / the non-test application call site that issues it. start-framing / captured / internal/application/framing.go:191. ready / framing+waiting+needs-input / internal/application/human_input.go:648 (Service.AnswerHumanInput). start / ready+recovering+waiting / NONE. wait / ready+active+recovering / NONE. needs-input / framing+active+evaluating / internal/application/human_input.go:519 (Service.RequestHumanInput). recover / active+waiting / NONE. evaluate / active / NONE. pause / ready+active+waiting+recovering / NONE. cancel / everything except completed and cancelled / NONE. domain.CompleteRequirementFromRelease / evaluating (and it is not a RequirementCommandKind at all; it is a separate function taking a domain.StableReleaseProof) / NONE. Every source-status list and every issuer line number in the Work Order's expected table is CORRECT as measured. DERIVED FACT, stated plainly: BEFORE this task the reachable Requirement status set is {captured, framing, needs-input, ready} -- and `ready` is reachable ONLY by asking a question and answering it, because AnswerHumanInput is RequirementReadyCommand's sole issuer, so the status internal/application/allocation.go calls the only schedulable one cannot be reached from framing at all. AFTER this task the reachable set is exactly {captured, framing, needs-input, ready, active}, and wait, recover, evaluate, pause, cancel and the release-bound completion stay unissued BY DESIGN, each for the measured reason in the a13-* checks."
+    },
+    {
+      "name": "a3-increment-to-parent-rule",
+      "status": "passed",
+      "argv": [
+        "sh",
+        "-c",
+        "sed -n '258,296p' docs/architecture/domain-model.md; sed -n '98,104p' docs/architecture/domain-model.md; sed -n '100,135p' docs/product/definition.md"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 60,
+      "summary": "A3 THE RULE EXISTS, IT IS ASYMMETRIC, AND IT LICENSES EXACTLY ONE PARENT TRANSITION. Every line number the Work Order gives for these quotes is CORRECT as measured. docs/architecture/domain-model.md:266 (the `active` row of the Requirement lifecycle table) verbatim: '| `active` | 1つ以上のIncrementが進行中 | `evaluating`, `waiting`, `needs-input`, `paused`, `recovering`, `cancelled` |'. That is a DEFINITION of the status, not a hint: the parent is active precisely because a subordinate Increment is in progress, so the ready->active edge is licensed by Increment progress and by nothing else -- and it licenses it in exactly the transaction that puts an Increment into progress, which is Service.Claim. domain-model.md:265 verbatim: '| `ready` | 優先順位評価済みで実行可能 | `active`, `waiting`, `paused`, `cancelled` |' -- ready is the completion of framing, which is why edge one's target is right. domain-model.md:101 verbatim: '1 Requirementに複数Incrementを許す。Incrementが成功してもRequirementは自動完了しない。' -- the opposite direction is REFUSED. domain-model.md:272 verbatim: '| `completed` | 対応Stable ReleaseとEvidenceで課題解決を確認 | 終端。新feedbackは新Requirement |'. docs/product/definition.md:104-105 verbatim: 'システム上の改善完了は、対象変更が / Previewで実証され、Stableへ昇格した時点とする。' and definition.md:130 verbatim: '- 完了を自己申告だけで決めず、要求と不変条件を検証する'. CONCLUSION recorded as this task's reading, and it matches dp-v2-084 d2: the rule licenses exactly ONE parent transition -- start (ready->active), derived inside the claim transaction -- and forbids the parent's completion and any advance on Prepare, Start, Checkpoint, AcceptResult or release. There is no disagreement to escalate."
+    },
+    {
+      "name": "a6-claim-blast-radius",
+      "status": "passed",
+      "argv": [
+        "sh",
+        "-c",
+        "grep -rln '\\.Claim(\\|\\.ClaimIncrement(' --include='*_test.go' . | sort; grep -rln '\\.Claim(\\|\\.ClaimIncrement(' --include='*_test.go' . | wc -l; grep -rln '\\.Claim(\\|\\.ClaimIncrement(' --include='*_test.go' . | xargs -n1 dirname | sort -u"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 60,
+      "summary": "A6 BLAST RADIUS, MEASURED. The file COUNT agrees with the Work Order: 18 test files call Claim or ClaimIncrement. The PACKAGE count DISAGREES: the Work Order and dp-v2-084 d6 both say five packages; measured it is FOUR -- internal/application (8 files: allocation_test.go 1 hit, human_input_test.go 3, provider_registry_test.go 1, publication_test.go 3, repository_test.go 1, runner_version_test.go 1, service_test.go 15, stop_matrix_test.go 2), internal/reconciler (2 files: fencing_journey_test.go 2, stop_journey_test.go 2), internal/runner (7 files: control_agent_test.go 1, crash_test.go 1, forgepublish_test.go 1, journey_test.go 1, lease_test.go 1, provider_live_test.go 9, secret_broker_test.go 1) and internal/store/firestore (1 file: store_test.go 1). Two more disagreements inside that: d6 says 8 hits in internal/runner/provider_live_test.go, measured 9; d6's claim that internal/api/api_test.go is one of the holders is true only for the HTTP route -- that file calls the /v1/runner/claims:acquire ROUTE and never Service.Claim directly, so it is not in the 18. The figure the Work Order cares about is confirmed: 15 hits in internal/application/service_test.go. This is why the refusal is LOGGED and not asserted."
+    },
+    {
+      "name": "a13-i-pause-has-no-exit",
+      "status": "passed",
+      "argv": [
+        "sh",
+        "-c",
+        "grep -rn 'Resume\\|resume' --include='*.go' internal/domain/ | grep -v _test.go; grep -n '^type Requirement struct' -A 25 internal/domain/model.go; grep -n 'case RequirementReadyCommand:' -A 2 internal/domain/model.go"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 60,
+      "summary": "A13(i) pause IS BLOCKED, by measurement, not by scope. internal/domain declares NO resume command: the RequirementCommandKind const block is model.go:436-446 and its nine members are start-framing, ready, start, wait, needs-input, recover, evaluate, pause and cancel -- there is no resume, and the ONLY non-test occurrence of the string 'resume' anywhere in internal/domain is a comment at internal/domain/control.go:162 about control revisions, which is unrelated. RequirementReadyCommand is admitted from framing, waiting and needs-input only (model.go:481), so it is NOT admitted from paused. domain.Requirement (model.go:178-...) carries exactly ID, Status, Version, Increments, StableSnapshot, RequestedBy and CapturedAt -- there is NO previous-status field, so the exit docs/architecture/domain-model.md:269 describes ('| `paused` | 人間が処理を停止 | 直前の安全な非終端状態, `cancelled` |') cannot be built without editing internal/domain, which is prohibited. Issuing pause would create a one-way door whose only exit is cancel. NOT IMPLEMENTED, and no domain edge added to make it possible."
+    },
+    {
+      "name": "a13-ii-cancel-is-a-control-plane-design",
+      "status": "passed",
+      "argv": [
+        "sh",
+        "-c",
+        "sed -n '140,150p' docs/product/definition.md; grep -n 'ScopeRequirement' internal/domain/control.go"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 60,
+      "summary": "A13(ii) cancel is DELIVERABLE but REFUSED here, and the refusing document line is docs/product/definition.md:147 verbatim: '- **cancel requirement**: 指定したRequirementの以後の処理を止める' -- it is listed among the human controls at definition.md:140-148, i.e. it is an OWNER CONTROL VERB. Measured coupling that makes it a separate design: domain.ControlScope already admits domain.ScopeRequirement and domain.ControlMode already admits domain.ControlCancel, so a Control Intent with mode cancel scoped to a Requirement is already expressible today while nothing decides what it does to that Requirement's STATUS. Issuing domain.RequirementCancel from a command without deciding that is to ship two answers to one question. NOT IMPLEMENTED."
+    },
+    {
+      "name": "a13-iii-iv-wait-and-recover-have-no-caller",
+      "status": "passed",
+      "argv": [
+        "sh",
+        "-c",
+        "sed -n '158,172p' docs/architecture/technology.md; grep -rn ') Tick(' --include='*.go' internal/reconciler/; grep -rn 'application.Caller\\|ContextWithCaller' --include='*.go' internal/reconciler/ | grep -v _test.go"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 60,
+      "summary": "A13(iii) and (iv) wait and recover are BLOCKED because their issuer holds no identity. The documents make both automatic: domain-model.md:267 verbatim '| `waiting` | dependency、capacity、time条件を自動待機 | `ready`, `active`, `paused`, `cancelled` |' and domain-model.md:270 verbatim '| `recovering` | lost ExecutionやPreview failureから再開中 | `active`, `waiting`, `needs-input`, `paused` |'. The architecture names the issuer at docs/architecture/technology.md 5. Schedulingとbackground work -- MEASURED at lines 161-170, so the Work Order's 'technology.md:162-170' is off by one at the start (162 is blank; the heading is 161 and the prose is 163-164, the bounded batch list is 166-170). That tick lives in internal/reconciler, and MEASURED there are exactly THREE Tick methods -- reconciler.Reconciler.Tick (reconciler.go:43, takes ctx and a cursor string), reconciler.VerificationReconciler.Tick (control_verifier.go:18, takes ctx only) and reconciler.OrphanSweep.Tick (orphan.go:43, takes ctx and a cursor string) -- and NONE of the three takes an application.Caller. grep for application.Caller and ContextWithCaller in internal/reconciler returns ZERO non-test hits (the only five hits are in fencing_journey_test.go and stop_journey_test.go). So no reconciler code path can issue a caller-attributed Requirement command at all. This is also V2-086's recorded-unfixed finding, restated here as this task's blocking measurement. NOT IMPLEMENTED."
+    },
+    {
+      "name": "a13-v-completion-proof-has-no-producer",
+      "status": "passed",
+      "argv": [
+        "sh",
+        "-c",
+        "grep -rn '\\.Promote(' --include='*.go' . | grep -v _test.go; grep -rn 'StableReleaseProof{' --include='*.go' . | grep -v _test.go; grep -rn CompletePromotionWithProof --include='*.go' . | grep -v _test.go"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 60,
+      "summary": "A13(v) evaluate and domain.CompleteRequirementFromRelease are UNREACHABLE BY CONSTRUCTION, not merely unissued. The measurement is the a1-v check: domain.CompleteRequirementFromRelease (internal/domain/model.go:529) requires a domain.StableReleaseProof; the proof's only constructor is internal/domain/release.go:155 inside domain.CompletePromotionWithProof (release.go:150); its only non-test caller is internal/release/release.go:261 inside release.PromotionGate (release.go:248); PromotionGate's only non-test caller is internal/release/pipeline.go:52 inside release.Pipeline.Promote; and Pipeline.Promote has ZERO non-test callers -- the only non-test '.Promote(' hit in the repository, pipeline.go:59, is p.Router.Promote, a different method. So no running process can obtain the input. Issuing domain.RequirementEvaluate alone would move a Requirement into `evaluating`, whose only non-cancel exits per domain-model.md:271 are completed, active and needs-input, and completed cannot be reached -- a status nothing can leave. NEITHER IS IMPLEMENTED and no domain edge was added to make one possible."
+    }
+  ]
+}
