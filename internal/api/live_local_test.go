@@ -357,6 +357,91 @@ func TestControlPlanePreviewLocalLive(t *testing.T) {
 		t.Fatalf("framing an already-framing Requirement: expected 400, got %d: %+v", again.status, again.body)
 	}
 
+	// --- V2-084: the Requirement reaches READY, against the real binary, the
+	// real Firestore emulator and real HTTP. This is the executed proof of edge
+	// one. Measured on the parent tree, domain.RequirementReadyCommand's only
+	// non-test issuer was Service.AnswerHumanInput, so `ready` -- the only
+	// status the scheduler treats as schedulable -- was reachable ONLY by asking
+	// a Requirement a question and having the owner answer it. A Requirement
+	// that needed no question could not become executable at all.
+	//
+	// BOUNDARY, stated rather than blurred. The segment executed here against
+	// real persistence is exactly capture -> :start-framing -> :complete-framing
+	// -> the detail reports ready at the capture version plus two, plus the
+	// idempotent replay. The claim-to-active segment -- edge two -- is NOT
+	// proven against real persistence, because Service.Claim requires a verified
+	// RUNNER session and this file composes LocalOwnerBearerAuthenticator from
+	// AGENTIC_LOOP_LOCAL_OWNER_TOKENS and drives owner-authenticated routes
+	// only, with no runner enrolment. That is a LIMIT OF THIS TASK'S
+	// AUTHORISATIONS rather than a gap in the assertion: edge two is asserted
+	// over the composed handler in internal/api/api_test.go's
+	// TestTheWholeChainReachesReadyAndTheClaimCarriesTheParentToActive, and no
+	// runner enrolment is added to this file. No Provider is involved here.
+	completed := liveCall(t, client, http.MethodPost, base+"/v1/requirements/"+requirementID+":complete-framing", ownerToken, map[string]any{
+		"request_id":                   "live-complete-framing-1",
+		"expected_requirement_version": framingVersion,
+	})
+	if completed.status != http.StatusOK {
+		t.Fatalf("complete-framing: expected 200, got %d: %+v", completed.status, completed.body)
+	}
+	if got, _ := completed.body["requirement_id"].(string); got != requirementID {
+		t.Fatalf("complete-framing named requirement_id=%q, want %q", got, requirementID)
+	}
+	if got, _ := completed.body["status"].(string); got != "ready" {
+		t.Fatalf("complete-framing response status = %q, want ready", got)
+	}
+	readyVersion, _ := completed.body["version"].(float64)
+	if readyVersion != framingVersion+1 {
+		t.Fatalf("complete-framing response version = %v, want %v", readyVersion, framingVersion+1)
+	}
+	if readyVersion != detailVersionBefore+2 {
+		t.Fatalf("the Requirement reached ready at version %v, want the capture version %v plus exactly two", readyVersion, detailVersionBefore)
+	}
+	readyDetail := liveCall(t, client, http.MethodGet, base+"/v1/requirements/"+requirementID, ownerToken, nil)
+	if readyDetail.status != http.StatusOK {
+		t.Fatalf("requirement detail after complete-framing: expected 200, got %d: %+v", readyDetail.status, readyDetail.body)
+	}
+	if got, _ := readyDetail.body["status"].(string); got != "ready" {
+		t.Fatalf("requirement detail status after complete-framing = %q, want ready; the Requirement did not reach the schedulable status in real persistence", got)
+	}
+	if got, _ := readyDetail.body["version"].(float64); got != readyVersion {
+		t.Fatalf("requirement detail version after complete-framing = %v, want %v", got, readyVersion)
+	}
+	t.Logf("V2-084 live-local: requirement_id=%s reached ready at version %v against the real Firestore emulator, two versions above capture; the claim-to-active segment is NOT proven here because this file has no runner enrolment", requirementID, readyVersion)
+	// A SECOND identical request with the SAME request_id replays the prior
+	// response instead of transitioning again: the version does not move, and
+	// the stored status does not move either.
+	completedReplay := liveCall(t, client, http.MethodPost, base+"/v1/requirements/"+requirementID+":complete-framing", ownerToken, map[string]any{
+		"request_id":                   "live-complete-framing-1",
+		"expected_requirement_version": framingVersion,
+	})
+	if completedReplay.status != http.StatusOK {
+		t.Fatalf("complete-framing replay: expected 200, got %d: %+v", completedReplay.status, completedReplay.body)
+	}
+	if got, _ := completedReplay.body["version"].(float64); got != readyVersion {
+		t.Fatalf("complete-framing replay version = %v, want the prior %v; the replay transitioned again", got, readyVersion)
+	}
+	if got, _ := completedReplay.body["status"].(string); got != "ready" {
+		t.Fatalf("complete-framing replay status = %q, want ready", got)
+	}
+	replayedReadyDetail := liveCall(t, client, http.MethodGet, base+"/v1/requirements/"+requirementID, ownerToken, nil)
+	if replayedReadyDetail.status != http.StatusOK {
+		t.Fatalf("requirement detail after the complete-framing replay: expected 200, got %d: %+v", replayedReadyDetail.status, replayedReadyDetail.body)
+	}
+	if got, _ := replayedReadyDetail.body["version"].(float64); got != readyVersion {
+		t.Fatalf("the idempotent replay moved the stored version to %v, want %v", got, readyVersion)
+	}
+	// A runner-less boundary check that costs nothing: completing the framing
+	// again with a FRESH request id is refused by the domain transition table,
+	// because framing is the only admitted source.
+	readyAgain := liveCall(t, client, http.MethodPost, base+"/v1/requirements/"+requirementID+":complete-framing", ownerToken, map[string]any{
+		"request_id":                   "live-complete-framing-2",
+		"expected_requirement_version": readyVersion,
+	})
+	if readyAgain.status != http.StatusBadRequest {
+		t.Fatalf("completing the framing of an already-ready Requirement: expected 400, got %d: %+v", readyAgain.status, readyAgain.body)
+	}
+
 	// --- Control display (also exercises the Outbox: Control stages a
 	// control-changed outbox item) ---
 	control := liveCall(t, client, http.MethodPost, base+"/v1/controls", ownerToken, map[string]any{
