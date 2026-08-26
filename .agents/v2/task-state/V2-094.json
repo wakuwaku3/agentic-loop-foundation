@@ -1,0 +1,83 @@
+{
+  "schema_version": "v1",
+  "id": "ts-v2-094",
+  "kind": "canonical-task-state",
+  "task_id": "V2-094",
+  "status": "blocked",
+  "block_reason": "V2-088",
+  "dependencies": [
+    "V2-087",
+    "V2-088"
+  ],
+  "outcome": "Settle the three places where the two adapters give different answers to the same question, so that a green test on the fast adapter is evidence about the slow one for the answer and not only for the cost.",
+  "non_goals": [
+    "Do not decide by preference which adapter is right; measure what the real one does and say so",
+    "Do not change an adapter's answer without a test that fails first on the old one",
+    "Do not close the gap by deleting the assertion that exposes it"
+  ],
+  "actor": "sol",
+  "owner": "terra",
+  "next_owner": "terra",
+  "input_refs": [
+    "V2-087"
+  ],
+  "input_hash": "e4faeededa7fcd6f575966ffd1b457ea605cb655febf22dd919bdf7bce121381",
+  "output_refs": [
+    "V2-094"
+  ],
+  "output_hash": "a7ca05f96284eee57c67e4ad17565b67cec81ec24d83f9bfdfe750454c72d88c",
+  "retry_budget": {
+    "max_attempts": 2,
+    "attempts_used": 0,
+    "remaining": 2
+  },
+  "release_eligible": false,
+  "transitions": [
+    {
+      "sequence": 1,
+      "at": "2026-08-26T13:45:00Z",
+      "from_status": null,
+      "to_status": "queued",
+      "actor": "sol",
+      "owner": "terra",
+      "next_owner": "terra",
+      "input_refs": [
+        "V2-087"
+      ],
+      "input_hash": "e4faeededa7fcd6f575966ffd1b457ea605cb655febf22dd919bdf7bce121381",
+      "output_refs": [
+        "V2-094"
+      ],
+      "output_hash": "a7ca05f96284eee57c67e4ad17565b67cec81ec24d83f9bfdfe750454c72d88c",
+      "retry_budget": {
+        "max_attempts": 2,
+        "attempts_used": 0,
+        "remaining": 2
+      },
+      "reason": "V2-087は課金の非対称を閉じたが、閉じる過程で課金ではなく答えそのものが食い違う3箇所を測って記録し、firestoreを仕様として課金側だけを寄せた。IncrementsForRequirementsに空のid listを渡したときの返り、Outboxesのready判定、SaveIdempotencyがreplay時にwriteするかの3点である。答えが違うままだと、速いadapterで緑になったtestは費用については遅いadapterの証拠になったが答えについてはならない。V2-087が同じ変更の中でこれを直さなかったのは正しい:課金規則の一致を主張するtestと答えの変更を同じcommitに混ぜると、赤が出たときにどちらの主張が壊れたのか分からなくなる"
+    },
+    {
+      "sequence": 2,
+      "at": "2026-08-26T13:46:00Z",
+      "from_status": "queued",
+      "to_status": "blocked",
+      "actor": "sol",
+      "owner": "terra",
+      "next_owner": "terra",
+      "input_refs": [
+        "V2-087"
+      ],
+      "input_hash": "e4faeededa7fcd6f575966ffd1b457ea605cb655febf22dd919bdf7bce121381",
+      "output_refs": [
+        "V2-094"
+      ],
+      "output_hash": "a7ca05f96284eee57c67e4ad17565b67cec81ec24d83f9bfdfe750454c72d88c",
+      "retry_budget": {
+        "max_attempts": 2,
+        "attempts_used": 0,
+        "remaining": 2
+      },
+      "reason": "internal/store/**とinternal/application/**を触るので、いま走っているtaskの占有が解けるまで待つ"
+    }
+  ]
+}
