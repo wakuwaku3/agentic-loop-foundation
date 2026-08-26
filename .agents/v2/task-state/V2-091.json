@@ -8,11 +8,14 @@
     "V2-084"
   ],
   "block_reason": "V2-084",
-  "outcome": "Let the reconcile pass issue the two transitions that describe waiting and recovering, which today nothing can reach because the pass has no caller identity.",
+  "outcome": "Give the transitions the domain already models a caller outside a test: let the reconcile pass issue waiting and recovering, let promotion evaluate and complete a Requirement, and let the shipped Runner drive the journey. These were three tasks; they are one defect with three appearances.",
   "non_goals": [
-    "Do not give the pass a caller it is not",
-    "Do not let the pass advance a Requirement for a reason it did not observe",
-    "Do not make the pass unbounded in order to reach every Requirement"
+    "Do not give any of the three paths a caller identity it is not",
+    "Do not advance a Requirement for a reason the pass did not observe",
+    "Do not construct the completion proof anywhere other than the promotion path that earns it",
+    "Do not complete a Requirement on the strength of an Increment succeeding",
+    "Do not treat a fake journey as evidence about the real one",
+    "Do not make any of the three unbounded in order to reach every Requirement"
   ],
   "actor": "sol",
   "input_refs": [
@@ -80,6 +83,54 @@
         "remaining": 2
       },
       "reason": "the task that measured this defect lands the first edges the rest build on"
+    },
+    {
+      "sequence": 3,
+      "at": "2026-08-26T23:05:00Z",
+      "from_status": "blocked",
+      "to_status": "queued",
+      "actor": "sol",
+      "input_refs": [
+        "V2-084",
+        "V2-091"
+      ],
+      "input_hash": "09b54b99bdbbdc4447ad84e677153e10f15907da2b18757d3122d0fe0824d658",
+      "output_refs": [
+        "V2-091"
+      ],
+      "output_hash": "6ff4357079914d899b24f3283d8db67b0b7c265ad2046a608ada0887985b08d4",
+      "owner": "terra",
+      "next_owner": "terra",
+      "retry_budget": {
+        "max_attempts": 2,
+        "attempts_used": 0,
+        "remaining": 2
+      },
+      "reason": "記録されていた事由の再評価のため一度解く"
+    },
+    {
+      "sequence": 4,
+      "at": "2026-08-26T23:06:00Z",
+      "from_status": "queued",
+      "to_status": "blocked",
+      "actor": "sol",
+      "input_refs": [
+        "V2-084",
+        "V2-091"
+      ],
+      "input_hash": "09b54b99bdbbdc4447ad84e677153e10f15907da2b18757d3122d0fe0824d658",
+      "output_refs": [
+        "V2-091"
+      ],
+      "output_hash": "6ff4357079914d899b24f3283d8db67b0b7c265ad2046a608ada0887985b08d4",
+      "owner": "terra",
+      "next_owner": "terra",
+      "retry_budget": {
+        "max_attempts": 2,
+        "attempts_used": 0,
+        "remaining": 2
+      },
+      "reason": "V2-091・V2-092・V2-093を1件に統合してこのtaskに寄せた。3件のoutcomeは同じことを言っていた——出荷されたコードから到達できない遷移がある。V2-086は「no code outside a test constructs it」、V2-091は「nothing can reach because the pass has no caller」、V2-093は「the only thing that drives one today is a test」。9 taskへの分割は「1 task 1境界」という規約の産物であって問題の構造ではない。したがってreconcile passのwaiting/recovering、promotionの評価と完了、出荷されたRunnerのjourney driverを1つの到達性の問題として扱う。V2-093のfileは削除し、V2-092は空いたのでM5の再判定gateへ再scopeした。packetが完備しているV2-084・V2-086・V2-089・V2-090は統合対象から外した——済んだ設計を捨てない。2026-08-26の規約変更(§12)に伴う再導出である。fan-outが08-24から08-26で完了+48・新規+48の≈1.0で残数が動かず、未完了21件のうちpacket完備は4件だけだった。§12.1のG1 v2でgateの合格条件をtask集合から性質集合へ移し、§12.2でgate依存を凍結した。この再導出はtask-state fileを1件も増やさず、統合・除外・再scopeだけで行う。既存evidenceは再発行せず、完了済みtaskには触れず、M0からM4のgate判定も再計算しない。"
     }
   ]
 }

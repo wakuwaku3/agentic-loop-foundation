@@ -6,7 +6,7 @@
   "status": "blocked",
   "dependencies": [
     "V2-027",
-    "V2-081"
+    "V2-092"
   ],
   "outcome": "Verify success, error, quota, and cancel on real Codex, Claude, and opencode, prove shared adapter changes on all three, and keep Increment, Artifact, and Evidence across a Provider switch.",
   "non_goals": [
@@ -108,6 +108,56 @@
         "remaining": 2
       },
       "reason": "このtaskの待ち相手は2つあり、依存taskの側はV2-026からV2-081へ付け替えた。しかし実際に人の手を要するのはもう一方で、2026-08-26に実測した。codexとopencodeはどちらも導入済み(codex-cli 0.149.1、opencode 1.18.22)だが、`codex login status`は\"Not logged in\"を返し、`opencode auth list`は\"0 credentials\"を返す。~/.codexにauth.jsonは無く、~/.config/opencodeは空である。非対話の経路は`codex login --with-api-key`と`--with-access-token`がstdinから読む形しか無く、どちらもowner本人が持つ値を要求するので、私は代行できず、値を記録することも禁じられている。したがってblock_reasonはtask参照ではなくexternal-unavailableとして表現し、next_ownerをsolに置く。3 provider全部での成功・error・quota・cancelの確認と、Provider切替をまたぐIncrement/Artifact/Evidenceの保持は、この認証が済むまで1つも測れない"
+    },
+    {
+      "sequence": 4,
+      "at": "2026-08-26T23:20:00Z",
+      "from_status": "blocked",
+      "to_status": "queued",
+      "actor": "sol",
+      "input_refs": [
+        "V2-028",
+        "V2-027",
+        "V2-026"
+      ],
+      "input_hash": "8cd71305e16efeb81af1df34b4af9b67445837a065526d34f59997cc6d52207c",
+      "output_refs": [
+        "V2-028"
+      ],
+      "output_hash": "4b15f599d0308a4124d96f4b6e8bc0c9213ae9b38c8a26d4b4b565b94220ef05",
+      "owner": "sol",
+      "next_owner": "sol",
+      "retry_budget": {
+        "max_attempts": 2,
+        "attempts_used": 0,
+        "remaining": 2
+      },
+      "reason": "依存taskの付け替えのため一度解く。人の作業待ちという事由そのものは変わらない"
+    },
+    {
+      "sequence": 5,
+      "at": "2026-08-26T23:21:00Z",
+      "from_status": "queued",
+      "to_status": "blocked",
+      "actor": "sol",
+      "input_refs": [
+        "V2-028",
+        "V2-027",
+        "V2-026"
+      ],
+      "input_hash": "8cd71305e16efeb81af1df34b4af9b67445837a065526d34f59997cc6d52207c",
+      "output_refs": [
+        "V2-028"
+      ],
+      "output_hash": "4b15f599d0308a4124d96f4b6e8bc0c9213ae9b38c8a26d4b4b565b94220ef05",
+      "owner": "sol",
+      "next_owner": "sol",
+      "retry_budget": {
+        "max_attempts": 2,
+        "attempts_used": 0,
+        "remaining": 2
+      },
+      "reason": "M5の再判定gateがV2-081からV2-092へ移ったので、依存もそちらへ付け替えた。実際に待っているのは依然としてcodexとopencodeの認証で、2026-08-26の実測ではcodex login statusがNot logged in、opencode auth listが0 credentialsである。2026-08-26の規約変更(§12)に伴う再導出である。fan-outが08-24から08-26で完了+48・新規+48の≈1.0で残数が動かず、未完了21件のうちpacket完備は4件だけだった。§12.1のG1 v2でgateの合格条件をtask集合から性質集合へ移し、§12.2でgate依存を凍結した。この再導出はtask-state fileを1件も増やさず、統合・除外・再scopeだけで行う。既存evidenceは再発行せず、完了済みtaskには触れず、M0からM4のgate判定も再計算しない。"
     }
   ]
 }

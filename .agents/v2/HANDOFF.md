@@ -77,35 +77,43 @@ settle 1件あたり概ね **0.07〜0.11 USD**。
 
 ---
 
-## 2. 残タスク — required と deferred
+## 2. 残タスク — required と deferred（2026-08-26の再導出後）
 
-### required（v2 の完了条件）
+**gate の合格条件は task 一覧ではなく性質集合である**（G1 v2、`docs/operations/v2-task-dag.md`
+§12.1）。M5 の性質 P1〜P6 と、そこに**含まれない**繰り延べ済み 7 capability は §12.8 / §12.9。
+
+### required（M5 を閉じるもの）
 
 | task | 中身 | packet |
 |---|---|---|
-| V2-085 | Plan/Prepare の permit 欠落。**emergency-stop 下で canonical state が動く** | あり |
-| V2-086 | scheduler role の到達性 | あり |
-| V2-084 | lifecycle edge 2本（`CompleteFraming`、Claim ready→active）| あり |
+| V2-084 | lifecycle edge 2本（`CompleteFraming`、Claim ready→active）| あり・**queued** |
 | V2-089 | Claim 拒否 + fixture 62件の移行 | あり |
 | V2-090 | owner の pause/cancel + paused の出口 | あり |
-| V2-091 | reconcile tick の waiting/recovering | **要作成** |
-| V2-092 | promotion 配線と完了 | **要作成** |
-| V2-093 | production journey driver | **要作成** |
-| V2-081 | M5 gate 再判定（`repair_of: V2-026`）| **要作成** |
-| V2-028〜036 | M6・M7・M8 — **codex/opencode 認証が必要** | 要作成 |
-| V2-014, V2-054, V2-037〜039 | M9 — **GCP project が必要** | V2-014 のみあり |
+| V2-091 | **到達性の欠陥1件に統合**（reconcile pass の waiting/recovering、promotion の評価と完了、出荷 Runner の journey driver）| 要作成 |
+| V2-095 | M5 自身が負う 4 product gap + dogfood 再観測 | 要作成 |
+| V2-092 | **M5 再判定 gate**（`repair_of: V2-081`、依存は §12.2 により凍結済み）| 要作成 |
 
-**packet を書くときの雛形は `V2-089` と `V2-090` を読むこと。** この2つが最も強い。
-V2-089 は「機構は既に1状態について存在していたので、これは問いを追加する task ではなく
-既に発している問いを広げる task」と見抜き、admitting set を `internal/domain` から**導出**して
-`internal/domain/**` を prohibited にし、**set の二重宣言を build failure に変えた**。
-さらに直感的な誤答（`{ready, active}` だけ）が**test suite 全体から不可視**であることまで測っている。
+**V2-091・V2-092・V2-093 の3件は統合しました。** outcome が3件とも同じことを言っていた
+——出荷されたコードから到達できない遷移がある。V2-093 の file は削除し、V2-092 は
+M5 の再判定 gate に再 scope しました。**packet が完備している V2-084/086/089/090 は
+統合対象から外しています**（済んだ設計を捨てない）。
 
-### deferred（gate を塞がない）
+**V2-094 は台帳から外しました**（required ではないため。内容は `DEFERRED.md` D1）。
 
-`.agents/v2/DEFERRED.md` に9件。**V2-094 は台帳に登録済みだが required ではない。**
+### 人待ち（§8.3 により M5 の gate は止めない）
 
----
+| 待ち | 塞いでいるもの |
+|---|---|
+| **codex / opencode の login 各1回** | V2-028〜036（M6・M7・M8）＋ dogfood の 3 capability |
+| **GCP project** | V2-014・V2-054・V2-037〜039（M9・D1）＋ dogfood の 4 capability |
+
+**V2-095 の依存から V2-028 を外しました。** 以前は V2-028 に依存していたため、
+**認証が済むまで M5 はどうやっても閉じませんでした。**
+
+### deferred
+
+`.agents/v2/DEFERRED.md` に9件。`.agents/v2/DECLARATION-GAP.md` は宣言と実装の差の台帳で、
+**以後の発見は新規 task ではなくこの台帳の消し込みとして扱います**（§12.6）。
 
 ## 3. 運用規約 — 破ると静かに間違う
 
