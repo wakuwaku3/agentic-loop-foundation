@@ -21,9 +21,14 @@ var (
 	ErrRepositoryNotAvailable = errors.New("repository is registered no longer and cannot take new work")
 )
 
+// requireRequest is the site that AUTHORS this refusal, which is why the
+// V2-083 caller-fault marker goes here rather than anywhere upstream of it. An
+// absent request_id is the caller's mistake by construction: no dependency and
+// no clock can produce it. invalidRequest changes nothing a caller sees -- the
+// response message stays exactly "request_id is required".
 func requireRequest(requestID string) error {
 	if requestID == "" {
-		return errors.New("request_id is required")
+		return invalidRequest(errors.New("request_id is required"))
 	}
 	return nil
 }
@@ -1312,7 +1317,8 @@ func (s *Service) Control(ctx context.Context, req ControlRequest) (out ControlR
 		return out, err
 	}
 	if !validControlScope(req.Scope) || !validControlMode(req.Mode) {
-		return out, errors.New("invalid control mode or scope")
+		// Authored here, marked here (V2-083). The message is unchanged.
+		return out, invalidRequest(errors.New("invalid control mode or scope"))
 	}
 	// The limit is validated before any transaction opens, so a rejected limit
 	// creates no Control Intent, stores no side-table row and records no event.

@@ -1,0 +1,128 @@
+{
+ "schema_version": "v1",
+ "kind": "evidence",
+ "id": "ev-v2-083-application",
+ "created_at": "2026-08-26T20:00:00Z",
+ "correlation_id": "v2-083-error-classification",
+ "task_id": "V2-083",
+ "component": "application",
+ "evidence_key": "c351ad1d8dcb0a26a32c7694bac7f8d83179f77eebbf6b6bd1a1b3e89c8089f8",
+ "result": "passed",
+ "observed_at": "2026-08-26T20:00:00Z",
+ "checks": [
+  {
+   "name": "scope-boundary",
+   "status": "passed",
+   "argv": [
+    "git",
+    "status",
+    "--porcelain"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 30,
+   "summary": "Scope boundary for V2-083, written into both evidence records BEFORE any source file was edited (git status --porcelain was empty at the moment this row was written), against base commit 76cfa91ede067f941991d5f1a128c8c6ba1e8ad1. The Work Order's cited measurement commit 9a09ef8 is NOT this worktree's base: this worktree is based on 76cfa91ede067f941991d5f1a128c8c6ba1e8ad1, which already carries V2-082's :start-framing route, so every line number and count below was re-measured here. ROW 1 -- what this task makes true: an error the request did not cause leaves the API as 500 internal_error with the fixed message \"internal server error\" rather than 400 invalid_request with the dependency's own text, on every one of the MEASURED 26 h.domainError call sites (21 in internal/api/api.go including the /internal/reconcile branch at api.go:94, and 5 in internal/api/repositories.go at :76 :89 :102 :111 :120). The Work Order said 24 call sites (\"19 handlers in api.go, five in repositories.go, and the /internal/reconcile branch\", which is itself 25); the tree says 26 and the measured value is used. The response for an unclassified error carries no dependency text at all. ROW 2 -- what it deliberately does not do: it moves no existing status code and no existing response message (A3's before/after pin table and A14's byte-identical body comparison measure exactly that), it edits internal/domain not at all, it edits no contract document, it adds no logging, it adds no route, no response field and no header, and it changes no error's Error() text -- the caller-fault marker delegates Error() to the wrapped error, so \"request_id is required\" stays \"request_id is required\" on the wire. ROW 3 -- what it records but does not fix: (a) contracts/openapi/openapi-v1.yaml declares neither '500' nor '400' for four routes that call domainError (dp-v2-083 d11a, re-measured in the openapi-gap check); (b) this repository has no logging idiom at all -- no non-test file under internal/ or cmd/ imports \"log\" or \"log/slog\" -- so after this change the dependency's own text is visible NOWHERE in-process, which is an accepted cost owned by follow-up task V2-088 (dp-v2-083 d11b); (c) domain.ErrInvalidTransition and application.ErrDuplicateRequest deliberately stay 400 although a state-machine refusal arguably deserves 409 (dp-v2-083 d9). ROW 4 -- what only a later task can establish: nothing. This task's outcome is fully assertable here and A8 is executed rather than skipped. ROW 5 -- this task passes no release gate on its own: no release_eligible entry is produced, no capability id is cited in either record, contracts/release-contract/** is untouched and .agents/v2/evidence/V2-022-release-live-dogfood.json is untouched."
+  },
+  {
+   "name": "environment-identifier",
+   "status": "passed",
+   "argv": [
+    "uname",
+    "-srm"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 30,
+   "summary": "execution environment: uname -srm = Linux 6.18.33.2-microsoft-standard-WSL2 x86_64; devbox run --pure -- go version = go1.25.0 linux/amd64; devbox 0.17.2, environment resolved from this worktree's devbox.json/devbox.lock, both untouched by this task. Worktree /home/takushi/repos/agentic-loop-foundation-worktrees/v2-task-083 on branch v2-task/V2-083, base commit 76cfa91ede067f941991d5f1a128c8c6ba1e8ad1. The only external process any check started is the local Firestore emulator that scripts/firestore-emulator.sh starts (firebase emulators:start --only firestore) together with the real cmd/control-plane binary this repository builds. NO Provider CLI was started at any point -- no claude, no codex, no opencode, not even --version or --help -- no gh child was started, and no Google Cloud resource was touched."
+  },
+  {
+   "name": "baseline-and-after-test-counts",
+   "status": "passed",
+   "argv": [
+    "devbox",
+    "run",
+    "--pure",
+    "--",
+    "go",
+    "test",
+    "-list",
+    ".*",
+    "./internal/application"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 900,
+   "summary": "A2. internal/application top-level tests BEFORE any edit: 186, measured by go test -list '.*' and cross-checked by grep -c on func Test/func Fuzz (both agree). The Work Order said 180 -- DISAGREEMENT, and the measured value is used. AFTER: 187. The delta is exactly the one test A9 adds, TestEveryCallerFaultCarriesTheInvalidRequestIdentityAndNoOtherFaultDoes in the new file internal/application/errors_test.go. No existing test in this package was deleted or renamed. Two other measured disagreements with the Work Order, resolved in favour of the tree: internal/application/runner_version.go has ONE \"clock returned zero time\" site, at :297, not two (:297 and :321); and internal/application/allocation.go already exports ErrAllocationLimitOutOfRange as a sentinel, so the allocation-limit refusal needed naming in internal/api rather than marking here."
+  },
+  {
+   "name": "the-caller-fault-marker-is-message-transparent",
+   "status": "passed",
+   "argv": [
+    "devbox",
+    "run",
+    "--pure",
+    "--",
+    "go",
+    "test",
+    "-count=1",
+    "-v",
+    "-run",
+    "TestEveryCallerFaultCarriesTheInvalidRequestIdentityAndNoOtherFaultDoes",
+    "./internal/application"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 900,
+   "summary": "A5 and A9. VERDICT LINE: 'ok  github.com/takushi/agentic-loop-foundation/v2/internal/application 0.003s'. THE MARKER (A5): the new file internal/application/errors.go holds the exported sentinel ErrInvalidRequest and the UNEXPORTED constructor invalidRequest, backed by a small invalidRequestError struct whose Error() DELEGATES to the wrapped error, whose Unwrap() returns the wrapped error so any sentinel it already carries keeps its identity, and whose Is(target) matches ErrInvalidRequest AND NOTHING ELSE -- an Is that matched more would move a 404 or a 409 to 400. It is NOT spelled fmt.Errorf(\"%w: ...\", ErrInvalidRequest) anywhere, because that would prepend the sentinel's own text to every one of these responses and change bodies this task forbids itself to change; the test asserts, per row, both that the message equals the ORIGINAL unchanged text and that the sentinel's own text (\"invalid request\") does not appear in it. FIVE AUTHORING SITES ARE MARKED, and only sites that AUTHOR a caller-input validation error: internal/application/service.go requireRequest (\"request_id is required\"); internal/application/service.go's Control (\"invalid control mode or scope\"); internal/application/readmodels.go boundPageSize (\"page_size must be between 1 and 100\"); internal/application/readmodels.go ListControls (\"page_size must be at most 100\"); internal/application/readmodels.go Export (\"export limit must be between 1 and 100\"). NOTHING was marked at a shared helper that also carries dependency failures, nothing in Service.transact or Service.mutate, and nothing around a transaction. Four of the five were identified by MEASUREMENT rather than by grep: they are exactly the sites behind the 20 pin-table rows that turned red the moment the default was inverted. The fifth, Export's limit bound, is marked although the transport's own invalid_limit check refuses an out-of-range limit before it is reached, so no pin row exercises it; that is recorded rather than hidden. THE POSITIVE HALF (A9): 11 rows, each asserting errors.Is(err, ErrInvalidRequest) AND the unchanged message -- capture with no request_id, Control with no request_id, RegisterRepository with no request_id, Heartbeat with no request_id, StartFraming with no request_id, a control mode outside the seven, page_size below one, page_size above MaxPageSize, the controls page_size bound, an export limit below one and an export limit above MaxPageSize. THE ALREADY-SENTINELLED HALF: 6 further rows asserting that the caller faults which ALREADY carried an exported sentinel still carry it, which is what makes internal/api's explicit list a measured claim rather than a guess -- application.ErrInvalidCursor (a cursor the route never issued, which is V2-079's boundary), application.ErrProviderUnknown twice (a provider name outside the closed set on start, and a provider observation naming an unknown provider on result), application.ErrRunnerVersionReportInvalid, application.ErrAllocationLimitOutOfRange and domain.ErrInvalidSourceLocator. THE NEGATIVE HALF, WHICH IS NOT OPTIONAL: 7 rows asserting that a fault the request did NOT cause does NOT satisfy errors.Is(err, ErrInvalidRequest) -- a clock returning the zero instant on Capture (service.go:779), on QueueSummary (allocation.go:564), on Providers (provider_registry.go:742) and on Runners (runner_version.go:297), and a Transactor decorator's storage error (the same doubled Firestore parent name with a byte offset) on a paged read, on a mutation and on the repository list. Without this half the marker would drift toward being applied everywhere, and a blanket wrap turns every 500 back into a 400, which is the original defect with a new spelling. Determinism: no sleep, no timer, no goroutine; the clock is injected and stepped a whole UTC day between read transactions because the memory adapter never trues up a read reservation."
+  },
+  {
+   "name": "no-import-edge-and-no-source-change-outside-the-marked-sites",
+   "status": "passed",
+   "argv": [
+    "devbox",
+    "run",
+    "--pure",
+    "--",
+    "go",
+    "test",
+    "-count=1",
+    "./internal/ci"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 900,
+   "summary": "A17, application half. VERDICT LINE: 'ok  github.com/takushi/agentic-loop-foundation/v2/internal/ci 0.126s'. The new file internal/application/errors.go imports exactly one package, \"errors\"; the Work Order allowed \"errors and fmt\" and fmt turned out not to be needed. git diff on internal/application/service.go and internal/application/readmodels.go shows NO added or removed import line: invalidRequest is package-local and both files already imported errors and fmt. The whole application-side diff is 5 marked call sites plus comments, and no exported signature, no port, no stored field and no response shape changed. internal/domain/** is byte-unchanged and got no test change and no source change. internal/application/source_guard_test.go is prohibited and untouched. This task creates and removes no component edge, so a red manifest or dependency-coverage check would mean the design was departed from; internal/ci is green."
+  },
+  {
+   "name": "evidence-key-for-this-record",
+   "status": "passed",
+   "argv": [
+    "devbox",
+    "run",
+    "--pure",
+    "--",
+    "make",
+    "evidence-keys"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 900,
+   "summary": "A16, application half. Read on the final tree with every touched file git-added: application = c351ad1d8dcb0a26a32c7694bac7f8d83179f77eebbf6b6bd1a1b3e89c8089f8. Exactly two keys were measured for this task (api and application); the other 21 were not measured, not recorded and not compared. Under gate rule G6a this is provenance, not a pass/fail condition."
+  },
+  {
+   "name": "work-order-validation-argv",
+   "status": "passed",
+   "argv": [
+    "devbox",
+    "run",
+    "--pure",
+    "--",
+    "go",
+    "test",
+    "-race",
+    "-count=1",
+    "./internal/api",
+    "./internal/application",
+    "./internal/domain",
+    "./internal/contracts"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 2400,
+   "summary": "A15. The Work Order's own validation argv, run on the final committed tree. VERDICT LINES, verbatim: 'ok  github.com/takushi/agentic-loop-foundation/v2/internal/api 1.282s'; 'ok  github.com/takushi/agentic-loop-foundation/v2/internal/application 2.475s'; 'ok  github.com/takushi/agentic-loop-foundation/v2/internal/domain 2.786s'; 'ok  github.com/takushi/agentic-loop-foundation/v2/internal/contracts 1.867s'. Judged by these verdict lines, not by devbox run's exit status. Afterwards, with both records committed: devbox run --pure -- gitleaks dir .agents --config .gitleaks.toml reported 'scanned ~3665366 bytes (3.67 MB) in 290ms' and 'no leaks found'. gitleaks dir . was NOT used. No release_eligible entry is produced by either record, no capability id is cited in either, contracts/release-contract/** is untouched and .agents/v2/evidence/V2-022-release-live-dogfood.json is untouched."
+  }
+ ]
+}

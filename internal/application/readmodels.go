@@ -118,12 +118,15 @@ type RequirementView struct {
 	CapturedAt *time.Time `json:"captured_at,omitempty"`
 }
 
+// boundPageSize authors the page_size refusal, so the V2-083 caller-fault
+// marker goes here. The message is unchanged: a caller still reads
+// "page_size must be between 1 and 100".
 func boundPageSize(size int) (int, error) {
 	if size == 0 {
 		return 25, nil
 	}
 	if size < 0 || size > MaxPageSize {
-		return 0, fmt.Errorf("page_size must be between 1 and %d", MaxPageSize)
+		return 0, invalidRequest(fmt.Errorf("page_size must be between 1 and %d", MaxPageSize))
 	}
 	return size, nil
 }
@@ -355,7 +358,8 @@ func (s *Service) ListControls(ctx context.Context, limit int) ([]ControlReadMod
 		limit = 25
 	}
 	if limit > MaxPageSize {
-		return nil, fmt.Errorf("page_size must be at most %d", MaxPageSize)
+		// Authored here, marked here (V2-083). The message is unchanged.
+		return nil, invalidRequest(fmt.Errorf("page_size must be at most %d", MaxPageSize))
 	}
 	var out []ControlReadModel
 	err := s.transact(ctx, func(u UnitOfWork) error {
@@ -447,7 +451,12 @@ func (s *Service) Export(ctx context.Context, limit int) ([]ExportRecord, error)
 		return nil, err
 	}
 	if limit < 1 || limit > MaxPageSize {
-		return nil, fmt.Errorf("export limit must be between 1 and %d", MaxPageSize)
+		// Authored here, marked here (V2-083). The transport's own
+		// invalid_limit check on GET /v1/export refuses an out-of-range limit
+		// before this one is reached, so no pin-table row exercises it; it is
+		// marked anyway because it is the same class of refusal and
+		// errors_test.go asserts it directly.
+		return nil, invalidRequest(fmt.Errorf("export limit must be between 1 and %d", MaxPageSize))
 	}
 	out := make([]ExportRecord, 0, limit*2)
 	err := s.transact(ctx, func(u UnitOfWork) error {

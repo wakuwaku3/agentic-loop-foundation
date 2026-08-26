@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -3558,5 +3559,826 @@ func TestARequirementLeftInFramingStillReadsAfterTheChangeIsReverted(t *testing.
 	}
 	if !strings.Contains(w.Body.String(), id) {
 		t.Fatalf("the requirement page omits the framing Requirement: %s", w.Body.String())
+	}
+}
+
+// ===========================================================================
+// V2-083: a storage fault is not the caller's mistake.
+//
+// A3 -- THE PIN TABLE. This table is written and measured GREEN ON THE
+// UNEDITED TREE before internal/api/api.go's domainError default is touched,
+// and re-measured afterwards. Every row pins BOTH the HTTP status and the
+// error code of one (method, path, role, body) case, so "no existing status
+// code moved" is a measurement rather than a promise. A row is never adjusted
+// to match a new answer: a row that moves means the design was departed from.
+// ===========================================================================
+
+// pinInstallation and pinReconcileIdentity are the fixture's two identities.
+// The reconcile identity is asserted through the IAP header exactly the way
+// internal/api/api.go's /internal/reconcile branch reads it.
+const (
+	pinInstallation       = "install"
+	pinReconcileIdentity  = "reconciler@example.com"
+	pinReconcileAssertion = "accounts.google.com:" + pinReconcileIdentity
+)
+
+// pinPublicKey is a deterministic ed25519 public key in the encoding
+// internal/api's decodePublicKey accepts first. It is derived from an
+// all-zero seed rather than generated, so no row depends on randomness.
+var pinPublicKey = base64.RawStdEncoding.EncodeToString([]byte(ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize)).Public().(ed25519.PublicKey)))
+
+// pinRow is one measured case. wantCode is the "error" field of the response
+// envelope; an empty wantCode means the row is a success and carries no error
+// code at all.
+type pinRow struct {
+	name        string
+	method      string
+	path        string
+	body        string
+	token       string
+	contentType string // "" means application/json; "-" means send no Content-Type
+	origin      string
+	headers     map[string]string
+	// sameDay keeps the injected clock where it is. Every other row steps it
+	// a whole UTC day first, because a read transaction reserves the
+	// conservative read boundary against the daily quota budget and the
+	// memory adapter never trues that reservation up, so a fixed clock allows
+	// only four read transactions per UTC day per store. That is an injected
+	// clock advanced explicitly -- never a sleep, a timer or a goroutine.
+	sameDay bool
+	// unconfigured drives the row against a Handler composed with neither an
+	// Authenticator nor a Service, which is the fail-closed shape.
+	unconfigured bool
+	// exhaustQuota fills the day's whole write budget before the request, so
+	// the next mutation's worst-case reservation is refused by one write.
+	exhaustQuota bool
+	wantStatus   int
+	wantCode     string
+	// capture records values from a success response for later rows.
+	capture func(*pinFixture, map[string]any)
+}
+
+// pinFixture composes the whole authenticated surface once: a memory store, a
+// steppable injected clock, owner/runner/scheduler bearer tokens, runner
+// enrollment, an /internal/reconcile hook that succeeds, and a second
+// Handler with nothing configured at all.
+type pinFixture struct {
+	handler      http.Handler
+	unconfigured http.Handler
+	store        *memory.Store
+	service      *application.Service
+	clock        *framingClock
+	values       map[string]string
+}
+
+// expand substitutes the fixture's recorded values into a path or body.
+func (fx *pinFixture) expand(s string) string {
+	if !strings.Contains(s, "{") {
+		return s
+	}
+	for k, v := range fx.values {
+		s = strings.ReplaceAll(s, "{"+k+"}", v)
+	}
+	return s
+}
+
+func (fx *pinFixture) ownerContext() context.Context {
+	return application.ContextWithCaller(context.Background(), application.Caller{Role: application.RoleOwner, Subject: "owner"})
+}
+
+// pinSeedRequirement captures a Requirement through the real route with a
+// caller-supplied identifier, so every row below names a stable id.
+func (fx *pinFixture) pinSeedRequirement(t *testing.T, id string) {
+	t.Helper()
+	fx.clock.nextDay()
+	w := pinCall(fx.handler, pinRow{method: http.MethodPost, token: "owner"}, "/v1/requirements",
+		`{"request_id":"pin:capture:`+id+`","requirement_id":"`+id+`","text":"a requirement the pin table names"}`)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("seeding requirement %s: %d %s", id, w.Code, w.Body.String())
+	}
+}
+
+// pinMakeActive moves a captured Requirement to active through the store, the
+// same way seedActiveRequirement does: no /v1 route advances it.
+func (fx *pinFixture) pinMakeActive(t *testing.T, id string) domain.Version {
+	t.Helper()
+	fx.clock.nextDay()
+	var version domain.Version
+	if err := fx.store.Transact(context.Background(), func(u application.UnitOfWork) error {
+		r, ok, e := u.Requirement(context.Background(), id)
+		if e != nil || !ok {
+			t.Fatalf("seed active %s: ok=%v err=%v", id, ok, e)
+		}
+		next := r
+		next.Status = domain.RequirementActive
+		next.Version++
+		version = next.Version
+		return u.SaveRequirement(context.Background(), next, r.Version)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return version
+}
+
+func (fx *pinFixture) pinSeedRepository(t *testing.T, id, url string) {
+	t.Helper()
+	fx.clock.nextDay()
+	w := pinCall(fx.handler, pinRow{method: http.MethodPost, token: "owner"}, "/v1/repositories",
+		`{"request_id":"pin:repo:`+id+`","repository_id":"`+id+`","source_url":"`+url+`"}`)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("seeding repository %s: %d %s", id, w.Code, w.Body.String())
+	}
+}
+
+func newPinFixture(t *testing.T) *pinFixture {
+	t.Helper()
+	st := memory.New()
+	clk := &framingClock{at: time.Unix(1700000000, 0).UTC()}
+	svc, err := application.NewServiceWithConfig(st, clk, &ids{}, application.ServiceConfig{InstallationID: pinInstallation, LeaseTTL: time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	enrollment, err := runner.NewService(runner.NewMemoryStore())
+	if err != nil {
+		t.Fatal(err)
+	}
+	auth := api.BearerAuthenticator{
+		"owner":     {Role: application.RoleOwner, Subject: "owner"},
+		"runner":    {Role: application.RoleRunner, Subject: "runner", RunnerID: "runner-1"},
+		"scheduler": {Role: application.RoleScheduler, Subject: "scheduler.self"},
+	}
+	fx := &pinFixture{
+		handler: api.New(api.Config{
+			Authenticator:     auth,
+			Service:           svc,
+			RunnerEnrollment:  enrollment,
+			AllowedOrigins:    []string{"https://console.example"},
+			InternalReconcile: func(context.Context) error { return nil },
+			ReconcileIdentity: pinReconcileIdentity,
+		}),
+		unconfigured: api.New(api.Config{}),
+		store:        st,
+		service:      svc,
+		clock:        clk,
+		values:       map[string]string{},
+	}
+
+	// Three Requirements with distinct roles, so no row depends on a status
+	// another row moved: one stays captured for ever, one is the
+	// :start-framing success, one is active for the needs-input pair, and one
+	// is the Increment the runner-facing journey claims.
+	for _, id := range []string{"pin-captured", "pin-framing", "pin-active", "pin-loop"} {
+		fx.pinSeedRequirement(t, id)
+	}
+	activeVersion := fx.pinMakeActive(t, "pin-active")
+	loopVersion := fx.pinMakeActive(t, "pin-loop")
+	fx.pinSeedRepository(t, "repo-pin", "https://github.com/pin/observed")
+	fx.pinSeedRepository(t, "repo-retire", "https://github.com/pin/retired")
+
+	// The Increment the runner-facing journey claims. No /v1 route creates
+	// one, so Plan and Prepare are driven through the Service directly, the
+	// way internal/api/live_dogfood_test.go's planAndPrepare does.
+	fx.clock.nextDay()
+	planned, err := svc.Plan(fx.ownerContext(), application.PlanRequest{RequestID: "pin:plan", RequirementID: "pin-loop", ExpectedRequirementVersion: loopVersion})
+	if err != nil {
+		t.Fatalf("plan (through the Service, because no /v1 route creates an Increment): %v", err)
+	}
+	fx.clock.nextDay()
+	prepared, err := svc.Prepare(fx.ownerContext(), application.PrepareRequest{RequestID: "pin:prepare", IncrementID: planned.IncrementID, ExpectedVersion: planned.Version})
+	if err != nil {
+		t.Fatalf("prepare (through the Service): %v", err)
+	}
+
+	fx.values["captured"] = "pin-captured"
+	fx.values["framing"] = "pin-framing"
+	fx.values["active"] = "pin-active"
+	fx.values["activeVersion"] = strconv.FormatInt(int64(activeVersion), 10)
+	fx.values["loop"] = "pin-loop"
+	fx.values["increment"] = planned.IncrementID
+	fx.values["incrementVersion"] = strconv.FormatInt(int64(prepared.Version), 10)
+	fx.values["publicKey"] = pinPublicKey
+	return fx
+}
+
+// pinCorrelationID is sent on every row so the whole response body is
+// deterministic and can be compared BYTE FOR BYTE before and after the
+// default is inverted (A14): correlation_id is the only field in the error
+// envelope that is otherwise random per request.
+const pinCorrelationID = "pin-correlation-id"
+
+func pinCall(h http.Handler, row pinRow, path, body string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(row.method, path, strings.NewReader(body))
+	req.Header.Set("X-Correlation-ID", pinCorrelationID)
+	switch row.contentType {
+	case "":
+		req.Header.Set("Content-Type", "application/json")
+	case "-":
+	default:
+		req.Header.Set("Content-Type", row.contentType)
+	}
+	if row.token != "" {
+		req.Header.Set("Authorization", "Bearer "+row.token)
+	}
+	if row.origin != "" {
+		req.Header.Set("Origin", row.origin)
+	}
+	for k, v := range row.headers {
+		req.Header.Set(k, v)
+	}
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	return w
+}
+
+// pinAskBody fills the existing needs-input ask template with a request id and
+// a version placeholder the fixture expands, so the table reuses the same body
+// shape TestNeedsInputRoutesAreRoleGated already pins.
+func pinAskBody(requestID, version string) string {
+	body := strings.Replace(needsInputAskBody, "REQUEST_ID", requestID, 1)
+	return strings.Replace(body, "VERSION", version, 1)
+}
+
+// pinTarget is the ControlTarget every runner-facing row names.
+const pinTarget = `"target":{"installation_id":"` + pinInstallation + `","requirement_id":"{loop}","increment_id":"{increment}"}`
+
+// pinRows is the whole table. It is ordered: the runner-facing journey rows
+// run inside one UTC day because a Lease lives one minute, and the quota row
+// is last because it fills the day's write budget.
+func pinRows() []pinRow {
+	return []pinRow{
+		// --- /healthz, and the fail-closed shape -------------------------
+		{name: "healthz", method: http.MethodGet, path: "/healthz", wantStatus: 200},
+		{name: "healthz-rejects-post", method: http.MethodPost, path: "/healthz", wantStatus: 405, wantCode: "method_not_allowed"},
+		{name: "healthz-with-nothing-configured", method: http.MethodGet, path: "/healthz", unconfigured: true, wantStatus: 200},
+		{name: "authenticated-route-with-nothing-configured", method: http.MethodGet, path: "/v1/requirements", unconfigured: true, wantStatus: 503, wantCode: "not_configured"},
+		{name: "capture-with-nothing-configured", method: http.MethodPost, path: "/v1/requirements", body: `{"request_id":"x","text":"y"}`, unconfigured: true, wantStatus: 503, wantCode: "not_configured"},
+		{name: "reconcile-with-nothing-configured", method: http.MethodPost, path: "/internal/reconcile", unconfigured: true, wantStatus: 401, wantCode: "unauthorized"},
+
+		// --- POST /internal/reconcile ------------------------------------
+		{name: "reconcile-without-the-scheduler-identity", method: http.MethodPost, path: "/internal/reconcile", wantStatus: 401, wantCode: "unauthorized"},
+		{name: "reconcile-with-a-runner-session-header", method: http.MethodPost, path: "/internal/reconcile",
+			headers: map[string]string{"X-Goog-Authenticated-User-Email": pinReconcileAssertion, "X-Agentic-Runner-Session": "anything"},
+			wantStatus: 401, wantCode: "unauthorized"},
+		{name: "reconcile-with-a-foreign-identity", method: http.MethodPost, path: "/internal/reconcile",
+			headers: map[string]string{"X-Goog-Authenticated-User-Email": "accounts.google.com:someone.else@example.com"},
+			wantStatus: 401, wantCode: "unauthorized"},
+		{name: "reconcile-accepted", method: http.MethodPost, path: "/internal/reconcile",
+			headers:    map[string]string{"X-Goog-Authenticated-User-Email": pinReconcileAssertion},
+			wantStatus: 202},
+		{name: "reconcile-rejects-get", method: http.MethodGet, path: "/internal/reconcile", wantStatus: 405, wantCode: "method_not_allowed"},
+
+		// --- the three enrollment routes ---------------------------------
+		{name: "enrollment-issue-unauthenticated", method: http.MethodPost, path: "/v1/runner/enrollment", body: `{"runner_id":"runner-1"}`, wantStatus: 401, wantCode: "unauthorized"},
+		{name: "enrollment-issue-wrong-role", method: http.MethodPost, path: "/v1/runner/enrollment", body: `{"runner_id":"runner-1"}`, token: "runner", wantStatus: 403, wantCode: "forbidden"},
+		{name: "enrollment-issue-accepted", method: http.MethodPost, path: "/v1/runner/enrollment", body: `{"runner_id":"runner-1"}`, token: "owner", wantStatus: 201},
+		{name: "enrollment-issue-empty-runner-id", method: http.MethodPost, path: "/v1/runner/enrollment", body: `{"runner_id":""}`, token: "owner", wantStatus: 400, wantCode: "invalid_request"},
+		{name: "enrollment-issue-malformed-body", method: http.MethodPost, path: "/v1/runner/enrollment", body: `{`, token: "owner", wantStatus: 400, wantCode: "invalid_json"},
+		{name: "enrollment-issue-unknown-field", method: http.MethodPost, path: "/v1/runner/enrollment", body: `{"runner_id":"runner-1","extra":1}`, token: "owner", wantStatus: 400, wantCode: "invalid_json"},
+		{name: "enrollment-issue-wrong-content-type", method: http.MethodPost, path: "/v1/runner/enrollment", body: `{"runner_id":"runner-1"}`, token: "owner", contentType: "text/plain", wantStatus: 415, wantCode: "unsupported_media_type"},
+		{name: "enrollment-challenge-malformed-public-key", method: http.MethodPost, path: "/v1/runner/enrollment/challenge", body: `{"enrollment_token":"t","public_key":"zz"}`, wantStatus: 400, wantCode: "invalid_request"},
+		{name: "enrollment-challenge-unknown-token", method: http.MethodPost, path: "/v1/runner/enrollment/challenge", body: `{"enrollment_token":"never-issued","public_key":"{publicKey}"}`, wantStatus: 401, wantCode: "enrollment_failed"},
+		{name: "enrollment-challenge-malformed-body", method: http.MethodPost, path: "/v1/runner/enrollment/challenge", body: `{`, wantStatus: 400, wantCode: "invalid_json"},
+		{name: "enrollment-challenge-rejects-get", method: http.MethodGet, path: "/v1/runner/enrollment/challenge", wantStatus: 405, wantCode: "method_not_allowed"},
+		{name: "enrollment-complete-unknown-challenge", method: http.MethodPost, path: "/v1/runner/enrollment/complete", body: `{"challenge_id":"never-issued","signature":"AAAA"}`, wantStatus: 401, wantCode: "enrollment_failed"},
+		{name: "enrollment-complete-malformed-body", method: http.MethodPost, path: "/v1/runner/enrollment/complete", body: `{`, wantStatus: 400, wantCode: "invalid_json"},
+
+		// --- /owner and /owner/assets/ -----------------------------------
+		{name: "owner-console", method: http.MethodGet, path: "/owner", token: "owner", wantStatus: 200},
+		{name: "owner-console-trailing-slash", method: http.MethodGet, path: "/owner/", token: "owner", wantStatus: 200},
+		{name: "owner-console-unauthenticated", method: http.MethodGet, path: "/owner", wantStatus: 401, wantCode: "unauthorized"},
+		{name: "owner-console-wrong-role", method: http.MethodGet, path: "/owner", token: "runner", wantStatus: 403, wantCode: "forbidden"},
+		{name: "owner-asset", method: http.MethodGet, path: "/owner/assets/owner.js", wantStatus: 200},
+		{name: "owner-asset-unknown", method: http.MethodGet, path: "/owner/assets/nothing.js", wantStatus: 404, wantCode: "not_found"},
+		{name: "owner-asset-traversal", method: http.MethodGet, path: "/owner/assets/a..b", wantStatus: 404, wantCode: "not_found"},
+		{name: "owner-asset-empty-name", method: http.MethodGet, path: "/owner/assets/", wantStatus: 404, wantCode: "not_found"},
+
+		// --- GET /v1/requirements ----------------------------------------
+		{name: "list-requirements", method: http.MethodGet, path: "/v1/requirements", token: "owner", wantStatus: 200},
+		{name: "list-requirements-unauthenticated", method: http.MethodGet, path: "/v1/requirements", wantStatus: 401, wantCode: "unauthorized"},
+		{name: "list-requirements-wrong-role", method: http.MethodGet, path: "/v1/requirements", token: "runner", wantStatus: 403, wantCode: "forbidden"},
+		{name: "list-requirements-page-size-is-not-an-integer", method: http.MethodGet, path: "/v1/requirements?page_size=abc", token: "owner", wantStatus: 400, wantCode: "invalid_page"},
+		{name: "list-requirements-page-size-below-one", method: http.MethodGet, path: "/v1/requirements?page_size=-1", token: "owner", wantStatus: 400, wantCode: "invalid_request"},
+		{name: "list-requirements-page-size-above-the-maximum", method: http.MethodGet, path: "/v1/requirements?page_size=101", token: "owner", wantStatus: 400, wantCode: "invalid_request"},
+		{name: "list-requirements-cursor-the-route-never-issued", method: http.MethodGet, path: "/v1/requirements?cursor=fabricated.cursor*", token: "owner", wantStatus: 400, wantCode: "invalid_request"},
+		{name: "list-requirements-rejects-put", method: http.MethodPut, path: "/v1/requirements", token: "owner", wantStatus: 405, wantCode: "method_not_allowed"},
+
+		// --- POST /v1/requirements (capture) -----------------------------
+		{name: "capture", method: http.MethodPost, path: "/v1/requirements", body: `{"request_id":"pin:capture-1","text":"a captured requirement"}`, token: "owner", wantStatus: 201},
+		{name: "capture-as-the-scheduler", method: http.MethodPost, path: "/v1/requirements", body: `{"request_id":"pin:capture-2","text":"a captured requirement"}`, token: "scheduler", wantStatus: 201},
+		{name: "capture-unauthenticated", method: http.MethodPost, path: "/v1/requirements", body: `{"request_id":"pin:capture-3","text":"x"}`, wantStatus: 401, wantCode: "unauthorized"},
+		{name: "capture-wrong-role", method: http.MethodPost, path: "/v1/requirements", body: `{"request_id":"pin:capture-4","text":"x"}`, token: "runner", wantStatus: 403, wantCode: "forbidden"},
+		{name: "capture-malformed-json", method: http.MethodPost, path: "/v1/requirements", body: `{`, token: "owner", wantStatus: 400, wantCode: "invalid_json"},
+		{name: "capture-unknown-field", method: http.MethodPost, path: "/v1/requirements", body: `{"request_id":"pin:capture-5","text":"x","extra":1}`, token: "owner", wantStatus: 400, wantCode: "invalid_json"},
+		{name: "capture-two-json-values", method: http.MethodPost, path: "/v1/requirements", body: `{"request_id":"pin:capture-6","text":"x"} {}`, token: "owner", wantStatus: 400, wantCode: "invalid_json"},
+		{name: "capture-without-a-request-id", method: http.MethodPost, path: "/v1/requirements", body: `{"text":"x"}`, token: "owner", wantStatus: 400, wantCode: "invalid_request"},
+		{name: "capture-with-empty-text-is-accepted-today", method: http.MethodPost, path: "/v1/requirements", body: `{"request_id":"pin:capture-7","text":""}`, token: "owner", wantStatus: 201},
+		{name: "capture-wrong-content-type", method: http.MethodPost, path: "/v1/requirements", body: `{"request_id":"pin:capture-8","text":"x"}`, token: "owner", contentType: "text/plain", wantStatus: 415, wantCode: "unsupported_media_type"},
+		{name: "capture-from-a-denied-origin", method: http.MethodPost, path: "/v1/requirements", body: `{"request_id":"pin:capture-9","text":"x"}`, token: "owner", origin: "https://evil.example", wantStatus: 403, wantCode: "origin_denied"},
+		{name: "capture-from-an-allowed-origin", method: http.MethodPost, path: "/v1/requirements", body: `{"request_id":"pin:capture-10","text":"x"}`, token: "owner", origin: "https://console.example", wantStatus: 201},
+		{name: "capture-reusing-a-request-id-with-another-body", method: http.MethodPost, path: "/v1/requirements", body: `{"request_id":"pin:capture-1","text":"a different text"}`, token: "owner", wantStatus: 409, wantCode: "conflict"},
+		{name: "capture-with-an-unknown-repository", method: http.MethodPost, path: "/v1/requirements", body: `{"request_id":"pin:capture-11","text":"x","repository_id":"no-such-repository"}`, token: "owner", wantStatus: 404, wantCode: "not_found"},
+
+		// --- GET /v1/requirements/{id} -----------------------------------
+		{name: "requirement-detail", method: http.MethodGet, path: "/v1/requirements/{captured}", token: "owner", wantStatus: 200},
+		{name: "requirement-detail-unknown-id", method: http.MethodGet, path: "/v1/requirements/no-such-requirement", token: "owner", wantStatus: 404, wantCode: "not_found"},
+		{name: "requirement-detail-unauthenticated", method: http.MethodGet, path: "/v1/requirements/{captured}", wantStatus: 401, wantCode: "unauthorized"},
+		{name: "requirement-detail-wrong-role", method: http.MethodGet, path: "/v1/requirements/{captured}", token: "runner", wantStatus: 403, wantCode: "forbidden"},
+
+		// --- POST /v1/requirements/{id}:request-input --------------------
+		{name: "request-input-unauthenticated", method: http.MethodPost, path: "/v1/requirements/{active}:request-input", body: `{"request_id":"pin:ask-0"}`, wantStatus: 401, wantCode: "unauthorized"},
+		{name: "request-input-refused-for-the-owner", method: http.MethodPost, path: "/v1/requirements/{active}:request-input", body: `{"request_id":"pin:ask-1"}`, token: "owner", wantStatus: 403, wantCode: "forbidden"},
+		{name: "request-input-empty-id", method: http.MethodPost, path: "/v1/requirements/:request-input", body: `{"request_id":"pin:ask-2"}`, token: "runner", wantStatus: 404, wantCode: "not_found"},
+		{name: "request-input-malformed-json", method: http.MethodPost, path: "/v1/requirements/{active}:request-input", body: `{`, token: "runner", wantStatus: 400, wantCode: "invalid_json"},
+		{name: "request-input-without-a-request-id", method: http.MethodPost, path: "/v1/requirements/{active}:request-input", body: `{"question":"?"}`, token: "runner", wantStatus: 400, wantCode: "invalid_request"},
+		{name: "request-input-with-no-question", method: http.MethodPost, path: "/v1/requirements/{active}:request-input", body: `{"request_id":"pin:ask-3","expected_requirement_version":{activeVersion}}`, token: "runner", wantStatus: 400, wantCode: "invalid_request"},
+		{name: "request-input-for-a-captured-requirement", method: http.MethodPost, path: "/v1/requirements/{captured}:request-input", body: pinAskBody("pin:ask-4", "1"), token: "runner", wantStatus: 400, wantCode: "invalid_request"},
+		{name: "request-input-unknown-requirement", method: http.MethodPost, path: "/v1/requirements/no-such-requirement:request-input", body: pinAskBody("pin:ask-5", "1"), token: "runner", wantStatus: 404, wantCode: "not_found"},
+		{name: "request-input-accepted", method: http.MethodPost, path: "/v1/requirements/{active}:request-input", body: pinAskBody("pin:ask-6", "{activeVersion}"), token: "runner", wantStatus: 200,
+			capture: func(fx *pinFixture, doc map[string]any) {
+				if v, ok := doc["version"].(float64); ok {
+					fx.values["activeVersion"] = strconv.FormatInt(int64(v), 10)
+				}
+			}},
+
+		// --- POST /v1/requirements/{id}:answer-input ---------------------
+		{name: "answer-input-unauthenticated", method: http.MethodPost, path: "/v1/requirements/{active}:answer-input", body: `{"request_id":"pin:answer-0"}`, wantStatus: 401, wantCode: "unauthorized"},
+		{name: "answer-input-refused-for-the-runner", method: http.MethodPost, path: "/v1/requirements/{active}:answer-input", body: `{"request_id":"pin:answer-1"}`, token: "runner", wantStatus: 403, wantCode: "forbidden"},
+		{name: "answer-input-empty-id", method: http.MethodPost, path: "/v1/requirements/:answer-input", body: `{"request_id":"pin:answer-2"}`, token: "owner", wantStatus: 404, wantCode: "not_found"},
+		{name: "answer-input-malformed-json", method: http.MethodPost, path: "/v1/requirements/{active}:answer-input", body: `{`, token: "owner", wantStatus: 400, wantCode: "invalid_json"},
+		{name: "answer-input-without-a-request-id", method: http.MethodPost, path: "/v1/requirements/{active}:answer-input", body: `{"option_id":"delete"}`, token: "owner", wantStatus: 400, wantCode: "invalid_request"},
+		{name: "answer-input-with-an-option-that-was-not-offered", method: http.MethodPost, path: "/v1/requirements/{active}:answer-input", body: `{"request_id":"pin:answer-3","expected_requirement_version":{activeVersion},"option_id":"never-offered"}`, token: "owner", wantStatus: 400, wantCode: "invalid_request"},
+		{name: "answer-input-unknown-requirement", method: http.MethodPost, path: "/v1/requirements/no-such-requirement:answer-input", body: `{"request_id":"pin:answer-4","expected_requirement_version":1,"option_id":"delete"}`, token: "owner", wantStatus: 404, wantCode: "not_found"},
+		{name: "answer-input-accepted", method: http.MethodPost, path: "/v1/requirements/{active}:answer-input", body: `{"request_id":"pin:answer-5","expected_requirement_version":{activeVersion},"option_id":"delete"}`, token: "owner", wantStatus: 200,
+			capture: func(fx *pinFixture, doc map[string]any) {
+				if v, ok := doc["version"].(float64); ok {
+					fx.values["activeVersion"] = strconv.FormatInt(int64(v), 10)
+				}
+			}},
+
+		// --- POST /v1/requirements/{id}:start-framing --------------------
+		{name: "start-framing-unauthenticated", method: http.MethodPost, path: "/v1/requirements/{framing}:start-framing", body: `{"request_id":"pin:framing-0","expected_requirement_version":1}`, wantStatus: 401, wantCode: "unauthorized"},
+		{name: "start-framing-refused-for-the-runner", method: http.MethodPost, path: "/v1/requirements/{framing}:start-framing", body: `{"request_id":"pin:framing-1","expected_requirement_version":1}`, token: "runner", wantStatus: 403, wantCode: "forbidden"},
+		{name: "start-framing-empty-id", method: http.MethodPost, path: "/v1/requirements/:start-framing", body: `{"request_id":"pin:framing-2","expected_requirement_version":1}`, token: "owner", wantStatus: 404, wantCode: "not_found"},
+		{name: "start-framing-malformed-json", method: http.MethodPost, path: "/v1/requirements/{framing}:start-framing", body: `{`, token: "owner", wantStatus: 400, wantCode: "invalid_json"},
+		{name: "start-framing-without-a-request-id", method: http.MethodPost, path: "/v1/requirements/{framing}:start-framing", body: `{"expected_requirement_version":1}`, token: "owner", wantStatus: 400, wantCode: "invalid_request"},
+		{name: "start-framing-unknown-requirement", method: http.MethodPost, path: "/v1/requirements/no-such-requirement:start-framing", body: `{"request_id":"pin:framing-3","expected_requirement_version":1}`, token: "owner", wantStatus: 404, wantCode: "not_found"},
+		{name: "start-framing-stale-version", method: http.MethodPost, path: "/v1/requirements/{framing}:start-framing", body: `{"request_id":"pin:framing-4","expected_requirement_version":99}`, token: "owner", wantStatus: 409, wantCode: "conflict"},
+		{name: "start-framing-for-an-active-requirement", method: http.MethodPost, path: "/v1/requirements/{active}:start-framing", body: `{"request_id":"pin:framing-5","expected_requirement_version":{activeVersion}}`, token: "owner", wantStatus: 400, wantCode: "invalid_request"},
+		{name: "start-framing-accepted", method: http.MethodPost, path: "/v1/requirements/{framing}:start-framing", body: `{"request_id":"pin:framing-6","expected_requirement_version":1}`, token: "owner", wantStatus: 200},
+		{name: "start-framing-accepted-as-the-scheduler", method: http.MethodPost, path: "/v1/requirements/{captured}:start-framing", body: `{"request_id":"pin:framing-7","expected_requirement_version":1}`, token: "scheduler", wantStatus: 200},
+
+		// --- GET /v1/controls --------------------------------------------
+		{name: "list-controls", method: http.MethodGet, path: "/v1/controls", token: "owner", wantStatus: 200},
+		{name: "list-controls-unauthenticated", method: http.MethodGet, path: "/v1/controls", wantStatus: 401, wantCode: "unauthorized"},
+		{name: "list-controls-wrong-role", method: http.MethodGet, path: "/v1/controls", token: "runner", wantStatus: 403, wantCode: "forbidden"},
+		{name: "list-controls-page-size-is-not-an-integer", method: http.MethodGet, path: "/v1/controls?page_size=abc", token: "owner", wantStatus: 400, wantCode: "invalid_page"},
+		{name: "list-controls-page-size-above-the-maximum", method: http.MethodGet, path: "/v1/controls?page_size=101", token: "owner", wantStatus: 400, wantCode: "invalid_request"},
+
+		// --- GET /v1/queue/summary ---------------------------------------
+		{name: "queue-summary", method: http.MethodGet, path: "/v1/queue/summary", token: "owner", wantStatus: 200},
+		{name: "queue-summary-unauthenticated", method: http.MethodGet, path: "/v1/queue/summary", wantStatus: 401, wantCode: "unauthorized"},
+		{name: "queue-summary-wrong-role", method: http.MethodGet, path: "/v1/queue/summary", token: "runner", wantStatus: 403, wantCode: "forbidden"},
+		{name: "queue-summary-rejects-post", method: http.MethodPost, path: "/v1/queue/summary", token: "owner", wantStatus: 404, wantCode: "not_found"},
+
+		// --- GET /v1/runners ---------------------------------------------
+		{name: "list-runners", method: http.MethodGet, path: "/v1/runners", token: "owner", wantStatus: 200},
+		{name: "list-runners-unauthenticated", method: http.MethodGet, path: "/v1/runners", wantStatus: 401, wantCode: "unauthorized"},
+		{name: "list-runners-wrong-role", method: http.MethodGet, path: "/v1/runners", token: "runner", wantStatus: 403, wantCode: "forbidden"},
+		{name: "list-runners-rejects-post", method: http.MethodPost, path: "/v1/runners", token: "owner", wantStatus: 405, wantCode: "method_not_allowed"},
+
+		// --- GET /v1/providers -------------------------------------------
+		{name: "list-providers", method: http.MethodGet, path: "/v1/providers", token: "owner", wantStatus: 200},
+		{name: "list-providers-unauthenticated", method: http.MethodGet, path: "/v1/providers", wantStatus: 401, wantCode: "unauthorized"},
+		{name: "list-providers-wrong-role", method: http.MethodGet, path: "/v1/providers", token: "runner", wantStatus: 403, wantCode: "forbidden"},
+		{name: "list-providers-rejects-post", method: http.MethodPost, path: "/v1/providers", token: "owner", wantStatus: 405, wantCode: "method_not_allowed"},
+
+		// --- GET /v1/export ----------------------------------------------
+		{name: "export", method: http.MethodGet, path: "/v1/export", token: "owner", wantStatus: 200},
+		{name: "export-ndjson", method: http.MethodGet, path: "/v1/export?format=ndjson", token: "owner", wantStatus: 200},
+		{name: "export-unauthenticated", method: http.MethodGet, path: "/v1/export", wantStatus: 401, wantCode: "unauthorized"},
+		{name: "export-wrong-role", method: http.MethodGet, path: "/v1/export", token: "runner", wantStatus: 403, wantCode: "forbidden"},
+		{name: "export-limit-below-one", method: http.MethodGet, path: "/v1/export?limit=0", token: "owner", wantStatus: 400, wantCode: "invalid_limit"},
+		{name: "export-limit-above-the-maximum", method: http.MethodGet, path: "/v1/export?limit=101", token: "owner", wantStatus: 400, wantCode: "invalid_limit"},
+		{name: "export-unknown-format", method: http.MethodGet, path: "/v1/export?format=xml", token: "owner", wantStatus: 400, wantCode: "invalid_format"},
+
+		// --- GET /v1/release/state ---------------------------------------
+		{name: "release-state-without-an-observer", method: http.MethodGet, path: "/v1/release/state", token: "owner", wantStatus: 503, wantCode: "release_observer_not_configured"},
+		{name: "release-state-unauthenticated", method: http.MethodGet, path: "/v1/release/state", wantStatus: 401, wantCode: "unauthorized"},
+		{name: "release-state-wrong-role", method: http.MethodGet, path: "/v1/release/state", token: "runner", wantStatus: 403, wantCode: "forbidden"},
+		{name: "release-state-rejects-post", method: http.MethodPost, path: "/v1/release/state", token: "owner", wantStatus: 405, wantCode: "method_not_allowed"},
+
+		// --- the five /v1/repositories routes ----------------------------
+		{name: "list-repositories", method: http.MethodGet, path: "/v1/repositories", token: "owner", wantStatus: 200},
+		{name: "list-repositories-unauthenticated", method: http.MethodGet, path: "/v1/repositories", wantStatus: 401, wantCode: "unauthorized"},
+		{name: "list-repositories-wrong-role", method: http.MethodGet, path: "/v1/repositories", token: "runner", wantStatus: 403, wantCode: "forbidden"},
+		{name: "register-repository", method: http.MethodPost, path: "/v1/repositories", body: `{"request_id":"pin:register-1","source_url":"https://github.com/pin/registered"}`, token: "owner", wantStatus: 201},
+		{name: "register-repository-unauthenticated", method: http.MethodPost, path: "/v1/repositories", body: `{"request_id":"pin:register-2","source_url":"https://github.com/pin/x"}`, wantStatus: 401, wantCode: "unauthorized"},
+		{name: "register-repository-wrong-role", method: http.MethodPost, path: "/v1/repositories", body: `{"request_id":"pin:register-3","source_url":"https://github.com/pin/x"}`, token: "runner", wantStatus: 403, wantCode: "forbidden"},
+		{name: "register-repository-malformed-json", method: http.MethodPost, path: "/v1/repositories", body: `{`, token: "owner", wantStatus: 400, wantCode: "invalid_json"},
+		{name: "register-repository-without-a-request-id", method: http.MethodPost, path: "/v1/repositories", body: `{"source_url":"https://github.com/pin/y"}`, token: "owner", wantStatus: 400, wantCode: "invalid_request"},
+		{name: "register-repository-with-an-unparsable-source-url", method: http.MethodPost, path: "/v1/repositories", body: `{"request_id":"pin:register-4","source_url":"not a locator"}`, token: "owner", wantStatus: 400, wantCode: "invalid_request"},
+		{name: "register-repository-duplicate-locator", method: http.MethodPost, path: "/v1/repositories", body: `{"request_id":"pin:register-5","source_url":"https://github.com/pin/observed"}`, token: "owner", wantStatus: 409, wantCode: "conflict"},
+		{name: "repository-detail", method: http.MethodGet, path: "/v1/repositories/repo-pin", token: "owner", wantStatus: 200},
+		{name: "repository-detail-unknown-id", method: http.MethodGet, path: "/v1/repositories/no-such-repository", token: "owner", wantStatus: 404, wantCode: "not_found"},
+		{name: "repository-detail-unauthenticated", method: http.MethodGet, path: "/v1/repositories/repo-pin", wantStatus: 401, wantCode: "unauthorized"},
+		{name: "repository-detail-wrong-role", method: http.MethodGet, path: "/v1/repositories/repo-pin", token: "runner", wantStatus: 403, wantCode: "forbidden"},
+		{name: "repository-detail-empty-id", method: http.MethodGet, path: "/v1/repositories/", token: "owner", wantStatus: 404, wantCode: "not_found"},
+		{name: "repository-verb-is-not-readable", method: http.MethodGet, path: "/v1/repositories/repo-pin:retire", token: "owner", wantStatus: 405, wantCode: "method_not_allowed"},
+		{name: "observe-repository-refused-for-the-owner", method: http.MethodPost, path: "/v1/repositories/repo-pin:observe", body: `{"request_id":"pin:observe-1","reachable":true}`, token: "owner", wantStatus: 403, wantCode: "forbidden"},
+		{name: "observe-repository-unauthenticated", method: http.MethodPost, path: "/v1/repositories/repo-pin:observe", body: `{"request_id":"pin:observe-2","reachable":true}`, wantStatus: 401, wantCode: "unauthorized"},
+		{name: "observe-repository-without-a-request-id", method: http.MethodPost, path: "/v1/repositories/repo-pin:observe", body: `{"reachable":true}`, token: "runner", wantStatus: 400, wantCode: "invalid_request"},
+		{name: "observe-repository-malformed-json", method: http.MethodPost, path: "/v1/repositories/repo-pin:observe", body: `{`, token: "runner", wantStatus: 400, wantCode: "invalid_json"},
+		{name: "observe-repository-unknown-repository", method: http.MethodPost, path: "/v1/repositories/no-such-repository:observe", body: `{"request_id":"pin:observe-3","reachable":true}`, token: "runner", wantStatus: 404, wantCode: "not_found"},
+		{name: "observe-repository-accepted", method: http.MethodPost, path: "/v1/repositories/repo-pin:observe", body: `{"request_id":"pin:observe-4","reachable":true,"default_branch":"main","can_push":true,"adapter_version":"pin"}`, token: "runner", wantStatus: 200},
+		{name: "retire-repository-refused-for-the-runner", method: http.MethodPost, path: "/v1/repositories/repo-retire:retire", body: `{"request_id":"pin:retire-1"}`, token: "runner", wantStatus: 403, wantCode: "forbidden"},
+		{name: "retire-repository-unauthenticated", method: http.MethodPost, path: "/v1/repositories/repo-retire:retire", body: `{"request_id":"pin:retire-2"}`, wantStatus: 401, wantCode: "unauthorized"},
+		{name: "retire-repository-without-a-request-id", method: http.MethodPost, path: "/v1/repositories/repo-retire:retire", body: `{}`, token: "owner", wantStatus: 400, wantCode: "invalid_request"},
+		{name: "retire-repository-unknown-repository", method: http.MethodPost, path: "/v1/repositories/no-such-repository:retire", body: `{"request_id":"pin:retire-3"}`, token: "owner", wantStatus: 404, wantCode: "not_found"},
+		{name: "retire-repository-accepted", method: http.MethodPost, path: "/v1/repositories/repo-retire:retire", body: `{"request_id":"pin:retire-4"}`, token: "owner", wantStatus: 200},
+		{name: "repository-unknown-verb", method: http.MethodPost, path: "/v1/repositories/repo-pin:frobnicate", body: `{"request_id":"pin:verb"}`, token: "owner", wantStatus: 404, wantCode: "not_found"},
+		{name: "repository-empty-id-with-a-verb", method: http.MethodPost, path: "/v1/repositories/:retire", body: `{"request_id":"pin:verb-2"}`, token: "owner", wantStatus: 404, wantCode: "not_found"},
+
+		// --- the runner-facing routes, refusals first --------------------
+		{name: "claim-unauthenticated", method: http.MethodPost, path: "/v1/runner/claims:acquire", body: `{"request_id":"pin:claim-0","increment_id":"{increment}","expected_increment_version":{incrementVersion},` + pinTarget + `}`, wantStatus: 401, wantCode: "unauthorized"},
+		{name: "claim-refused-for-the-owner", method: http.MethodPost, path: "/v1/runner/claims:acquire", body: `{"request_id":"pin:claim-1","increment_id":"{increment}","expected_increment_version":{incrementVersion},` + pinTarget + `}`, token: "owner", wantStatus: 403, wantCode: "forbidden"},
+		{name: "claim-malformed-json", method: http.MethodPost, path: "/v1/runner/claims:acquire", body: `{`, token: "runner", wantStatus: 400, wantCode: "invalid_json"},
+		{name: "claim-without-a-request-id", method: http.MethodPost, path: "/v1/runner/claims:acquire", body: `{"increment_id":"{increment}"}`, token: "runner", wantStatus: 400, wantCode: "invalid_request"},
+		{name: "claim-unknown-increment", method: http.MethodPost, path: "/v1/runner/claims:acquire", body: `{"request_id":"pin:claim-2","increment_id":"no-such-increment","expected_increment_version":1,` + pinTarget + `}`, token: "runner", wantStatus: 404, wantCode: "not_found"},
+		{name: "permit-unauthenticated", method: http.MethodPost, path: "/v1/runner/permits:check", body: `{"request_id":"pin:permit-0","kind":"process",` + pinTarget + `}`, wantStatus: 401, wantCode: "unauthorized"},
+		{name: "permit-refused-for-the-owner", method: http.MethodPost, path: "/v1/runner/permits:check", body: `{"request_id":"pin:permit-1","kind":"process",` + pinTarget + `}`, token: "owner", wantStatus: 403, wantCode: "forbidden"},
+		{name: "permit-malformed-json", method: http.MethodPost, path: "/v1/runner/permits:check", body: `{`, token: "runner", wantStatus: 400, wantCode: "invalid_json"},
+		{name: "permit-without-a-request-id", method: http.MethodPost, path: "/v1/runner/permits:check", body: `{"kind":"process",` + pinTarget + `}`, token: "runner", wantStatus: 400, wantCode: "invalid_request"},
+		{name: "start-execution-unauthenticated", method: http.MethodPost, path: "/v1/executions/no-such-execution:start", body: `{"request_id":"pin:start-0","expected_execution_version":1}`, wantStatus: 401, wantCode: "unauthorized"},
+		{name: "start-execution-refused-for-the-owner", method: http.MethodPost, path: "/v1/executions/no-such-execution:start", body: `{"request_id":"pin:start-1","expected_execution_version":1}`, token: "owner", wantStatus: 403, wantCode: "forbidden"},
+		{name: "start-execution-malformed-json", method: http.MethodPost, path: "/v1/executions/no-such-execution:start", body: `{`, token: "runner", wantStatus: 400, wantCode: "invalid_json"},
+		{name: "start-execution-without-a-request-id", method: http.MethodPost, path: "/v1/executions/no-such-execution:start", body: `{"expected_execution_version":1}`, token: "runner", wantStatus: 400, wantCode: "invalid_request"},
+		{name: "start-execution-unknown-provider-name", method: http.MethodPost, path: "/v1/executions/no-such-execution:start", body: `{"request_id":"pin:start-2","expected_execution_version":1,"provider":"not-a-provider"}`, token: "runner", wantStatus: 400, wantCode: "invalid_request"},
+		{name: "start-execution-unknown-execution", method: http.MethodPost, path: "/v1/executions/no-such-execution:start", body: `{"request_id":"pin:start-3","expected_execution_version":1}`, token: "runner", wantStatus: 404, wantCode: "not_found"},
+		{name: "renew-unauthenticated", method: http.MethodPost, path: "/v1/leases/no-such-lease:renew", body: `{"request_id":"pin:renew-0","expected_lease_version":1}`, wantStatus: 401, wantCode: "unauthorized"},
+		{name: "renew-refused-for-the-owner", method: http.MethodPost, path: "/v1/leases/no-such-lease:renew", body: `{"request_id":"pin:renew-1","expected_lease_version":1}`, token: "owner", wantStatus: 403, wantCode: "forbidden"},
+		{name: "renew-malformed-json", method: http.MethodPost, path: "/v1/leases/no-such-lease:renew", body: `{`, token: "runner", wantStatus: 400, wantCode: "invalid_json"},
+		{name: "renew-without-a-request-id", method: http.MethodPost, path: "/v1/leases/no-such-lease:renew", body: `{"expected_lease_version":1}`, token: "runner", wantStatus: 400, wantCode: "invalid_request"},
+		{name: "renew-unknown-lease", method: http.MethodPost, path: "/v1/leases/no-such-lease:renew", body: `{"request_id":"pin:renew-2","expected_lease_version":1}`, token: "runner", wantStatus: 404, wantCode: "not_found"},
+		{name: "heartbeat-unauthenticated", method: http.MethodPost, path: "/v1/runner/heartbeat", body: `{"request_id":"pin:beat-0"}`, wantStatus: 401, wantCode: "unauthorized"},
+		{name: "heartbeat-refused-for-the-owner", method: http.MethodPost, path: "/v1/runner/heartbeat", body: `{"request_id":"pin:beat-1"}`, token: "owner", wantStatus: 403, wantCode: "forbidden"},
+		{name: "heartbeat-malformed-json", method: http.MethodPost, path: "/v1/runner/heartbeat", body: `{`, token: "runner", wantStatus: 400, wantCode: "invalid_json"},
+		{name: "heartbeat-without-a-request-id", method: http.MethodPost, path: "/v1/runner/heartbeat", body: `{}`, token: "runner", wantStatus: 400, wantCode: "invalid_request"},
+		{name: "heartbeat-with-an-incomplete-runner-version-report", method: http.MethodPost, path: "/v1/runner/heartbeat", body: `{"request_id":"pin:beat-2","runner_version":{"version":"","binary_sha256":"","schema_min":0,"schema_max":0}}`, token: "runner", wantStatus: 400, wantCode: "invalid_request"},
+		{name: "checkpoint-unauthenticated", method: http.MethodPost, path: "/v1/runner/checkpoints", body: `{"request_id":"pin:checkpoint-0","execution_id":"no-such-execution","lease_id":"no-such-lease"}`, wantStatus: 401, wantCode: "unauthorized"},
+		{name: "checkpoint-refused-for-the-owner", method: http.MethodPost, path: "/v1/runner/checkpoints", body: `{"request_id":"pin:checkpoint-1","execution_id":"no-such-execution","lease_id":"no-such-lease"}`, token: "owner", wantStatus: 403, wantCode: "forbidden"},
+		{name: "checkpoint-malformed-json", method: http.MethodPost, path: "/v1/runner/checkpoints", body: `{`, token: "runner", wantStatus: 400, wantCode: "invalid_json"},
+		{name: "checkpoint-without-a-request-id", method: http.MethodPost, path: "/v1/runner/checkpoints", body: `{"execution_id":"no-such-execution"}`, token: "runner", wantStatus: 400, wantCode: "invalid_request"},
+		{name: "checkpoint-unknown-execution", method: http.MethodPost, path: "/v1/runner/checkpoints", body: `{"request_id":"pin:checkpoint-2","execution_id":"no-such-execution","lease_id":"no-such-lease"}`, token: "runner", wantStatus: 404, wantCode: "not_found"},
+		{name: "result-unauthenticated", method: http.MethodPost, path: "/v1/executions/result", body: `{"request_id":"pin:result-0","execution_id":"no-such-execution","lease_id":"no-such-lease"}`, wantStatus: 401, wantCode: "unauthorized"},
+		{name: "result-refused-for-the-owner", method: http.MethodPost, path: "/v1/executions/result", body: `{"request_id":"pin:result-1","execution_id":"no-such-execution","lease_id":"no-such-lease"}`, token: "owner", wantStatus: 403, wantCode: "forbidden"},
+		{name: "result-malformed-json", method: http.MethodPost, path: "/v1/executions/result", body: `{`, token: "runner", wantStatus: 400, wantCode: "invalid_json"},
+		{name: "result-without-a-request-id", method: http.MethodPost, path: "/v1/executions/result", body: `{"execution_id":"no-such-execution"}`, token: "runner", wantStatus: 400, wantCode: "invalid_request"},
+		{name: "result-with-an-unknown-provider-name", method: http.MethodPost, path: "/v1/executions/result", body: `{"request_id":"pin:result-2","execution_id":"no-such-execution","lease_id":"no-such-lease","provider_observation":{"name":"not-a-provider"}}`, token: "runner", wantStatus: 400, wantCode: "invalid_request"},
+		{name: "result-unknown-execution", method: http.MethodPost, path: "/v1/executions/result", body: `{"request_id":"pin:result-3","execution_id":"no-such-execution","lease_id":"no-such-lease","expected_execution_version":1,"succeeded":true,` + pinTarget + `}`, token: "runner", wantStatus: 404, wantCode: "not_found"},
+
+		// --- the runner-facing journey, all inside one UTC day ----------
+		{name: "claim-accepted", method: http.MethodPost, path: "/v1/runner/claims:acquire", body: `{"request_id":"pin:claim-accepted","increment_id":"{increment}","expected_increment_version":{incrementVersion},` + pinTarget + `}`, token: "runner", wantStatus: 200,
+			capture: func(fx *pinFixture, doc map[string]any) {
+				fx.values["execution"], _ = doc["execution_id"].(string)
+				fx.values["lease"], _ = doc["lease_id"].(string)
+				if v, ok := doc["fencing_token"].(float64); ok {
+					fx.values["fence"] = strconv.FormatInt(int64(v), 10)
+				}
+			}},
+		{name: "permit-process-accepted", sameDay: true, method: http.MethodPost, path: "/v1/runner/permits:check", body: `{"request_id":"pin:permit-process","kind":"process",` + pinTarget + `,"fencing_token":{fence},"expected_fencing_token":{fence},"resource":"{execution}"}`, token: "runner", wantStatus: 200},
+		{name: "start-execution-accepted", sameDay: true, method: http.MethodPost, path: "/v1/executions/{execution}:start", body: `{"request_id":"pin:start-accepted","expected_execution_version":1,"provider":"claude"}`, token: "runner", wantStatus: 200,
+			capture: func(fx *pinFixture, doc map[string]any) {
+				if v, ok := doc["version"].(float64); ok {
+					fx.values["executionVersion"] = strconv.FormatInt(int64(v), 10)
+				}
+			}},
+		{name: "renew-accepted", sameDay: true, method: http.MethodPost, path: "/v1/leases/{lease}:renew", body: `{"request_id":"pin:renew-accepted","expected_lease_version":1,"fencing_token":{fence}}`, token: "runner", wantStatus: 200},
+		{name: "heartbeat-accepted", sameDay: true, method: http.MethodPost, path: "/v1/runner/heartbeat", body: `{"request_id":"pin:beat-accepted"}`, token: "runner", wantStatus: 200},
+		{name: "heartbeat-accepted-with-a-complete-runner-version-report", sameDay: true, method: http.MethodPost, path: "/v1/runner/heartbeat", body: `{"request_id":"pin:beat-accepted-2","runner_version":{"version":"1.2.3","binary_sha256":"0000000000000000000000000000000000000000000000000000000000000000","schema_min":1,"schema_max":1}}`, token: "runner", wantStatus: 200},
+		{name: "checkpoint-accepted", sameDay: true, method: http.MethodPost, path: "/v1/runner/checkpoints", body: `{"request_id":"pin:checkpoint-accepted","execution_id":"{execution}","lease_id":"{lease}","fencing_token":{fence}}`, token: "runner", wantStatus: 200},
+		{name: "permit-external-effect-accepted", sameDay: true, method: http.MethodPost, path: "/v1/runner/permits:check", body: `{"request_id":"pin:permit-effect","kind":"external-effect",` + pinTarget + `,"fencing_token":{fence},"expected_fencing_token":{fence},"resource":"{execution}"}`, token: "runner", wantStatus: 200},
+		{name: "result-accepted", sameDay: true, method: http.MethodPost, path: "/v1/executions/result", body: `{"request_id":"pin:result-accepted","execution_id":"{execution}","lease_id":"{lease}","expected_execution_version":{executionVersion},"fencing_token":{fence},"succeeded":true,` + pinTarget + `,"provider_observation":{"name":"claude"}}`, token: "runner", wantStatus: 200},
+
+		// --- POST /v1/controls, after the journey ------------------------
+		{name: "control-unauthenticated", method: http.MethodPost, path: "/v1/controls", body: `{"request_id":"pin:control-0","scope_kind":"channel","scope_value":"pin","mode":"allow"}`, wantStatus: 401, wantCode: "unauthorized"},
+		{name: "control-wrong-role", method: http.MethodPost, path: "/v1/controls", body: `{"request_id":"pin:control-1","scope_kind":"channel","scope_value":"pin","mode":"allow"}`, token: "runner", wantStatus: 403, wantCode: "forbidden"},
+		{name: "control-malformed-json", method: http.MethodPost, path: "/v1/controls", body: `{`, token: "owner", wantStatus: 400, wantCode: "invalid_json"},
+		{name: "control-unknown-field", method: http.MethodPost, path: "/v1/controls", body: `{"request_id":"pin:control-2","scope_kind":"channel","scope_value":"pin","mode":"allow","extra":1}`, token: "owner", wantStatus: 400, wantCode: "invalid_json"},
+		{name: "control-without-a-request-id", method: http.MethodPost, path: "/v1/controls", body: `{"scope_kind":"channel","scope_value":"pin","mode":"allow"}`, token: "owner", wantStatus: 400, wantCode: "invalid_request"},
+		{name: "control-unknown-mode", method: http.MethodPost, path: "/v1/controls", body: `{"request_id":"pin:control-3","scope_kind":"channel","scope_value":"pin","mode":"not-a-mode"}`, token: "owner", wantStatus: 400, wantCode: "invalid_request"},
+		{name: "control-unknown-scope-kind", method: http.MethodPost, path: "/v1/controls", body: `{"request_id":"pin:control-4","scope_kind":"not-a-scope","scope_value":"pin","mode":"allow"}`, token: "owner", wantStatus: 400, wantCode: "invalid_request"},
+		{name: "control-with-a-negative-allocation-limit", method: http.MethodPost, path: "/v1/controls", body: `{"request_id":"pin:control-5","scope_kind":"installation","scope_value":"` + pinInstallation + `","mode":"allow","allocation_limit":{"installation_concurrent_executions":-1}}`, token: "owner", wantStatus: 400, wantCode: "invalid_request"},
+		{name: "control-accepted", method: http.MethodPost, path: "/v1/controls", body: `{"request_id":"pin:control-6","scope_kind":"channel","scope_value":"pin","mode":"allow"}`, token: "owner", wantStatus: 200},
+		{name: "control-accepted-with-an-allocation-limit", method: http.MethodPost, path: "/v1/controls", body: `{"request_id":"pin:control-7","scope_kind":"installation","scope_value":"` + pinInstallation + `","mode":"allow","allocation_limit":{"installation_concurrent_executions":3}}`, token: "owner", wantStatus: 200},
+
+		// --- routing: what is neither a route nor a method --------------
+		{name: "unknown-route-unauthenticated", method: http.MethodPost, path: "/v1/nothing-here", body: `{}`, wantStatus: 401, wantCode: "unauthorized"},
+		{name: "unknown-route-post", method: http.MethodPost, path: "/v1/nothing-here", body: `{}`, token: "owner", wantStatus: 404, wantCode: "not_found"},
+		{name: "unknown-route-get", method: http.MethodGet, path: "/v1/nothing-here", token: "owner", wantStatus: 405, wantCode: "method_not_allowed"},
+		{name: "root-path", method: http.MethodGet, path: "/", token: "owner", wantStatus: 405, wantCode: "method_not_allowed"},
+
+		// --- the quota answer, last: it fills the day's write budget ----
+		{name: "capture-when-the-daily-write-budget-is-exhausted", method: http.MethodPost, path: "/v1/requirements", body: `{"request_id":"pin:quota","text":"x"}`, token: "owner", exhaustQuota: true, wantStatus: 429, wantCode: "quota_exhausted"},
+	}
+}
+
+// TestEveryRouteStillAnswersTheStatusItAnsweredBefore is V2-083 A3 and A6.
+//
+// It is measured GREEN on the unedited tree first and recorded as the
+// baseline, then re-measured after domainError's default is inverted. Every
+// row must answer identically both times. A row that moves is not a row to
+// adjust: it means a status code the caller already depends on has changed,
+// which this task forbids itself.
+func TestEveryRouteStillAnswersTheStatusItAnsweredBefore(t *testing.T) {
+	fx := newPinFixture(t)
+	for _, row := range pinRows() {
+		row := row
+		t.Run(row.name, func(t *testing.T) {
+			h := fx.handler
+			if row.unconfigured {
+				h = fx.unconfigured
+			}
+			if !row.sameDay {
+				fx.clock.nextDay()
+			}
+			if row.exhaustQuota {
+				if err := fx.store.Transact(context.Background(), func(u application.UnitOfWork) error {
+					return u.ReserveQuota(context.Background(), "pin-fill", fx.clock.Now(), quota.Usage{Writes: quota.DefaultBudget.Writes})
+				}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			w := pinCall(h, row, fx.expand(row.path), fx.expand(row.body))
+			code := ""
+			var doc map[string]any
+			if json.Unmarshal(w.Body.Bytes(), &doc) == nil {
+				code, _ = doc["error"].(string)
+			}
+			t.Logf("PIN\t%s\t%s\t%s\t%d\t%s", row.name, row.method, row.path, w.Code, code)
+			// A14's message-neutrality measurement: the whole body, not just
+			// the code. Every row is logged so the after run can be compared
+			// byte for byte against the recorded baseline.
+			t.Logf("PINBODY\t%s\t%s", row.name, strings.ReplaceAll(w.Body.String(), "\n", "\\n"))
+			if got := w.Header().Get("X-Correlation-ID"); got != pinCorrelationID {
+				t.Errorf("X-Correlation-ID = %q, want %q", got, pinCorrelationID)
+			}
+			if w.Code != row.wantStatus {
+				t.Errorf("status = %d, want %d (body %s)", w.Code, row.wantStatus, w.Body.String())
+			}
+			if code != row.wantCode {
+				t.Errorf("error code = %q, want %q (body %s)", code, row.wantCode, w.Body.String())
+			}
+			if row.capture != nil && w.Code == row.wantStatus {
+				row.capture(fx, doc)
+			}
+		})
+	}
+}
+
+// ===========================================================================
+// V2-083 A7: the repair, asserted per route and in both fault shapes.
+// ===========================================================================
+
+// injectedStoreFaultText is storage-shaped text copied from V2-079's
+// measurement: a DOUBLED Firestore parent name carrying the installation key
+// and the collection segments, plus a byte offset. It is carried by a plain
+// errors.New -- no gRPC status package is imported, because internal/ci
+// derives the component manifest from imports and a new edge would turn make
+// check red for a reason unrelated to this repair.
+const injectedStoreFaultText = "rpc error: code = InvalidArgument desc = Invalid StartAfter value: " +
+	"projects/agentic-loop-local/databases/(default)/documents/installations/install-7f3a/requirements/" +
+	"projects/agentic-loop-local/databases/(default)/documents/installations/install-7f3a/requirements/" +
+	"cmVxdWlyZW1lbnQtYg at byte offset 118"
+
+// injectedStoreFaultFragments are the parts of that text no response may
+// contain. Matching text here is the OPPOSITE of classifying by text: the
+// test matches to prove the text is GONE.
+var injectedStoreFaultFragments = []string{
+	injectedStoreFaultText,
+	"InvalidArgument",
+	"StartAfter",
+	"projects/agentic-loop-local",
+	"install-7f3a",
+	"byte offset",
+	"cmVxdWlyZW1lbnQtYg",
+	"rpc error",
+}
+
+// faultTransactor is a test-local decorator over the application.Transactor
+// port, in the two shapes a real store fault takes.
+type faultTransactor struct {
+	inner         application.Transactor
+	fault         error
+	armed         bool
+	afterCallback bool
+}
+
+func (f *faultTransactor) Transact(ctx context.Context, fn func(application.UnitOfWork) error) error {
+	if !f.armed {
+		return f.inner.Transact(ctx, fn)
+	}
+	if !f.afterCallback {
+		// Variant A: the fault arrives INSTEAD of the callback, which is the
+		// shape a refused query or a failed transaction start takes. Nothing
+		// is read and nothing is staged.
+		return f.fault
+	}
+	// Variant B: the commit-time shape. The callback runs and the transaction
+	// then fails. Whatever the callback itself returned is deliberately
+	// discarded -- a commit that fails fails -- because the property under
+	// test is that no handler can answer 2xx while Transact returns non-nil.
+	_ = f.inner.Transact(ctx, fn)
+	return f.fault
+}
+
+type faultFixture struct {
+	handler http.Handler
+	tx      *faultTransactor
+	clock   *framingClock
+	values  map[string]string
+}
+
+// faultReconcileIdentity is the scheduler identity the /internal/reconcile
+// branch asserts through the IAP header.
+const faultReconcileIdentity = "reconciler@example.com"
+
+func (fx *faultFixture) expand(s string) string {
+	for k, v := range fx.values {
+		s = strings.ReplaceAll(s, "{"+k+"}", v)
+	}
+	return s
+}
+
+// newFaultFixture seeds real state with the decorator DISARMED, then arms it.
+func newFaultFixture(t *testing.T, afterCallback bool) *faultFixture {
+	t.Helper()
+	st := memory.New()
+	tx := &faultTransactor{inner: st, fault: errors.New(injectedStoreFaultText), afterCallback: afterCallback}
+	clk := &framingClock{at: time.Unix(1700000000, 0).UTC()}
+	svc, err := application.NewServiceWithConfig(tx, clk, &ids{}, application.ServiceConfig{InstallationID: pinInstallation, LeaseTTL: time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	enrollment, err := runner.NewService(runner.NewMemoryStore())
+	if err != nil {
+		t.Fatal(err)
+	}
+	auth := api.BearerAuthenticator{
+		"owner":     {Role: application.RoleOwner, Subject: "owner"},
+		"runner":    {Role: application.RoleRunner, Subject: "runner", RunnerID: "runner-1"},
+		"scheduler": {Role: application.RoleScheduler, Subject: "scheduler.self"},
+	}
+	// The /internal/reconcile branch reaches domainError through this hook
+	// rather than through the Transactor, so the same fault is injected here:
+	// a reconciliation the caller did not perform failing is the clearest case
+	// of an error the request did not cause, and it answered 400
+	// invalid_request before this change.
+	h := api.New(api.Config{
+		Authenticator: auth, Service: svc, RunnerEnrollment: enrollment,
+		AllowedOrigins:    []string{"https://console.example"},
+		InternalReconcile: func(context.Context) error { return tx.fault },
+		ReconcileIdentity: faultReconcileIdentity,
+	})
+	fx := &faultFixture{handler: h, tx: tx, clock: clk, values: map[string]string{}}
+
+	for _, seed := range []struct{ path, body string }{
+		{"/v1/requirements", `{"request_id":"fault:capture-1","requirement_id":"fault-captured","text":"seed"}`},
+		{"/v1/requirements", `{"request_id":"fault:capture-2","requirement_id":"fault-active","text":"seed"}`},
+		{"/v1/repositories", `{"request_id":"fault:repo","repository_id":"repo-fault","source_url":"https://github.com/fault/seed"}`},
+	} {
+		clk.nextDay()
+		if w := pinCall(h, pinRow{method: http.MethodPost, token: "owner"}, seed.path, seed.body); w.Code != http.StatusCreated {
+			t.Fatalf("seeding %s: %d %s", seed.path, w.Code, w.Body.String())
+		}
+	}
+	clk.nextDay()
+	if err := st.Transact(context.Background(), func(u application.UnitOfWork) error {
+		r, ok, e := u.Requirement(context.Background(), "fault-active")
+		if e != nil || !ok {
+			t.Fatalf("seed active: ok=%v err=%v", ok, e)
+		}
+		next := r
+		next.Status = domain.RequirementActive
+		next.Version++
+		return u.SaveRequirement(context.Background(), next, r.Version)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	fx.values["captured"] = "fault-captured"
+	fx.values["active"] = "fault-active"
+	fx.values["repository"] = "repo-fault"
+	tx.armed = true
+	return fx
+}
+
+// faultRoutes is every route that reaches h.domainError through the
+// application Service, and therefore every route a store fault can surface
+// on. Four routes reach domainError without ever opening a transaction and
+// are named here rather than silently omitted: /healthz and /owner/assets/
+// never call domainError at all; the three /v1/runner/enrollment routes reach
+// internal/runner's own store and answer their own codes; POST
+// /internal/reconcile reaches domainError through the injected reconcile hook,
+// which is measured separately (A10); and GET /v1/release/state reads the
+// release observer and opens no transaction, so its only domainError path is
+// the already-classified 401/403 one.
+type faultRoute struct {
+	name    string
+	method  string
+	path    string
+	body    string
+	token   string
+	headers map[string]string
+}
+
+func faultRoutes(variant string) []faultRoute {
+	rid := func(s string) string { return `"request_id":"fault:` + variant + ":" + s + `"` }
+	target := `"target":{"installation_id":"` + pinInstallation + `","requirement_id":"{active}","increment_id":"increment-x"}`
+	return []faultRoute{
+		{name: "internal-reconcile", method: http.MethodPost, path: "/internal/reconcile",
+			headers: map[string]string{"X-Goog-Authenticated-User-Email": "accounts.google.com:" + faultReconcileIdentity}},
+		{name: "list-requirements", method: http.MethodGet, path: "/v1/requirements", token: "owner"},
+		{name: "capture", method: http.MethodPost, path: "/v1/requirements", body: `{` + rid("capture") + `,"text":"a requirement"}`, token: "owner"},
+		{name: "requirement-detail", method: http.MethodGet, path: "/v1/requirements/{captured}", body: "", token: "owner"},
+		{name: "request-input", method: http.MethodPost, path: "/v1/requirements/{active}:request-input", body: pinAskBody("fault:"+variant+":ask", "2"), token: "runner"},
+		{name: "answer-input", method: http.MethodPost, path: "/v1/requirements/{active}:answer-input", body: `{` + rid("answer") + `,"expected_requirement_version":2,"option_id":"delete"}`, token: "owner"},
+		{name: "start-framing", method: http.MethodPost, path: "/v1/requirements/{captured}:start-framing", body: `{` + rid("framing") + `,"expected_requirement_version":1}`, token: "owner"},
+		{name: "list-controls", method: http.MethodGet, path: "/v1/controls", body: "", token: "owner"},
+		{name: "control", method: http.MethodPost, path: "/v1/controls", body: `{` + rid("control") + `,"scope_kind":"channel","scope_value":"fault","mode":"allow"}`, token: "owner"},
+		{name: "queue-summary", method: http.MethodGet, path: "/v1/queue/summary", body: "", token: "owner"},
+		{name: "list-runners", method: http.MethodGet, path: "/v1/runners", body: "", token: "owner"},
+		{name: "list-providers", method: http.MethodGet, path: "/v1/providers", body: "", token: "owner"},
+		{name: "export", method: http.MethodGet, path: "/v1/export", body: "", token: "owner"},
+		{name: "claim", method: http.MethodPost, path: "/v1/runner/claims:acquire", body: `{` + rid("claim") + `,"increment_id":"increment-x","expected_increment_version":1,` + target + `}`, token: "runner"},
+		{name: "permit", method: http.MethodPost, path: "/v1/runner/permits:check", body: `{` + rid("permit") + `,"kind":"process",` + target + `,"resource":"execution-x"}`, token: "runner"},
+		{name: "result", method: http.MethodPost, path: "/v1/executions/result", body: `{` + rid("result") + `,"execution_id":"execution-x","lease_id":"lease-x","expected_execution_version":1,"succeeded":true,` + target + `}`, token: "runner"},
+		{name: "start-execution", method: http.MethodPost, path: "/v1/executions/execution-x:start", body: `{` + rid("start") + `,"expected_execution_version":1}`, token: "runner"},
+		{name: "renew", method: http.MethodPost, path: "/v1/leases/lease-x:renew", body: `{` + rid("renew") + `,"expected_lease_version":1}`, token: "runner"},
+		{name: "heartbeat", method: http.MethodPost, path: "/v1/runner/heartbeat", body: `{` + rid("heartbeat") + `}`, token: "runner"},
+		{name: "checkpoint", method: http.MethodPost, path: "/v1/runner/checkpoints", body: `{` + rid("checkpoint") + `,"execution_id":"execution-x","lease_id":"lease-x"}`, token: "runner"},
+		{name: "list-repositories", method: http.MethodGet, path: "/v1/repositories", body: "", token: "owner"},
+		{name: "register-repository", method: http.MethodPost, path: "/v1/repositories", body: `{` + rid("register") + `,"source_url":"https://github.com/fault/new"}`, token: "owner"},
+		{name: "repository-detail", method: http.MethodGet, path: "/v1/repositories/{repository}", body: "", token: "owner"},
+		{name: "retire-repository", method: http.MethodPost, path: "/v1/repositories/{repository}:retire", body: `{` + rid("retire") + `}`, token: "owner"},
+		{name: "observe-repository", method: http.MethodPost, path: "/v1/repositories/{repository}:observe", body: `{` + rid("observe") + `,"reachable":true}`, token: "runner"},
+	}
+}
+
+// TestAStorageFaultIsNotReportedAsTheCallersMistake is V2-083 A7.
+func TestAStorageFaultIsNotReportedAsTheCallersMistake(t *testing.T) {
+	for _, variant := range []struct {
+		name          string
+		afterCallback bool
+	}{
+		{"the-fault-arrives-instead-of-the-callback", false},
+		{"the-fault-arrives-after-the-callback-ran-which-is-the-commit-time-shape", true},
+	} {
+		variant := variant
+		t.Run(variant.name, func(t *testing.T) {
+			fx := newFaultFixture(t, variant.afterCallback)
+			for _, route := range faultRoutes(variant.name) {
+				route := route
+				t.Run(route.name, func(t *testing.T) {
+					fx.clock.nextDay()
+					w := pinCall(fx.handler, pinRow{method: route.method, token: route.token, headers: route.headers}, fx.expand(route.path), fx.expand(route.body))
+					body := w.Body.String()
+					t.Logf("FAULT\t%s\t%s\t%s %s\t%d", variant.name, route.name, route.method, route.path, w.Code)
+
+					if w.Code != http.StatusInternalServerError {
+						t.Fatalf("status = %d, want 500: %s", w.Code, body)
+					}
+					if w.Code == http.StatusBadRequest {
+						t.Fatalf("a fault the request did not cause was reported as the caller's mistake: %s", body)
+					}
+					if w.Code >= 200 && w.Code < 300 {
+						t.Fatalf("an unclassified failure became a success: %d %s", w.Code, body)
+					}
+					doc := decodeBody(t, w.Body.Bytes())
+					if doc["error"] != "internal_error" {
+						t.Fatalf("error code = %v, want internal_error: %s", doc["error"], body)
+					}
+					if doc["message"] != "internal server error" {
+						t.Fatalf("message = %v, want the constant \"internal server error\": %s", doc["message"], body)
+					}
+					for _, fragment := range injectedStoreFaultFragments {
+						if strings.Contains(body, fragment) {
+							t.Fatalf("the response leaks part of the injected store fault (%q): %s", fragment, body)
+						}
+					}
+					if len(doc) != 4 {
+						t.Fatalf("body carries %d keys, want exactly 4: %s", len(doc), body)
+					}
+					for key := range doc {
+						switch key {
+						case "error", "message", "schema_version", "correlation_id":
+						default:
+							t.Fatalf("unexpected response field %q: %s", key, body)
+						}
+					}
+					if got := w.Header().Get("X-Correlation-ID"); got == "" {
+						t.Fatal("the X-Correlation-ID header is no longer set")
+					}
+				})
+			}
+		})
 	}
 }

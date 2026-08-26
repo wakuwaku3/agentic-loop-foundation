@@ -1177,27 +1177,53 @@ func (h *Handler) domainError(w http.ResponseWriter, r *http.Request, err error)
 		h.error(w, r, http.StatusTooManyRequests, "quota_exhausted", "the daily Firestore quota budget is exhausted for this installation; retry after the next UTC midnight")
 		return
 	}
-	status := http.StatusBadRequest
-	code := "invalid_request"
+	// V2-083: the default. An error this function cannot classify is NOT the
+	// caller's mistake -- it is a fault the request did not cause, and the
+	// only honest answer is the one the panic-recovery branch at the top of
+	// this file already gives. It is also, by definition, an error nobody
+	// vetted for what its text carries, so the message below is a CONSTANT
+	// rather than err.Error(): a gRPC InvalidArgument from the Firestore
+	// adapter used to reach the caller verbatim, doubled parent name,
+	// installation key, collection segments, byte offset and all.
+	//
+	// Classification is by sentinel identity through errors.Is and by nothing
+	// else -- never by the text a dependency happened to produce, never by a
+	// type assertion on an adapter type, and never by a gRPC status code.
+	status := http.StatusInternalServerError
+	code := "internal_error"
+	classified := false
+	// The caller-fault branch comes FIRST so that any of the eight groups
+	// below still wins when an error carries both identities, which is
+	// exactly the precedence the 400 default had before this change.
+	if isCallerFault(err) {
+		status = http.StatusBadRequest
+		code = "invalid_request"
+		classified = true
+	}
 	if errors.Is(err, application.ErrNotFound) {
 		status = http.StatusNotFound
 		code = "not_found"
+		classified = true
 	}
 	if errors.Is(err, application.ErrUnauthenticated) {
 		status = 401
 		code = "unauthorized"
+		classified = true
 	}
 	if errors.Is(err, application.ErrForbidden) {
 		status = 403
 		code = "forbidden"
+		classified = true
 	}
 	if errors.Is(err, domain.ErrControlDenied) || errors.Is(err, domain.ErrLeaseNotOwned) {
 		status = 403
 		code = "policy_denied"
+		classified = true
 	}
 	if errors.Is(err, domain.ErrStaleVersion) {
 		status = 409
 		code = "conflict"
+		classified = true
 	}
 	if errors.Is(err, application.ErrRepositoryAlreadyRegistered) {
 		// A duplicate source locator is a conflict with existing state, not a
@@ -1205,10 +1231,12 @@ func (h *Handler) domainError(w http.ResponseWriter, r *http.Request, err error)
 		// is already registered for this Installation.
 		status = http.StatusConflict
 		code = "conflict"
+		classified = true
 	}
 	if errors.Is(err, domain.ErrStaleFence) || errors.Is(err, domain.ErrLeaseExpired) || errors.Is(err, application.ErrIdempotencyConflict) {
 		status = http.StatusConflict
 		code = "conflict"
+		classified = true
 	}
 	if errors.Is(err, application.ErrAwaitingHumanInput) {
 		// The Increment's parent Requirement is waiting for the owner to
@@ -1217,8 +1245,78 @@ func (h *Handler) domainError(w http.ResponseWriter, r *http.Request, err error)
 		// rewrite makes the claim issuable while the question is open.
 		status = http.StatusConflict
 		code = "conflict"
+		classified = true
 	}
+	if !classified {
+		// Byte-identical to the panic-recovery branch above, so the two 500
+		// paths in this file cannot drift apart and one assertion covers
+		// both. err.Error() is deliberately NOT passed here: see the comment
+		// on the default above.
+		h.error(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
+		return
+	}
+	// The already-classified branches keep err.Error(), so no response
+	// message that existed before this change moves by a single byte. Those
+	// texts are authored in internal/application and internal/domain, several
+	// existing tests read them, and none of them is a dependency's.
 	h.error(w, r, status, code, err.Error())
+}
+
+// isCallerFault reports whether err carries the identity of a caller mistake.
+//
+// The list is EXPLICIT on purpose. Every entry is an already-exported
+// sentinel that answered 400 invalid_request before V2-083 inverted
+// domainError's default, and each one is proven reachable as a 400 by a row
+// of TestEveryRouteStillAnswersTheStatusItAnsweredBefore or by a
+// pre-existing test in this package or in internal/application. Sentinel
+// identity is the only material: no text is matched, no adapter type is
+// asserted on, and no gRPC status is read.
+//
+// application.ErrInvalidRequest is the marker internal/application applies at
+// the sites that AUTHOR a validation error with errors.New or fmt.Errorf and
+// therefore carried no identity at all -- "request_id is required", the
+// page_size and export-limit bounds, "invalid control mode or scope". It
+// changes none of their messages.
+//
+// internal/domain's sentinels are named from here rather than by editing
+// internal/domain, which this task leaves byte-unchanged: internal/api
+// already imports both packages, so this adds no import and no component
+// edge.
+//
+// Two entries are deliberate judgements rather than mechanical ones.
+// domain.ErrInvalidTransition and application.ErrDuplicateRequest are 400
+// today and stay 400 here, even though a state-machine refusal arguably
+// deserves 409: moving them is a separate decision about this API's
+// vocabulary, and this change's constraint is that no code moves
+// (dp-v2-083 d9).
+func isCallerFault(err error) bool {
+	switch {
+	case errors.Is(err, application.ErrInvalidRequest):
+		return true
+	case errors.Is(err, application.ErrInvalidCursor):
+		// V2-079's boundary: five refused cursor shapes stay 400
+		// invalid_request and the two accepted shapes stay 200.
+		return true
+	case errors.Is(err, application.ErrInvalidHumanInputRequest),
+		errors.Is(err, application.ErrUnknownHumanInputOption):
+		return true
+	case errors.Is(err, application.ErrProviderUnknown),
+		errors.Is(err, application.ErrProviderObservationInvalid):
+		return true
+	case errors.Is(err, application.ErrRunnerVersionReportInvalid):
+		return true
+	case errors.Is(err, application.ErrAllocationLimitOutOfRange):
+		return true
+	case errors.Is(err, application.ErrDuplicateRequest):
+		return true
+	case errors.Is(err, domain.ErrInvalidTransition):
+		return true
+	case errors.Is(err, domain.ErrEmptyID),
+		errors.Is(err, domain.ErrInvalidSourceLocator),
+		errors.Is(err, domain.ErrUnknownForge):
+		return true
+	}
+	return false
 }
 
 // nextUTCMidnight returns the first instant of the UTC day after at, which
