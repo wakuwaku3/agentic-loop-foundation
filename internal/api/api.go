@@ -518,6 +518,55 @@ func (h *Handler) route(w http.ResponseWriter, r *http.Request) {
 			h.completeFraming(w, r.WithContext(ctx), id)
 			return
 		}
+		// V2-090: the owner's pause, its exit, and its cancel. Same
+		// prefix-plus-suffix idiom as the five branches above, and gated to
+		// RoleOwner ALONE -- exactly the way the :answer-input branch is gated
+		// -- because docs/product/user-facing-spec.md:201 puts the
+		// pause/resume/cancel triple under section 4.8, whose subject sentence
+		// at :194 is 利用者, and the product names the Loop, the scheduler and a
+		// Runner ZERO times in any of the passages that describe these three.
+		// A scheduler is refused here even though :start-framing and
+		// :complete-framing accept it: shaping a Requirement is Loop work, and
+		// stopping one is not.
+		if strings.HasPrefix(r.URL.Path, requirementsPrefix) && strings.HasSuffix(r.URL.Path, pauseRequirementSuffix) {
+			id := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, requirementsPrefix), pauseRequirementSuffix)
+			if id == "" {
+				h.error(w, r, http.StatusNotFound, "not_found", "route not found")
+				return
+			}
+			if caller.Role != application.RoleOwner {
+				h.error(w, r, 403, "forbidden", "owner role required")
+				return
+			}
+			h.pauseRequirement(w, r.WithContext(ctx), id)
+			return
+		}
+		if strings.HasPrefix(r.URL.Path, requirementsPrefix) && strings.HasSuffix(r.URL.Path, resumeRequirementSuffix) {
+			id := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, requirementsPrefix), resumeRequirementSuffix)
+			if id == "" {
+				h.error(w, r, http.StatusNotFound, "not_found", "route not found")
+				return
+			}
+			if caller.Role != application.RoleOwner {
+				h.error(w, r, 403, "forbidden", "owner role required")
+				return
+			}
+			h.resumeRequirement(w, r.WithContext(ctx), id)
+			return
+		}
+		if strings.HasPrefix(r.URL.Path, requirementsPrefix) && strings.HasSuffix(r.URL.Path, cancelRequirementSuffix) {
+			id := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, requirementsPrefix), cancelRequirementSuffix)
+			if id == "" {
+				h.error(w, r, http.StatusNotFound, "not_found", "route not found")
+				return
+			}
+			if caller.Role != application.RoleOwner {
+				h.error(w, r, 403, "forbidden", "owner role required")
+				return
+			}
+			h.cancelRequirement(w, r.WithContext(ctx), id)
+			return
+		}
 		h.error(w, r, http.StatusNotFound, "not_found", "route not found")
 	}
 }
@@ -666,6 +715,24 @@ const (
 	// own handler for the same requirement id in the same run rather than
 	// leaving it to be read.
 	completeFramingSuffix = ":complete-framing"
+	// V2-090: the owner's three Requirement verbs, named beside their five
+	// siblings for the same reason those are named -- the router matches each of
+	// them twice, and a literal repeated twice is a route that can drift from
+	// its own contract.
+	//
+	// COLLISION, by construction and then by assertion. None of the three is a
+	// suffix of any existing suffix under requirementsPrefix and no existing one
+	// is a suffix of any of the three: ":pause", ":resume" and ":cancel" share
+	// no trailing byte sequence with ":request-input", ":answer-input",
+	// ":start-framing" or ":complete-framing". The /v1/leases/ :renew and
+	// /v1/executions/ :start branches earlier in this function are PREFIX-gated
+	// on their own collections, and the GET /v1/requirements/ branch is
+	// METHOD-gated. Every one of those claims is asserted by an api test rather
+	// than left to be read, including that all three resolve to their own
+	// handler for the SAME requirement id in the SAME test.
+	pauseRequirementSuffix  = ":pause"
+	resumeRequirementSuffix = ":resume"
+	cancelRequirementSuffix = ":cancel"
 )
 
 type humanInputOptionBody struct {
@@ -792,6 +859,84 @@ func (h *Handler) completeFraming(w http.ResponseWriter, r *http.Request, id str
 		return
 	}
 	out, err := h.config.Service.CompleteFraming(r.Context(), application.CompleteFramingRequest{
+		RequestID:       b.RequestID,
+		RequirementID:   id,
+		ExpectedVersion: b.ExpectedRequirementVersion,
+	})
+	if err != nil {
+		h.domainError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// pauseRequirementBody, resumeRequirementBody and cancelRequirementBody are
+// each the WHOLE request. None carries a control_revision, a repository_id or a
+// timestamp: the revision is derived from the effective control inside the
+// command's own transaction, the repository comes from the Requirement's own
+// link, and the instant is the transaction authority time. The strict decoder
+// refuses any other field, so a caller cannot smuggle one.
+//
+// They are three distinct types rather than one shared type on purpose. Each is
+// hashed into its own request fingerprint by its own application command, so a
+// shared type would make a :pause and a :resume with the same request_id
+// fingerprint-compatible, and the idempotency conflict that ought to refuse the
+// second would instead replay the first.
+type pauseRequirementBody struct {
+	RequestID                  string         `json:"request_id"`
+	ExpectedRequirementVersion domain.Version `json:"expected_requirement_version"`
+}
+
+type resumeRequirementBody struct {
+	RequestID                  string         `json:"request_id"`
+	ExpectedRequirementVersion domain.Version `json:"expected_requirement_version"`
+}
+
+type cancelRequirementBody struct {
+	RequestID                  string         `json:"request_id"`
+	ExpectedRequirementVersion domain.Version `json:"expected_requirement_version"`
+}
+
+func (h *Handler) pauseRequirement(w http.ResponseWriter, r *http.Request, id string) {
+	var b pauseRequirementBody
+	if !h.decode(w, r, &b) {
+		return
+	}
+	out, err := h.config.Service.PauseRequirement(r.Context(), application.PauseRequirementRequest{
+		RequestID:       b.RequestID,
+		RequirementID:   id,
+		ExpectedVersion: b.ExpectedRequirementVersion,
+	})
+	if err != nil {
+		h.domainError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (h *Handler) resumeRequirement(w http.ResponseWriter, r *http.Request, id string) {
+	var b resumeRequirementBody
+	if !h.decode(w, r, &b) {
+		return
+	}
+	out, err := h.config.Service.ResumeRequirement(r.Context(), application.ResumeRequirementRequest{
+		RequestID:       b.RequestID,
+		RequirementID:   id,
+		ExpectedVersion: b.ExpectedRequirementVersion,
+	})
+	if err != nil {
+		h.domainError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (h *Handler) cancelRequirement(w http.ResponseWriter, r *http.Request, id string) {
+	var b cancelRequirementBody
+	if !h.decode(w, r, &b) {
+		return
+	}
+	out, err := h.config.Service.CancelRequirement(r.Context(), application.CancelRequirementRequest{
 		RequestID:       b.RequestID,
 		RequirementID:   id,
 		ExpectedVersion: b.ExpectedRequirementVersion,

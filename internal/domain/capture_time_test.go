@@ -56,6 +56,18 @@ func requirementWithStatus(t *testing.T, status RequirementStatus, capturedAt ti
 		// stable release snapshot and has nothing to do with the capture time.
 		r.StableSnapshot = StableReleaseSnapshot{ReleaseID: "release-1", ReleaseVersion: 1, BundleDigest: "bundle", EvidenceDigest: "evidence"}
 	}
+	if status == RequirementPaused {
+		// V2-090: a paused Requirement carries the status it was paused from,
+		// exactly as a completed one carries its stable release snapshot above.
+		// This is MANDATORY rather than cosmetic: RequirementResume joins the
+		// command axis below and is admitted from paused only, so without a
+		// memory here TestCapturedAtSurvivesEveryRequirementCommandKind would
+		// fail at its "want a legal transition" assertion. Making resume
+		// tolerate an empty memory instead would be the defect this task exists
+		// to prevent -- a resume that lands a Requirement in a status it was
+		// never in.
+		r.PausedFrom = RequirementReady
+	}
 	return r
 }
 
@@ -111,6 +123,11 @@ func startStatusFor(kind RequirementCommandKind) RequirementStatus {
 		return RequirementReady
 	case RequirementCancel:
 		return RequirementActive
+	case RequirementResume:
+		// The only status a resume is admitted from. requirementWithStatus
+		// gives a paused Requirement its memory, so this transition is legal
+		// and lands back on RequirementReady.
+		return RequirementPaused
 	}
 	return ""
 }
@@ -247,7 +264,7 @@ func TestRequirementFieldListAndCaptureTagArePinned(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse model.go: %v", err)
 	}
-	want := []string{"ID", "Status", "Version", "Increments", "StableSnapshot", "RequestedBy", "CapturedAt"}
+	want := []string{"ID", "Status", "Version", "Increments", "StableSnapshot", "RequestedBy", "CapturedAt", "PausedFrom"}
 	var got []string
 	tagged := []string{}
 	found := false

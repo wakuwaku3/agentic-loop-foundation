@@ -442,6 +442,144 @@ func TestControlPlanePreviewLocalLive(t *testing.T) {
 		t.Fatalf("completing the framing of an already-ready Requirement: expected 400, got %d: %+v", readyAgain.status, readyAgain.body)
 	}
 
+	// --- V2-090: the owner PAUSES a Requirement, RESUMES it into the exact
+	// status it was in, and CANCELS it, against the real binary, the real
+	// Firestore emulator and real HTTP. This is the ONLY place the new
+	// Requirement.PausedFrom field is proved to SURVIVE SERIALIZATION.
+	//
+	// internal/store/** is PROHIBITED to this task and NO store change was
+	// needed, and the measurement that makes that true is this: the Firestore
+	// adapter serializes the whole Requirement with a plain json.Marshal
+	// (measured at internal/store/firestore/store.go:210 and :266) and
+	// domain.Requirement carries no json tags on any field, so the persisted key
+	// is the Go field name and a new field is persisted and read back with no
+	// adapter edit at all. A bare `go test` with no emulator would be GREEN
+	// while measuring nothing, which is why this segment lives here.
+	//
+	// It runs on a SEPARATE freshly captured Requirement rather than on the one
+	// above, so the cancel at the end cannot disturb the export, restart and
+	// backlog assertions that follow, which all name the first Requirement.
+	const pauseText = "V2-090 preview-local pause/resume/cancel journey"
+	pauseCapture := liveCall(t, client, http.MethodPost, base+"/v1/requirements", ownerToken, map[string]any{
+		"request_id": "live-v2090-capture",
+		"text":       pauseText,
+	})
+	if pauseCapture.status != http.StatusCreated {
+		t.Fatalf("V2-090 capture: expected 201, got %d: %+v", pauseCapture.status, pauseCapture.body)
+	}
+	pauseID, _ := pauseCapture.body["requirement_id"].(string)
+	if pauseID == "" {
+		t.Fatalf("V2-090 capture response missing requirement_id: %+v", pauseCapture.body)
+	}
+	pauseVersion, _ := pauseCapture.body["version"].(float64)
+	if pauseVersion == 0 {
+		t.Fatalf("V2-090 capture response carried no version: %+v", pauseCapture.body)
+	}
+	pauseFraming := liveCall(t, client, http.MethodPost, base+"/v1/requirements/"+pauseID+":start-framing", ownerToken, map[string]any{
+		"request_id":                   "live-v2090-start-framing",
+		"expected_requirement_version": pauseVersion,
+	})
+	if pauseFraming.status != http.StatusOK {
+		t.Fatalf("V2-090 start-framing: expected 200, got %d: %+v", pauseFraming.status, pauseFraming.body)
+	}
+	pauseFramingVersion, _ := pauseFraming.body["version"].(float64)
+	pauseReady := liveCall(t, client, http.MethodPost, base+"/v1/requirements/"+pauseID+":complete-framing", ownerToken, map[string]any{
+		"request_id":                   "live-v2090-complete-framing",
+		"expected_requirement_version": pauseFramingVersion,
+	})
+	if pauseReady.status != http.StatusOK {
+		t.Fatalf("V2-090 complete-framing: expected 200, got %d: %+v", pauseReady.status, pauseReady.body)
+	}
+	if got, _ := pauseReady.body["status"].(string); got != "ready" {
+		t.Fatalf("V2-090 complete-framing reported status %q, want ready", got)
+	}
+	pauseReadyVersion, _ := pauseReady.body["version"].(float64)
+
+	// :pause -- and the response already names the way out.
+	paused := liveCall(t, client, http.MethodPost, base+"/v1/requirements/"+pauseID+":pause", ownerToken, map[string]any{
+		"request_id":                   "live-v2090-pause",
+		"expected_requirement_version": pauseReadyVersion,
+	})
+	if paused.status != http.StatusOK {
+		t.Fatalf("V2-090 :pause: expected 200, got %d: %+v", paused.status, paused.body)
+	}
+	if got, _ := paused.body["requirement_id"].(string); got != pauseID {
+		t.Fatalf("V2-090 :pause named requirement_id=%q, want %q", got, pauseID)
+	}
+	if got, _ := paused.body["status"].(string); got != "paused" {
+		t.Fatalf("V2-090 :pause reported status %q, want paused", got)
+	}
+	if got, _ := paused.body["resumes_to"].(string); got != "ready" {
+		t.Fatalf("V2-090 :pause reported resumes_to=%q, want ready", got)
+	}
+	pausedVersion, _ := paused.body["version"].(float64)
+	if pausedVersion != pauseReadyVersion+1 {
+		t.Fatalf("V2-090 :pause moved the version to %v, want %v", pausedVersion, pauseReadyVersion+1)
+	}
+
+	// THE DETAIL, read back over real HTTP from the real emulator: the memory
+	// survived serialization, because nothing but the stored document could
+	// answer this.
+	pausedDetail := liveCall(t, client, http.MethodGet, base+"/v1/requirements/"+pauseID, ownerToken, nil)
+	if pausedDetail.status != http.StatusOK {
+		t.Fatalf("V2-090 detail while paused: expected 200, got %d: %+v", pausedDetail.status, pausedDetail.body)
+	}
+	if got, _ := pausedDetail.body["status"].(string); got != "paused" {
+		t.Fatalf("V2-090 detail status while paused = %q, want paused", got)
+	}
+	if got, _ := pausedDetail.body["resumes_to"].(string); got != "ready" {
+		t.Fatalf("V2-090 detail resumes_to while paused = %q, want ready; the PausedFrom field did not survive Firestore serialization", got)
+	}
+
+	// :resume -- into the EXACT status it came from.
+	resumed := liveCall(t, client, http.MethodPost, base+"/v1/requirements/"+pauseID+":resume", ownerToken, map[string]any{
+		"request_id":                   "live-v2090-resume",
+		"expected_requirement_version": pausedVersion,
+	})
+	if resumed.status != http.StatusOK {
+		t.Fatalf("V2-090 :resume: expected 200, got %d: %+v", resumed.status, resumed.body)
+	}
+	if got, _ := resumed.body["status"].(string); got != "ready" {
+		t.Fatalf("V2-090 :resume reported status %q, want ready -- the exact status the pause remembered", got)
+	}
+	resumedVersion, _ := resumed.body["version"].(float64)
+	if resumedVersion != pausedVersion+1 {
+		t.Fatalf("V2-090 :resume moved the version to %v, want %v", resumedVersion, pausedVersion+1)
+	}
+	resumedDetail := liveCall(t, client, http.MethodGet, base+"/v1/requirements/"+pauseID, ownerToken, nil)
+	if resumedDetail.status != http.StatusOK {
+		t.Fatalf("V2-090 detail after the resume: expected 200, got %d: %+v", resumedDetail.status, resumedDetail.body)
+	}
+	if got, _ := resumedDetail.body["status"].(string); got != "ready" {
+		t.Fatalf("V2-090 detail status after the resume = %q, want ready", got)
+	}
+	if _, present := resumedDetail.body["resumes_to"]; present {
+		t.Fatalf("V2-090 detail after the resume still carries resumes_to=%v; the memory was not cleared in real persistence", resumedDetail.body["resumes_to"])
+	}
+
+	// :cancel -- the second exit, on a Requirement that is no longer paused.
+	cancelled := liveCall(t, client, http.MethodPost, base+"/v1/requirements/"+pauseID+":cancel", ownerToken, map[string]any{
+		"request_id":                   "live-v2090-cancel",
+		"expected_requirement_version": resumedVersion,
+	})
+	if cancelled.status != http.StatusOK {
+		t.Fatalf("V2-090 :cancel: expected 200, got %d: %+v", cancelled.status, cancelled.body)
+	}
+	if got, _ := cancelled.body["status"].(string); got != "cancelled" {
+		t.Fatalf("V2-090 :cancel reported status %q, want cancelled", got)
+	}
+	cancelledDetail := liveCall(t, client, http.MethodGet, base+"/v1/requirements/"+pauseID, ownerToken, nil)
+	if cancelledDetail.status != http.StatusOK {
+		t.Fatalf("V2-090 detail after the cancel: expected 200, got %d: %+v", cancelledDetail.status, cancelledDetail.body)
+	}
+	if got, _ := cancelledDetail.body["status"].(string); got != "cancelled" {
+		t.Fatalf("V2-090 detail status after the cancel = %q, want cancelled", got)
+	}
+	if _, present := cancelledDetail.body["resumes_to"]; present {
+		t.Fatalf("V2-090 detail after the cancel carries resumes_to=%v; a cancelled Requirement is terminal and must remember nothing", cancelledDetail.body["resumes_to"])
+	}
+	t.Logf("V2-090 live-local: requirement_id=%s went ready -> paused(resumes_to=ready) -> ready -> cancelled against the real Firestore emulator; the PausedFrom field survived serialization with NO store adapter change", pauseID)
+
 	// --- Control display (also exercises the Outbox: Control stages a
 	// control-changed outbox item) ---
 	control := liveCall(t, client, http.MethodPost, base+"/v1/controls", ownerToken, map[string]any{

@@ -657,12 +657,13 @@ func allRequirementCommandKinds() []RequirementCommandKind {
 	return []RequirementCommandKind{
 		RequirementStartFraming, RequirementReadyCommand, RequirementStart, RequirementWait,
 		RequirementNeedInput, RequirementRecover, RequirementEvaluate, RequirementPause, RequirementCancel,
+		RequirementResume,
 	}
 }
 
 const (
 	wantRequirementStatusCount  = 11
-	wantRequirementCommandCount = 9
+	wantRequirementCommandCount = 10
 )
 
 // requirementsEqual compares Requirement values field by field. Requirement
@@ -670,8 +671,16 @@ const (
 // non-comparable with ==; every construction in this file leaves Increments
 // nil on both sides, so a length-and-elementwise comparison is sufficient
 // and avoids adding a reflect import to the test-file allowlist.
+//
+// V2-090 added PausedFrom to the comparison, and it is a MANDATORY addition
+// rather than tidiness: PausedFrom is the only field on Requirement that a
+// transition function writes, so every "mutated a rejected requirement"
+// assertion in this package -- and in pause_resume_test.go, where the whole
+// 55-cell table rests on it -- would have gone blind to the one field this
+// change writes. internal/domain would have kept passing while measuring LESS
+// than before.
 func requirementsEqual(a, b Requirement) bool {
-	if a.ID != b.ID || a.Status != b.Status || a.Version != b.Version || a.StableSnapshot != b.StableSnapshot {
+	if a.ID != b.ID || a.Status != b.Status || a.Version != b.Version || a.StableSnapshot != b.StableSnapshot || a.PausedFrom != b.PausedFrom {
 		return false
 	}
 	if len(a.Increments) != len(b.Increments) {

@@ -211,6 +211,41 @@ type Requirement struct {
 	// json.Marshal, and `omitempty` does not suppress a zero time.Time in
 	// any case.
 	CapturedAt time.Time
+	// PausedFrom remembers which status this Requirement was in when it was
+	// paused, and it is empty for every Requirement that is not paused.
+	//
+	// It exists because docs/architecture/domain-model.md:269 defines the exit
+	// from `paused` as "直前の安全な非終端状態、`cancelled`" -- the immediately
+	// preceding safe non-terminal state, or cancellation. The first of those two
+	// names the status the Requirement was ACTUALLY IN, so the exit is a MEMORY
+	// rather than a fixed status: nothing else on this struct could answer
+	// "which status does a resume restore", and without it `paused` was a source
+	// status in exactly ONE of DecideRequirement's ten branches -- cancel --
+	// which would have made a pause a button whose only sequel is destroying the
+	// Requirement.
+	//
+	// IT DEPARTS FROM THE RequestedBy/CapturedAt DISCIPLINE, deliberately and
+	// visibly. Both of those are value additions only: their comments above say
+	// that every branch assigns only Status and Version, so no transition
+	// function inspects or rewrites them. This is the FIRST field on Requirement
+	// that a transition function WRITES -- the pause branch sets it to the
+	// current status and the resume and cancel branches clear it -- so that
+	// sentence stays true of RequestedBy and CapturedAt and is false of this
+	// field. Every other branch still carries it forward untouched through
+	// `next := current`.
+	//
+	// A record written before this field existed carries the zero value, and
+	// Validate treats that as legitimate rather than invalid EVEN WHEN the
+	// status is paused -- see the clause in Validate's Requirement case. Such a
+	// record cannot be resumed, because there is no origin to restore, but it
+	// can still be cancelled, which is the entire reason for not rejecting it.
+	// Past records are never retrofitted.
+	//
+	// It carries no json tag because no field on this struct does: the Firestore
+	// adapter serializes the whole value with a plain json.Marshal, so the
+	// persisted key is the Go field name, and json.Unmarshal ignores that key if
+	// this field is ever reverted.
+	PausedFrom RequirementStatus
 }
 
 // CaptureRecorded reports whether a capture time was actually recorded on
@@ -332,6 +367,34 @@ func Validate(v any) error {
 		if value.RequestedBy.ActorType != "" && !validActorType(value.RequestedBy.ActorType) {
 			return fmt.Errorf("unknown requested_by actor_type %q", value.RequestedBy.ActorType)
 		}
+		// A non-empty PausedFrom must name a status a pause could have come
+		// from, read from the same pausableRequirementStatuses the pause and
+		// resume branches read.
+		//
+		// THE CONVERSE IS DELIBERATELY ABSENT: a Requirement whose Status is
+		// paused and whose PausedFrom is EMPTY stays VALID. DecideRequirement
+		// calls Validate on its first line, so a record Validate rejected would
+		// be a record NO command can be issued against -- including cancel --
+		// and a paused record with no remembered origin is precisely the record
+		// that most needs an exit. It is resume-refused and cancel-accepted
+		// instead.
+		//
+		// That is an ASYMMETRY with the completed clause a dozen lines above,
+		// where a completed Requirement with no StableSnapshot IS invalid, and
+		// the asymmetry is justified by terminality: an invalid terminal record
+		// needs no exit, while `paused` is the one non-terminal status whose
+		// entire design problem is having one.
+		if value.PausedFrom != "" {
+			legal := false
+			for _, status := range pausableRequirementStatuses() {
+				if value.PausedFrom == status {
+					legal = true
+				}
+			}
+			if !legal {
+				return fmt.Errorf("unknown requirement paused_from %q", value.PausedFrom)
+			}
+		}
 	case Increment:
 		if _, err := NewIncrementID(value.ID.String()); err != nil {
 			return err
@@ -416,6 +479,28 @@ func validRequirementStatus(s RequirementStatus) bool {
 	}
 	return false
 }
+
+// pausableRequirementStatuses is the set of statuses from which a pause is
+// admitted, AND -- read the other way round -- the set of statuses a resume may
+// restore. IT IS DECLARED HERE ONCE AND READ FROM MORE THAN ONE PLACE ON
+// PURPOSE: the pause branch passes it to allowed(...), the resume branch tests
+// Requirement.PausedFrom for membership in it, and Validate's Requirement case
+// tests the same field the same way. Writing the four statuses out a second
+// time would let resume's legal TARGETS drift away from pause's legal SOURCES,
+// and a drifted resume lands a Requirement in a status it was never in --
+// exactly the defect the memory exists to prevent. internal/domain's
+// pause_resume_test.go turns that into a red guard rather than a convention: it
+// parses this file and fails if a second []RequirementStatus literal appears
+// anywhere in it.
+//
+// The four members are NOT chosen here. They are the four cells of
+// docs/architecture/domain-model.md's Requirement lifecycle table that name
+// `paused` among their 主な遷移先 -- :265 ready, :266 active, :267 waiting and
+// :270 recovering -- and the table names `paused` as a target in no other cell.
+func pausableRequirementStatuses() []RequirementStatus {
+	return []RequirementStatus{RequirementReady, RequirementActive, RequirementWaiting, RequirementRecovering}
+}
+
 func validIncrementStatus(s IncrementStatus) bool {
 	switch s {
 	case IncrementProposed, IncrementReady, IncrementLeased, IncrementExecuting, IncrementVerifying, IncrementIntegrated, IncrementPreviewValidating, IncrementFailed, IncrementAccepted, IncrementReleased, IncrementAbandoned, IncrementCancelled:
@@ -443,6 +528,11 @@ const (
 	RequirementEvaluate     RequirementCommandKind = "evaluate"
 	RequirementPause        RequirementCommandKind = "pause"
 	RequirementCancel       RequirementCommandKind = "cancel"
+	// RequirementResume is the exit docs/architecture/domain-model.md:269 names
+	// first: "直前の安全な非終端状態". It is admitted from RequirementPaused ONLY
+	// and restores Requirement.PausedFrom verbatim, so it can never land a
+	// Requirement in a status it was not actually in.
+	RequirementResume RequirementCommandKind = "resume"
 )
 
 type RequirementCommand struct {
@@ -508,15 +598,48 @@ func DecideRequirement(current Requirement, command RequirementCommand) (Require
 		}
 		next.Status = RequirementEvaluating
 	case RequirementPause:
-		if !allowed(RequirementReady, RequirementActive, RequirementWaiting, RequirementRecovering) {
+		// The admitted source set is read from pausableRequirementStatuses and
+		// is NOT written out here, so the resume branch below cannot drift away
+		// from it.
+		if !allowed(pausableRequirementStatuses()...) {
 			return current, ErrInvalidTransition
 		}
 		next.Status = RequirementPaused
+		next.PausedFrom = current.Status
+	case RequirementResume:
+		if !allowed(RequirementPaused) {
+			return current, ErrInvalidTransition
+		}
+		// The memory must be one of the statuses a pause could have come from.
+		// Validate already rejects any other non-empty value, so the only case
+		// this loop refuses in practice is the EMPTY memory -- a Requirement
+		// stored as paused before this field existed. That record stays valid
+		// and cancellable on purpose (see Validate); it simply has no origin to
+		// restore. The membership test is written out anyway rather than
+		// shortened to `PausedFrom == ""`, because reading the same helper the
+		// pause branch reads is what makes "resume's targets are pause's
+		// sources" a property of this file instead of a comment about it.
+		resumable := false
+		for _, status := range pausableRequirementStatuses() {
+			if current.PausedFrom == status {
+				resumable = true
+			}
+		}
+		if !resumable {
+			return current, ErrInvalidTransition
+		}
+		next.Status = current.PausedFrom
+		next.PausedFrom = ""
 	case RequirementCancel:
 		if allowed(RequirementCompleted, RequirementCancelled) {
 			return current, ErrInvalidTransition
 		}
 		next.Status = RequirementCancelled
+		// A cancelled Requirement is terminal -- docs/architecture/domain-model
+		// .md:273 "終端。再開は新しい明示Intentでのみ可能" -- so a remembered
+		// origin on it would advertise a resumption the lifecycle does not
+		// honour.
+		next.PausedFrom = ""
 	default:
 		return current, fmt.Errorf("unknown requirement command %q", command.Kind)
 	}
