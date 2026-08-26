@@ -299,11 +299,17 @@ func TestQuotaExhaustionMapsTo429NotBadRequest(t *testing.T) {
 	// Fill the day's write budget directly to exactly the ceiling, so the
 	// next mutation's worst-case reservation is refused by one write before
 	// any document is staged.
-	if err := st.Transact(context.Background(), func(u application.UnitOfWork) error {
-		return u.ReserveQuota(context.Background(), "fill", c.Now(), quota.Usage{Writes: quota.DefaultBudget.Writes})
-	}); err != nil {
-		t.Fatal(err)
-	}
+	//
+	// The fill is SEEDED rather than reserved (V2-087). The in-memory adapter
+	// now settles a reservation down to the records a transaction actually read
+	// and wrote, exactly as the Firestore adapter always has, so a fill made
+	// through ReserveQuota inside a transaction that stages nothing would be
+	// credited straight back to about one write and this route would answer 201
+	// instead of 429. The Firestore package hit the same wall first and solved
+	// it the same way, with seedQuotaTotal in its quota_integration_test.go.
+	// Nothing else about this test changes: same name, same subject, same
+	// assertions.
+	st.SeedQuotaTotal(c.Now(), quota.Usage{Writes: quota.DefaultBudget.Writes})
 	auth := api.BearerAuthenticator{"owner": {Role: application.RoleOwner, Subject: "owner"}}
 	enrollment, err := runner.NewService(runner.NewMemoryStore())
 	if err != nil {
@@ -4102,11 +4108,13 @@ func TestEveryRouteStillAnswersTheStatusItAnsweredBefore(t *testing.T) {
 				fx.clock.nextDay()
 			}
 			if row.exhaustQuota {
-				if err := fx.store.Transact(context.Background(), func(u application.UnitOfWork) error {
-					return u.ReserveQuota(context.Background(), "pin-fill", fx.clock.Now(), quota.Usage{Writes: quota.DefaultBudget.Writes})
-				}); err != nil {
-					t.Fatal(err)
-				}
+				// Seeded, not reserved (V2-087): the in-memory adapter now
+				// settles a reservation down to the records a transaction
+				// actually read and wrote, so a fill made through ReserveQuota
+				// inside a transaction that stages nothing is credited straight
+				// back and this row would answer 201. The pinned status stays
+				// 429; only how the day is filled changed.
+				fx.store.SeedQuotaTotal(fx.clock.Now(), quota.Usage{Writes: quota.DefaultBudget.Writes})
 			}
 			w := pinCall(h, row, fx.expand(row.path), fx.expand(row.body))
 			code := ""

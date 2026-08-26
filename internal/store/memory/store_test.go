@@ -14,6 +14,7 @@ import (
 
 	"github.com/takushi/agentic-loop-foundation/v2/internal/application"
 	"github.com/takushi/agentic-loop-foundation/v2/internal/domain"
+	"github.com/takushi/agentic-loop-foundation/v2/internal/quota"
 )
 
 func repository(t *testing.T, id, owner, name string, status domain.RepositoryStatus, version domain.Version) domain.Repository {
@@ -822,18 +823,23 @@ func TestThePageCursorTheCallerWasHandedIsAcceptedByTheNextPageUntilEveryRequire
 			t.Fatal(err)
 		}
 	}
-	// The clock is injected and the test advances it one UTC day per page. That
-	// is not a timer and not a sleep: it is the only way this adapter can be
-	// walked at all. Service.transact reserves quota.ReadTransactionUsage
-	// (6,001 reads) as the worst case for every read transaction, and this
-	// adapter -- prohibited from change by this task -- never trues that
-	// reservation down to the reads it actually made, unlike the Firestore
-	// adapter's countReads/trueUpQuota pair. quota.DefaultBudget allows 25,000
-	// reads per UTC day, so exactly four read transactions fit in one simulated
-	// day while a full walk of 7 records at page_size 1 needs seven. Advancing
-	// the injected clock past midnight resets quota.Counter's daily aggregate.
-	// Paging is clock-independent, so this changes nothing the walk asserts.
-	clock := &dayAdvancingClock{at: time.Unix(1700000000, 0).UTC()}
+	// The clock is injected and FIXED, exactly as the Firestore package's copy
+	// of this test fixes integrationClock at the same instant.
+	//
+	// It was not always fixed. When V2-079 wrote this walk, the clock was a
+	// dayAdvancingClock the test stepped forward 25 hours PER PAGE, because
+	// Service.transact reserves quota.ReadTransactionUsage (6,001 reads) as the
+	// worst case for every read transaction and this adapter never settled that
+	// reservation, unlike the Firestore adapter's countReads/trueUpQuota pair.
+	// quota.DefaultBudget allows 25,000 reads per UTC day, so exactly four read
+	// transactions fitted in one simulated day while a full walk of 7 records at
+	// page_size 1 needs seven, and the only way to walk this adapter at all was
+	// to cross midnight between pages and reset quota.Counter's daily
+	// aggregate. V2-087 made this adapter settle its reservation the way the
+	// real one does, so the workaround is gone and the two adapters' copies of
+	// this test now hold fixture-identical clocks. Paging was always
+	// clock-independent, so nothing this walk asserts has changed.
+	clock := captureClock{at: time.Unix(1700000000, 0).UTC()}
 	svc, err := application.NewServiceWithConfig(store, clock, &captureIDs{}, application.ServiceConfig{InstallationID: "install", LeaseTTL: time.Minute})
 	if err != nil {
 		t.Fatal(err)
@@ -851,7 +857,6 @@ func TestThePageCursorTheCallerWasHandedIsAcceptedByTheNextPageUntilEveryRequire
 				if pages > bound {
 					t.Fatalf("walk did not terminate within %d pages", bound)
 				}
-				clock.advanceOneDay()
 				page, err := svc.ListRequirementsPage(owner, cursor, pageSize)
 				if err != nil {
 					t.Fatalf("page %d with cursor %q: %v", pages, cursor, err)
@@ -941,10 +946,258 @@ func assertMultisetCoversOnce(t *testing.T, want []string, got map[string]int) {
 	}
 }
 
-// dayAdvancingClock is an injected clock the test steps forward explicitly. It
-// holds a fixed instant between steps, so every run of the test sees the very
-// same sequence of instants; nothing here reads the wall clock.
-type dayAdvancingClock struct{ at time.Time }
+// ===========================================================================
+// V2-087: the settled reservation, and the two adapters agreeing about it
+// ===========================================================================
 
-func (c *dayAdvancingClock) Now() time.Time { return c.at }
-func (c *dayAdvancingClock) advanceOneDay() { c.at = c.at.Add(25 * time.Hour) }
+// workloadExpectation is one row of the cross-adapter workload table
+// (dp-v2-087 d5 / A6): a named piece of work, and the committed daily
+// quota.Usage the adapter must hold after that work's single transaction has
+// settled its reservation.
+type workloadExpectation struct {
+	name  string
+	usage quota.Usage
+}
+
+// crossAdapterWorkload is that table.
+//
+// THE LITERALS BELOW MUST STAY BYTE-IDENTICAL TO THE COPY IN
+// internal/store/firestore/quota_integration_test.go, which carries the same
+// table under the same test name over the other adapter. That duplication is
+// deliberate and is the whole point: the two adapters must not disagree about
+// what a reservation costs, and two literals differing is a diff a reader can
+// see, where a shared helper would need a third package and a range-valued
+// expectation would hide exactly the drift being guarded.
+//
+// If a row's two measurements ever disagree, neither literal is adjusted, the
+// row is not deleted and the expectation is not widened into a range or a
+// tolerance: both measurements are reported and the work stops.
+var crossAdapterWorkload = []workloadExpectation{
+	{name: "a bounded first page at page_size 1", usage: quota.Usage{Reads: 4, Writes: 1}},
+	{name: "the same page at page_size 2", usage: quota.Usage{Reads: 6, Writes: 1}},
+	{name: "a Requirement detail read", usage: quota.Usage{Reads: 4, Writes: 1}},
+	{name: "a capture mutation", usage: quota.Usage{Reads: 4, Writes: 5}},
+}
+
+// crossAdapterWorkloadIDs are the Requirement ids the workload seeds, and they
+// are the same ids the Firestore package's copy of this test seeds. The two
+// adapters order a page differently -- this one by the raw domain id, that one
+// by the base64url document key -- so the two pages may hold different rows;
+// the COUNT of documents a Limit(limit+1) query touches is what this table is
+// about, and that is the same on both.
+var crossAdapterWorkloadIDs = []string{"wl-a", "wl-b", "wl-c"}
+
+// crossAdapterWorkloadInstant is the single fixed injected instant every row
+// runs on, identical in both packages. Nothing advances it: the point of this
+// task is that no test has to buy budget by moving a clock.
+func crossAdapterWorkloadInstant() time.Time { return time.Unix(1700000000, 0).UTC() }
+
+// workloadFixture seeds the shared fixture and returns the store, a service on
+// the fixed instant, and an owner context. The seeding transactions call no
+// ReserveQuota at all -- they go straight through the port -- so they settle
+// nothing and leave no quota record: the committed total read back after a
+// workload row is exactly that row's own settled cost.
+func workloadFixture(t *testing.T) (*Store, *application.Service, context.Context) {
+	t.Helper()
+	store := New()
+	ctx := context.Background()
+	for _, raw := range crossAdapterWorkloadIDs {
+		id, err := domain.NewRequirementID(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := store.Transact(ctx, func(u application.UnitOfWork) error {
+			if e := u.SaveRequirement(ctx, domain.Requirement{ID: id, Version: 1, Status: domain.RequirementCaptured}, 0); e != nil {
+				return e
+			}
+			return u.SaveRequirementText(ctx, raw, "text-"+raw)
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	svc, err := application.NewServiceWithConfig(store, captureClock{at: crossAdapterWorkloadInstant()}, &captureIDs{}, application.ServiceConfig{InstallationID: "install", LeaseTTL: time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return store, svc, application.ContextWithCaller(ctx, application.Caller{Role: application.RoleOwner, Subject: "workload-owner"})
+}
+
+// committedWorkloadUsage reads the day's committed total back through the
+// exported inspection seam. A day with no record at all is a failure, not a
+// zero total: it would mean the workload reserved nothing.
+func committedWorkloadUsage(t *testing.T, store *Store) quota.Usage {
+	t.Helper()
+	got, ok := store.QuotaTotal(crossAdapterWorkloadInstant())
+	if !ok {
+		t.Fatal("no quota record for the workload day: the transaction reserved nothing")
+	}
+	return got
+}
+
+// TestBothAdaptersSettleTheSameReservationForTheSameWorkload is A6. The
+// Firestore package carries this exact test name over its own adapter, with the
+// same four rows and the same literal expectations.
+func TestBothAdaptersSettleTheSameReservationForTheSameWorkload(t *testing.T) {
+	runners := []func(t *testing.T) quota.Usage{
+		func(t *testing.T) quota.Usage {
+			store, svc, owner := workloadFixture(t)
+			if _, err := svc.ListRequirementsPage(owner, "", 1); err != nil {
+				t.Fatal(err)
+			}
+			return committedWorkloadUsage(t, store)
+		},
+		func(t *testing.T) quota.Usage {
+			store, svc, owner := workloadFixture(t)
+			if _, err := svc.ListRequirementsPage(owner, "", 2); err != nil {
+				t.Fatal(err)
+			}
+			return committedWorkloadUsage(t, store)
+		},
+		func(t *testing.T) quota.Usage {
+			store, svc, owner := workloadFixture(t)
+			if _, ok, err := svc.GetRequirementDetail(owner, crossAdapterWorkloadIDs[0]); err != nil {
+				t.Fatal(err)
+			} else if !ok {
+				t.Fatal("the seeded Requirement was not found")
+			}
+			return committedWorkloadUsage(t, store)
+		},
+		func(t *testing.T) quota.Usage {
+			store, svc, owner := workloadFixture(t)
+			if _, err := svc.Capture(owner, application.CaptureRequest{RequestID: "workload-capture", Text: "x"}); err != nil {
+				t.Fatal(err)
+			}
+			return committedWorkloadUsage(t, store)
+		},
+	}
+	if len(runners) != len(crossAdapterWorkload) {
+		t.Fatalf("%d workload runners for %d table rows; the table and the work must stay paired", len(runners), len(crossAdapterWorkload))
+	}
+	for i, row := range crossAdapterWorkload {
+		i, row := i, row
+		t.Run(row.name, func(t *testing.T) {
+			got := runners[i](t)
+			if got != row.usage {
+				t.Fatalf("%s settled to %+v on the in-memory adapter, want %+v. If the Firestore half of this test measured %+v for the same row, the two adapters disagree about what a reservation costs: report both measurements and stop -- do not adjust either literal, delete the row, or widen the expectation into a range", row.name, got, row.usage, got)
+			}
+			if got.Reads >= quota.ReadTransactionUsage.Reads {
+				t.Fatalf("%s settled to %+v, which is not below the worst-case read reservation (%d): nothing was credited back", row.name, got, quota.ReadTransactionUsage.Reads)
+			}
+		})
+	}
+}
+
+// TestManyReadTransactionsFitInOneDayOnTheInMemoryAdapter is A7: the outcome
+// asserted directly, on ONE fixed injected instant, with the committed total
+// asserted and not merely the absence of an error.
+//
+// Asserting the committed total is what closes the two loopholes at once. A
+// raised budget (which internal/quota being prohibited and byte-unchanged also
+// forbids) would leave the total unchanged; a reservation moved to after the
+// work, or removed, would leave a different total or none at all. Only a
+// settled reservation produces exactly the measured cost per transaction.
+func TestManyReadTransactionsFitInOneDayOnTheInMemoryAdapter(t *testing.T) {
+	// The pre-repair capacity, derived and not asserted about: the worst case
+	// divided into the budget is how many read transactions used to fit.
+	worstCaseCapacity := quota.DefaultBudget.Reads / quota.ReadTransactionUsage.Reads
+	if worstCaseCapacity <= 0 {
+		t.Fatalf("worst-case read capacity = %d; the budget arithmetic is broken", worstCaseCapacity)
+	}
+
+	// Measure one read transaction's trued-up cost rather than assuming it.
+	oneStore, oneSvc, oneOwner := workloadFixture(t)
+	if _, err := oneSvc.ListRequirementsPage(oneOwner, "", 1); err != nil {
+		t.Fatal(err)
+	}
+	perTransaction := committedWorkloadUsage(t, oneStore)
+	if perTransaction.Reads <= 0 || perTransaction.Writes <= 0 {
+		t.Fatalf("one read transaction settled to %+v; a transaction that costs nothing is not a measurement", perTransaction)
+	}
+
+	t.Run("a handful of read transactions costs a fraction of the day", func(t *testing.T) {
+		// Five is the run that used to fail: the fifth read transaction was
+		// refused with quota.ErrOverBudget because the worst case had already
+		// been charged four times.
+		const handful = 5
+		if int64(handful) <= worstCaseCapacity {
+			t.Fatalf("a handful of %d is not more than the worst-case capacity of %d, so it proves nothing", handful, worstCaseCapacity)
+		}
+		store, svc, owner := workloadFixture(t)
+		for i := 0; i < handful; i++ {
+			if _, err := svc.ListRequirementsPage(owner, "", 1); err != nil {
+				t.Fatalf("read transaction %d of %d was refused: %v", i+1, handful, err)
+			}
+		}
+		got := committedWorkloadUsage(t, store)
+		want := quota.Usage{Reads: perTransaction.Reads * handful, Writes: perTransaction.Writes * handful}
+		if got != want {
+			t.Fatalf("%d read transactions committed %+v, want %+v", handful, got, want)
+		}
+		// Far below the day's budget: two orders of magnitude of headroom.
+		if got.Reads*100 >= quota.DefaultBudget.Reads {
+			t.Fatalf("%d read transactions committed %d reads against a budget of %d; that is not a fraction of the day", handful, got.Reads, quota.DefaultBudget.Reads)
+		}
+	})
+
+	t.Run("every read transaction the settled arithmetic admits succeeds", func(t *testing.T) {
+		// The bound is derived from the measured cost and the budget, not
+		// chosen: the worst case is still reserved before each transaction, so
+		// what fits is the headroom the worst case leaves, divided by the
+		// settled cost, plus the last transaction that consumes that headroom.
+		headroom := quota.DefaultBudget.Reads - quota.ReadTransactionUsage.Reads
+		admitted := headroom/perTransaction.Reads + 1
+		if admitted <= worstCaseCapacity {
+			t.Fatalf("the settled arithmetic admits %d read transactions, no more than the %d that fitted unsettled", admitted, worstCaseCapacity)
+		}
+		store, svc, owner := workloadFixture(t)
+		for i := int64(0); i < admitted; i++ {
+			if _, err := svc.ListRequirementsPage(owner, "", 1); err != nil {
+				t.Fatalf("read transaction %d of %d was refused: %v", i+1, admitted, err)
+			}
+		}
+		got := committedWorkloadUsage(t, store)
+		want := quota.Usage{Reads: perTransaction.Reads * admitted, Writes: perTransaction.Writes * admitted}
+		if got != want {
+			t.Fatalf("%d read transactions committed %+v, want %+v", admitted, got, want)
+		}
+		if got.Reads >= quota.DefaultBudget.Reads {
+			t.Fatalf("the committed total %d is not below the budget %d", got.Reads, quota.DefaultBudget.Reads)
+		}
+		// The reservation is still made BEFORE the work, and the budget was
+		// not raised: the next transaction's worst case no longer fits.
+		if _, err := svc.ListRequirementsPage(owner, "", 1); !errors.Is(err, quota.ErrOverBudget) {
+			t.Fatalf("read transaction %d = %v, want quota.ErrOverBudget: the worst case must still be reserved before the work", admitted+1, err)
+		}
+	})
+
+	t.Run("mutations settle their reservation the same way", func(t *testing.T) {
+		// The same derivation on the write component: the number of mutations
+		// that used to be a whole day's capacity is now what it costs, and the
+		// committed writes prove it.
+		worstCaseMutations := quota.DefaultBudget.Writes / quota.MutationUsage.Writes
+		if worstCaseMutations <= 0 {
+			t.Fatalf("worst-case mutation capacity = %d; the budget arithmetic is broken", worstCaseMutations)
+		}
+		store, svc, owner := workloadFixture(t)
+		var settled quota.Usage
+		for i := int64(0); i < worstCaseMutations; i++ {
+			if _, err := svc.Capture(owner, application.CaptureRequest{RequestID: fmt.Sprintf("many-capture-%d", i), Text: "x"}); err != nil {
+				t.Fatalf("mutation %d of %d was refused: %v", i+1, worstCaseMutations, err)
+			}
+			if i == 0 {
+				settled = committedWorkloadUsage(t, store)
+			}
+		}
+		got := committedWorkloadUsage(t, store)
+		want := quota.Usage{Reads: settled.Reads * worstCaseMutations, Writes: settled.Writes * worstCaseMutations}
+		if got != want {
+			t.Fatalf("%d mutations committed %+v, want %+v", worstCaseMutations, got, want)
+		}
+		if got.Writes >= quota.DefaultBudget.Writes {
+			t.Fatalf("the committed write total %d is not below the budget %d", got.Writes, quota.DefaultBudget.Writes)
+		}
+		if settled.Writes >= quota.MutationUsage.Writes {
+			t.Fatalf("one mutation settled to %+v, which credits nothing back against the worst case of %d writes", settled, quota.MutationUsage.Writes)
+		}
+	})
+}

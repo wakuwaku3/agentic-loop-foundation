@@ -41,12 +41,17 @@ func registerViaAPI(t *testing.T, h http.Handler, requestID, url string) string 
 	return id
 }
 
-// The three tests below deliberately use a fresh handler each, because a
-// bounded read transaction reserves internal/quota.ReadTransactionUsage
-// (6,001 reads) against the Installation's daily budget and the reservation
-// fails closed at 80% of it. Four owner reads in one store exhaust that
-// budget, which is a real production property, not a test artefact: it is why
-// the detail view is a bounded read and not a poll.
+// The three tests below use a fresh handler each. That was once load-bearing:
+// a bounded read transaction reserves internal/quota.ReadTransactionUsage
+// (6,001 reads) as its worst case, and until V2-087 the in-memory adapter never
+// settled that reservation, so four owner reads in one store exhausted the
+// Installation's daily budget and a fifth was refused. That was never a
+// production property -- the Firestore adapter has always trued the worst case
+// down to the documents a transaction actually touched -- it was one adapter
+// failing to apply the shared policy, and V2-087 fixed it: a read transaction
+// now settles to a handful of reads on both adapters and thousands of them fit
+// in a day. The fresh handler per test is kept because it is honest isolation,
+// not because the budget requires it.
 
 func TestRepositoryRegisterNormalisesAndIsListedAndDetailed(t *testing.T) {
 	h := testHandler(t)
