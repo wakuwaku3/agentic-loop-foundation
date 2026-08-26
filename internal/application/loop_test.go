@@ -1531,3 +1531,96 @@ func TestTheIncrementReadTakesIncrementIdsBecauseTheAdaptersDisagree(t *testing.
 		t.Fatalf("recover transitions = %d, want 1: the lost Execution belongs to an Increment the batch read must have returned", report.Recover.Transitions)
 	}
 }
+
+// TestTheEvaluateAndTheCompletionAreOneTransactionAndOneWrite is A9's atomicity
+// clause, asserted STRUCTURALLY because there is no way to arrange a valid proof
+// that domain.CompleteRequirementFromRelease then refuses: the proof is exactly
+// what it accepts. What CAN be asserted, and is, is the shape that makes the
+// half-state impossible.
+//
+// (1) loopCompleteRequirement opens EXACTLY ONE s.mutate.
+// (2) BOTH domain calls -- domain.DecideRequirement with RequirementEvaluate and
+// domain.CompleteRequirementFromRelease -- are inside that one callback.
+// (3) EXACTLY ONE u.SaveRequirement is staged, carrying the COMPLETED value.
+// Staging the evaluating value first and the completed value second inside one
+// transaction would be two writes describing one atomic step, and a store that
+// flushed the first and refused the second would leave precisely the state this
+// signature exists to make impossible.
+func TestTheEvaluateAndTheCompletionAreOneTransactionAndOneWrite(t *testing.T) {
+	fn := loopFunctionDecl(t, "loop.go", "loopCompleteRequirement")
+	mutates, saves, evaluates, completes := 0, 0, 0, 0
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		sel, isSel := call.Fun.(*ast.SelectorExpr)
+		if !isSel || sel.Sel == nil {
+			return true
+		}
+		switch sel.Sel.Name {
+		case "mutate":
+			mutates++
+		case "SaveRequirement":
+			saves++
+		case "CompleteRequirementFromRelease":
+			completes++
+		case "DecideRequirement":
+			evaluates++
+		}
+		return true
+	})
+	if mutates != 1 {
+		t.Fatalf("loopCompleteRequirement opens %d transactions, want exactly 1: the evaluate and the completion must be atomic", mutates)
+	}
+	if saves != 1 {
+		t.Fatalf("loopCompleteRequirement stages %d Requirement writes, want exactly 1 (the completed value): two writes describing one atomic step is the half-state this signature exists to prevent", saves)
+	}
+	if evaluates != 1 || completes != 1 {
+		t.Fatalf("loopCompleteRequirement calls domain.DecideRequirement %d times and domain.CompleteRequirementFromRelease %d times, want exactly 1 and 1", evaluates, completes)
+	}
+	// And the evaluate really is RequirementEvaluate, not some other kind.
+	found := false
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		sel, ok := n.(*ast.SelectorExpr)
+		if ok && sel.Sel != nil && sel.Sel.Name == "RequirementEvaluate" {
+			found = true
+		}
+		return true
+	})
+	if !found {
+		t.Fatal("loopCompleteRequirement never names domain.RequirementEvaluate; the completion must pass through evaluating")
+	}
+	// The behavioural corollary, over a real store: after a SUCCESSFUL pass the
+	// Requirement is completed at exactly TWO versions above the observed one --
+	// one for the evaluate and one for the completion -- and it is never
+	// observable in evaluating, because only one write was staged.
+	s, st, clk := allocService(t)
+	ctx := owner(context.Background())
+	version := loopReadyNamed(t, s, st, ctx, clk.now, "req-atomic")
+	loopReleaseIncrement(t, s, st, ctx, clk.now, "req-atomic", version, "atomic")
+	before := loopRequirement(t, st, ctx, "req-atomic")
+	revision := allocSetLimit(t, s, ctx, "promote-atomic", 20)
+	root := loopSyntheticRoot(t, []string{"loop-cap-alpha"})
+	if err := s.AttachReleaseSource(application.ReleaseSourceConfig{
+		Root: root, Repository: "loop-repo", EnvironmentClass: "preview-local",
+		AssembledAt: clk.now, Candidate: loopFullyEvidencedCandidate(t, root, revision, true),
+	}); err != nil {
+		t.Fatalf("AttachReleaseSource: %v", err)
+	}
+	t.Cleanup(s.DetachReleaseSource)
+	report, err := s.LoopPass(loopScheduler(t, context.Background()), application.LoopPassRequest{RequestID: "pass-atomic"})
+	if err != nil {
+		t.Fatalf("LoopPass: %v", err)
+	}
+	if report.Promotion.Completions != 1 {
+		t.Fatalf("completions = %d, want 1 (outcome %q reason %q)", report.Promotion.Completions, report.Promotion.Outcome, report.Promotion.Reason)
+	}
+	after := loopRequirement(t, st, ctx, "req-atomic")
+	if after.Status != domain.RequirementCompleted {
+		t.Fatalf("status = %q, want completed", after.Status)
+	}
+	if after.Version != before.Version+2 {
+		t.Fatalf("version = %d, want exactly two above %d: one for the evaluate and one for the completion, both in one transaction", after.Version, before.Version)
+	}
+}
