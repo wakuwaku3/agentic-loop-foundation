@@ -616,6 +616,29 @@ func (u *unit) Requirements(ctx context.Context) ([]domain.Requirement, error) {
 	return out, nil
 }
 
+// documentIDCursor translates the port's ordering key into the cursor value a
+// query ordered by cloudfirestore.DocumentID actually wants. The Go client's
+// own contract, stated verbatim in firestore.Query.StartAt's doc comment, is:
+// "If an OrderBy call uses the special DocumentID field path, the
+// corresponding value should be the document ID relative to the query's
+// collection." The client prefixes the collection's own full resource name
+// itself -- Query.fieldValuesToCursorValues builds the ReferenceValue as the
+// collection path joined to the string it is handed -- so a caller that joins
+// the collection path on first makes the installation and collection segments
+// appear twice and the server refuses the query with
+// `rpc error: code = InvalidArgument desc = Document parent name "...
+// /installations/<key>/requirements/installations/<key>/requirements/<docID>"
+// lacks "/" at index 203`, which internal/api then reported to the caller as
+// 400 invalid_request. Both paged reads below therefore pass the bare,
+// collection-relative document id and nothing else. A *DocumentRef is not
+// used on purpose: the client carries an unimplemented "TODO(jba): error if
+// document ref does not belong to the right collection" on that branch, so a
+// ref from another collection is silently accepted and returns the whole
+// unfiltered page -- a weaker guard than this one.
+func documentIDCursor(afterID string) (string, error) {
+	return PathKey(afterID)
+}
+
 func (u *unit) RequirementsPage(ctx context.Context, afterID string, limit int) ([]domain.Requirement, bool, error) {
 	if limit <= 0 || limit > application.MaxPageSize {
 		return nil, false, fmt.Errorf("invalid requirement page limit")
@@ -626,11 +649,11 @@ func (u *unit) RequirementsPage(ctx context.Context, afterID string, limit int) 
 	}
 	q := u.store.client.Collection(path).OrderBy(cloudfirestore.DocumentID, cloudfirestore.Asc)
 	if afterID != "" {
-		key, e := PathKey(afterID)
+		key, e := documentIDCursor(afterID)
 		if e != nil {
 			return nil, false, e
 		}
-		q = q.StartAfter(path + "/" + key)
+		q = q.StartAfter(key)
 	}
 	snaps, err := u.tx.Documents(q.Limit(limit + 1)).GetAll()
 	if err != nil {
@@ -756,11 +779,11 @@ func (u *unit) EventsPage(ctx context.Context, afterID string, limit int) ([]app
 	}
 	q := u.store.client.Collection(path).OrderBy(cloudfirestore.DocumentID, cloudfirestore.Asc)
 	if afterID != "" {
-		key, e := PathKey(afterID)
+		key, e := documentIDCursor(afterID)
 		if e != nil {
 			return nil, false, e
 		}
-		q = q.StartAfter(path + "/" + key)
+		q = q.StartAfter(key)
 	}
 	snaps, e := u.tx.Documents(q.Limit(limit + 1)).GetAll()
 	if e != nil {

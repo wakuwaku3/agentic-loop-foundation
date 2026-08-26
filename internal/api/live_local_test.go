@@ -236,6 +236,30 @@ func TestControlPlanePreviewLocalLive(t *testing.T) {
 		t.Fatalf("backlog did not contain requirement_id=%s: %+v", requirementID, backlog.body)
 	}
 
+	// --- Backlog paging over the cursor the route itself hands out (V2-079).
+	// This is the route-level proof of the observable outcome: a cursor the
+	// Backlog just returned is accepted by the very next request against real
+	// persistence, so a Backlog larger than one page can be paged at all. Two
+	// more Requirements are captured first so the Backlog cannot fit in a
+	// single page_size=1 page, then every next_cursor is fed straight back
+	// until a page reports none. ---
+	captured := []string{requirementID}
+	for i, text := range []string{"V2-079 second Backlog row", "V2-079 third Backlog row"} {
+		more := liveCall(t, client, http.MethodPost, base+"/v1/requirements", ownerToken, map[string]any{
+			"request_id": fmt.Sprintf("live-capture-page-%d", i+2),
+			"text":       text,
+		})
+		if more.status != http.StatusCreated {
+			t.Fatalf("capture #%d for the paging walk: expected 201, got %d: %+v", i+2, more.status, more.body)
+		}
+		id, _ := more.body["requirement_id"].(string)
+		if id == "" {
+			t.Fatalf("capture #%d response missing requirement_id: %+v", i+2, more.body)
+		}
+		captured = append(captured, id)
+	}
+	walkBacklogWithTheRouteOwnCursor(t, client, base, ownerToken, captured)
+
 	// --- Requirement display ---
 	detail := liveCall(t, client, http.MethodGet, base+"/v1/requirements/"+requirementID, ownerToken, nil)
 	if detail.status != http.StatusOK {
@@ -312,6 +336,66 @@ func TestControlPlanePreviewLocalLive(t *testing.T) {
 	// before flush, so exhaustion requires driving real cumulative usage,
 	// not a fake counter. ---
 	exhaustWriteBudgetOrFail(t, client, base2, ownerToken)
+}
+
+// walkBacklogWithTheRouteOwnCursor pages GET /v1/requirements at page_size=1
+// over real HTTP, feeding back each next_cursor the route itself returned,
+// until a page carries none, and asserts that every captured requirement_id
+// appears exactly once across the whole walk -- no duplicate and no omission.
+// It asserts NOTHING about the order the rows arrive in: the Firestore adapter
+// orders by the document id, which is base64url of the raw id, and base64url is
+// not order-preserving, so raw-id order and page order legitimately differ.
+// The walk is bounded by the number of captured Requirements, never by a timer.
+func walkBacklogWithTheRouteOwnCursor(t *testing.T, client *http.Client, base, ownerToken string, captured []string) {
+	t.Helper()
+	seen := map[string]int{}
+	cursor := ""
+	bound := len(captured) + 2
+	for pages := 0; ; pages++ {
+		if pages > bound {
+			t.Fatalf("Backlog walk did not terminate within %d pages (seen=%v)", bound, seen)
+		}
+		url := base + "/v1/requirements?page_size=1"
+		if cursor != "" {
+			// A v1 cursor is base64url without padding, so every byte of it is
+			// already safe in a query string and needs no escaping.
+			url += "&cursor=" + cursor
+		}
+		page := liveCall(t, client, http.MethodGet, url, ownerToken, nil)
+		if page.status != http.StatusOK {
+			t.Fatalf("Backlog page %d with the cursor the route itself returned (%q): expected 200, got %d: %+v", pages, cursor, page.status, page.body)
+		}
+		rows, _ := page.body["requirements"].([]any)
+		for _, row := range rows {
+			m, ok := row.(map[string]any)
+			if !ok {
+				continue
+			}
+			if id, _ := m["requirement_id"].(string); id != "" {
+				seen[id]++
+			}
+		}
+		next, _ := page.body["next_cursor"].(string)
+		if next == "" {
+			if len(rows) != 1 {
+				t.Fatalf("terminal Backlog page carried %d rows, want exactly 1 at page_size=1: %+v", len(rows), page.body)
+			}
+			break
+		}
+		if len(rows) != 1 {
+			t.Fatalf("non-terminal Backlog page %d carried %d rows, want exactly 1 at page_size=1: %+v", pages, len(rows), page.body)
+		}
+		cursor = next
+	}
+	for _, id := range captured {
+		if seen[id] != 1 {
+			t.Fatalf("requirement_id %s appeared %d times across the Backlog walk, want exactly 1 (seen=%v)", id, seen[id], seen)
+		}
+	}
+	if len(seen) != len(captured) {
+		t.Fatalf("Backlog walk covered %d distinct requirement_ids, want the %d this run captured (seen=%v)", len(seen), len(captured), seen)
+	}
+	t.Logf("Backlog paged to exhaustion at page_size=1 over real HTTP: %d captured requirement_ids each covered exactly once", len(captured))
 }
 
 func backlogContains(body map[string]any, requirementID string) bool {

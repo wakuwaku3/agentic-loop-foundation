@@ -2932,3 +2932,86 @@ func TestOwnerConsoleReportsBothRelationsAndTheDisposition(t *testing.T) {
 		}
 	}
 }
+
+// TestTheBacklogStillRefusesACursorItDidNotIssue pins the refusal boundary in
+// BOTH directions, in the same change that makes a cursor the route issued
+// actually work (V2-079). The fix moved a query argument inside the Firestore
+// adapter; it touched no validation, and this test is what says so rather than
+// promising it.
+//
+// Measured on this tree, the shapes the route refuses with 400 invalid_request
+// and the shapes it accepts with 200 are exactly what they were before the fix.
+// The boundary the refusals must NOT cross is asserted here too: a well-formed
+// v1 envelope naming a Requirement id that does not exist is NOT an error, and
+// neither is one naming an id that belongs to another aggregate; the cursor
+// carries an opaque ordering key, not a proof of existence, and turning either
+// into a 400 would be a behaviour change this task forbids itself.
+func TestTheBacklogStillRefusesACursorItDidNotIssue(t *testing.T) {
+	h := testHandler(t)
+	for _, r := range []string{"one", "two", "three"} {
+		w := call(h, http.MethodPost, "/v1/requirements", `{"request_id":"`+r+`","text":"x"}`, "owner")
+		if w.Code != http.StatusCreated {
+			t.Fatalf("seeding %s: %d %s", r, w.Code, w.Body.String())
+		}
+	}
+	first := call(h, http.MethodGet, "/v1/requirements?page_size=1", "", "owner")
+	if first.Code != http.StatusOK {
+		t.Fatalf("first page: %d %s", first.Code, first.Body.String())
+	}
+	var page struct {
+		NextCursor string `json:"next_cursor"`
+	}
+	if err := json.Unmarshal(first.Body.Bytes(), &page); err != nil || page.NextCursor == "" {
+		t.Fatalf("first page carried no cursor to work from: %v %s", err, first.Body.String())
+	}
+	// The cursor the route itself issued is accepted: that is the outcome this
+	// task delivers, and it is what makes the refusals below meaningful rather
+	// than a route that refuses everything.
+	if w := call(h, http.MethodGet, "/v1/requirements?page_size=1&cursor="+page.NextCursor, "", "owner"); w.Code != http.StatusOK {
+		t.Fatalf("the cursor the route itself issued was refused: %d %s", w.Code, w.Body.String())
+	}
+
+	envelope := func(body string) string { return base64.RawURLEncoding.EncodeToString([]byte(body)) }
+	for _, bad := range []struct{ name, cursor string }{
+		// Fabricated: not base64url at all ("." and "*" are outside the alphabet).
+		{"fabricated-not-base64url", "fabricated.cursor*the-route-never-issued"},
+		// A well-formed base64url envelope whose version is not v1.
+		{"envelope-version-is-not-v1", envelope(`{"v":"v2","after":"requirement-b"}`)},
+		// A truncated prefix of a cursor the route actually issued.
+		{"truncated-prefix-of-a-real-cursor", page.NextCursor[:len(page.NextCursor)/2]},
+		// Another collection's key space: the Firestore document key of an
+		// Increment, which is base64url of the Increment id. It decodes, and
+		// what it decodes to is not a cursor envelope.
+		{"another-collections-document-key-space", envelope("increment-b")},
+		// The lease-reconciliation paged read's own cursor shape, which is
+		// base64url of "<expires-at>\n<document-key>": another key space again,
+		// and refused by this envelope rather than silently paged.
+		{"another-paged-reads-cursor-shape", envelope("2023-11-14T22:13:20Z\naW5jcmVtZW50LWI")},
+	} {
+		t.Run(bad.name, func(t *testing.T) {
+			w := call(h, http.MethodGet, "/v1/requirements?page_size=1&cursor="+bad.cursor, "", "owner")
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400: %s", w.Code, w.Body.String())
+			}
+			if !strings.Contains(w.Body.String(), `"error":"invalid_request"`) {
+				t.Fatalf("error code is not invalid_request: %s", w.Body.String())
+			}
+		})
+	}
+
+	// The boundary the refusals must not cross. Both of these are 200 today and
+	// this task must not turn either into a 400: the ordering key inside the
+	// envelope is opaque, and a page positioned after a key no row holds is an
+	// empty or later page, not a caller mistake.
+	for _, ok := range []struct{ name, cursor string }{
+		{"v1-envelope-naming-a-requirement-that-does-not-exist", envelope(`{"v":"v1","after":"requirement-does-not-exist"}`)},
+		{"v1-envelope-naming-another-aggregates-id", envelope(`{"v":"v1","after":"increment-b"}`)},
+	} {
+		t.Run(ok.name, func(t *testing.T) {
+			w := call(h, http.MethodGet, "/v1/requirements?page_size=1&cursor="+ok.cursor, "", "owner")
+			if w.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200 (this shape is accepted today and must stay accepted): %s", w.Code, w.Body.String())
+			}
+		})
+	}
+}

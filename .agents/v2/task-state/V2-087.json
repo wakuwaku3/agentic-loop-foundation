@@ -1,0 +1,60 @@
+{
+  "schema_version": "v1",
+  "id": "ts-v2-087",
+  "kind": "canonical-task-state",
+  "task_id": "V2-087",
+  "status": "queued",
+  "dependencies": [
+    "V2-079"
+  ],
+  "outcome": "Make the in-memory adapter settle its reservation the way the real one does, so a test that reads a handful of times does not exhaust a day's budget and a passing test means the same thing on both adapters.",
+  "non_goals": [
+    "Do not raise the budget to make the symptom go away",
+    "Do not stop reserving before the work",
+    "Do not let the two adapters disagree about what a reservation costs"
+  ],
+  "actor": "sol",
+  "input_refs": [
+    "V2-079",
+    "V2-087"
+  ],
+  "input_hash": "abaae2532203ef2cf5c96e6c20fa753ab56759729b9d7011a53eb9e47f2b6e66",
+  "output_refs": [
+    "V2-087"
+  ],
+  "output_hash": "e4faeededa7fcd6f575966ffd1b457ea605cb655febf22dd919bdf7bce121381",
+  "owner": "terra",
+  "next_owner": "terra",
+  "retry_budget": {
+    "max_attempts": 2,
+    "attempts_used": 0,
+    "remaining": 2
+  },
+  "release_eligible": false,
+  "transitions": [
+    {
+      "sequence": 1,
+      "at": "2026-08-26T08:00:00Z",
+      "from_status": null,
+      "to_status": "queued",
+      "actor": "sol",
+      "input_refs": [
+        "V2-079",
+        "V2-087"
+      ],
+      "input_hash": "abaae2532203ef2cf5c96e6c20fa753ab56759729b9d7011a53eb9e47f2b6e66",
+      "output_refs": [
+        "V2-087"
+      ],
+      "output_hash": "e4faeededa7fcd6f575966ffd1b457ea605cb655febf22dd919bdf7bce121381",
+      "owner": "terra",
+      "next_owner": "terra",
+      "retry_budget": {
+        "max_attempts": 2,
+        "attempts_used": 0,
+        "remaining": 2
+      },
+      "reason": "the cursor work measured that a read transaction reserves a worst case of six thousand and one reads and the in-memory adapter never settles it, while the real adapter counts what it actually read and trues the reservation up. The consequence is that only four read transactions fit in a day on the in-memory adapter, so a seven-page walk had to advance an injected clock by a day between pages to run at all. A budget that binds at four reads on one adapter and not the other means a green test on the fast adapter is not evidence about the slow one"
+    }
+  ]
+}

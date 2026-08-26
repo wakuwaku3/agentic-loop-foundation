@@ -545,20 +545,72 @@ func (fx *dogfood) capBacklogVisibility(t *testing.T) {
 		t.Fatalf("a bounded page over %d captures reported no next_cursor: %+v", len(fx.capturedIDs), page.body)
 	}
 
-	// The cursor is measured, not assumed. Against a real Firestore it does
-	// not work: internal/store/firestore's RequirementsPage passes
-	// StartAfter(collectionPath + "/" + key) while ordering by
-	// firestore.DocumentID, and the Go client treats a string cursor for
-	// DocumentID as a document id, so it appends that value to the collection
-	// path again. The emulator therefore refuses the query and the route
-	// answers 400. This is a defect in a prohibited path; it is recorded, not
-	// fixed (escalation E22-11).
-	second := dogfoodCall(t, fx.client, http.MethodGet, fx.base+"/v1/requirements?page_size=25&cursor="+url.QueryEscape(cursor), fx.owner(), nil)
-	cursorWorks := second.status == http.StatusOK
-	if cursorWorks {
-		t.Fatalf("the second Backlog page succeeded (%d): the measured cursor defect recorded below no longer holds and this capability's verdict must be re-judged, not assumed", second.status)
+	// The cursor is measured, not assumed -- and what is measured now is the
+	// whole walk, not one hop.
+	//
+	// HISTORY, kept rather than deleted. On 2026-08-26, V2-022's dogfood run
+	// measured escalation E22-11 right here: the second Backlog page was
+	// refused with HTTP 400. internal/store/firestore's RequirementsPage
+	// passed StartAfter(collectionPath + "/" + key) while ordering by
+	// firestore.DocumentID, and the Go client, whose contract is that a string
+	// cursor under a DocumentID order is the document id RELATIVE to the
+	// queried collection, prefixed the collection's own resource name a second
+	// time; the server refused the doubled parent, and internal/api's
+	// unclassified-error default dressed that storage-side InvalidArgument as
+	// 400 invalid_request. This probe then FAILED ON PURPOSE if the second page
+	// ever succeeded, with a message instructing the reader to re-judge this
+	// capability's verdict rather than assume it.
+	//
+	// V2-079 supplied exactly that judgement: it replaced both doubled-prefix
+	// expressions with the bare collection-relative document id through one
+	// named helper (internal/store/firestore.documentIDCursor), changing no
+	// byte of what this route returns. So the inverted assertion is replaced by
+	// the assertion it demanded -- page to exhaustion at page_size=1, feeding
+	// back each next_cursor the route itself issued, and cover every
+	// Requirement this run captured exactly once. No order is asserted: the
+	// Firestore adapter orders by the base64url document key, which is not raw
+	// id order. The capability VERDICT remains the M5 re-dogfood's to issue.
+	walked := map[string]int{}
+	countRows := func(raw []any) {
+		for _, row := range raw {
+			if m, ok := row.(map[string]any); ok {
+				if id, _ := m["requirement_id"].(string); id != "" {
+					walked[id]++
+				}
+			}
+		}
 	}
-	t.Logf("E22-11 measured: GET /v1/requirements with the next_cursor this run was handed -> %d %v; the Backlog cannot be paged past its first page against a real Firestore", second.status, second.body["error"])
+	countRows(rows)
+	// The walk is bounded by the number of Requirements this run captured,
+	// never by a timer.
+	bound := len(fx.capturedIDs) + 2
+	for pages := 1; ; pages++ {
+		if pages > bound {
+			t.Fatalf("the Backlog walk did not terminate within %d pages (walked=%v)", bound, walked)
+		}
+		next := dogfoodCall(t, fx.client, http.MethodGet, fx.base+"/v1/requirements?page_size=1&cursor="+url.QueryEscape(cursor), fx.owner(), nil)
+		if next.status != http.StatusOK {
+			t.Fatalf("Backlog page %d with the next_cursor this run was handed: expected 200, got %d: %+v", pages, next.status, next.body)
+		}
+		nextRows, _ := next.body["requirements"].([]any)
+		countRows(nextRows)
+		cursor, _ = next.body["next_cursor"].(string)
+		if cursor == "" {
+			if len(nextRows) != 1 {
+				t.Fatalf("terminal Backlog page carried %d rows, want exactly 1 at page_size=1: %+v", len(nextRows), next.body)
+			}
+			break
+		}
+		if len(nextRows) != 1 {
+			t.Fatalf("non-terminal Backlog page %d carried %d rows, want exactly 1 at page_size=1: %+v", pages, len(nextRows), next.body)
+		}
+	}
+	for _, id := range fx.capturedIDs {
+		if walked[id] != 1 {
+			t.Fatalf("Requirement %s appeared %d times across the Backlog walk, want exactly 1 (walked=%v)", id, walked[id], walked)
+		}
+	}
+	t.Logf("the Backlog was paged to exhaustion at page_size=1 over the cursor the route itself issued: every one of the %d Requirements this run captured was covered exactly once, with no duplicate and no omission", len(fx.capturedIDs))
 
 	// The whole Backlog is still readable in one bounded page, so the rest of
 	// the declared success condition can still be measured against this run's
@@ -631,7 +683,7 @@ func (fx *dogfood) capBacklogVisibility(t *testing.T) {
 	}
 	t.Logf("E22-7 measured: GET /v1/requirements ignores repository_id (%d rows with and without it); the Backlog cannot be filtered by Repository", len(filteredRows))
 	t.Logf("what WAS observed: a bounded page, a next_cursor, and a queueSummary whose counts by Requirement status, by Increment status and active Executions agree with the %d Requirements this run itself created; the declared rollback condition also holds, because every read above left the canonical state unchanged.", total)
-	t.Log("cap-backlog-visibility recorded FAILED against its declared success condition, and its evidence_ids stays empty. The reason is measured, not argued: the Backlog cannot be paged past its first page against a real Firestore (E22-11), so listRequirements does not return the current Backlog state without shortfall for any Backlog larger than one page. The declared user action \"filter by related Repository\" is additionally unimplemented (E22-7).")
+	t.Log("E22-11, measured on 2026-08-26 and the reason cap-backlog-visibility was recorded FAILED then, no longer reproduces: the Backlog was paged past its first page over the cursor the route itself issued, walked to exhaustion, covering every Requirement this run captured exactly once (V2-079). The remaining measured shortfall is E22-7: the declared user action \"filter by related Repository\" is still unimplemented. This helper records what it measured and issues no verdict; the cap-backlog-visibility verdict and its evidence_ids belong to the M5 re-dogfood.")
 }
 
 // dogfoodDocSet is the documentation role's real member set (the same five

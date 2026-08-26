@@ -1,0 +1,225 @@
+{
+ "schema_version": "v1",
+ "id": "ev-v2-079-api",
+ "kind": "evidence",
+ "created_at": "2026-08-26T13:00:00Z",
+ "correlation_id": "v2-079-backlog-cursor",
+ "task_id": "V2-079",
+ "component": "api",
+ "evidence_key": "5098f86e8840c061a8b561194c720066a76c1dbe95a969971b5424872837bcdd",
+ "result": "partial",
+ "observed_at": "2026-08-26T13:00:00Z",
+ "checks": [
+  {
+   "name": "scope-boundary",
+   "status": "passed",
+   "argv": [
+    "git",
+    "status",
+    "--porcelain"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 30,
+   "summary": "Scope boundary for V2-079, written into all three evidence records BEFORE any source file was edited (recorded at base commit cc17473495a4ad5b562e5a7892b5d4e64af0b084, working tree clean). ROW 1 -- what this task makes true: a cursor the Backlog route returned is accepted by the very next request against real persistence, and the concatenation of pages covers every record exactly once, on BOTH adapters (internal/store/firestore and internal/store/memory), for RequirementsPage and for EventsPage. ROW 2 -- what it deliberately does not do: it changes no byte of what the route returns (proved by A15's before/after cursor measurement); it widens no page bound (application.MaxPageSize and boundPageSize are untouched); it adds no Firestore index (firestore.indexes.json is prohibited and byte-unchanged); it changes no document id and no stored field; it changes no query shape, filter or ordering; and it changes the in-memory adapter's behaviour not at all (internal/store/memory/store.go is prohibited; only its test file is touched). ROW 3 -- what it records but does not fix: (a) internal/api's domainError defaults to 400 invalid_request for any error it does not classify, which dressed a storage-side gRPC InvalidArgument as a caller mistake (dp-v2-079 d7) -- internal/api/api.go is prohibited here and the default is escalated, not changed; (b) the two adapters do not share one total order because base64url is not order-preserving (dp-v2-079 d4), so no cross-adapter test asserts an order; (c) internal/application/allocation.go and internal/application/release_surface.go each consume the FIRST page of RequirementsPage under an adapter-specific order (d4), a pre-existing divergence left alone; (d) internal/reconciler/orphan.go's OrphanSweep is the second victim of the same defect and is repaired without being edited (A11). ROW 4 -- what only a later task can establish: the cap-backlog-visibility verdict, which needs the M5 re-dogfood (dp-v2-079 d10); the dogfood assertion this task rewrites is compiled and vetted but NOT executed here, so the api record's result is partial. ROW 5 -- this task passes no release gate on its own: no release_eligible entry is produced, no capability id is cited in any of these three records, contracts/release-contract/** is untouched and .agents/v2/evidence/V2-022-release-live-dogfood.json is untouched."
+  },
+  {
+   "name": "environment-identifier",
+   "status": "passed",
+   "argv": [
+    "uname",
+    "-srm"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 30,
+   "summary": "execution environment: uname -srm = Linux 6.18.33.2-microsoft-standard-WSL2 x86_64; devbox run --pure -- go version = go1.25.0 linux/amd64; devbox 0.17.2, environment resolved from this worktree's devbox.json/devbox.lock, both untouched by this task; cloud.google.com/go/firestore v1.25.0 as declared in go.mod, untouched. Worktree /home/takushi/repos/agentic-loop-foundation-worktrees/v2-task-079 on branch v2-task/V2-079, base commit cc17473495a4ad5b562e5a7892b5d4e64af0b084. The only external process any check started is the local Firestore emulator that scripts/firestore-emulator.sh starts (firebase emulators:start --only firestore --project agentic-loop-test on a free 127.0.0.1 port) and, for the route-level check, the real cmd/control-plane binary this repository builds. NO real Provider CLI was started at any point -- no claude, no codex, no opencode, not even --version -- no gh child was started, and no Google Cloud resource was touched."
+  },
+  {
+   "name": "baseline-and-after-test-counts",
+   "status": "passed",
+   "argv": [
+    "devbox",
+    "run",
+    "--pure",
+    "--",
+    "go",
+    "test",
+    "-list",
+    ".*",
+    "./internal/api"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 600,
+   "summary": "Baseline re-measured at base commit cc17473495a4ad5b562e5a7892b5d4e64af0b084 with devbox run --pure -- go test -list '.*' ./<pkg> counting lines matching ^Test, then re-measured on the final tree. BEFORE -> AFTER: internal/store/firestore 33 -> 35; internal/store/memory 11 -> 13; internal/api 53 -> 54; internal/application 180 -> 180; internal/contracts 33 -> 33; internal/reconciler 16 -> 16. Every one of the six baseline counts written in the Work Order AGREED with the measurement -- no disagreement to report, which is itself worth recording because the Work Order warned that the last eight tasks each found one. The deltas are exactly the tests A6, A7 and A9 add and nothing else: firestore +2 = A6 + A7; memory +2 = A6 + A7; api +1 = A9 only, because A8 EXTENDS the existing top-level TestControlPlanePreviewLocalLive rather than adding a name, and A12 rewrites the body of the existing capBacklogVisibility subtest helper. No existing test was deleted and none was renamed: git diff shows no removed 'func Test' line in any touched file. LINE-NUMBER measurements against the Work Order's a258ed2569205dec3585d303ecb7f1c4fdba8254 numbers. AGREEING at cc17473495a4ad5b562e5a7892b5d4e64af0b084: store.go:633 RequirementsPage's StartAfter, store.go:763 EventsPage's StartAfter, store.go:957 ExpiredActiveLeases's StartAfter, store.go:183 PathKey, store.go:2171 readCollection, reconciler/orphan.go:54 the sweep's RequirementsPage call, memory/store.go:208-227 the memory RequirementsPage, application/readmodels.go:35 decodeCursor, api/api.go:1116 domainError, application/ports.go:130 EventsPage, application/allocation.go:603 and application/release_surface.go:265 the first-page-only reads, api/live_local_test.go:231 the existing GET /v1/requirements?page_size=25, and store_test.go:316-326 the ExpiredActiveLeases round trip. DISAGREEING at cc17473495a4ad5b562e5a7892b5d4e64af0b084 (measured value first, Work Order value second): ActiveLeases 987 not 995; the pending control-verification scan PendingControlProgresses 1035 not 1043; the links-by-repository scan RequirementIDsForRepository 1480 not 1496; the publication-observation scan PublicationObservationsForIncrement 1561 not 1577; the outbox candidate scan Outboxes 1905 not 1918. On the FINAL tree, after the 23-line helper is inserted, those same functions are at 1010, 1058, 1503, 1584, 1928 and readCollection at 2194, with documentIDCursor at 638, RequirementsPage at 642, EventsPage at 775 and ExpiredActiveLeases at 961."
+  },
+  {
+   "name": "route-level-live-walk-over-real-persistence",
+   "status": "passed",
+   "argv": [
+    "devbox",
+    "run",
+    "--pure",
+    "-e",
+    "AGENTIC_LOOP_LIVE_LOCAL=1",
+    "--",
+    "scripts/firestore-emulator.sh",
+    "go",
+    "test",
+    "-count=1",
+    "-v",
+    "-run",
+    "TestControlPlanePreviewLocalLive",
+    "./internal/api"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 1800,
+   "summary": "A8, the executable route-level proof over REAL persistence, at the layer the M5 dogfood measured the defect and with no Provider involved. TestControlPlanePreviewLocalLive in internal/api/live_local_test.go was extended: it now captures two more Requirements (three in total for this run), then pages GET /v1/requirements?page_size=1 over real HTTP against the real cmd/control-plane binary it builds itself and the real Firestore emulator, feeding back each next_cursor the route returned until a page carries none, and asserts every captured requirement_id appears exactly ONCE across the whole walk and that the terminal page carries no next_cursor. The walk is bounded by the number of captured Requirements, never by a timer, and asserts no order. VERDICT: `--- PASS: TestControlPlanePreviewLocalLive (9.94s)` and `ok github.com/takushi/agentic-loop-foundation/v2/internal/api 9.946s`, with the run's own log line `Backlog paged to exhaustion at page_size=1 over real HTTP: 3 captured requirement_ids each covered exactly once`. The rest of that test still passes unchanged in the same run, including the direct emulator reads (requirements=3, controls=1, events=4, outbox=1, quota=1 documents) and the budget hard guard tripping as a real HTTP 429 quota_exhausted after 1991 real capture mutations. AGENTIC_LOOP_LIVE_LOCAL was passed with devbox run's -e and never as a shell prefix, because devbox run --pure strips environment variables."
+  },
+  {
+   "name": "refusal-is-not-weakened",
+   "status": "passed",
+   "argv": [
+    "devbox",
+    "run",
+    "--pure",
+    "--",
+    "go",
+    "test",
+    "-count=1",
+    "-v",
+    "-run",
+    "TestTheBacklogStillRefusesACursorItDidNotIssue",
+    "./internal/api"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 600,
+   "summary": "A9, refusal asserted rather than promised, in the same change that makes a real cursor work. New test TestTheBacklogStillRefusesACursorItDidNotIssue in internal/api/api_test.go. VERDICT: `--- PASS` for the parent and for all seven subtests, `ok github.com/takushi/agentic-loop-foundation/v2/internal/api 0.005s`, and PASS again under `make component-api` and under the -race validation run. REFUSED WITH 400 AND \"error\":\"invalid_request\", each asserted: (1) a fabricated cursor that is not base64url (fabricated.cursor*not-base64url); (2) a well-formed base64url envelope whose version is not v1 ({\"v\":\"v2\",...}); (3) a truncated prefix of a cursor the route ACTUALLY issued in the same test (the first half of the real next_cursor; prefixes of length 20, 21, 22, 23 and 44 were all measured 400 before the assertion was written); (4) another collection's key space -- the Firestore DOCUMENT KEY of an Increment, base64url(\"increment-b\"), which decodes cleanly and is not a cursor envelope; and additionally (5) another paged read's own cursor shape, base64url of \"<expires-at>\\n<document-key>\" as ExpiredActiveLeases emits it. The test also asserts the cursor the route itself issued is accepted with 200, so the file cannot pass by refusing everything. MEASURED DISAGREEMENT WITH THE WORK ORDER'S PARENTHETICAL, recorded rather than acted on, because acting on it is exactly what the design forbids: A9 names the fourth shape as 'a well-formed v1 envelope whose after names another collection's key space (an Increment id)'. Measured on this tree, base64url({\"v\":\"v1\",\"after\":\"increment-b\"}) returns 200, not 400 -- and it must, because A9's own boundary clause says a well-formed envelope naming a Requirement id that does not exist is not an error today and must not become one, and an Increment id is precisely such a string: nothing structurally distinguishes the two id namespaces inside the envelope, application.decodeCursor validates shape and not existence, and PathKey accepts any non-empty valid-UTF-8 key under the byte limit. Turning that shape into a 400 would be a behaviour change turning a currently-accepted cursor into a refusal, which the constraints forbid outright. So the fourth shape is asserted in the form that IS refused -- another collection's document key space -- and the two accepted shapes are pinned as 200 in the same test (v1-envelope-naming-a-requirement-that-does-not-exist and v1-envelope-naming-another-aggregates-id) so a later change cannot quietly turn either into a 400. THE BOUNDARY THIS TEST MUST NOT CROSS, stated as A9 requires: a well-formed envelope naming a Requirement id that does not exist is NOT an error; measured, a fabricated document id returns an empty page from Firestore (0 rows, no error) and the memory adapter returns the page positioned after that key. Nothing in this task's diff touches application.decodeCursor, PathKey, boundPageSize, application.MaxPageSize or internal/api's error classification, so no refusal was weakened and none was added."
+  },
+  {
+   "name": "dogfood-tripwire-replaced-compiled-and-vetted-not-executed",
+   "status": "skipped",
+   "argv": [
+    "devbox",
+    "run",
+    "--pure",
+    "--",
+    "go",
+    "vet",
+    "./internal/api"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 600,
+   "summary": "A12, the dogfood tripwire turned into the assertion it demanded -- and honestly recorded as NOT EXECUTED. STATUS SKIPPED. In internal/api/live_dogfood_test.go, capBacklogVisibility used to FAIL ON PURPOSE when the second Backlog page succeeded (`t.Fatalf(\"the second Backlog page succeeded (%d): the measured cursor defect recorded below no longer holds and this capability's verdict must be re-judged, not assumed\")`). That inverted assertion is replaced by the same full-walk coverage assertion A8 uses, over this run's own captured ids: page GET /v1/requirements?page_size=1 to exhaustion, feed back each next_cursor, bound the walk by len(fx.capturedIDs)+2 rather than by any timer, require every non-terminal page to carry exactly one row and the terminal page to carry no cursor, and require every id in fx.capturedIDs to appear exactly once. No order is asserted. The recorded E22-11 history is KEPT in the comment as history, with its date (2026-08-26) and its mechanism, and the comment adds that V2-079 supplied the judgement the old message asked for and that the capability VERDICT remains the M5 re-dogfood's to issue. Two edits were made in that file and no more: the inverted assertion block inside capBacklogVisibility, and the final t.Log of that same helper, which asserted in prose that the Backlog cannot be paged past its first page -- leaving it would have printed a statement this task just falsified into the M5 re-dogfood's own log, and it is the same helper A12 authorises changing. It now reports that E22-11 no longer reproduces, that E22-7 (repository_id is still ignored) remains the measured shortfall, and that the verdict belongs to the re-dogfood. No other helper, no gate, no name and no other line in the file was changed: dogfoodEligible, dogfoodIdentifiers, the E22-7 probe and every other capability helper are byte-unchanged, and the file's net/url import is still used by the rewritten walk so no import was added or removed. WHY THIS CHECK IS SKIPPED AND NOT A PASS: the code was COMPILED and VETTED -- devbox run --pure -- go build ./... succeeded and devbox run --pure -- go vet ./internal/api is clean, and go vet type-checks test files -- but it was NOT EXECUTED, because TestFoundationPreviewLocalDogfood additionally requires the Provider gate (AGENTIC_LOOP_LIVE_DOGFOOD=1 plus AGENTIC_LOOP_LIVE_PROVIDER=1) and makes real claude invocations that this task does not authorise. The gate that executes it is the M5 RE-DOGFOOD. This is why this record's result is PARTIAL and never passed."
+  },
+  {
+   "name": "capability-impact-and-the-required-re-dogfood",
+   "status": "passed",
+   "argv": [
+    "git",
+    "status",
+    "--porcelain",
+    "contracts",
+    ".agents/v2/evidence/V2-022-release-live-dogfood.json"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 60,
+   "summary": "A14, capability impact recorded as a judgement with its reasoning, citing no capability id beyond the surface name the Work Order itself uses and editing neither contracts/release-contract/** nor V2-022's dogfood record (both byte-unchanged; the capability-evidence reverse check is scoped to V2-022's records and stays green). The Backlog capability's declared user action is to list the Installation's Requirements as ONE Backlog over the owner surface GET /v1/requirements. That surface returns a BOUNDED page, so its cursor is the ONLY way to see a Backlog larger than one page: page_size is capped by boundPageSize/application.MaxPageSize, which this task did not widen. At cc17473495a4ad5b562e5a7892b5d4e64af0b084 the capability could therefore be exercised only for a Backlog that fits in a single page, because the second request was refused with HTTP 400. After this task it is demonstrable for ANY size, and that is executed rather than claimed: the A8 route-level walk pages a three-Requirement Backlog to exhaustion at page_size=1 over real HTTP against real persistence. Consequently an M5 RE-DOGFOOD IS REQUIRED and is a coordinator-owned follow-up: this task issues no capability verdict, writes no evidence id for any capability, and sets release_eligible false on all three of its records."
+  },
+  {
+   "name": "component-api",
+   "status": "passed",
+   "argv": [
+    "devbox",
+    "run",
+    "--pure",
+    "--",
+    "make",
+    "component-api"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 600,
+   "summary": "VERDICT: `ok github.com/takushi/agentic-loop-foundation/v2/internal/api 0.045s`. Top-level test count 53 -> 54: the one name A9 adds. A8 extended the existing TestControlPlanePreviewLocalLive and A12 rewrote the body of the existing capBacklogVisibility helper, so neither adds a name. Both live tests skip under this target because their gates are unset, which is what keeps make check free of processes; that is why the route-level walk has its own gated, executed check above and why the dogfood check is recorded skipped."
+  },
+  {
+   "name": "validation-argv",
+   "status": "passed",
+   "argv": [
+    "devbox",
+    "run",
+    "--pure",
+    "--",
+    "scripts/firestore-emulator.sh",
+    "go",
+    "test",
+    "-race",
+    "-count=1",
+    "./internal/store/firestore",
+    "./internal/store/memory",
+    "./internal/api",
+    "./internal/contracts"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 2400,
+   "summary": "The Work Order's validation argv, run to completion on the final tree with the three evidence records registered. VERDICT LINES, verbatim: `ok github.com/takushi/agentic-loop-foundation/v2/internal/store/firestore 13.903s`, `ok github.com/takushi/agentic-loop-foundation/v2/internal/store/memory 1.031s`, `ok github.com/takushi/agentic-loop-foundation/v2/internal/api 1.198s`, `ok github.com/takushi/agentic-loop-foundation/v2/internal/contracts 1.779s`. With -race, under the local Firestore emulator that scripts/firestore-emulator.sh actually started, so the store cases ran instead of skipping. An earlier run of the identical argv, before the records were registered, was green on the same three code packages (firestore 13.464s, memory 1.035s, api 1.214s) and red only on internal/contracts' TestActiveEvidenceIndex, which is the registration check. Judged by these verdict lines and never by devbox run's shell exit status. The full `devbox run --pure -- make check` was deliberately NOT run: the coordinator runs it once at integration."
+  },
+  {
+   "name": "whole-tree-vet-and-test",
+   "status": "passed",
+   "argv": [
+    "devbox",
+    "run",
+    "--pure",
+    "--",
+    "go",
+    "vet",
+    "./..."
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 1800,
+   "summary": "Whole-tree verification by the implementer, judged by verdict lines. `devbox run --pure -- go vet ./...` is CLEAN: no output at all. `devbox run --pure -- go test -count=1 ./...` is green across every package. `devbox run --pure -- go build ./...` succeeds, which is what compiles the rewritten, unexecuted capBacklogVisibility."
+  },
+  {
+   "name": "evidence-registered-and-contracts-green",
+   "status": "passed",
+   "argv": [
+    "devbox",
+    "run",
+    "--pure",
+    "--",
+    "go",
+    "test",
+    "-count=1",
+    "./internal/contracts"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 600,
+   "summary": "The three records issued by this task are registered with appended entries in .agents/v2/evidence/index.json whose evidence_hash is the sha256 of each artifact's final committed bytes. No other task's entry was touched, no entry was reordered or removed, and no fourth record was created. VERDICT: `ok github.com/takushi/agentic-loop-foundation/v2/internal/contracts` with the records in place; before registration the same command failed TestActiveEvidenceIndex, which is the check that proves the registration is what made it green."
+  },
+  {
+   "name": "evidence-key-provenance",
+   "status": "passed",
+   "argv": [
+    "devbox",
+    "run",
+    "--pure",
+    "--",
+    "make",
+    "evidence-keys"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 600,
+   "summary": "A17, provenance only, not a pass/fail condition (gate rule G6a: make check re-runs these checks). Measured with devbox run --pure -- make evidence-keys on the final tree with every touched file already git-added, because a file not yet in the index is invisible to the git ls-files based input set the key derives from. Exactly three keys were measured, for the three records this task issues and no others: store-firestore 467cd146928efdcc7bf0f9291d1e1461d576817f454bbbe0aab21d6b41e68cb2, store-memory 53c22a127190e01775d0d81f3498c117c99e7d905dc1b2d33881fc3df9e9a553, api 5098f86e8840c061a8b561194c720066a76c1dbe95a969971b5424872837bcdd. No key was copied from an earlier record, all 23 component keys were NOT measured, and neither key movement nor key stability is treated here as a verdict."
+  },
+  {
+   "name": "chain-position-and-manifest",
+   "status": "passed",
+   "argv": [
+    "git",
+    "status",
+    "--porcelain"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 60,
+   "summary": "A18, chain position and manifest, recorded as facts for the coordinator. internal/application/**, contracts/** and internal/web/** are prohibited here BY DESIGN and not by omission: the cursor envelope and the route's response are already correct, and that was measured rather than assumed -- the cursor decodes to {\"v\":\"v1\",\"after\":\"<domain Requirement id>\"} and leaks no client representation, and the bytes the route returns are identical before and after the fix (dp-v2-079 d3, verified in the rollback check). So this task touches NONE of the surface-chain contract groups: contracts/openapi/openapi-v1.yaml, contracts/release-contract/** and internal/web/** are byte-unchanged. The change creates and removes NO import edge: internal/store/firestore/store.go gains one unexported function and changes two expressions, and no file in the diff gains or loses an import -- the two test files that gained code reuse imports their packages already had, and internal/api/live_dogfood_test.go's net/url is still used by the rewritten walk. Because this design creates no edge, a red manifest or dependency-coverage check would mean the design was departed from; ci/components.json, Makefile, go.mod, go.sum, devbox.json and devbox.lock are all byte-unchanged and were never opened for edit. No module-path string literal was written into any source or test file. This task must be SERIALIZED against any other task editing internal/store/firestore or internal/api. The six files this task modifies are exactly: internal/store/firestore/store.go, internal/store/firestore/store_test.go, internal/store/memory/store_test.go, internal/api/api_test.go, internal/api/live_local_test.go and internal/api/live_dogfood_test.go, plus the three evidence records and the evidence index."
+  }
+ ]
+}

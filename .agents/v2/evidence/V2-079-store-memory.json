@@ -1,0 +1,205 @@
+{
+ "schema_version": "v1",
+ "id": "ev-v2-079-store-memory",
+ "kind": "evidence",
+ "created_at": "2026-08-26T13:00:00Z",
+ "correlation_id": "v2-079-backlog-cursor",
+ "task_id": "V2-079",
+ "component": "store-memory",
+ "evidence_key": "53c22a127190e01775d0d81f3498c117c99e7d905dc1b2d33881fc3df9e9a553",
+ "result": "passed",
+ "observed_at": "2026-08-26T13:00:00Z",
+ "checks": [
+  {
+   "name": "scope-boundary",
+   "status": "passed",
+   "argv": [
+    "git",
+    "status",
+    "--porcelain"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 30,
+   "summary": "Scope boundary for V2-079, written into all three evidence records BEFORE any source file was edited (recorded at base commit cc17473495a4ad5b562e5a7892b5d4e64af0b084, working tree clean). ROW 1 -- what this task makes true: a cursor the Backlog route returned is accepted by the very next request against real persistence, and the concatenation of pages covers every record exactly once, on BOTH adapters (internal/store/firestore and internal/store/memory), for RequirementsPage and for EventsPage. ROW 2 -- what it deliberately does not do: it changes no byte of what the route returns (proved by A15's before/after cursor measurement); it widens no page bound (application.MaxPageSize and boundPageSize are untouched); it adds no Firestore index (firestore.indexes.json is prohibited and byte-unchanged); it changes no document id and no stored field; it changes no query shape, filter or ordering; and it changes the in-memory adapter's behaviour not at all (internal/store/memory/store.go is prohibited; only its test file is touched). ROW 3 -- what it records but does not fix: (a) internal/api's domainError defaults to 400 invalid_request for any error it does not classify, which dressed a storage-side gRPC InvalidArgument as a caller mistake (dp-v2-079 d7) -- internal/api/api.go is prohibited here and the default is escalated, not changed; (b) the two adapters do not share one total order because base64url is not order-preserving (dp-v2-079 d4), so no cross-adapter test asserts an order; (c) internal/application/allocation.go and internal/application/release_surface.go each consume the FIRST page of RequirementsPage under an adapter-specific order (d4), a pre-existing divergence left alone; (d) internal/reconciler/orphan.go's OrphanSweep is the second victim of the same defect and is repaired without being edited (A11). ROW 4 -- what only a later task can establish: the cap-backlog-visibility verdict, which needs the M5 re-dogfood (dp-v2-079 d10); the dogfood assertion this task rewrites is compiled and vetted but NOT executed here, so the api record's result is partial. ROW 5 -- this task passes no release gate on its own: no release_eligible entry is produced, no capability id is cited in any of these three records, contracts/release-contract/** is untouched and .agents/v2/evidence/V2-022-release-live-dogfood.json is untouched."
+  },
+  {
+   "name": "environment-identifier",
+   "status": "passed",
+   "argv": [
+    "uname",
+    "-srm"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 30,
+   "summary": "execution environment: uname -srm = Linux 6.18.33.2-microsoft-standard-WSL2 x86_64; devbox run --pure -- go version = go1.25.0 linux/amd64; devbox 0.17.2, environment resolved from this worktree's devbox.json/devbox.lock, both untouched by this task; cloud.google.com/go/firestore v1.25.0 as declared in go.mod, untouched. Worktree /home/takushi/repos/agentic-loop-foundation-worktrees/v2-task-079 on branch v2-task/V2-079, base commit cc17473495a4ad5b562e5a7892b5d4e64af0b084. The only external process any check started is the local Firestore emulator that scripts/firestore-emulator.sh starts (firebase emulators:start --only firestore --project agentic-loop-test on a free 127.0.0.1 port) and, for the route-level check, the real cmd/control-plane binary this repository builds. NO real Provider CLI was started at any point -- no claude, no codex, no opencode, not even --version -- no gh child was started, and no Google Cloud resource was touched."
+  },
+  {
+   "name": "baseline-and-after-test-counts",
+   "status": "passed",
+   "argv": [
+    "devbox",
+    "run",
+    "--pure",
+    "--",
+    "go",
+    "test",
+    "-list",
+    ".*",
+    "./internal/store/memory"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 600,
+   "summary": "Baseline re-measured at base commit cc17473495a4ad5b562e5a7892b5d4e64af0b084 with devbox run --pure -- go test -list '.*' ./<pkg> counting lines matching ^Test, then re-measured on the final tree. BEFORE -> AFTER: internal/store/firestore 33 -> 35; internal/store/memory 11 -> 13; internal/api 53 -> 54; internal/application 180 -> 180; internal/contracts 33 -> 33; internal/reconciler 16 -> 16. Every one of the six baseline counts written in the Work Order AGREED with the measurement -- no disagreement to report, which is itself worth recording because the Work Order warned that the last eight tasks each found one. The deltas are exactly the tests A6, A7 and A9 add and nothing else: firestore +2 = A6 + A7; memory +2 = A6 + A7; api +1 = A9 only, because A8 EXTENDS the existing top-level TestControlPlanePreviewLocalLive rather than adding a name, and A12 rewrites the body of the existing capBacklogVisibility subtest helper. No existing test was deleted and none was renamed: git diff shows no removed 'func Test' line in any touched file. LINE-NUMBER measurements against the Work Order's a258ed2569205dec3585d303ecb7f1c4fdba8254 numbers. AGREEING at cc17473495a4ad5b562e5a7892b5d4e64af0b084: store.go:633 RequirementsPage's StartAfter, store.go:763 EventsPage's StartAfter, store.go:957 ExpiredActiveLeases's StartAfter, store.go:183 PathKey, store.go:2171 readCollection, reconciler/orphan.go:54 the sweep's RequirementsPage call, memory/store.go:208-227 the memory RequirementsPage, application/readmodels.go:35 decodeCursor, api/api.go:1116 domainError, application/ports.go:130 EventsPage, application/allocation.go:603 and application/release_surface.go:265 the first-page-only reads, api/live_local_test.go:231 the existing GET /v1/requirements?page_size=25, and store_test.go:316-326 the ExpiredActiveLeases round trip. DISAGREEING at cc17473495a4ad5b562e5a7892b5d4e64af0b084 (measured value first, Work Order value second): ActiveLeases 987 not 995; the pending control-verification scan PendingControlProgresses 1035 not 1043; the links-by-repository scan RequirementIDsForRepository 1480 not 1496; the publication-observation scan PublicationObservationsForIncrement 1561 not 1577; the outbox candidate scan Outboxes 1905 not 1918. On the FINAL tree, after the 23-line helper is inserted, those same functions are at 1010, 1058, 1503, 1584, 1928 and readCollection at 2194, with documentIDCursor at 638, RequirementsPage at 642, EventsPage at 775 and ExpiredActiveLeases at 961."
+  },
+  {
+   "name": "requirement-cursor-walk-covers-every-row-once",
+   "status": "passed",
+   "argv": [
+    "devbox",
+    "run",
+    "--pure",
+    "--",
+    "go",
+    "test",
+    "-count=1",
+    "-v",
+    "-run",
+    "TestThePageCursorTheCallerWasHandedIsAcceptedByTheNextPageUntilEveryRequirementIsCoveredOnce",
+    "./internal/store/memory"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 600,
+   "summary": "A6 on the in-memory adapter, under the SAME name the Firestore package carries: TestThePageCursorTheCallerWasHandedIsAcceptedByTheNextPageUntilEveryRequirementIsCoveredOnce. Same N=7, same two page sizes (1, and 2 which does not divide 7), same drive through Service.ListRequirementsPage, same multiset coverage assertion, same absence of any order assertion. VERDICT: `--- PASS` for both sub-walks, `ok github.com/takushi/agentic-loop-foundation/v2/internal/store/memory 0.003s`, and PASS again inside `make component-store-memory`. internal/store/memory/store.go is BYTE-UNCHANGED: git status shows only internal/store/memory/store_test.go modified in that package. The adapter passes because it is self-consistent, not by accident: it sorts by the raw domain id and advances with rows[start].ID.String() <= afterID, an exclusive-after over a stable total order, which is the whole of what the port promises -- and it is a DIFFERENT total order from Firestore's, which sorts by base64url of the same id. MEASURED DISAGREEMENT WITH dp-v2-079 d5, recorded rather than worked around silently: driving the identical sequence over this adapter is NOT possible with a single fixed clock. Service.transact reserves quota.ReadTransactionUsage (6,001 reads) as the worst case for every read transaction, and this adapter -- prohibited from change here -- never trues that reservation down to the reads it actually made, unlike the Firestore adapter's countReads/trueUpQuota pair. quota.DefaultBudget allows 25,000 reads per UTC day, so exactly four read transactions fit in one simulated day while a page_size=1 walk of 7 records needs seven; the first attempt failed with `daily Firestore quota reservation exceeds the hard budget: day=2023-11-14 reads=30005/25000 writes=5/10000 deletes=0/10000` at page 4. The resolution keeps the walk at full strength and weakens no assertion: the test injects a clock it advances 25 hours per page, so each read transaction lands on a fresh UTC day and quota.Counter resets its daily aggregate. That is not a sleep and not a wall clock -- the clock holds a fixed instant between explicit steps, so every run sees the identical sequence of instants -- and paging is clock-independent, so nothing the walk asserts is affected. The pre-existing absence of a true-up in this adapter is recorded here as a fact for a later task; it is not touched."
+  },
+  {
+   "name": "event-cursor-walk-covers-every-row-once",
+   "status": "passed",
+   "argv": [
+    "devbox",
+    "run",
+    "--pure",
+    "--",
+    "go",
+    "test",
+    "-count=1",
+    "-v",
+    "-run",
+    "TestTheEventPageCursorTheCallerWasHandedIsAcceptedByTheNextPageUntilEveryEventIsCoveredOnce",
+    "./internal/store/memory"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 600,
+   "summary": "A7 on the in-memory adapter, same single name as the Firestore package's: TestTheEventPageCursorTheCallerWasHandedIsAcceptedByTheNextPageUntilEveryEventIsCoveredOnce. Same walk to exhaustion at page_size 1 and 2 over 7 seeded Events through the EventsPage port, same multiset coverage assertion, no order assertion. VERDICT: `--- PASS` for both sub-walks. This walk needs no clock advance because it goes through the port inside store.Transact rather than through Service.transact, so it reserves no read quota at all -- recorded so the asymmetry with the A6 walk above is not read as an inconsistency."
+  },
+  {
+   "name": "the-adapter-itself-is-byte-unchanged",
+   "status": "passed",
+   "argv": [
+    "git",
+    "status",
+    "--porcelain",
+    "internal/store/memory"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 60,
+   "summary": "internal/store/memory/store.go is BYTE-UNCHANGED, and its test file is the only memory-side file this task touched: git status --porcelain internal/store/memory reports exactly `M internal/store/memory/store_test.go` and nothing else. internal/store/memory/source_guard_test.go is untouched. The adapter needed no fix because it is self-consistent, not because the defect spared it: both adapters satisfy the port's actual promise -- a stable total order plus exclusive-after over the very key the caller was handed -- and that promise, not a shared order, is what makes the concatenation of pages cover every record once. Measured, the two orders genuinely differ: base64url is not order-preserving, and this task's own seeded ids demonstrate it (raw req-aa < req-at, encoded cmVxLWFh > cmVxLWF0; raw ev-aa < ev-am, encoded ZXYtYWE > ZXYtYW0). That is why NO cross-adapter test here asserts an order and both assert coverage as a multiset."
+  },
+  {
+   "name": "component-store-memory",
+   "status": "passed",
+   "argv": [
+    "devbox",
+    "run",
+    "--pure",
+    "--",
+    "make",
+    "component-store-memory"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 600,
+   "summary": "VERDICT: `ok github.com/takushi/agentic-loop-foundation/v2/internal/store/memory 0.006s`. Top-level test count 11 -> 13, the two names A6 and A7 add. No skips."
+  },
+  {
+   "name": "validation-argv",
+   "status": "passed",
+   "argv": [
+    "devbox",
+    "run",
+    "--pure",
+    "--",
+    "scripts/firestore-emulator.sh",
+    "go",
+    "test",
+    "-race",
+    "-count=1",
+    "./internal/store/firestore",
+    "./internal/store/memory",
+    "./internal/api",
+    "./internal/contracts"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 2400,
+   "summary": "The Work Order's validation argv, run to completion on the final tree with the three evidence records registered. VERDICT LINES, verbatim: `ok github.com/takushi/agentic-loop-foundation/v2/internal/store/firestore 13.903s`, `ok github.com/takushi/agentic-loop-foundation/v2/internal/store/memory 1.031s`, `ok github.com/takushi/agentic-loop-foundation/v2/internal/api 1.198s`, `ok github.com/takushi/agentic-loop-foundation/v2/internal/contracts 1.779s`. With -race, under the local Firestore emulator that scripts/firestore-emulator.sh actually started, so the store cases ran instead of skipping. An earlier run of the identical argv, before the records were registered, was green on the same three code packages (firestore 13.464s, memory 1.035s, api 1.214s) and red only on internal/contracts' TestActiveEvidenceIndex, which is the registration check. Judged by these verdict lines and never by devbox run's shell exit status. The full `devbox run --pure -- make check` was deliberately NOT run: the coordinator runs it once at integration."
+  },
+  {
+   "name": "whole-tree-vet-and-test",
+   "status": "passed",
+   "argv": [
+    "devbox",
+    "run",
+    "--pure",
+    "--",
+    "go",
+    "vet",
+    "./..."
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 1800,
+   "summary": "Whole-tree verification by the implementer, judged by verdict lines. `devbox run --pure -- go vet ./...` is CLEAN: no output at all. `devbox run --pure -- go test -count=1 ./...` is green across every package. `devbox run --pure -- go build ./...` succeeds, which is what compiles the rewritten, unexecuted capBacklogVisibility."
+  },
+  {
+   "name": "evidence-registered-and-contracts-green",
+   "status": "passed",
+   "argv": [
+    "devbox",
+    "run",
+    "--pure",
+    "--",
+    "go",
+    "test",
+    "-count=1",
+    "./internal/contracts"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 600,
+   "summary": "The three records issued by this task are registered with appended entries in .agents/v2/evidence/index.json whose evidence_hash is the sha256 of each artifact's final committed bytes. No other task's entry was touched, no entry was reordered or removed, and no fourth record was created. VERDICT: `ok github.com/takushi/agentic-loop-foundation/v2/internal/contracts` with the records in place; before registration the same command failed TestActiveEvidenceIndex, which is the check that proves the registration is what made it green."
+  },
+  {
+   "name": "evidence-key-provenance",
+   "status": "passed",
+   "argv": [
+    "devbox",
+    "run",
+    "--pure",
+    "--",
+    "make",
+    "evidence-keys"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 600,
+   "summary": "A17, provenance only, not a pass/fail condition (gate rule G6a: make check re-runs these checks). Measured with devbox run --pure -- make evidence-keys on the final tree with every touched file already git-added, because a file not yet in the index is invisible to the git ls-files based input set the key derives from. Exactly three keys were measured, for the three records this task issues and no others: store-firestore 467cd146928efdcc7bf0f9291d1e1461d576817f454bbbe0aab21d6b41e68cb2, store-memory 53c22a127190e01775d0d81f3498c117c99e7d905dc1b2d33881fc3df9e9a553, api 5098f86e8840c061a8b561194c720066a76c1dbe95a969971b5424872837bcdd. No key was copied from an earlier record, all 23 component keys were NOT measured, and neither key movement nor key stability is treated here as a verdict."
+  },
+  {
+   "name": "chain-position-and-manifest",
+   "status": "passed",
+   "argv": [
+    "git",
+    "status",
+    "--porcelain"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 60,
+   "summary": "A18, chain position and manifest, recorded as facts for the coordinator. internal/application/**, contracts/** and internal/web/** are prohibited here BY DESIGN and not by omission: the cursor envelope and the route's response are already correct, and that was measured rather than assumed -- the cursor decodes to {\"v\":\"v1\",\"after\":\"<domain Requirement id>\"} and leaks no client representation, and the bytes the route returns are identical before and after the fix (dp-v2-079 d3, verified in the rollback check). So this task touches NONE of the surface-chain contract groups: contracts/openapi/openapi-v1.yaml, contracts/release-contract/** and internal/web/** are byte-unchanged. The change creates and removes NO import edge: internal/store/firestore/store.go gains one unexported function and changes two expressions, and no file in the diff gains or loses an import -- the two test files that gained code reuse imports their packages already had, and internal/api/live_dogfood_test.go's net/url is still used by the rewritten walk. Because this design creates no edge, a red manifest or dependency-coverage check would mean the design was departed from; ci/components.json, Makefile, go.mod, go.sum, devbox.json and devbox.lock are all byte-unchanged and were never opened for edit. No module-path string literal was written into any source or test file. This task must be SERIALIZED against any other task editing internal/store/firestore or internal/api. The six files this task modifies are exactly: internal/store/firestore/store.go, internal/store/firestore/store_test.go, internal/store/memory/store_test.go, internal/api/api_test.go, internal/api/live_local_test.go and internal/api/live_dogfood_test.go, plus the three evidence records and the evidence index."
+  }
+ ]
+}

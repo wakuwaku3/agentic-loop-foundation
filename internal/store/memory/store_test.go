@@ -776,3 +776,175 @@ func TestPublicationObservationIsWriteOncePerOperationAndBoundedPerIncrement(t *
 		t.Fatal(err)
 	}
 }
+
+// backlogCursorWalkIDs are the seeded Requirement ids for the cursor walk. They
+// are the same ids the Firestore package's identically named test seeds, and
+// they are chosen so the two adapters genuinely disagree about order: this
+// adapter orders by the raw domain id, so "req-aa" < "req-at", while the
+// Firestore adapter orders by the base64url document key, which inverts that
+// pair ("cmVxLWFh" > "cmVxLWF0"). base64url is not order-preserving.
+var backlogCursorWalkIDs = []string{"req-aa", "req-at", "req-b0", "req-cz", "req-d9", "req-eZ", "req-f_"}
+
+// eventCursorWalkIDs are the seeded Event ids, chosen the same way: raw
+// "ev-aa" < "ev-am" while base64url("ev-aa") = "ZXYtYWE" > base64url("ev-am") =
+// "ZXYtYW0".
+var eventCursorWalkIDs = []string{"ev-aa", "ev-am", "ev-b0", "ev-cz", "ev-d9", "ev-eZ", "ev-f_"}
+
+// TestThePageCursorTheCallerWasHandedIsAcceptedByTheNextPageUntilEveryRequirementIsCoveredOnce
+// walks the Backlog cursor to exhaustion over this adapter: every next_cursor
+// the read model hands out is fed straight back into the next call until a page
+// reports none. It is driven through Service.ListRequirementsPage rather than
+// through the port so the opaque v1 cursor envelope is exercised, which is the
+// layer the observable outcome is stated about. The Firestore package carries
+// this exact test name over its own adapter.
+//
+// This test asserts NOTHING about the order the ids arrive in, and the reason
+// is not laziness. This adapter orders by the raw domain id; the Firestore
+// adapter, under this very same test name, orders by the document id, which is
+// base64url of the raw id. base64url is not order-preserving, so the two orders
+// differ (see backlogCursorWalkIDs). An order assertion would pass here and
+// fail on Firestore for a reason that has nothing to do with the cursor.
+// Coverage is therefore asserted as a MULTISET -- no duplicate and no omission
+// -- which is exactly the promise a stable total order plus an exclusive-after
+// cursor makes, and which fails on refusal, on a duplicated row, on a skipped
+// row and on a walk that does not terminate.
+func TestThePageCursorTheCallerWasHandedIsAcceptedByTheNextPageUntilEveryRequirementIsCoveredOnce(t *testing.T) {
+	store := New()
+	ctx := context.Background()
+	for _, raw := range backlogCursorWalkIDs {
+		id, err := domain.NewRequirementID(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := store.Transact(ctx, func(u application.UnitOfWork) error {
+			return u.SaveRequirement(ctx, domain.Requirement{ID: id, Version: 1, Status: domain.RequirementCaptured}, 0)
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The clock is injected and the test advances it one UTC day per page. That
+	// is not a timer and not a sleep: it is the only way this adapter can be
+	// walked at all. Service.transact reserves quota.ReadTransactionUsage
+	// (6,001 reads) as the worst case for every read transaction, and this
+	// adapter -- prohibited from change by this task -- never trues that
+	// reservation down to the reads it actually made, unlike the Firestore
+	// adapter's countReads/trueUpQuota pair. quota.DefaultBudget allows 25,000
+	// reads per UTC day, so exactly four read transactions fit in one simulated
+	// day while a full walk of 7 records at page_size 1 needs seven. Advancing
+	// the injected clock past midnight resets quota.Counter's daily aggregate.
+	// Paging is clock-independent, so this changes nothing the walk asserts.
+	clock := &dayAdvancingClock{at: time.Unix(1700000000, 0).UTC()}
+	svc, err := application.NewServiceWithConfig(store, clock, &captureIDs{}, application.ServiceConfig{InstallationID: "install", LeaseTTL: time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner := application.ContextWithCaller(ctx, application.Caller{Role: application.RoleOwner, Subject: "cursor-walk-owner"})
+	// 1 pages one row at a time; 2 does not divide the seeded count of 7, which
+	// is what catches an off-by-one in the exclusive boundary.
+	for _, pageSize := range []int{1, 2} {
+		t.Run(fmt.Sprintf("page_size=%d", pageSize), func(t *testing.T) {
+			seen := map[string]int{}
+			cursor := ""
+			// The walk is bounded by the seeded record count, never by a timer.
+			bound := len(backlogCursorWalkIDs)/pageSize + 2
+			for pages := 0; ; pages++ {
+				if pages > bound {
+					t.Fatalf("walk did not terminate within %d pages", bound)
+				}
+				clock.advanceOneDay()
+				page, err := svc.ListRequirementsPage(owner, cursor, pageSize)
+				if err != nil {
+					t.Fatalf("page %d with cursor %q: %v", pages, cursor, err)
+				}
+				for _, r := range page.Requirements {
+					seen[r.RequirementID]++
+				}
+				if page.NextCursor == "" {
+					if len(page.Requirements) == 0 || len(page.Requirements) > pageSize {
+						t.Fatalf("terminal page carried %d rows, want 1..%d", len(page.Requirements), pageSize)
+					}
+					break
+				}
+				if len(page.Requirements) != pageSize {
+					t.Fatalf("non-terminal page %d carried %d rows, want exactly %d", pages, len(page.Requirements), pageSize)
+				}
+				cursor = page.NextCursor
+			}
+			assertMultisetCoversOnce(t, backlogCursorWalkIDs, seen)
+		})
+	}
+}
+
+// TestTheEventPageCursorTheCallerWasHandedIsAcceptedByTheNextPageUntilEveryEventIsCoveredOnce
+// is the EventsPage counterpart, driven through the port because no route
+// exposes it. It asserts no order, for the reason spelled out above.
+func TestTheEventPageCursorTheCallerWasHandedIsAcceptedByTheNextPageUntilEveryEventIsCoveredOnce(t *testing.T) {
+	store := New()
+	ctx := context.Background()
+	for _, raw := range eventCursorWalkIDs {
+		id := raw
+		if err := store.Transact(ctx, func(u application.UnitOfWork) error {
+			return u.Record(application.Event{ID: id, AggregateType: "requirement", AggregateID: "req-aa", Type: "requirement.captured", Version: 1}, nil)
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, pageSize := range []int{1, 2} {
+		t.Run(fmt.Sprintf("page_size=%d", pageSize), func(t *testing.T) {
+			seen := map[string]int{}
+			after := ""
+			bound := len(eventCursorWalkIDs)/pageSize + 2
+			for pages := 0; ; pages++ {
+				if pages > bound {
+					t.Fatalf("walk did not terminate within %d pages", bound)
+				}
+				var rows []application.Event
+				var more bool
+				if err := store.Transact(ctx, func(u application.UnitOfWork) error {
+					var e error
+					rows, more, e = u.EventsPage(ctx, after, pageSize)
+					return e
+				}); err != nil {
+					t.Fatalf("page %d after %q: %v", pages, after, err)
+				}
+				for _, e := range rows {
+					seen[e.ID]++
+				}
+				if !more {
+					if len(rows) == 0 || len(rows) > pageSize {
+						t.Fatalf("terminal page carried %d rows, want 1..%d", len(rows), pageSize)
+					}
+					break
+				}
+				if len(rows) != pageSize {
+					t.Fatalf("non-terminal page %d carried %d rows, want exactly %d", pages, len(rows), pageSize)
+				}
+				after = rows[len(rows)-1].ID
+			}
+			assertMultisetCoversOnce(t, eventCursorWalkIDs, seen)
+		})
+	}
+}
+
+// assertMultisetCoversOnce is the coverage assertion both walks share: the
+// concatenation of every page equals the seeded ids as a multiset, so a
+// duplicated row and an omitted row are both failures, and no order is named.
+func assertMultisetCoversOnce(t *testing.T, want []string, got map[string]int) {
+	t.Helper()
+	for _, id := range want {
+		if got[id] != 1 {
+			t.Fatalf("id %q appeared %d times across the walk, want exactly 1 (seen=%v)", id, got[id], got)
+		}
+	}
+	if len(got) != len(want) {
+		t.Fatalf("walk covered %d distinct ids, want %d (seen=%v)", len(got), len(want), got)
+	}
+}
+
+// dayAdvancingClock is an injected clock the test steps forward explicitly. It
+// holds a fixed instant between steps, so every run of the test sees the very
+// same sequence of instants; nothing here reads the wall clock.
+type dayAdvancingClock struct{ at time.Time }
+
+func (c *dayAdvancingClock) Now() time.Time { return c.at }
+func (c *dayAdvancingClock) advanceOneDay() { c.at = c.at.Add(25 * time.Hour) }
