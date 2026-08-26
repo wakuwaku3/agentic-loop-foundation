@@ -3,7 +3,7 @@
   "id": "ts-v2-085",
   "kind": "canonical-task-state",
   "task_id": "V2-085",
-  "status": "running",
+  "status": "complete",
   "dependencies": [
     "V2-088"
   ],
@@ -24,7 +24,7 @@
   ],
   "output_hash": "48461041270692ff88877b40fa737f5c450bec0aab33579371520f45b39e2b32",
   "owner": "terra",
-  "next_owner": "terra",
+  "next_owner": null,
   "retry_budget": {
     "max_attempts": 2,
     "attempts_used": 1,
@@ -175,6 +175,30 @@
         "remaining": 1
       },
       "reason": "emergency-stop下でPlanとPrepareがcanonical stateを動かす欠落の修理に着手した。owner判断によりcodex/opencodeとGCPに依存する検証以外をこのmachineで完遂する方針に切り替え、V2-085からV2-093までを直列に進める。nice to haveに分類したV2-094は着手しない"
+    },
+    {
+      "sequence": 7,
+      "at": "2026-08-26T20:40:00Z",
+      "from_status": "running",
+      "to_status": "complete",
+      "actor": "terra",
+      "input_refs": [
+        "V2-082",
+        "V2-085"
+      ],
+      "input_hash": "bd746c71bd1dc2cfcecba43b30e96643eb1d32b7d645fdb8618abbf4fb7d4f70",
+      "output_refs": [
+        "V2-085"
+      ],
+      "output_hash": "48461041270692ff88877b40fa737f5c450bec0aab33579371520f45b39e2b32",
+      "owner": "terra",
+      "next_owner": null,
+      "retry_budget": {
+        "max_attempts": 2,
+        "attempts_used": 1,
+        "remaining": 1
+      },
+      "reason": "emergency-stop下でPlanとPrepareがcanonical stateを動かす欠落を閉じた。Permitはkind claimを2箇所、いずれも同じtransaction内でRequirement自身のRepository linkとEffectiveControlから解決したtargetに対して評価する。requestからは読まないのでrequest fieldもrouteもtransport契約も動かない。7 mode表を両commandについて実測しassertした。allowとpause-intakeがALLOW、pause-claim・graceful-stop・immediate-stop・emergency-stop・cancelがDENYで、7/7がpermitAllowedTableと一致しallowedは2/7である。pause-intakeで同一run・同一control revisionのfresh CaptureがDENYされるという食い違いも観測した——これがkindをclaimにした理由そのものである。DENY cellは3点でassertした。ErrControlDeniedであること、storeがreflect.DeepEqualでbyte不変であること(Versionとincrements sliceを含む)、event数とoutbox行数が不変でidempotency entryも無いこと。さらにstop解除後に同一request_idの再送が実際に実行されることで、予約が残っていないことを二重に示した。V2-082がloggedのまま残したprobeは同じ関数名のままassertionになり、V2-082の履歴をdoc commentに保存している。stop matrixとdocs/product/definition.mdはsha256で前後同一。domain treeのdigestとopenapiのdigestも同一でcontracts_changedは空。test名は187から193で削除も改名も0。A3の字面から1点だけ逸脱しており、coordinatorがこれを是認した。字面はControlTargetをInstallationIDとRepositoryIDだけで組むと書いていたが、実装はPlanが既に構築して保存しているtarget(RequirementIDとIncrementIDを含む)で評価している。domain.matches()はScopeRequirementとScopeIncrementを持つので、字面どおりだとその2 scopeのstopがPlanとPrepareに一度も届かない。つまりWork Orderの字面が穴を作る側で、実装はstrictly strongerかつframing.go:178の既存呼び出しと同形であり、canonical targetはbyte不変である。逆向きの確認もした——特定のRequirementに向けたstopがそのRequirementのplanningを止めるのはproductの意図どおりで、止めるべきでないものを止めてはいない。Work Orderのline番号は12件が陳腐化していた"
     }
   ]
 }
