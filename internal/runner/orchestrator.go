@@ -20,6 +20,17 @@ type Orchestrator struct {
 	Workspace *Workspace
 	Journal   *Journal
 	RunnerID  string
+	// Caller is the identity the owner-side half of the journey runs as, and it
+	// is REQUIRED and INJECTED. Before V2-086 this component fabricated it --
+	// application.Caller{Role: application.RoleOwner, Subject:
+	// "runner-local-owner"} -- so a Runner asserted the owner's role to get
+	// through a role gate. Relabelling that literal RoleScheduler would have
+	// been the same self-naming one word over, and DEFAULTING this field would
+	// be the fabrication again, so it has no default: RunFakeJourney refuses
+	// when its Role or its Subject is empty, in the same style as the existing
+	// dependency guard. Whoever constructs the Orchestrator supplies the
+	// identity; measured at V2-086, that is exactly one site and it is a test.
+	Caller application.Caller
 	// Hooks are test-only/local guards immediately before external effects.
 	// Production wiring leaves them nil and relies on the application permit.
 	BeforeProvider func(context.Context, domain.ControlTarget) error
@@ -36,17 +47,20 @@ func (o *Orchestrator) RunFakeJourney(ctx context.Context, req JourneyRequest) (
 	if o.Service == nil || o.Provider == nil || o.Workspace == nil || o.Journal == nil || o.RunnerID == "" {
 		return JourneyResult{}, errors.New("orchestrator dependencies are incomplete")
 	}
-	owner := application.ContextWithCaller(ctx, application.Caller{Role: application.RoleOwner, Subject: "runner-local-owner"})
+	if o.Caller.Role == "" || o.Caller.Subject == "" {
+		return JourneyResult{}, errors.New("orchestrator caller identity is incomplete")
+	}
+	callerCtx := application.ContextWithCaller(ctx, o.Caller)
 	runnerCtx := application.ContextWithCaller(ctx, application.Caller{Role: application.RoleRunner, Subject: o.RunnerID, RunnerID: o.RunnerID})
-	cap, err := o.Service.Capture(owner, application.CaptureRequest{RequestID: req.RequestID + ":capture", Text: req.Text})
+	cap, err := o.Service.Capture(callerCtx, application.CaptureRequest{RequestID: req.RequestID + ":capture", Text: req.Text})
 	if err != nil {
 		return JourneyResult{}, fmt.Errorf("capture: %w", err)
 	}
-	plan, err := o.Service.Plan(owner, application.PlanRequest{RequestID: req.RequestID + ":plan", RequirementID: cap.RequirementID, ExpectedRequirementVersion: cap.Version})
+	plan, err := o.Service.Plan(callerCtx, application.PlanRequest{RequestID: req.RequestID + ":plan", RequirementID: cap.RequirementID, ExpectedRequirementVersion: cap.Version})
 	if err != nil {
 		return JourneyResult{}, fmt.Errorf("plan: %w", err)
 	}
-	prepared, err := o.Service.Prepare(owner, application.PrepareRequest{RequestID: req.RequestID + ":prepare", IncrementID: plan.IncrementID, ExpectedVersion: plan.Version})
+	prepared, err := o.Service.Prepare(callerCtx, application.PrepareRequest{RequestID: req.RequestID + ":prepare", IncrementID: plan.IncrementID, ExpectedVersion: plan.Version})
 	if err != nil {
 		return JourneyResult{}, fmt.Errorf("prepare: %w", err)
 	}

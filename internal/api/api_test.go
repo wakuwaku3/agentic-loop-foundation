@@ -4658,3 +4658,426 @@ func TestAnUnclassifiedErrorReachesTheOperatorAndNotTheCaller(t *testing.T) {
 		t.Logf("OPPANIC\tresponse correlation_id=%v\theader=%q\trecord detail_bytes=%d truncated=%v", doc["correlation_id"], w.Header().Get("X-Correlation-ID"), len(detail), record["detail_truncated"])
 	})
 }
+
+// ===========================================================================
+// V2-086: the scheduler becomes a role a real caller can be.
+// ===========================================================================
+
+// v2086OwnerIAP, v2086SchedulerIAP and v2086ForeignIAP are the three IAP
+// identities the V2-086 proofs assert against. They are ordinary
+// service-account-shaped addresses and carry no credential of any kind: the
+// only secret in an IAP composition is the upstream assertion itself, which
+// httptest supplies as a header value.
+const (
+	v2086OwnerIAP     = "owner@example.com"
+	v2086SchedulerIAP = "reconciler@example.iam.gserviceaccount.com"
+	v2086ForeignIAP   = "stranger@example.com"
+	v2086IAPHeader    = "X-Goog-Authenticated-User-Email"
+	v2086IAPPrefix    = "accounts.google.com:"
+)
+
+// v2086IAPCall drives the composed handler with an IAP assertion instead of a
+// bearer token, which is the only way to reach CombinedAuthenticator. It
+// mirrors call() exactly apart from the authentication header, and it adds no
+// timing, no goroutine and no randomness.
+func v2086IAPCall(h http.Handler, method, path, body, iapEmail string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(method, path, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	if iapEmail != "" {
+		req.Header.Set(v2086IAPHeader, v2086IAPPrefix+iapEmail)
+	}
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	return w
+}
+
+// TestNoOwnerOrRunnerTransportCanRecordALoopRequester is V2-086 A3: the BEFORE
+// row of the measurement this task moves, kept as a permanent assertion.
+//
+// The composition here is deliberately the one that existed before this task:
+// an owner and a runner and nothing else. Driving Capture over it as each of
+// the two produces owner attribution and a 403, and never
+// domain.ActorTypeLoop -- so the value was unreachable for a Requirement's
+// RequestedBy not because the domain refused it (it has always admitted it)
+// and not because the command refused the role (Capture has always accepted
+// RoleScheduler), but solely because no transport produced the role. The same
+// claim is asserted directly against a CombinedAuthenticator with no scheduler
+// identity configured, which is the shape every deployment had at the parent
+// commit.
+func TestNoOwnerOrRunnerTransportCanRecordALoopRequester(t *testing.T) {
+	st := memory.New()
+	clk := &framingClock{at: time.Unix(1700000000, 0).UTC()}
+	svc, err := application.NewServiceWithConfig(st, clk, &ids{}, application.ServiceConfig{InstallationID: "install", LeaseTTL: time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Owner and runner only: the two roles internal/api/auth.go's four
+	// producers can actually assert.
+	auth := api.BearerAuthenticator{
+		"owner":  {Role: application.RoleOwner, Subject: "owner"},
+		"runner": {Role: application.RoleRunner, Subject: "runner", RunnerID: "runner-1"},
+	}
+	h := api.New(api.Config{Authenticator: auth, Service: svc, AllowedOrigins: []string{"https://console.example"}})
+
+	w := call(h, http.MethodPost, "/v1/requirements", `{"request_id":"a3:owner","text":"captured by the owner"}`, "owner")
+	if w.Code != http.StatusCreated {
+		t.Fatalf("owner capture status=%d body=%s", w.Code, w.Body.String())
+	}
+	doc := decodeBody(t, w.Body.Bytes())
+	requestedBy, ok := doc["requested_by"].(map[string]any)
+	if !ok {
+		t.Fatalf("the owner capture response carries no requested_by object: %s", w.Body.String())
+	}
+	if requestedBy["actor_type"] != "owner" {
+		t.Fatalf("owner capture requested_by.actor_type = %v, want owner", requestedBy["actor_type"])
+	}
+	id, _ := doc["requirement_id"].(string)
+	stored, found := st.Requirement(id)
+	if !found {
+		t.Fatalf("the captured Requirement %q is not in the store", id)
+	}
+	if stored.RequestedBy.ActorType != domain.ActorTypeOwner {
+		t.Fatalf("stored requested_by.actor_type = %q, want %q", stored.RequestedBy.ActorType, domain.ActorTypeOwner)
+	}
+
+	// A runner cannot capture at all, so it cannot record a loop requester
+	// either: Capture's callerActor pair is owner-or-scheduler.
+	clk.nextDay()
+	if w := call(h, http.MethodPost, "/v1/requirements", `{"request_id":"a3:runner","text":"captured by a runner"}`, "runner"); w.Code != http.StatusForbidden {
+		t.Fatalf("runner capture status=%d body=%s, want 403", w.Code, w.Body.String())
+	}
+
+	// And the production transport, with no scheduler identity configured,
+	// resolves an allowlisted IAP identity to exactly RoleOwner.
+	combined := api.CombinedAuthenticator{OwnerEmails: map[string]struct{}{v2086OwnerIAP: {}}}
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set(v2086IAPHeader, v2086IAPPrefix+v2086OwnerIAP)
+	caller, err := combined.Authenticate(req)
+	if err != nil || caller.Role != application.RoleOwner {
+		t.Fatalf("an unconfigured CombinedAuthenticator resolved %#v (err=%v), want RoleOwner", caller, err)
+	}
+	if caller.Role == application.RoleScheduler {
+		t.Fatal("a CombinedAuthenticator with no scheduler identity produced a scheduler caller")
+	}
+}
+
+// v2086SchedulerFixture composes the PRODUCTION transport boundary -- a real
+// api.CombinedAuthenticator, not a bearer map -- with an owner identity, a
+// different scheduler identity, and the same address as the reconcile identity,
+// which is how cmd/control-plane wires it from RECONCILE_IDENTITY. The clock is
+// the steppable injected one: a read transaction reserves the conservative read
+// boundary against the daily quota budget and the memory adapter never trues
+// that reservation up, so only four read transactions fit in one UTC day per
+// store, and this proof performs more than four reads. The clock is advanced
+// explicitly -- never a sleep, a timer or a goroutine -- and no assertion below
+// depends on the values it returns.
+type v2086SchedulerFixture struct {
+	handler         http.Handler
+	store           *memory.Store
+	clock           *framingClock
+	reconcileCaller application.Caller
+	reconcileErr    error
+	reconcileCalls  int
+}
+
+func newV2086SchedulerFixture(t *testing.T) *v2086SchedulerFixture {
+	t.Helper()
+	st := memory.New()
+	clk := &framingClock{at: time.Unix(1700000000, 0).UTC()}
+	svc, err := application.NewServiceWithConfig(st, clk, &ids{}, application.ServiceConfig{InstallationID: "install", LeaseTTL: time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	enrollment, err := runner.NewService(runner.NewMemoryStore())
+	if err != nil {
+		t.Fatal(err)
+	}
+	fx := &v2086SchedulerFixture{store: st, clock: clk}
+	fx.handler = api.New(api.Config{
+		Authenticator: api.CombinedAuthenticator{
+			Runner:            enrollment,
+			OwnerEmails:       map[string]struct{}{v2086OwnerIAP: {}},
+			SchedulerIdentity: v2086SchedulerIAP,
+		},
+		Service:           svc,
+		RunnerEnrollment:  enrollment,
+		AllowedOrigins:    []string{"https://console.example"},
+		ReconcileIdentity: v2086SchedulerIAP,
+		InternalReconcile: func(ctx context.Context) error {
+			fx.reconcileCalls++
+			fx.reconcileCaller, fx.reconcileErr = application.CallerFromContext(ctx)
+			return nil
+		},
+	})
+	return fx
+}
+
+// v2086CaptureAs captures a Requirement through the real route as the given IAP
+// identity and returns its id, its version and the response's requested_by.
+func (fx *v2086SchedulerFixture) captureAs(t *testing.T, iapEmail, requestID string) (string, domain.Version, map[string]any) {
+	t.Helper()
+	w := v2086IAPCall(fx.handler, http.MethodPost, "/v1/requirements",
+		`{"request_id":"`+requestID+`","text":"a requirement the V2-086 proof names"}`, iapEmail)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("capture as %s: status=%d body=%s", iapEmail, w.Code, w.Body.String())
+	}
+	doc := decodeBody(t, w.Body.Bytes())
+	id, ok := doc["requirement_id"].(string)
+	if !ok || id == "" {
+		t.Fatalf("capture response carries no requirement_id: %s", w.Body.String())
+	}
+	version, ok := doc["version"].(float64)
+	if !ok {
+		t.Fatalf("capture response carries no version: %s", w.Body.String())
+	}
+	requestedBy, ok := doc["requested_by"].(map[string]any)
+	if !ok {
+		t.Fatalf("capture response carries no requested_by: %s", w.Body.String())
+	}
+	return id, domain.Version(version), requestedBy
+}
+
+// makeActive moves a captured Requirement to active through the store, the same
+// way seedActiveRequirement does. No /v1 route advances it, and a direct store
+// transaction reserves no quota.
+func (fx *v2086SchedulerFixture) makeActive(t *testing.T, id string) domain.Version {
+	t.Helper()
+	var version domain.Version
+	if err := fx.store.Transact(context.Background(), func(u application.UnitOfWork) error {
+		r, ok, e := u.Requirement(context.Background(), id)
+		if e != nil || !ok {
+			t.Fatalf("seed active %s: ok=%v err=%v", id, ok, e)
+		}
+		next := r
+		next.Status = domain.RequirementActive
+		next.Version++
+		version = next.Version
+		return u.SaveRequirement(context.Background(), next, r.Version)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return version
+}
+
+// TestTheSchedulerIdentityCapturesALoopAttributedRequirementAndIsRefusedOnEveryOwnerOnlyRoute
+// is V2-086 A9: the executed proof, over the composed HTTP handler with a real
+// CombinedAuthenticator.
+//
+// Its centre is the attribution, because that is the only assertion that makes
+// the repair non-decorative: a request asserting the scheduler identity
+// captures a Requirement whose STORED RequestedBy.ActorType reads "loop" -- a
+// value no transport could produce before this task, since
+// internal/application/caller.go's requestedBy is the sole producer of it for a
+// Requirement and nothing produced the role -- while the same capture as the
+// owner reads "owner". Everything else it proves is a negative: the same
+// identity is accepted on exactly the pairs that already name it and refused on
+// the owner-only routes, and /internal/reconcile still refuses the owner and
+// still accepts the scheduler.
+func TestTheSchedulerIdentityCapturesALoopAttributedRequirementAndIsRefusedOnEveryOwnerOnlyRoute(t *testing.T) {
+	fx := newV2086SchedulerFixture(t)
+
+	// (a) the attribution. Three captures and no reads yet, so they share one
+	// budget day: a mutation reserves 32 reads and 16 writes.
+	loopID, loopVersion, loopRequestedBy := fx.captureAs(t, v2086SchedulerIAP, "a9:loop")
+	if loopRequestedBy["actor_type"] != "loop" {
+		t.Fatalf("the scheduler's capture response reports actor_type %v, want loop", loopRequestedBy["actor_type"])
+	}
+	if loopRequestedBy["subject"] != v2086SchedulerIAP {
+		t.Fatalf("the scheduler's capture response reports subject %v, want the asserted identity", loopRequestedBy["subject"])
+	}
+	ownerID, _, ownerRequestedBy := fx.captureAs(t, v2086OwnerIAP, "a9:owner")
+	if ownerRequestedBy["actor_type"] != "owner" {
+		t.Fatalf("the owner's capture response reports actor_type %v, want owner", ownerRequestedBy["actor_type"])
+	}
+	activeID, _, activeRequestedBy := fx.captureAs(t, v2086SchedulerIAP, "a9:active")
+	if activeRequestedBy["actor_type"] != "loop" {
+		t.Fatalf("the scheduler's second capture reports actor_type %v, want loop", activeRequestedBy["actor_type"])
+	}
+
+	// The STORE, not only the response body. This is the before/after the whole
+	// task is measured by: false -> true for domain.ActorTypeLoop on a
+	// Requirement's RequestedBy.
+	stored, ok := fx.store.Requirement(loopID)
+	if !ok {
+		t.Fatalf("the loop-captured Requirement %q is not in the store", loopID)
+	}
+	if stored.RequestedBy.ActorType != domain.ActorTypeLoop || stored.RequestedBy.Subject != v2086SchedulerIAP {
+		t.Fatalf("stored requested_by = %+v, want %q with the scheduler identity as subject", stored.RequestedBy, domain.ActorTypeLoop)
+	}
+	storedOwner, ok := fx.store.Requirement(ownerID)
+	if !ok {
+		t.Fatalf("the owner-captured Requirement %q is not in the store", ownerID)
+	}
+	if storedOwner.RequestedBy.ActorType != domain.ActorTypeOwner {
+		t.Fatalf("the owner's Requirement stored requested_by = %+v, want owner", storedOwner.RequestedBy)
+	}
+
+	// The owner read model reports the same, for both. GET /v1/requirements/{id}
+	// is owner-only (an unchanged role gate), so the read is performed as the
+	// owner: the point is that the value the Loop wrote is what the owner sees.
+	fx.clock.nextDay()
+	for id, want := range map[string]string{loopID: "loop", ownerID: "owner"} {
+		w := v2086IAPCall(fx.handler, http.MethodGet, "/v1/requirements/"+id, "", v2086OwnerIAP)
+		if w.Code != http.StatusOK {
+			t.Fatalf("owner read of %s: status=%d body=%s", id, w.Code, w.Body.String())
+		}
+		doc := decodeBody(t, w.Body.Bytes())
+		requestedBy, ok := doc["requested_by"].(map[string]any)
+		if !ok {
+			t.Fatalf("the detail read of %s carries no requested_by: %s", id, w.Body.String())
+		}
+		if requestedBy["actor_type"] != want {
+			t.Fatalf("GET /v1/requirements/%s reports actor_type %v, want %s", id, requestedBy["actor_type"], want)
+		}
+	}
+	// And the scheduler is refused on that owner-only read, so nothing was
+	// widened by making the role producible.
+	if w := v2086IAPCall(fx.handler, http.MethodGet, "/v1/requirements/"+loopID, "", v2086SchedulerIAP); w.Code != http.StatusForbidden {
+		t.Fatalf("the scheduler read GET /v1/requirements/{id}: status=%d body=%s, want 403", w.Code, w.Body.String())
+	}
+
+	// (b) :start-framing, an owner-or-scheduler pair that already names it.
+	fx.clock.nextDay()
+	if w := v2086IAPCall(fx.handler, http.MethodPost, "/v1/requirements/"+loopID+startFramingRouteSuffix,
+		startFramingBody("a9:framing", loopVersion), v2086SchedulerIAP); w.Code != http.StatusOK {
+		t.Fatalf("scheduler :start-framing status=%d body=%s, want 200", w.Code, w.Body.String())
+	}
+	framed, _ := fx.store.Requirement(loopID)
+	if framed.Status != domain.RequirementFraming {
+		t.Fatalf("the scheduler's :start-framing did not reach the command: %+v", framed)
+	}
+	// The attribution survives the transition: the requester is still the Loop.
+	if framed.RequestedBy.ActorType != domain.ActorTypeLoop {
+		t.Fatalf("after framing, stored requested_by = %+v, want loop", framed.RequestedBy)
+	}
+
+	// (c) :request-input, a runner-or-scheduler pair that already names it.
+	activeVersion := fx.makeActive(t, activeID)
+	if w := v2086IAPCall(fx.handler, http.MethodPost, "/v1/requirements/"+activeID+":request-input",
+		askBody("a9:ask", activeVersion), v2086SchedulerIAP); w.Code != http.StatusOK {
+		t.Fatalf("scheduler :request-input status=%d body=%s, want 200", w.Code, w.Body.String())
+	}
+
+	// (d) the owner-only routes. Both are refused at the transport, so neither
+	// reaches a command and neither reserves quota.
+	fx.clock.nextDay()
+	if w := v2086IAPCall(fx.handler, http.MethodPost, "/v1/repositories",
+		`{"request_id":"a9:repo","source_url":"https://github.com/v2086/refused"}`, v2086SchedulerIAP); w.Code != http.StatusForbidden {
+		t.Fatalf("scheduler POST /v1/repositories status=%d body=%s, want 403", w.Code, w.Body.String())
+	}
+	if w := v2086IAPCall(fx.handler, http.MethodPost, "/v1/requirements/"+activeID+":answer-input",
+		answerBodyJSON("a9:answer", activeVersion+1, "delete"), v2086SchedulerIAP); w.Code != http.StatusForbidden {
+		t.Fatalf("scheduler :answer-input status=%d body=%s, want 403", w.Code, w.Body.String())
+	}
+
+	// (e) /internal/reconcile: the owner is still refused and the scheduler is
+	// still accepted, and the branch now CARRIES the loop caller it verified.
+	if w := v2086IAPCall(fx.handler, http.MethodPost, "/internal/reconcile", "", v2086OwnerIAP); w.Code != http.StatusUnauthorized {
+		t.Fatalf("owner /internal/reconcile status=%d body=%s, want 401", w.Code, w.Body.String())
+	}
+	if fx.reconcileCalls != 0 {
+		t.Fatalf("the owner reached the reconcile hook %d times", fx.reconcileCalls)
+	}
+	w := v2086IAPCall(fx.handler, http.MethodPost, "/internal/reconcile", "", v2086SchedulerIAP)
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("scheduler /internal/reconcile status=%d body=%s, want 202", w.Code, w.Body.String())
+	}
+	if fx.reconcileCalls != 1 {
+		t.Fatalf("the reconcile hook ran %d times, want exactly 1", fx.reconcileCalls)
+	}
+	if fx.reconcileErr != nil {
+		t.Fatalf("the reconcile tick received a context with no caller on it: %v", fx.reconcileErr)
+	}
+	if fx.reconcileCaller.Role != application.RoleScheduler || fx.reconcileCaller.Subject != v2086SchedulerIAP {
+		t.Fatalf("the reconcile tick received %#v, want the loop caller for the reconcile identity", fx.reconcileCaller)
+	}
+	// A request carrying a runner-session header is still refused there, and so
+	// is a foreign identity: the branch's own check is unchanged.
+	for _, tc := range []struct {
+		name    string
+		email   string
+		session string
+	}{
+		{name: "a runner session header", email: v2086SchedulerIAP, session: "spoof"},
+		{name: "a foreign identity", email: v2086ForeignIAP},
+		{name: "no identity at all", email: ""},
+	} {
+		req := httptest.NewRequest(http.MethodPost, "/internal/reconcile", nil)
+		if tc.email != "" {
+			req.Header.Set(v2086IAPHeader, v2086IAPPrefix+tc.email)
+		}
+		if tc.session != "" {
+			req.Header.Set("X-Agentic-Runner-Session", tc.session)
+		}
+		rec := httptest.NewRecorder()
+		fx.handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("/internal/reconcile with %s: status=%d body=%s, want 401", tc.name, rec.Code, rec.Body.String())
+		}
+	}
+	if fx.reconcileCalls != 1 {
+		t.Fatalf("a refused reconcile request reached the hook: calls=%d", fx.reconcileCalls)
+	}
+}
+
+// TestReconcileStillFailsClosedWithoutAnIdentityAndCarriesNoCallerThen is the
+// rest of V2-086 A7: ReconcileIdentity keeps its exact fail-closed meaning.
+// An empty identity is a 401 and the hook never runs, and an identity that is
+// non-empty but only whitespace -- the one shape the branch's own unchanged
+// check would otherwise admit, because it trims both sides before comparing --
+// is also a 401, because application.LoopCaller refuses it.
+func TestReconcileStillFailsClosedWithoutAnIdentityAndCarriesNoCallerThen(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		identity string
+		asserted string
+		// ownCheckAdmits records whether the branch's OWN unchanged predicate
+		// accepts this request. Where it does, the 401 can only come from the
+		// new LoopCaller guard, and that is asserted below rather than assumed:
+		// it is the only way to show a fail-closed guard is actually reached
+		// without editing the check it sits behind.
+		ownCheckAdmits bool
+	}{
+		{name: "no reconcile identity configured", identity: "", asserted: v2086SchedulerIAP},
+		{name: "a whitespace-only reconcile identity", identity: "   ", asserted: "", ownCheckAdmits: true},
+		{name: "a whitespace-only reconcile identity of tabs and spaces", identity: " \t ", asserted: "", ownCheckAdmits: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			called := 0
+			h := api.New(api.Config{
+				ReconcileIdentity: tc.identity,
+				InternalReconcile: func(context.Context) error { called++; return nil },
+			})
+			req := httptest.NewRequest(http.MethodPost, "/internal/reconcile", nil)
+			// The bare prefix is what a trimmed whitespace-only identity
+			// compares equal to, so this is the strongest available probe.
+			req.Header.Set(v2086IAPHeader, v2086IAPPrefix+tc.asserted)
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, req)
+			if w.Code != http.StatusUnauthorized {
+				t.Fatalf("status=%d body=%s, want 401", w.Code, w.Body.String())
+			}
+			if !strings.Contains(w.Body.String(), "reconcile scheduler identity required") {
+				t.Fatalf("body=%s, want the branch's own unchanged message", w.Body.String())
+			}
+			if called != 0 {
+				t.Fatalf("the reconcile hook ran %d times behind a 401", called)
+			}
+			// The branch's own predicate, evaluated on exactly these inputs.
+			// Where it admits the request, the refusal above is attributable to
+			// application.LoopCaller and to nothing else.
+			asserted := strings.ToLower(strings.TrimSpace(v2086IAPPrefix + tc.asserted))
+			admits := tc.identity != "" &&
+				asserted == v2086IAPPrefix+strings.ToLower(strings.TrimSpace(tc.identity)) &&
+				!strings.ContainsAny(asserted, " \t\r\n")
+			if admits != tc.ownCheckAdmits {
+				t.Fatalf("the branch's own predicate admits=%v for identity %q asserted %q, want %v; the fixture no longer measures what it claims", admits, tc.identity, tc.asserted, tc.ownCheckAdmits)
+			}
+			if admits {
+				if _, err := application.LoopCaller(tc.identity); err == nil {
+					t.Fatalf("LoopCaller(%q) accepted an identity the 401 above must be attributed to", tc.identity)
+				}
+			}
+		})
+	}
+}

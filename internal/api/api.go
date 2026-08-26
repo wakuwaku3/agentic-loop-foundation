@@ -102,7 +102,21 @@ func (h *Handler) route(w http.ResponseWriter, r *http.Request) {
 			h.error(w, r, http.StatusUnauthorized, "unauthorized", "reconcile scheduler identity required")
 			return
 		}
-		if err := h.config.InternalReconcile(r.Context()); err != nil {
+		// V2-086: the identity check above is byte-unchanged and this branch is
+		// deliberately NOT re-routed through h.config.Authenticator -- it runs
+		// before the authenticator-nil guard below and reads the IAP header
+		// directly, so it keeps working under LocalOwnerBearerAuthenticator,
+		// which cannot resolve an IAP email at all. What is new is that the
+		// verified identity is now CARRIED: the tick used to run on a context
+		// with no Caller on it at all. LoopCaller fails closed on an identity
+		// that is non-empty but whitespace-only, which is the one shape the
+		// check above admits and no caller could act as.
+		loop, err := application.LoopCaller(h.config.ReconcileIdentity)
+		if err != nil {
+			h.error(w, r, http.StatusUnauthorized, "unauthorized", "reconcile scheduler identity required")
+			return
+		}
+		if err := h.config.InternalReconcile(application.ContextWithCaller(r.Context(), loop)); err != nil {
 			h.domainError(w, r, err)
 			return
 		}
