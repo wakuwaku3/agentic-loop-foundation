@@ -3,7 +3,7 @@
   "id": "ts-v2-085",
   "kind": "canonical-task-state",
   "task_id": "V2-085",
-  "status": "queued",
+  "status": "running",
   "dependencies": [
     "V2-088"
   ],
@@ -13,7 +13,7 @@
     "Do not turn a refusal into a silent no-op",
     "Do not change what the two commands do when permission is granted"
   ],
-  "actor": "sol",
+  "actor": "terra",
   "input_refs": [
     "V2-082",
     "V2-085"
@@ -27,8 +27,8 @@
   "next_owner": "terra",
   "retry_budget": {
     "max_attempts": 2,
-    "attempts_used": 0,
-    "remaining": 2
+    "attempts_used": 1,
+    "remaining": 1
   },
   "release_eligible": false,
   "transitions": [
@@ -151,6 +151,30 @@
         "remaining": 2
       },
       "reason": "V2-088が完了しinternal/api/api.goとapi_test.goの占有が解けたのでblockが解消した"
+    },
+    {
+      "sequence": 6,
+      "at": "2026-08-26T20:00:00Z",
+      "from_status": "queued",
+      "to_status": "running",
+      "actor": "terra",
+      "input_refs": [
+        "V2-082",
+        "V2-085"
+      ],
+      "input_hash": "bd746c71bd1dc2cfcecba43b30e96643eb1d32b7d645fdb8618abbf4fb7d4f70",
+      "output_refs": [
+        "V2-085"
+      ],
+      "output_hash": "48461041270692ff88877b40fa737f5c450bec0aab33579371520f45b39e2b32",
+      "owner": "terra",
+      "next_owner": "terra",
+      "retry_budget": {
+        "max_attempts": 2,
+        "attempts_used": 1,
+        "remaining": 1
+      },
+      "reason": "emergency-stop下でPlanとPrepareがcanonical stateを動かす欠落の修理に着手した。owner判断によりcodex/opencodeとGCPに依存する検証以外をこのmachineで完遂する方針に切り替え、V2-085からV2-093までを直列に進める。nice to haveに分類したV2-094は着手しない"
     }
   ]
 }
