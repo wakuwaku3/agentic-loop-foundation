@@ -174,13 +174,25 @@ func run() error {
 		return err
 	}
 	clock := productionClock{}
+	// V2-088: where an error the caller must not be shown goes instead of
+	// nowhere. os.Stdout is the destination in BOTH deploy grades -- Cloud Run
+	// hands a container's stdout to Cloud Logging, and preview-local runs this
+	// binary in the owner's own terminal. Nothing is written to Firestore,
+	// because a caller-provokable write would drain the daily write budget
+	// that api's own 429 branch guards. The --version branch above returns
+	// before this function is reached, so `make smoke` still sees exactly the
+	// version on stdout.
+	operatorRecorder, err := api.NewJSONOperatorRecorder(os.Stdout, clock)
+	if err != nil {
+		return err
+	}
 	leaseReconciler := &reconciler.Reconciler{Tx: store, Clock: clock}
 	verificationReconciler := &reconciler.VerificationReconciler{Tx: store, Clock: clock, Deadline: time.Minute}
 	var authenticator api.Authenticator = api.CombinedAuthenticator{Runner: runnerEnrollment, OwnerEmails: owners}
 	if ownerTokens != nil {
 		authenticator = api.LocalOwnerBearerAuthenticator{Runner: runnerEnrollment, OwnerTokens: ownerTokens}
 	}
-	h := api.New(api.Config{Authenticator: authenticator, Service: service, RunnerEnrollment: runnerEnrollment, AllowedOrigins: origins, ReconcileIdentity: strings.ToLower(reconcileIdentity), InternalReconcile: func(callCtx context.Context) error {
+	h := api.New(api.Config{Authenticator: authenticator, Service: service, RunnerEnrollment: runnerEnrollment, AllowedOrigins: origins, ReconcileIdentity: strings.ToLower(reconcileIdentity), OperatorRecorder: operatorRecorder, InternalReconcile: func(callCtx context.Context) error {
 		tickCtx, cancel := context.WithTimeout(callCtx, 5*time.Second)
 		defer cancel()
 		if _, _, err := leaseReconciler.Tick(tickCtx, ""); err != nil {

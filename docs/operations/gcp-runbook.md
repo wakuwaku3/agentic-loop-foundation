@@ -116,3 +116,79 @@ application accepts only that normalized IAP assertion. The OIDC audience must
 be a custom IAP OAuth audience because Google-managed default IAP clients are
 not assumed programmatic-safe. See [Cloud Scheduler HTTP target auth](https://cloud.google.com/scheduler/docs/http-target-auth)
 and [IAP programmatic authentication](https://docs.cloud.google.com/iap/docs/authentication-howto).
+
+## 500 を返した理由を読む（operator record）
+
+caller に見せてはならないエラーは応答に一切載らない。応答は常に
+`error` / `message` / `schema_version` / `correlation_id` の 4 キーと
+`X-Correlation-ID` ヘッダだけで、`message` は定数 `internal server error` である。
+その理由そのものは、process の stdout に 1 行 1 JSON object の operator record として
+書かれる。書き先は stdout だけであり、Firestore には何も書かない: record の書き込みが
+日次 write budget を消費すると、caller が 500 を誘発するだけで budget を枯らして
+全 mutation を停止させられるため（同じ budget が `429 quota_exhausted` の根拠である）。
+また記録したい fault 自体が Firestore の fault であることが多く、Firestore に書く record は
+必要な時にこそ失われる。
+
+record が出るのは 2 か所だけである: `domainError` が分類できなかったエラー
+（`kind: unclassified_error`）と、`ServeHTTP` が recover した panic
+（`kind: recovered_panic`）。分類済みの 400/401/403/404/405/409/413/415/429/503 では
+record は 1 件も出ない。caller の間違いで operator の視界を埋めないためである。
+
+### Cloud Run（GCP grade）
+
+Cloud Run は container の stdout を Cloud Logging に渡し、structured logging の規約により
+`severity` がそのまま反映される。Logs Explorer では次の filter で選択する。
+
+```
+resource.type="cloud_run_revision"
+resource.labels.service_name="<service_name>"
+severity="ERROR"
+jsonPayload.schema_version="v1"
+jsonPayload.kind=("unclassified_error" OR "recovered_panic" OR "suppression_started")
+```
+
+caller から報告された `X-Correlation-ID` で 1 件に絞るときは
+`jsonPayload.correlation_id="<id>"` を足す。retention と IAM は platform 側の
+project-scoped な設定に従い、このリポジトリは log sink も log-based metric も作らない。
+
+### preview-local grade
+
+preview-local では record は owner 自身の端末の stdout に出る。追加設定は無い。
+ただし実測の caveat がある: `TestControlPlanePreviewLocalLive` は control plane を
+`runner.ProcessSupervisor` 経由で起動し、その `Stdout` は nil であるため、子 process は
+test process の stdout を継承する。したがって record は
+`go test -v -run TestControlPlanePreviewLocalLive ./internal/api` の出力の中に現れる。
+人間が読むことはできるが、その test file 自身は record を assert しない。
+
+### record の field
+
+| field | 意味 |
+| --- | --- |
+| `schema_version` | 常に `v1` |
+| `kind` | `unclassified_error` / `recovered_panic` / `suppression_started` の 3 値のみ |
+| `severity` | 常に `ERROR`（Cloud Logging の structured logging 規約） |
+| `observed_at` | 注入された clock の時刻（RFC3339、UTC） |
+| `correlation_id` | caller が受け取った `X-Correlation-ID` と同じ値 |
+| `method` | request method |
+| `path` | request path のみ（query string は読まない） |
+| `status` | 常に 500 |
+| `error` | 常に `internal_error`（caller が受け取った error code） |
+| `detail` | エラー自身の text。redact 後 256 byte で打ち切る |
+| `detail_truncated` | `detail` または `path` を打ち切ったか |
+| `suppressed_before` | この行の前に rate cap で捨てられた件数 |
+| `window_seconds` / `records_per_window` | `suppression_started` の行にのみ現れる（60 と 32） |
+
+1 window（60 秒）あたり 32 件を超えると、まず 1 行だけ `suppression_started` が出て、
+以降その window では何も書かれず件数だけ数える。次に実際に書かれた行の
+`suppressed_before` がその件数を正確に伝える。したがって 1 window の最悪ケースは 33 行で、
+捨てられた事実は「即座に marker として」と「正確な件数として」の 2 回見える。
+
+### record が絶対に含まないもの
+
+record は request body、response body、header（したがって `Authorization` の値）、
+query string、prompt、provider の生の応答、そして credential の値を一切含まない。
+これは注意ではなく構造による: record は閉じた struct であり free-form field を持たず、
+recorder が受け取るのは correlation id / method / path / detail の 4 値だけで、
+`http.ResponseWriter` も `*http.Request` も渡されない。`detail` と `path` は
+`internal/runner` の共有 deny-list（`bearer <...>` / `-----BEGIN ... PRIVATE KEY-----` /
+`gh[pousr]_<...>`）を通り、一致した部分は `[REDACTED]` に置換される。

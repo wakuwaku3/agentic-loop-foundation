@@ -35,6 +35,10 @@ type Config struct {
 	AllowedOrigins    []string
 	InternalReconcile func(context.Context) error
 	ReconcileIdentity string
+	// OperatorRecorder is where an error the caller must not be shown goes
+	// instead of nowhere. A nil value records nothing, which is the default
+	// and is what keeps every existing test's output unchanged.
+	OperatorRecorder OperatorRecorder
 }
 type Handler struct {
 	config Config
@@ -47,12 +51,20 @@ func New(cfg Config) *Handler {
 	return h
 }
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// cid is declared before the deferred function so the recover branch can
+	// name the same correlation id the caller was given. The two assignments
+	// below stay exactly where they were.
+	var cid string
 	defer func() {
-		if recover() != nil {
+		if recovered := recover(); recovered != nil {
 			h.error(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
+			// V2-088: the recovered value used not to be bound at all, so a
+			// panic was lost completely. It goes to the operator's record and
+			// NOT into the response, whose arguments above are unchanged.
+			h.recordOperatorObservation(OperatorRecordRecoveredPanic, cid, r.Method, r.URL.Path, operatorPanicText(recovered))
 		}
 	}()
-	cid := r.Header.Get("X-Correlation-ID")
+	cid = r.Header.Get("X-Correlation-ID")
 	if cid == "" {
 		cid = correlationID()
 	}
@@ -1253,6 +1265,10 @@ func (h *Handler) domainError(w http.ResponseWriter, r *http.Request, err error)
 		// both. err.Error() is deliberately NOT passed here: see the comment
 		// on the default above.
 		h.error(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
+		// V2-088: err.Error() is still not passed to the CALLER, and it is
+		// now passed to the OPERATOR. The audience is the whole difference:
+		// the recorder writes to a writer the Handler holds and never to w.
+		h.recordOperatorObservation(OperatorRecordUnclassifiedError, CorrelationID(r.Context()), r.Method, r.URL.Path, err.Error())
 		return
 	}
 	// The already-classified branches keep err.Error(), so no response

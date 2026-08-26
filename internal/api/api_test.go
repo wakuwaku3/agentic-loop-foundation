@@ -1,6 +1,7 @@
 package api_test
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"encoding/base64"
@@ -4204,6 +4205,10 @@ type faultFixture struct {
 	tx      *faultTransactor
 	clock   *framingClock
 	values  map[string]string
+	// records is V2-088's additive field: the sink the api.Config recorder
+	// writes to. It touches no assertion and no route row, and every
+	// pre-existing test that uses this fixture simply ignores it.
+	records *bytes.Buffer
 }
 
 // faultReconcileIdentity is the scheduler identity the /internal/reconcile
@@ -4241,13 +4246,19 @@ func newFaultFixture(t *testing.T, afterCallback bool) *faultFixture {
 	// a reconciliation the caller did not perform failing is the clearest case
 	// of an error the request did not cause, and it answered 400
 	// invalid_request before this change.
+	records := &bytes.Buffer{}
+	recorder, err := api.NewJSONOperatorRecorder(records, clk)
+	if err != nil {
+		t.Fatal(err)
+	}
 	h := api.New(api.Config{
 		Authenticator: auth, Service: svc, RunnerEnrollment: enrollment,
 		AllowedOrigins:    []string{"https://console.example"},
 		InternalReconcile: func(context.Context) error { return tx.fault },
 		ReconcileIdentity: faultReconcileIdentity,
+		OperatorRecorder:  recorder,
 	})
-	fx := &faultFixture{handler: h, tx: tx, clock: clk, values: map[string]string{}}
+	fx := &faultFixture{handler: h, tx: tx, clock: clk, values: map[string]string{}, records: records}
 
 	for _, seed := range []struct{ path, body string }{
 		{"/v1/requirements", `{"request_id":"fault:capture-1","requirement_id":"fault-captured","text":"seed"}`},
@@ -4389,4 +4400,261 @@ func TestAStorageFaultIsNotReportedAsTheCallersMistake(t *testing.T) {
 			}
 		})
 	}
+}
+
+// ===========================================================================
+// V2-088 A7: the seam, proved over HTTP by reusing V2-083's own fixtures.
+// ===========================================================================
+
+// operatorRecordDoc decodes the single line the recorder wrote, refusing any
+// count other than one.
+func operatorRecordDoc(t *testing.T, sink *bytes.Buffer, want int) []map[string]any {
+	t.Helper()
+	raw := sink.String()
+	var docs []map[string]any
+	if raw != "" {
+		if !strings.HasSuffix(raw, "\n") {
+			t.Fatalf("the recorder's sink does not end in a newline: %q", raw)
+		}
+		for _, line := range strings.Split(strings.TrimSuffix(raw, "\n"), "\n") {
+			var doc map[string]any
+			if err := json.Unmarshal([]byte(line), &doc); err != nil {
+				t.Fatalf("the recorded line is not one JSON object: %v (%q)", err, line)
+			}
+			docs = append(docs, doc)
+		}
+	}
+	if len(docs) != want {
+		t.Fatalf("the recorder wrote %d lines, want exactly %d: %q", len(docs), want, raw)
+	}
+	return docs
+}
+
+// TestAnUnclassifiedErrorReachesTheOperatorAndNotTheCaller is V2-088 A7. It
+// reuses V2-083's own faultRoutes and its own fault fixture, so the record's
+// coverage is BY CONSTRUCTION the same 25 routes in the same two variants
+// that V2-083 proved, and cannot fall behind it.
+func TestAnUnclassifiedErrorReachesTheOperatorAndNotTheCaller(t *testing.T) {
+	// --- the positive half: every unclassified 500 leaves exactly one record
+	for _, variant := range []struct {
+		name          string
+		afterCallback bool
+	}{
+		{"the-fault-arrives-instead-of-the-callback", false},
+		{"the-fault-arrives-after-the-callback-ran-which-is-the-commit-time-shape", true},
+	} {
+		variant := variant
+		t.Run(variant.name, func(t *testing.T) {
+			fx := newFaultFixture(t, variant.afterCallback)
+			routes := faultRoutes("operator:" + variant.name)
+			if len(routes) != 25 {
+				t.Fatalf("faultRoutes yielded %d routes, want the 25 V2-083 pinned", len(routes))
+			}
+			for _, route := range routes {
+				route := route
+				t.Run(route.name, func(t *testing.T) {
+					fx.clock.nextDay()
+					fx.records.Reset()
+					path := fx.expand(route.path)
+					w := pinCall(fx.handler, pinRow{method: route.method, token: route.token, headers: route.headers}, path, fx.expand(route.body))
+					body := w.Body.String()
+					if w.Code != http.StatusInternalServerError {
+						t.Fatalf("status = %d, want 500: %s", w.Code, body)
+					}
+
+					// The RESPONSE is unchanged: four keys, the constant
+					// message, and none of the injected fault's text.
+					doc := decodeBody(t, w.Body.Bytes())
+					if len(doc) != 4 {
+						t.Fatalf("body carries %d keys, want exactly 4: %s", len(doc), body)
+					}
+					for key := range doc {
+						switch key {
+						case "error", "message", "schema_version", "correlation_id":
+						default:
+							t.Fatalf("unexpected response field %q: %s", key, body)
+						}
+					}
+					if doc["error"] != "internal_error" || doc["message"] != "internal server error" {
+						t.Fatalf("the response envelope moved: %s", body)
+					}
+					for _, fragment := range injectedStoreFaultFragments {
+						if strings.Contains(body, fragment) {
+							t.Fatalf("the response leaks part of the injected store fault (%q): %s", fragment, body)
+						}
+					}
+
+					// The RECORD carries all of that plus the text.
+					records := operatorRecordDoc(t, fx.records, 1)
+					record := records[0]
+					if record["kind"] != api.OperatorRecordUnclassifiedError {
+						t.Fatalf("record kind = %v, want %q", record["kind"], api.OperatorRecordUnclassifiedError)
+					}
+					if record["correlation_id"] != doc["correlation_id"] {
+						t.Fatalf("record correlation_id = %v but the response body says %v", record["correlation_id"], doc["correlation_id"])
+					}
+					if record["correlation_id"] != w.Header().Get("X-Correlation-ID") {
+						t.Fatalf("record correlation_id = %v but the X-Correlation-ID header says %q", record["correlation_id"], w.Header().Get("X-Correlation-ID"))
+					}
+					if record["method"] != route.method {
+						t.Fatalf("record method = %v, want %q", record["method"], route.method)
+					}
+					if record["path"] != path {
+						t.Fatalf("record path = %v, want %q", record["path"], path)
+					}
+					if record["status"] != float64(http.StatusInternalServerError) || record["error"] != "internal_error" {
+						t.Fatalf("record status/error = %v/%v, want 500/internal_error", record["status"], record["error"])
+					}
+					detail, _ := record["detail"].(string)
+					// The injected fault text is 300 bytes and the record's
+					// detail is capped at 256, so the assertion is on the
+					// fragments that survive the cap rather than on the whole
+					// text: the doubled parent name and the installation key
+					// are what make the fault diagnosable.
+					for _, fragment := range []string{"rpc error: code = InvalidArgument", "StartAfter", "projects/agentic-loop-local", "install-7f3a"} {
+						if !strings.Contains(detail, fragment) {
+							t.Fatalf("the record's detail does not carry %q, so the operator cannot diagnose the fault: %q", fragment, detail)
+						}
+					}
+					if len(detail) > 256 {
+						t.Fatalf("the record's detail is %d bytes, want at most 256", len(detail))
+					}
+					t.Logf("OPRECORD\t%s\t%s\t%s %s\ttruncated=%v\tdetail_bytes=%d", variant.name, route.name, route.method, route.path, record["detail_truncated"], len(detail))
+				})
+			}
+		})
+	}
+
+	// --- the negative half, and it is not optional: a CLASSIFIED status
+	// records NOTHING. Without this the recorder drifts into logging every
+	// 404, which buries the only records carrying information the caller does
+	// not already have.
+	t.Run("a-classified-status-records-nothing", func(t *testing.T) {
+		fx := newFaultFixture(t, false)
+		unconfiguredRecords := &bytes.Buffer{}
+		unconfiguredRecorder, err := api.NewJSONOperatorRecorder(unconfiguredRecords, fx.clock)
+		if err != nil {
+			t.Fatal(err)
+		}
+		unconfigured := api.New(api.Config{OperatorRecorder: unconfiguredRecorder})
+
+		oversized := `{"request_id":"operator:413","text":"` + strings.Repeat("x", 1<<20) + `"}`
+		rows := []struct {
+			row          pinRow
+			unconfigured bool
+			disarm       bool
+			exhaustQuota bool
+		}{
+			{row: pinRow{name: "unauthenticated-list", method: http.MethodGet, path: "/v1/requirements", wantStatus: 401, wantCode: "unauthorized"}},
+			{row: pinRow{name: "list-requirements-wrong-role", method: http.MethodGet, path: "/v1/requirements", token: "runner", wantStatus: 403, wantCode: "forbidden"}},
+			{row: pinRow{name: "owner-asset-unknown", method: http.MethodGet, path: "/owner/assets/nothing.js", wantStatus: 404, wantCode: "not_found"}},
+			{row: pinRow{name: "healthz-rejects-post", method: http.MethodPost, path: "/healthz", wantStatus: 405, wantCode: "method_not_allowed"}},
+			{row: pinRow{name: "capture-malformed-json", method: http.MethodPost, path: "/v1/requirements", body: `{`, token: "owner", wantStatus: 400, wantCode: "invalid_json"}},
+			{row: pinRow{name: "capture-wrong-content-type", method: http.MethodPost, path: "/v1/requirements", body: `{"request_id":"operator:415","text":"x"}`, token: "owner", contentType: "text/plain", wantStatus: 415, wantCode: "unsupported_media_type"}},
+			{row: pinRow{name: "capture-body-over-one-mebibyte", method: http.MethodPost, path: "/v1/requirements", body: oversized, token: "owner", wantStatus: 413, wantCode: "request_too_large"}},
+			{row: pinRow{name: "start-framing-stale-version", method: http.MethodPost, path: "/v1/requirements/{captured}:start-framing", body: `{"request_id":"operator:409","expected_requirement_version":99}`, token: "owner", wantStatus: 409, wantCode: "conflict"}, disarm: true},
+			{row: pinRow{name: "capture-with-the-write-budget-full", method: http.MethodPost, path: "/v1/requirements", body: `{"request_id":"operator:429","text":"x"}`, token: "owner", wantStatus: 429, wantCode: "quota_exhausted"}, disarm: true, exhaustQuota: true},
+			{row: pinRow{name: "authenticated-route-with-nothing-configured", method: http.MethodGet, path: "/v1/requirements", wantStatus: 503, wantCode: "not_configured"}, unconfigured: true},
+		}
+		seen := map[int]bool{}
+		for _, tc := range rows {
+			tc := tc
+			t.Run(tc.row.name, func(t *testing.T) {
+				h := fx.handler
+				sink := fx.records
+				if tc.unconfigured {
+					h = unconfigured
+					sink = unconfiguredRecords
+				}
+				fx.clock.nextDay()
+				if tc.disarm {
+					fx.tx.armed = false
+				}
+				if tc.exhaustQuota {
+					store, ok := fx.tx.inner.(*memory.Store)
+					if !ok {
+						t.Fatalf("the fault fixture's inner Transactor is %T, not the in-memory store", fx.tx.inner)
+					}
+					store.SeedQuotaTotal(fx.clock.Now(), quota.Usage{Writes: quota.DefaultBudget.Writes})
+				}
+				sink.Reset()
+				w := pinCall(h, tc.row, fx.expand(tc.row.path), fx.expand(tc.row.body))
+				code := ""
+				var doc map[string]any
+				if json.Unmarshal(w.Body.Bytes(), &doc) == nil {
+					code, _ = doc["error"].(string)
+				}
+				if w.Code != tc.row.wantStatus || code != tc.row.wantCode {
+					t.Fatalf("status/code = %d/%q, want %d/%q (body %s)", w.Code, code, tc.row.wantStatus, tc.row.wantCode, w.Body.String())
+				}
+				operatorRecordDoc(t, sink, 0)
+				seen[tc.row.wantStatus] = true
+				t.Logf("OPNEGATIVE\t%s\t%d\t%s\tzero records", tc.row.name, w.Code, code)
+			})
+		}
+		for _, status := range []int{400, 401, 403, 404, 405, 409, 413, 415, 429, 503} {
+			if !seen[status] {
+				t.Errorf("no row measured zero records for classified status %d", status)
+			}
+		}
+	})
+
+	// --- the panic half: the branch that did not even bind what it recovered
+	t.Run("a-recovered-panic-reaches-the-operator", func(t *testing.T) {
+		records := &bytes.Buffer{}
+		clk := &framingClock{at: time.Unix(1700000000, 0).UTC()}
+		recorder, err := api.NewJSONOperatorRecorder(records, clk)
+		if err != nil {
+			t.Fatal(err)
+		}
+		panicText := "a reconciliation nobody classified: " + injectedStoreFaultText
+		h := api.New(api.Config{
+			ReconcileIdentity: faultReconcileIdentity,
+			InternalReconcile: func(context.Context) error { panic(errors.New(panicText)) },
+			OperatorRecorder:  recorder,
+		})
+		w := pinCall(h, pinRow{method: http.MethodPost, headers: map[string]string{"X-Goog-Authenticated-User-Email": "accounts.google.com:" + faultReconcileIdentity}}, "/internal/reconcile", "")
+		body := w.Body.String()
+		if w.Code != http.StatusInternalServerError {
+			t.Fatalf("status = %d, want 500: %s", w.Code, body)
+		}
+		doc := decodeBody(t, w.Body.Bytes())
+		if len(doc) != 4 {
+			t.Fatalf("body carries %d keys, want exactly 4: %s", len(doc), body)
+		}
+		for key := range doc {
+			switch key {
+			case "error", "message", "schema_version", "correlation_id":
+			default:
+				t.Fatalf("unexpected response field %q: %s", key, body)
+			}
+		}
+		if doc["error"] != "internal_error" || doc["message"] != "internal server error" {
+			t.Fatalf("the panic response envelope moved: %s", body)
+		}
+		for _, fragment := range injectedStoreFaultFragments {
+			if strings.Contains(body, fragment) {
+				t.Fatalf("the panic response leaks part of the injected text (%q): %s", fragment, body)
+			}
+		}
+		records0 := operatorRecordDoc(t, records, 1)
+		record := records0[0]
+		if record["kind"] != api.OperatorRecordRecoveredPanic {
+			t.Fatalf("record kind = %v, want %q", record["kind"], api.OperatorRecordRecoveredPanic)
+		}
+		if record["correlation_id"] != pinCorrelationID {
+			t.Fatalf("record correlation_id = %v, want %q", record["correlation_id"], pinCorrelationID)
+		}
+		if record["correlation_id"] != w.Header().Get("X-Correlation-ID") {
+			t.Fatalf("record correlation_id = %v but the X-Correlation-ID header says %q", record["correlation_id"], w.Header().Get("X-Correlation-ID"))
+		}
+		if record["method"] != http.MethodPost || record["path"] != "/internal/reconcile" {
+			t.Fatalf("record method/path = %v %v, want POST /internal/reconcile", record["method"], record["path"])
+		}
+		detail, _ := record["detail"].(string)
+		if !strings.HasPrefix(detail, "a reconciliation nobody classified: rpc error: code = InvalidArgument") {
+			t.Fatalf("the record does not carry the panic's own text: %q", detail)
+		}
+		t.Logf("OPPANIC\tresponse correlation_id=%v\theader=%q\trecord detail_bytes=%d truncated=%v", doc["correlation_id"], w.Header().Get("X-Correlation-ID"), len(detail), record["detail_truncated"])
+	})
 }
