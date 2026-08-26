@@ -1,0 +1,154 @@
+{
+  "schema_version": "v1",
+  "id": "ev-v2-086-application",
+  "kind": "evidence",
+  "created_at": "2026-08-26T22:00:00Z",
+  "correlation_id": "v2-086-scheduler-role",
+  "task_id": "V2-086",
+  "component": "application",
+  "evidence_key": "344c888cd65d1f869648d027833f72f5245b0a2ddfcbea67a2f5f2c1f80bfdd3",
+  "result": "passed",
+  "observed_at": "2026-08-26T22:00:00Z",
+  "checks": [
+    {
+      "name": "scope-boundary",
+      "status": "passed",
+      "argv": [
+        "git",
+        "rev-parse",
+        "HEAD"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 30,
+      "summary": "Scope boundary for V2-086, recorded against base commit a0622910d493cadd94c6d819690dbab0232a44ab on branch v2-task/V2-086, BEFORE any source file was edited: this record's first commit contains rows 1-5 and the whole A1/A2 baseline, and `git status --porcelain` at that commit showed ONLY .agents/v2/evidence paths, so every non-test and test source file named below was still byte-identical to the base. ROW 1 -- what this task makes true: the scheduler becomes a role a real caller can be. internal/application gains exactly one exported constructor, LoopCaller(subject string) (Caller, error), which is the only sanctioned producer of a Caller carrying RoleScheduler and refuses an empty or whitespace-only subject with ErrUnauthenticated; internal/api's CombinedAuthenticator gains one field, SchedulerIdentity, checked AFTER the byte-unchanged runner-session branch and parseIAPEmail but BEFORE the OwnerEmails lookup, and refusing outright an identity configured as both scheduler and owner; POST /internal/reconcile keeps its own identity check byte-for-byte and additionally carries application.LoopCaller(ReconcileIdentity) on the context it hands InternalReconcile; cmd/control-plane/main.go sets SchedulerIdentity from the same strings.ToLower(reconcileIdentity) value it already passes as ReconcileIdentity, adding no environment variable; and internal/runner.Orchestrator's fabricated Caller{Role: RoleOwner, Subject: runner-local-owner} literal is replaced by a required injected field that fails closed when its Role or Subject is empty. The measured before/after is a count: non-test producers of a RoleScheduler Caller 0 -> 1, and reachability of domain.ActorTypeLoop for Requirement.RequestedBy through a transport false -> true. ROW 2 -- what it deliberately does not do: application.RoleScheduler is not removed and no callerActor role pair changes; no operation becomes scheduler-only; no route's role gate changes; no PermitKind, ActorType, Role or status is added; internal/domain is byte-unchanged; contracts/openapi/openapi-v1.yaml is byte-unchanged (sha256 ca62ef4c0e1f7dbe357d03209d68f387581ed53aeaa66b0ea8fc5b8b7eea8cdd before and after) and contracts_changed is empty; api.Config gains and loses no field; POST /internal/reconcile is NOT re-routed through h.config.Authenticator, because that branch runs before the authenticator-nil guard and must keep working under LocalOwnerBearerAuthenticator, which cannot resolve an IAP email at all; LocalOwnerBearerAuthenticator is not changed and no preview-local scheduler environment variable is added; internal/application/readmodels.go, internal/web/**, docs/** and contracts/** are untouched, because actor_type 'loop' is already declared in the RequestedBy schema and already admitted by domain.validActorType, so the new value flows through every existing response and export with no field and no branch; ci/components.json, Makefile, go.mod, go.sum and devbox.* are untouched because the design creates and removes no import edge; no existing test is deleted, renamed or weakened. ROW 3 -- what it records but does not fix: (a) the openapi document declares at contracts/openapi/openapi-v1.yaml lines 5-8 that increment decomposition/planning 'remains a loop scheduler responsibility' while internal/application/service.go's Plan (:888) and Prepare (:1023) accept RoleOwner and 23 test files call one of the two, so the declaration and the application-layer role pair disagree; that is a statement about the public HTTP surface, where neither command has a route at all, and it is recorded here for the tech_lead rather than resolved. (b) Orchestrator.RunFakeJourney has no non-test caller in the repository and cmd/runner/main.go constructs no Orchestrator, so the whole Capture-to-AcceptResult driver is exercised only by internal/runner/orchestrator_test.go; moving the driver into a _test.go file is a larger and better change that is NOT taken here, and is recorded so a later task can decide. (c) the in-memory adapter never trues up its quota reservation, so quota.ReadTransactionUsage (Reads 6001, Writes 1) admits only four READ transactions per budget day against quota.DefaultBudget's 25000 reads; the new proof works around it by stepping an injected clock, never by weakening an assertion, and the adapter defect stays V2-087's. (d) internal/store/firestore's suite prints ok while producing 26 '--- SKIP' lines with no emulator (MEASURED 26, and the coordinator's brief said 49), so that package's run measured nothing about this change; it is recorded under gate rule G7 and never counted as a pass. (e) A6 asks both that the process 'fail to start' when RECONCILE_IDENTITY is also in OWNER_EMAILS and that nothing else in cmd/control-plane/main.go change and that the refusal be asserted through the authenticator; the two halves conflict, so the refusal is implemented and tested in CombinedAuthenticator.Authenticate (every IAP-authenticated request is refused with a message naming the conflict) and NO start-time guard was added -- recorded as a partial, escalated to the tech_lead, not reinterpreted. ROW 4 -- what only a later task can establish: the loop caller the reconcile branch now carries is verified as present and correctly attributed but is NOT consumed by any command inside the tick, because both reconcilers the cmd/control-plane closure drives (reconciler.Reconciler.Tick and reconciler.VerificationReconciler.Tick) take no Caller; the Requirement transitions that will consume it belong to the V2-084 follow-on. The preview-local composition can produce an owner and a runner but not a scheduler. ROW 5 -- this task passes no release gate: exactly three evidence records are issued (application, api, runner), release_eligible is false in all three and in the index, no capability id is cited anywhere, contracts/release-contract/** is untouched, .agents/v2/evidence/V2-022-release-live-dogfood.json is untouched, no release BundleDigest moves, no Provider CLI was started and no Google Cloud resource was touched."
+    },
+    {
+      "name": "a1-i-contextwithcaller-census",
+      "status": "passed",
+      "argv": [
+        "sh",
+        "-c",
+        "grep -rn ContextWithCaller --include='*.go' . | grep -v _test.go"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 60,
+      "summary": "A1(i) MEASURED at a0622910d493cadd94c6d819690dbab0232a44ab, and it DISAGREES with the Work Order by being far larger than 'the internal/api call sites'. 15 non-test hits, in three groups. (1) The DEFINITION: internal/application/caller.go:28. (2) internal/api/api.go, TWELVE call sites: :172 listRequirements, :185 listControls, :199 getRequirement, :212 listRepositories, :236 getRepository, :249 queueSummary, :270 listRunners, :294 listProviders, :307 export, :328 releaseState, :342 getRequirement (the second, release-scoped read), and :358 the single ctx built once for the whole authenticated POST switch. (3) internal/runner/orchestrator.go:39 and :40 -- exactly the two sites the Work Order names, and the ONLY ContextWithCaller sites outside internal/api and internal/application. orchestrator.go:39 is verbatim `owner := application.ContextWithCaller(ctx, application.Caller{Role: application.RoleOwner, Subject: \"runner-local-owner\"})` and :40 builds a genuine runner caller from o.RunnerID. So the fabrication the outcome sentence names is confirmed at the exact line the Work Order gives."
+    },
+    {
+      "name": "a1-ii-caller-literal-census",
+      "status": "passed",
+      "argv": [
+        "sh",
+        "-c",
+        "grep -rn 'Caller{' --include='*.go' . | grep -v _test.go"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 60,
+      "summary": "A1(ii) MEASURED at a0622910d493cadd94c6d819690dbab0232a44ab and it AGREES with every line number the Work Order gives, which is itself worth recording after eleven tasks of drift. 19 non-test hits. The ROLE-BEARING producers are exactly five: internal/api/auth.go:50 (RoleRunner, CombinedAuthenticator) and :85 (RoleRunner, LocalOwnerBearerAuthenticator) -- the only two RoleRunner producers; internal/api/auth.go:59 (RoleOwner, CombinedAuthenticator, from the IAP assertion) and :99 (RoleOwner, LocalOwnerBearerAuthenticator, from a bearer token) -- the only two RoleOwner producers reached from a transport; and internal/runner/orchestrator.go:39 (RoleOwner, FABRICATED) plus :40 (RoleRunner, from o.RunnerID) -- the only producers outside internal/api. The remaining 13 hits are the zero value `application.Caller{}` or `Caller{}` returned beside an error (auth.go:21, :25, :44, :48, :54, :57, :79, :83, :89, :93, :97 and internal/application/caller.go:34) and carry no role. ZERO of the 19 names RoleScheduler."
+    },
+    {
+      "name": "a1-iii-rolescheduler-census",
+      "status": "passed",
+      "argv": [
+        "sh",
+        "-c",
+        "grep -rn RoleScheduler --include='*.go' . | grep -v _test.go"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 60,
+      "summary": "A1(iii) MEASURED at a0622910d493cadd94c6d819690dbab0232a44ab: 19 non-test hits, ZERO of them produce-side, which is the defect. Marked one by one. PRODUCE-SIDE: none. DECLARATION (neither): internal/application/caller.go:15, the const. ATTRIBUTION (the one thing that requires the role): caller.go:68, the `case RoleScheduler:` arm of requestedBy that returns domain.ActorTypeLoop. COMMENT/PROSE (neither): caller.go:60 and internal/application/framing.go:85 and :86 -- framing.go's comment already states in the tree that 'no non-test path in this repository constructs a Caller with RoleScheduler'. ACCEPT-SIDE, 13 sites: internal/application/service.go:749 (Capture, callerActor owner|scheduler), :888 (Plan, owner|scheduler), :1023 (Prepare, owner|scheduler), :1373 (Control, owner|scheduler), :1529 (Permit, owner|runner|scheduler); internal/application/repository.go:133, :223, :471, :514 (owner|scheduler); internal/application/framing.go:123 (StartFraming, owner|scheduler); internal/application/human_input.go:414 (askedBy's `case RoleRunner, RoleScheduler:` arm) and :461 (RequestHumanInput, callerActor runner|scheduler); internal/api/api.go:439 (POST /v1/requirements/{id}:request-input, runner|scheduler) and :475 (POST /v1/requirements/{id}:start-framing, owner|scheduler). DISAGREEMENTS with the Work Order's line numbers, seven of them: service.go Capture expected :744 measured :749 (+5); Plan expected :883 measured :888 (+5); Prepare expected :987 measured :1023 (+36); Control expected :1303 measured :1373 (+70); Permit expected :1458 measured :1529 (+71); api.go :request-input expected :427 measured :439 (+12); api.go :start-framing expected :463 measured :475 (+12). AGREEMENTS: repository.go :133, :223, :471, :514 and framing.go :123 and human_input.go :461 are exactly as written. The Work Order's count of thirteen accept-side sites is CONFIRMED as thirteen, but its list omits human_input.go:414 (askedBy) and counts api.go's two route gates, so the composition of the thirteen differs from its enumeration by one: the Work Order lists Capture, Plan, Prepare, Control, Permit, repository x4, framing, RequestHumanInput and api.go x2 = 13 and does not name askedBy; measured, askedBy makes 13 accept-side plus askedBy = 14 role-accepting arms. Recorded as measured rather than reconciled to the written number."
+    },
+    {
+      "name": "a1-iv-runfakejourney-callers",
+      "status": "passed",
+      "argv": [
+        "sh",
+        "-c",
+        "grep -rn 'RunFakeJourney' --include='*.go' . ; grep -rn 'Orchestrator{' --include='*.go' ."
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 60,
+      "summary": "A1(iv) MEASURED at a0622910d493cadd94c6d819690dbab0232a44ab and it DISAGREES with the Work Order's 'exactly ONE caller'. Orchestrator.RunFakeJourney is DEFINED at internal/runner/orchestrator.go:35 and CALLED from TWO sites, both in the same test function: internal/runner/orchestrator_test.go:56 (the first journey, which the Work Order names) and internal/runner/orchestrator_test.go:63 (the retry, asserting idempotency). So the measured count of call sites is two, not one; the measured count of NON-TEST call sites is ZERO, which is the substance of the claim and is confirmed. The count of `Orchestrator{` composite literals in the whole repository is exactly one, internal/runner/orchestrator_test.go:54, and it is a test; cmd/runner/main.go contains no Orchestrator at all (grep over cmd/runner/main.go for Orchestrator returns nothing), so adding a required field to the struct changes no production wiring."
+    },
+    {
+      "name": "a1-v-baseline-top-level-test-counts",
+      "status": "passed",
+      "argv": [
+        "devbox",
+        "run",
+        "--pure",
+        "--",
+        "sh",
+        "-c",
+        "for p in application api runner domain; do go test -list '.*' ./internal/$p | grep -c '^Test'; done"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 60,
+      "summary": "A1(v) MEASURED at a0622910d493cadd94c6d819690dbab0232a44ab, counting only lines matching ^Test in `go test -list '.*'` output: internal/application 193, internal/api 63, internal/runner 118, internal/domain 54. Cross-checked against `grep -c '^func Test'` over each package's *_test.go files, which returns the identical four numbers 193/63/118/54, so neither measurement is an artefact of the other. The Work Order gives no expected values for these four, so there is nothing to disagree with; these are the BEFORE sets of the A11 set-difference."
+    },
+    {
+      "name": "a1-baseline-full-suite-green-before",
+      "status": "passed",
+      "argv": [
+        "devbox",
+        "run",
+        "--pure",
+        "--",
+        "sh",
+        "-c",
+        "go test -race -count=1 ./..."
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 1800,
+      "summary": "A1 baseline, so that any later red is attributable. At a0622910d493cadd94c6d819690dbab0232a44ab, with -race and -count=1, every package reported ok and none reported FAIL: cmd/bootstrap, cmd/ci-plan, internal/api, internal/application, internal/ci, internal/contracts, internal/domain, internal/legacyimport, internal/provider, internal/quota, internal/reconciler, internal/release, internal/runner, internal/scheduler, internal/store/firestore, internal/store/memory, internal/update all ok; cmd/control-plane, cmd/legacy-import, cmd/runner and internal/web report [no test files]. Verdict line taken from the output rather than from the shell exit status, which is unreliable under devbox run in this repository."
+    },
+    {
+      "name": "a1-ordering-record-precedes-source-edit",
+      "status": "passed",
+      "argv": [
+        "sh",
+        "-c",
+        "git status --porcelain && git rev-parse HEAD"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 60,
+      "summary": "Gate ordering, recorded because it is itself an acceptance item (hard rule 2, and V2-087 had to report the opposite). The scope-boundary table above and every a1-* and a2-* baseline check in these three records were written and COMMITTED as the FIRST commit on branch v2-task/V2-086, on top of base commit a0622910d493cadd94c6d819690dbab0232a44ab, at which point `git status --porcelain` listed only .agents/v2/evidence/V2-086-application.json, .agents/v2/evidence/V2-086-api.json, .agents/v2/evidence/V2-086-runner.json and .agents/v2/evidence/index.json. No file under internal/ or cmd/ was modified before that commit. The commits that follow are, in order: the A3 reproduction test (test files only, run against the UNREPAIRED non-test tree), then the repair, then the proof, then the verification results appended to these records."
+    },
+    {
+      "name": "a2-scope-table-thirteen-accept-sites-zero-require",
+      "status": "passed",
+      "argv": [
+        "sh",
+        "-c",
+        "grep -rn 'callerActor(ctx, Role' --include='*.go' internal/application | grep -v _test.go"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 60,
+      "summary": "A2, the enumeration that is the judgement, reproduced BEFORE any code was written. One row per non-test site that names application.RoleScheduler: file:line | operation | complete accepted role set | is any accepted role produced by a real transport today | does the operation REQUIRE the scheduler. (1) internal/application/service.go:749 | Capture | owner, scheduler | YES, owner (internal/api/auth.go:59 and :99) | NO. (2) service.go:888 | Plan | owner, scheduler | YES, owner | NO. (3) service.go:1023 | Prepare | owner, scheduler | YES, owner | NO. (4) service.go:1373 | Control | owner, scheduler | YES, owner | NO. (5) service.go:1529 | Permit | owner, runner, scheduler | YES, owner and runner | NO. (6) internal/application/repository.go:133 | RegisterRepository | owner, scheduler | YES, owner | NO. (7) repository.go:223 | the repository observation command | owner, scheduler | YES, owner | NO. (8) repository.go:471 | a repository read | owner, scheduler | YES, owner | NO. (9) repository.go:514 | a repository read | owner, scheduler | YES, owner | NO. (10) internal/application/framing.go:123 | StartFraming | owner, scheduler | YES, owner | NO. (11) internal/application/human_input.go:461 | RequestHumanInput | runner, scheduler (the OWNER is REFUSED) | YES, runner (auth.go:50 and :85) | NO. (12) internal/api/api.go:439 | transport gate, POST /v1/requirements/{id}:request-input | runner, scheduler | YES, runner | NO. (13) internal/api/api.go:475 | transport gate, POST /v1/requirements/{id}:start-framing | owner, scheduler | YES, owner | NO. VERDICT: ZERO of the thirteen operations REQUIRES the scheduler; every one of them also accepts a role a real transport already produces. That is the argument for removing the role, and it is not acted on, because of the next check. NO scheduler-ONLY operation was found, so d3's (a)/(b) judgement does not change and no escalation is triggered on that axis."
+    },
+    {
+      "name": "a2-requestedby-is-the-sole-producer-of-actortypeloop",
+      "status": "passed",
+      "argv": [
+        "sh",
+        "-c",
+        "grep -rn 'requestedBy(' --include='*.go' internal/application/ | grep -v _test.go ; grep -n reqBy internal/application/service.go internal/application/repository.go"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 60,
+      "summary": "A2's decisive half, MEASURED, and its call-site list DISAGREES with the Work Order in three places. internal/application/caller.go:64-72 is requestedBy, and its `case RoleScheduler:` arm at :69 is the SOLE producer of domain.RequestedBy{ActorType: domain.ActorTypeLoop} in the whole package. Its non-test call sites are exactly FIVE: human_input.go:577 (the human-input answerer), repository.go:137 (a Repository's RequestedBy), repository.go:227 (a discard-result guard on the observation path), service.go:753 (Capture) and service.go:1377 (Control). The stored fields those five feed are: service.go:846 domain.Requirement.RequestedBy; service.go:857 domain.RequirementRepositoryLink.RequestedBy; service.go:865 CaptureResponse.RequestedBy; repository.go:204 domain.Repository.RequestedBy; repository.go:216 RepositoryResponse.RequestedBy; service.go:1436 SaveControlRequestedBy (the Control Intent requester side table) and service.go:1505 ControlResponse.RequestedBy. DISAGREEMENTS: the Work Order says the call sites are service.go:748, :841, :852, repository.go:137, :204, service.go:1307, :1365 and human_input.go:577. Measured, service.go:841 and :852 and repository.go:204 are NOT requestedBy call sites at all -- they are USES of the single `reqBy` value each function computes once -- and the four true numbers are service.go:753 (expected :748, +5), service.go:1377 (expected :1307 or :1365, +70 or +12), repository.go:137 (AGREES) and human_input.go:577 (AGREES); repository.go:227 is a fifth call site the Work Order does not list at all. Because requestedBy's default arm (caller.go:70-72) refuses every other role, removing RoleScheduler would make domain.ActorTypeLoop unreachable for all of those stored fields, so the role is kept: judgement (a)."
+    },
+    {
+      "name": "a2-askedby-is-not-an-argument",
+      "status": "passed",
+      "argv": [
+        "sh",
+        "-c",
+        "sed -n '405,425p' internal/application/human_input.go"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 60,
+      "summary": "A2's 'what is NOT an argument', MEASURED, and its line span DISAGREES slightly. askedBy is internal/application/human_input.go:405-420 by the Work Order and MEASURED at :405 (comment) with `func askedBy(c Caller)` at :412; its RoleRunner arm is :414, `case RoleRunner, RoleScheduler:`, and it maps BOTH to domain.ActorTypeLoop. So domain.ActorTypeLoop is ALREADY reachable today for a HumanInputRequest's AskedBy through the runner transport, and the unreachability this task repairs is precisely the five requestedBy-fed fields in the previous check and nothing else. That measurement is what keeps the repair honest: it is not 'ActorTypeLoop is unreachable', it is 'ActorTypeLoop is unreachable for a Requirement's, a Repository's, a link's and a Control Intent's requester and for the human-input answerer'."
+    }
+  ]
+}
