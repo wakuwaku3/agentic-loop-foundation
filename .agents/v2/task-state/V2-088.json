@@ -3,11 +3,10 @@
   "id": "ts-v2-088",
   "kind": "canonical-task-state",
   "task_id": "V2-088",
-  "status": "blocked",
+  "status": "queued",
   "dependencies": [
     "V2-083"
   ],
-  "block_reason": "V2-083",
   "outcome": "Give the operator somewhere to read what actually went wrong, so an error that must not be shown to a caller is not simply discarded.",
   "non_goals": [
     "Do not put a dependency's message into a response in order to make it visible",
@@ -80,6 +79,30 @@
         "remaining": 2
       },
       "reason": "the task that stops sending the text to the caller decides what the text is, so it goes first"
+    },
+    {
+      "sequence": 3,
+      "at": "2026-08-26T12:00:00Z",
+      "from_status": "blocked",
+      "to_status": "queued",
+      "actor": "sol",
+      "input_refs": [
+        "V2-083",
+        "V2-088"
+      ],
+      "input_hash": "e764e9f08abac78b3df2f943be90bd8557735fc33bae528080b0ffa5d23211d3",
+      "output_refs": [
+        "V2-088"
+      ],
+      "output_hash": "2405635f4adbe8e8b5e04b82d6a56e4fdd33fefa988a6d6c1acef26630694f6b",
+      "owner": "terra",
+      "next_owner": "terra",
+      "retry_budget": {
+        "max_attempts": 2,
+        "attempts_used": 0,
+        "remaining": 2
+      },
+      "reason": "every task this one depends on is complete, so the block has cleared"
     }
   ]
 }

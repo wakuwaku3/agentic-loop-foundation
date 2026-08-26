@@ -3,7 +3,7 @@
   "id": "ts-v2-087",
   "kind": "canonical-task-state",
   "task_id": "V2-087",
-  "status": "blocked",
+  "status": "queued",
   "dependencies": [
     "V2-083"
   ],
@@ -79,7 +79,30 @@
         "remaining": 2
       },
       "reason": "the three tasks share the api handler and its test file, and the error-classification task must go first because its route table pins the quota row that the quota true-up could otherwise turn from a refusal into a success without anything noticing"
+    },
+    {
+      "sequence": 3,
+      "at": "2026-08-26T12:00:00Z",
+      "from_status": "blocked",
+      "to_status": "queued",
+      "actor": "sol",
+      "input_refs": [
+        "V2-079",
+        "V2-087"
+      ],
+      "input_hash": "abaae2532203ef2cf5c96e6c20fa753ab56759729b9d7011a53eb9e47f2b6e66",
+      "output_refs": [
+        "V2-087"
+      ],
+      "output_hash": "e4faeededa7fcd6f575966ffd1b457ea605cb655febf22dd919bdf7bce121381",
+      "owner": "terra",
+      "next_owner": "terra",
+      "retry_budget": {
+        "max_attempts": 2,
+        "attempts_used": 0,
+        "remaining": 2
+      },
+      "reason": "every task this one depends on is complete, so the block has cleared"
     }
-  ],
-  "block_reason": "V2-083"
+  ]
 }
