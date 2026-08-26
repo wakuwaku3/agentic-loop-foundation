@@ -247,6 +247,37 @@ paths:
       parameters: [{name: requirement_id, in: path, required: true, schema: {type: string}}]
       requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/StartRequirementFramingRequest'}}}}
       responses: {'200': {description: the Requirement left captured and is in framing, content: {application/json: {schema: {$ref: '#/components/schemas/StartRequirementFramingResponse'}}}}, '400': {$ref: '#/components/responses/Error'}, '401': {$ref: '#/components/responses/Error'}, '403': {$ref: '#/components/responses/Error'}, '404': {$ref: '#/components/responses/Error'}, '409': {$ref: '#/components/responses/Error'}, '413': {$ref: '#/components/responses/Error'}, '415': {$ref: '#/components/responses/Error'}, '429': {$ref: '#/components/responses/Error'}, '500': {$ref: '#/components/responses/Error'}, '503': {$ref: '#/components/responses/Error'}}
+  /v1/requirements/{requirement_id}:complete-framing:
+    post:
+      operationId: completeRequirementFraming
+      security: [{iapOwner: []}]
+      description: |
+        The owner declares that an already-framed Requirement's analysis is
+        finished and that it is executable, and it moves from framing to ready.
+        This is the edge that reaches the only status the scheduler calls
+        schedulable: before it existed, ready was reachable ONLY by asking the
+        Requirement a question and answering it, because the ready transition's
+        sole issuer was the answer command. A Requirement that needed no
+        question could not become executable at all.
+
+        Callable by the owner or by the scheduler; a Runner is refused, because
+        a Runner executes an Increment it was handed and does not decide that a
+        Requirement is executable. Admitted from framing only: a Requirement
+        still in captured, or already in ready, is refused by the domain
+        transition table itself, not by an application flag.
+
+        The claim Permit is evaluated against the Requirement's own target, so
+        pause-claim and every stop mode deny it, while pause-intake still
+        ALLOWS it: pause-intake means take no new work in and finish what you
+        already have, and finishing the framing of something already captured
+        is finishing what you have. pause-claim denying it is the boundary the
+        kind was chosen for, because declaring a framed Requirement executable
+        is the moment it becomes claimable. No outbox item is staged: nothing
+        outside the control plane is asked to do anything by a Requirement
+        becoming executable.
+      parameters: [{name: requirement_id, in: path, required: true, schema: {type: string}}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/CompleteRequirementFramingRequest'}}}}
+      responses: {'200': {description: the Requirement left framing and is in ready, content: {application/json: {schema: {$ref: '#/components/schemas/CompleteRequirementFramingResponse'}}}}, '400': {$ref: '#/components/responses/Error'}, '401': {$ref: '#/components/responses/Error'}, '403': {$ref: '#/components/responses/Error'}, '404': {$ref: '#/components/responses/Error'}, '409': {$ref: '#/components/responses/Error'}, '413': {$ref: '#/components/responses/Error'}, '415': {$ref: '#/components/responses/Error'}, '429': {$ref: '#/components/responses/Error'}, '500': {$ref: '#/components/responses/Error'}, '503': {$ref: '#/components/responses/Error'}}
   /v1/repositories:
     get:
       operationId: listRepositories
@@ -580,6 +611,28 @@ components:
       properties:
         requirement_id: {type: string, description: 'the SAME Requirement; framing creates nothing'}
         status: {type: string, description: 'framing, which is the status from which a question can be asked'}
+        version: {type: integer}
+    CompleteRequirementFramingRequest:
+      type: object
+      additionalProperties: false
+      required: [request_id, expected_requirement_version]
+      description: |
+        There is deliberately no control_revision, no repository_id and no
+        timestamp field. The control revision is derived from the effective
+        control inside the command's own transaction, the repository comes
+        from the Requirement's own link, and the instant is that
+        transaction's authority time: none of the three can be supplied by a
+        caller.
+      properties:
+        request_id: {type: string}
+        expected_requirement_version: {type: integer}
+    CompleteRequirementFramingResponse:
+      type: object
+      additionalProperties: false
+      required: [requirement_id, status, version]
+      properties:
+        requirement_id: {type: string, description: 'the SAME Requirement; completing framing creates nothing'}
+        status: {type: string, description: 'ready, which is the only status the scheduler treats as schedulable'}
         version: {type: integer}
     ControlRead:
       type: object
