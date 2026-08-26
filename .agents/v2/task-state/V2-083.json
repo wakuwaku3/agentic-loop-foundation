@@ -1,0 +1,85 @@
+{
+  "schema_version": "v1",
+  "id": "ts-v2-083",
+  "kind": "canonical-task-state",
+  "task_id": "V2-083",
+  "status": "blocked",
+  "dependencies": [
+    "V2-079"
+  ],
+  "block_reason": "V2-079",
+  "outcome": "Stop reporting a storage fault as the caller's mistake: an error the request did not cause must not leave the API as an invalid-request, on any route.",
+  "non_goals": [
+    "Do not classify an error by matching the text a dependency happened to produce",
+    "Do not turn an unclassified error into a success",
+    "Do not put a storage message into a response"
+  ],
+  "actor": "sol",
+  "input_refs": [
+    "V2-079",
+    "V2-083"
+  ],
+  "input_hash": "b01305ef75bcbadf492c6614cd4f68805f65c7071713a18721c984d6d801f250",
+  "output_refs": [
+    "V2-083"
+  ],
+  "output_hash": "a97bd4933fa0a815ec940978a3641387ad798c1367908c8b5ce9364543535df6",
+  "owner": "terra",
+  "next_owner": "terra",
+  "retry_budget": {
+    "max_attempts": 2,
+    "attempts_used": 0,
+    "remaining": 2
+  },
+  "release_eligible": false,
+  "transitions": [
+    {
+      "sequence": 1,
+      "at": "2026-08-26T06:00:00Z",
+      "from_status": null,
+      "to_status": "queued",
+      "actor": "sol",
+      "input_refs": [
+        "V2-079",
+        "V2-083"
+      ],
+      "input_hash": "b01305ef75bcbadf492c6614cd4f68805f65c7071713a18721c984d6d801f250",
+      "output_refs": [
+        "V2-083"
+      ],
+      "output_hash": "a97bd4933fa0a815ec940978a3641387ad798c1367908c8b5ce9364543535df6",
+      "owner": "terra",
+      "next_owner": "terra",
+      "retry_budget": {
+        "max_attempts": 2,
+        "attempts_used": 0,
+        "remaining": 2
+      },
+      "reason": "the cursor investigation measured that the API's error mapping sends every error it does not recognise out as an invalid request, so a storage-side argument fault arrived at the caller as though the caller had written a bad request. That is how a broken cursor looked like a refused cursor for as long as it did, and it applies to every route rather than to paging alone"
+    },
+    {
+      "sequence": 2,
+      "at": "2026-08-26T06:00:01Z",
+      "from_status": "queued",
+      "to_status": "blocked",
+      "actor": "sol",
+      "input_refs": [
+        "V2-079",
+        "V2-083"
+      ],
+      "input_hash": "b01305ef75bcbadf492c6614cd4f68805f65c7071713a18721c984d6d801f250",
+      "output_refs": [
+        "V2-083"
+      ],
+      "output_hash": "a97bd4933fa0a815ec940978a3641387ad798c1367908c8b5ce9364543535df6",
+      "owner": "terra",
+      "next_owner": "terra",
+      "retry_budget": {
+        "max_attempts": 2,
+        "attempts_used": 0,
+        "remaining": 2
+      },
+      "reason": "the cursor task lands the first concrete case and its refusal tests are the fixture this one must not weaken"
+    }
+  ]
+}
