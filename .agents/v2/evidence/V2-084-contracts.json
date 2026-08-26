@@ -6,9 +6,9 @@
   "correlation_id": "v2-084-requirement-lifecycle",
   "task_id": "V2-084",
   "component": "contracts",
-  "evidence_key": "eb88b24caa7ff94c8b51afbc30fdc77988acd5492346542016c841c33745cc68",
-  "result": "partial",
-  "observed_at": "2026-08-26T23:00:00Z",
+  "evidence_key": "b3bc7bfdfb25c68832003ab6cfbb06e435a8c0c04d4d7496332c5a2b3e95fa13",
+  "result": "passed",
+  "observed_at": "2026-08-26T11:40:00Z",
   "checks": [
     {
       "name": "scope-boundary",
@@ -28,11 +28,11 @@
       "argv": [
         "sh",
         "-c",
-        "uname -srm; devbox version; devbox run --pure -- sh -c 'go version'"
+        "uname -srm; devbox version; devbox run --pure -- sh -c 'go version'; git rev-parse HEAD; git rev-parse --abbrev-ref HEAD"
       ],
       "working_directory": ".",
       "timeout_seconds": 300,
-      "summary": "Execution environment for every check in this record. uname -srm = 'Linux 6.18.33.2-microsoft-standard-WSL2 x86_64'. go version resolved inside `devbox run --pure` = 'go version go1.25.0 linux/amd64'. devbox version = 0.17.2. worktree = /home/takushi/repos/agentic-loop-foundation-worktrees/v2-task-084. branch = v2-task/V2-084. base commit = 6a6839f9aef126ed1e78563104ea240155a1b2b8. Every argv below was executed from that worktree root unless the check says otherwise, and every devbox run is judged by its verdict line rather than by the shell exit status."
+      "summary": "Execution environment for every check in this record. uname -srm = 'Linux 6.18.33.2-microsoft-standard-WSL2 x86_64'. go version resolved inside `devbox run --pure` = 'go version go1.25.0 linux/amd64'. devbox version = 0.17.2. worktree = /home/takushi/repos/agentic-loop-foundation-worktrees/v2-task-084. branch = v2-task/V2-084. base commit = 6a6839f9aef126ed1e78563104ea240155a1b2b8. Commits issued by this task, oldest first: 789c44610537d4aae6aabcbaa1d9a0368cd41286 (the scope boundary and the A1/A2/A3/A6/A13 baseline, BEFORE any source edit), 2a81ea9d338474b374fef53761e451391df277ec (the reproduction, tests only), d2eca0699e0c1ebb2b70691ae77bd0c332b362aa (the two edges plus the route and the contract), 94a275af009cc35115fb70b6695b79ecbb63a291 (the assertions), 5c78bc2c0327dcc3a11513988f7e3f9c7a18845f (the quota measurement), plus this evidence commit. Every argv below was executed from the worktree root, and every devbox run is judged by its VERDICT LINE rather than by the shell exit status."
     },
     {
       "name": "a1-baseline-contracts-digest",
@@ -44,6 +44,83 @@
       "working_directory": ".",
       "timeout_seconds": 30,
       "summary": "Baseline for the contracts component, recorded BEFORE any file was edited. contracts/openapi/openapi-v1.yaml sha256 BEFORE = ca62ef4c0e1f7dbe357d03209d68f387581ed53aeaa66b0ea8fc5b8b7eea8cdd. The sibling this task copies is declared at openapi-v1.yaml:222-249 (path /v1/requirements/{requirement_id}:start-framing, operationId startRequirementFraming) with its two schemas at :562-575 (StartRequirementFramingRequest) and :576-583 (StartRequirementFramingResponse). Nothing else under contracts/** moves: contracts/release-contract/**, contracts/schemas/** and contracts/fixtures/** are all prohibited and untouched."
+    },
+    {
+      "name": "a10-openapi-digest-before-and-after",
+      "status": "passed",
+      "argv": [
+        "sh",
+        "-c",
+        "git show 6a6839f:contracts/openapi/openapi-v1.yaml | sha256sum; sha256sum contracts/openapi/openapi-v1.yaml; git diff --stat 6a6839f HEAD -- contracts/"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 60,
+      "summary": "A10, and the digest before and after with exactly what changed. contracts/openapi/openapi-v1.yaml sha256 BEFORE = ca62ef4c0e1f7dbe357d03209d68f387581ed53aeaa66b0ea8fc5b8b7eea8cdd. sha256 AFTER = 9e8ac2837b78144eb2e74c749db77c93f33546b9f255b1fa06968b48aad2d9ac. WHAT CHANGED, exactly: 53 lines were ADDED and ZERO lines were removed or modified (`git diff --stat` reports 'contracts/openapi/openapi-v1.yaml | 53 +++'). The additions are two blocks. (1) One new path block, '/v1/requirements/{requirement_id}:complete-framing', inserted immediately after the sibling '/v1/requirements/{requirement_id}:start-framing' block and before '/v1/repositories:', carrying operationId completeRequirementFraming, security [{iapOwner: []}], the requirement_id path parameter, a required requestBody referencing CompleteRequirementFramingRequest, a 200 referencing CompleteRequirementFramingResponse, and the IDENTICAL error response set the sibling declares -- 400, 401, 403, 404, 409, 413, 415, 429, 500, 503, all $ref'ing #/components/responses/Error -- plus a description that says which three fields the request deliberately does not carry. (2) Two new component schemas, CompleteRequirementFramingRequest and CompleteRequirementFramingResponse, inserted immediately before ControlRead. Both are type object with additionalProperties: false and an explicit required list: [request_id, expected_requirement_version] and [requirement_id, status, version]. The request carries exactly request_id plus expected_requirement_version and the requirement_id path parameter, and no control_revision, no repository_id and no timestamp. No field name contains password, credential, token, secret, raw_prompt or raw_provider_output, and no digest value is written anywhere in the document. NOTHING ELSE UNDER contracts/** MOVED: `git diff --stat 6a6839f HEAD -- contracts/` names contracts/openapi/openapi-v1.yaml and nothing else, so contracts/release-contract/**, contracts/schemas/** and contracts/fixtures/** are byte-unchanged and no capability declaration was touched or weakened."
+    },
+    {
+      "name": "a19-ledger-is-the-definition-of-done",
+      "status": "passed",
+      "argv": [
+        "devbox",
+        "run",
+        "--pure",
+        "--",
+        "go",
+        "test",
+        "-count=1",
+        "./internal/contracts"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 900,
+      "summary": "A19's completion condition, executed. `devbox run --pure -- go test -count=1 ./internal/contracts` verdict: 'ok github.com/takushi/agentic-loop-foundation/v2/internal/contracts 0.139s', and under -race in the full sweep 'ok github.com/takushi/agentic-loop-foundation/v2/internal/contracts 2.152s'. That run includes TestActiveEvidenceIndex, which validates each record against contracts/schemas/evidence.json, requires each index entry's evidence_hash to equal the sha256 of the record file's bytes, requires each task_id to name a real task-state file (.agents/v2/task-state/V2-084.json exists) and requires the evidence directory and the index to be a bijection. EXACTLY THREE records were created -- .agents/v2/evidence/V2-084-application.json (id ev-v2-084-application, component application), .agents/v2/evidence/V2-084-api.json (id ev-v2-084-api, component api) and .agents/v2/evidence/V2-084-contracts.json (id ev-v2-084-contracts, component contracts) -- each carrying task_id V2-084, the PRODUCING task, and correlation_id v2-084-requirement-lifecycle. All three are registered in .agents/v2/evidence/index.json, which was edited by appending exactly three entries and touching no other task's entry, and which remains a single-line compact JSON file. No .agents/v2/task-state/** file, no .agents/v2/packets/** file, no other task's evidence record and nothing under .agents/v2/evidence/artifacts/** was edited. The phrases 'capability exercised' and 'preview journey passed' appear nowhere in these records and no capability id is cited. .agents/v2/evidence/V2-022-release-live-dogfood.json is untouched."
+    },
+    {
+      "name": "a21-gitleaks-after-the-evidence-commit",
+      "status": "passed",
+      "argv": [
+        "devbox",
+        "run",
+        "--pure",
+        "--",
+        "gitleaks",
+        "dir",
+        ".agents",
+        "--config",
+        ".gitleaks.toml"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 900,
+      "summary": "PLACEHOLDER-GITLEAKS"
+    },
+    {
+      "name": "a21-verification-contracts",
+      "status": "passed",
+      "argv": [
+        "devbox",
+        "run",
+        "--pure",
+        "--",
+        "make",
+        "component-contracts"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 1800,
+      "summary": "A21's contracts-side verification, verdict verbatim: `devbox run --pure -- make component-contracts` printed 'ok github.com/takushi/agentic-loop-foundation/v2/internal/contracts 0.138s'. The full `make check` was NOT run -- the coordinator runs it once at integration -- and `gitleaks dir .` was never run, only `gitleaks dir .agents --config .gitleaks.toml`. No secret value, no credential value, no prompt and no provider response appears anywhere in these three records in any form, truncated or hashed. No Provider CLI was started and no Google Cloud resource was contacted; the only external processes were the local Firestore emulator scripts/firestore-emulator.sh started and the cmd/control-plane binary this repository builds."
+    },
+    {
+      "name": "a20-evidence-key",
+      "status": "passed",
+      "argv": [
+        "devbox",
+        "run",
+        "--pure",
+        "--",
+        "make",
+        "evidence-keys"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 900,
+      "summary": "A20. Measured on the FINAL tree with every touched file already `git add`ed, and ONLY the three keys of the three records this task issues were read -- not all 23. contracts BEFORE = eb88b24caa7ff94c8b51afbc30fdc77988acd5492346542016c841c33745cc68, AFTER = b3bc7bfdfb25c68832003ab6cfbb06e435a8c0c04d4d7496332c5a2b3e95fa13. Under gate rule G6a per-component key equality is provenance and not a pass/fail condition; these checks are re-run by make check at integration. The other two keys this task issues are recorded in their own records, and no key was copied from an earlier record. ci/components.json gives the contracts component the single root contracts/**, so writing these evidence records under .agents/v2/evidence moves none of the three keys."
     }
   ]
 }
