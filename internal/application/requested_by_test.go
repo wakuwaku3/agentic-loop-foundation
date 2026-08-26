@@ -373,3 +373,92 @@ var notACaller = Session{Role: RoleScheduler}
 	}
 	t.Logf("scheduler-producer scan parsed %d non-test .go files: 1 sanctioned producer at %s:%d and 0 anywhere else", parsed, inside[0].path, inside[0].line)
 }
+
+// TestLoopCallerIsTheOnlyProducerAndRefusesAnEmptySubject is V2-086 A4's
+// refusal proof and its positive case in one run.
+//
+// The refusal is asserted, not described: a guard with no refusal test is not a
+// guard. An empty subject, a subject that is only spaces and a subject that is
+// only tabs and newlines each return ErrUnauthenticated and the Caller zero
+// value, so no partially-formed scheduler identity can escape the constructor.
+// The positive case then shows the value is not decorative: the same subject
+// drives Capture and the stored Requirement reads domain.ActorTypeLoop, which
+// no transport could produce before this task.
+func TestLoopCallerIsTheOnlyProducerAndRefusesAnEmptySubject(t *testing.T) {
+	for _, subject := range []string{"", " ", "   ", "\t", "\n", " \t\r\n "} {
+		caller, err := application.LoopCaller(subject)
+		if !errors.Is(err, application.ErrUnauthenticated) {
+			t.Fatalf("LoopCaller(%q) error = %v, want ErrUnauthenticated", subject, err)
+		}
+		if caller != (application.Caller{}) {
+			t.Fatalf("LoopCaller(%q) returned %#v alongside its error; a refused identity must be the zero value", subject, caller)
+		}
+	}
+
+	caller, err := application.LoopCaller("reconciler.self-intake")
+	if err != nil {
+		t.Fatalf("LoopCaller with a real subject: %v", err)
+	}
+	if caller.Role != application.RoleScheduler {
+		t.Fatalf("LoopCaller role = %q, want %q", caller.Role, application.RoleScheduler)
+	}
+	if caller.Subject != "reconciler.self-intake" {
+		t.Fatalf("LoopCaller subject = %q, want the argument as given", caller.Subject)
+	}
+	if caller.RunnerID != "" {
+		t.Fatalf("LoopCaller invented a RunnerID %q; the Loop is not a runner", caller.RunnerID)
+	}
+
+	// And it is a caller the commands that name the role actually accept, with
+	// the attribution the domain distinguishes.
+	s, _ := service()
+	out, err := s.Capture(application.ContextWithCaller(context.Background(), caller), application.CaptureRequest{RequestID: "loopcaller-capture", Text: "the Loop's own intake"})
+	if err != nil {
+		t.Fatalf("Capture as the sanctioned loop caller: %v", err)
+	}
+	if out.RequestedBy.ActorType != domain.ActorTypeLoop || out.RequestedBy.Subject != "reconciler.self-intake" {
+		t.Fatalf("capture response requested_by = %+v, want loop/reconciler.self-intake", out.RequestedBy)
+	}
+	detail, ok, err := s.GetRequirementDetail(owner(context.Background()), out.RequirementID)
+	if err != nil || !ok {
+		t.Fatalf("detail lookup failed: ok=%v err=%v", ok, err)
+	}
+	if detail.RequestedBy == nil || detail.RequestedBy.ActorType != domain.ActorTypeLoop {
+		t.Fatalf("stored requirement requested_by = %+v, want loop", detail.RequestedBy)
+	}
+}
+
+// TestRequestedByStaysAClosedRefusalForEveryOtherRole is V2-086 A13. Nothing in
+// this task widens a closed set, and the way that is kept true is by asserting
+// the set: requestedBy admits exactly RoleOwner and RoleScheduler, and its
+// default arm is still a refusal, so an unlisted member still fails. The
+// unlisted members checked are RoleRunner -- which askedBy DOES admit, so the
+// two mappings must not be confused -- the zero Role, and an invented one.
+func TestRequestedByStaysAClosedRefusalForEveryOtherRole(t *testing.T) {
+	s, _ := service()
+	admitted := map[application.Role]domain.ActorType{
+		application.RoleOwner:     domain.ActorTypeOwner,
+		application.RoleScheduler: domain.ActorTypeLoop,
+	}
+	n := 0
+	for role, want := range admitted {
+		n++
+		ctx := application.ContextWithCaller(context.Background(), application.Caller{Role: role, Subject: "subject-" + string(role)})
+		out, err := s.Capture(ctx, application.CaptureRequest{RequestID: "closed-set-" + string(role), Text: "x"})
+		if err != nil {
+			t.Fatalf("Capture as %q: %v", role, err)
+		}
+		if out.RequestedBy.ActorType != want {
+			t.Fatalf("Capture as %q recorded actor_type %q, want %q", role, out.RequestedBy.ActorType, want)
+		}
+	}
+	if n != 2 {
+		t.Fatalf("the admitted-role table has %d entries, want exactly 2", n)
+	}
+	for _, role := range []application.Role{application.RoleRunner, application.Role(""), application.Role("superuser")} {
+		ctx := application.ContextWithCaller(context.Background(), application.Caller{Role: role, Subject: "subject"})
+		if _, err := s.Capture(ctx, application.CaptureRequest{RequestID: "closed-set-refused-" + string(role), Text: "x"}); !errors.Is(err, application.ErrForbidden) {
+			t.Fatalf("Capture as %q returned %v, want ErrForbidden; the requester attribution set must stay closed", role, err)
+		}
+	}
+}
