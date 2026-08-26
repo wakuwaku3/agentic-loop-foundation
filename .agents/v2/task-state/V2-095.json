@@ -4,29 +4,24 @@
   "kind": "canonical-task-state",
   "task_id": "V2-095",
   "status": "blocked",
-  "block_reason": "external-unavailable: codex and opencode CLI authentication and a GCP project; needs: one interactive login each by the owner, and an owner-designated project, because 7 of this exercise's 12 capabilities are unreachable without them (3 declare codex and opencode, 4 declare Cloud Run)",
+  "block_reason": "V2-089,V2-090,V2-091",
   "dependencies": [
     "V2-022",
-    "V2-081",
     "V2-084",
-    "V2-085",
-    "V2-086",
     "V2-089",
     "V2-090",
-    "V2-091",
-    "V2-092",
-    "V2-093",
-    "V2-028"
+    "V2-091"
   ],
-  "outcome": "Re-observe the dogfood exercise so that M5's required live ground is both eligible and fresh, and record each capability the exercise cannot reach as deferred by its own declaration rather than as failed.",
+  "outcome": "Close the four capability gaps that M5 itself owns and re-observe the dogfood exercise once, so that M5 has a ground that is both eligible and fresh. The gaps are cap-repository-registration, cap-backlog-visibility, cap-human-input-request and cap-user-documentation.",
   "non_goals": [
+    "Do not wait on a capability that is ineligible by its own declaration (section 8.3)",
     "Do not record a product gap as a deferred capability",
-    "Do not derive a deferral from anything other than the capability's own declared external systems",
-    "Do not re-observe before the gaps this exercise itself measured are closed"
+    "Do not re-observe before the four gaps are closed",
+    "Do not raise a spent record's thresholds or reinitialise a ledger; issue a new record instead"
   ],
   "actor": "sol",
-  "owner": "sol",
-  "next_owner": "sol",
+  "owner": "luna",
+  "next_owner": "luna",
   "input_refs": [
     "V2-022",
     "V2-081"
@@ -90,6 +85,54 @@
         "remaining": 2
       },
       "reason": "待つ相手は3種類ある。1つ目はcodexとopencodeの認証で、これがないと3 capabilityは測れない。2つ目はGCP projectで、これがないと4 capabilityはD1のまま。3つ目はM5自身が負う4つのproduct gapを閉じるtask群である。このうちcap-backlog-visibilityのcursor拒否はV2-079が既に直しており、cap-human-input-requestの「capturedからneeds-inputに入れない」はV2-082が入れたframingとV2-084のCompleteFramingが触る範囲なので、再観測すれば正当に反転する見込みがある。block_reasonをtask参照ではなくexternal-unavailableにしたのは、待ち行列の先頭にあるのが人の作業だからである"
+    },
+    {
+      "sequence": 3,
+      "at": "2026-08-26T23:15:00Z",
+      "from_status": "blocked",
+      "to_status": "queued",
+      "actor": "sol",
+      "owner": "luna",
+      "next_owner": "luna",
+      "input_refs": [
+        "V2-022",
+        "V2-081"
+      ],
+      "input_hash": "0d35056c9d60bc6bb4f4be380c6bf7af66444e990fc89f58c537f2276c1f0a07",
+      "output_refs": [
+        "V2-095"
+      ],
+      "output_hash": "e82890efbdb10b0c5036921ec3ae131302f2c3efcd997eee9cb1d538267395f7",
+      "retry_budget": {
+        "max_attempts": 2,
+        "attempts_used": 0,
+        "remaining": 2
+      },
+      "reason": "再scopeのため一度解く"
+    },
+    {
+      "sequence": 4,
+      "at": "2026-08-26T23:16:00Z",
+      "from_status": "queued",
+      "to_status": "blocked",
+      "actor": "sol",
+      "owner": "luna",
+      "next_owner": "luna",
+      "input_refs": [
+        "V2-022",
+        "V2-081"
+      ],
+      "input_hash": "0d35056c9d60bc6bb4f4be380c6bf7af66444e990fc89f58c537f2276c1f0a07",
+      "output_refs": [
+        "V2-095"
+      ],
+      "output_hash": "e82890efbdb10b0c5036921ec3ae131302f2c3efcd997eee9cb1d538267395f7",
+      "retry_budget": {
+        "max_attempts": 2,
+        "attempts_used": 0,
+        "remaining": 2
+      },
+      "reason": "§8.3のineligible-by-declarationを台帳に適用した。規則は文書に書かれていたのに台帳へ適用されていなかった。V2-022のdogfoodで失敗した11 capabilityを原因ごとに実測すると、3件は宣言にcodexとopencodeを含み、4件は宣言にCloud Runを含む。§8.3によりこの7件は宣言によって繰り延べられており、M5の欠落ではない。したがって依存からV2-028とCloud Run系を外し、M5の残作業を§8.3が名指しした4つのproduct gap——cap-repository-registration、cap-backlog-visibility、cap-human-input-request、cap-user-documentation——に縮める。これは判断ではなく測定である。繰り延べはcapability自身の宣言から導出し、「到達できなかった」という観察からは導出しない。外す前はV2-028に依存していたため、codexとopencodeの認証が済むまでM5はどうやっても閉じなかった。なおcap-backlog-visibilityのcursor拒否はV2-079が既に直しており、cap-human-input-requestの「capturedからneeds-inputに入れない」はV2-082のframingとV2-084のCompleteFramingが触る範囲なので、再観測すれば正当に反転する見込みがある。2026-08-26の規約変更(§12)に伴う再導出である。fan-outが08-24から08-26で完了+48・新規+48の≈1.0で残数が動かず、未完了21件のうちpacket完備は4件だけだった。§12.1のG1 v2でgateの合格条件をtask集合から性質集合へ移し、§12.2でgate依存を凍結した。この再導出はtask-state fileを1件も増やさず、統合・除外・再scopeだけで行う。既存evidenceは再発行せず、完了済みtaskには触れず、M0からM4のgate判定も再計算しない。"
     }
   ]
 }

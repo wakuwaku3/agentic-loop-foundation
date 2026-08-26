@@ -5,14 +5,16 @@
   "task_id": "V2-092",
   "status": "blocked",
   "dependencies": [
-    "V2-084"
+    "V2-095"
   ],
-  "block_reason": "V2-084",
-  "outcome": "Wire promotion so that a Requirement can be evaluated and completed at all: today the only thing that can construct the proof completion requires has no caller outside a test.",
+  "block_reason": "V2-095",
+  "outcome": "Judge the M5 gate under G1 v2: decide it against the property set P1..P6 recorded in docs/operations/v2-task-dag.md section 12.8, not against a task list, and land the milestone.",
   "non_goals": [
-    "Do not complete a Requirement on the strength of an Increment succeeding",
-    "Do not construct the proof anywhere other than the promotion path that earns it",
-    "Do not claim a capability is exercised because the wiring exists"
+    "Do not judge against a task list; G1 v2 defines the gate by properties",
+    "Do not re-observe existing live evidence because a rule changed (section 12.4)",
+    "Do not add a dependency to this gate after it was created (section 12.2)",
+    "Do not read a safety claim as a liveness requirement (section 8.1)",
+    "Do not count a capability that is ineligible by its own declaration as a gap (section 8.3)"
   ],
   "actor": "sol",
   "input_refs": [
@@ -24,8 +26,8 @@
     "V2-092"
   ],
   "output_hash": "ea155b9d2aa256e76169ca689914655543fbc3e55e43fb40540b5fd19cb1db38",
-  "owner": "terra",
-  "next_owner": "terra",
+  "owner": "sol",
+  "next_owner": "sol",
   "retry_budget": {
     "max_attempts": 2,
     "attempts_used": 0,
@@ -80,6 +82,57 @@
         "remaining": 2
       },
       "reason": "the task that measured this defect lands the first edges the rest build on"
+    },
+    {
+      "sequence": 3,
+      "at": "2026-08-26T23:10:00Z",
+      "from_status": "blocked",
+      "to_status": "queued",
+      "actor": "sol",
+      "input_refs": [
+        "V2-084",
+        "V2-092"
+      ],
+      "input_hash": "f5f15dcb1f86a675e395572a090a0cda285568e8ec8af2b0df0b6b6d0069caaf",
+      "output_refs": [
+        "V2-092"
+      ],
+      "output_hash": "ea155b9d2aa256e76169ca689914655543fbc3e55e43fb40540b5fd19cb1db38",
+      "owner": "sol",
+      "next_owner": "sol",
+      "retry_budget": {
+        "max_attempts": 2,
+        "attempts_used": 0,
+        "remaining": 2
+      },
+      "reason": "再scopeのため一度解く"
+    },
+    {
+      "sequence": 4,
+      "at": "2026-08-26T23:11:00Z",
+      "from_status": "queued",
+      "to_status": "blocked",
+      "actor": "sol",
+      "input_refs": [
+        "V2-084",
+        "V2-092"
+      ],
+      "input_hash": "f5f15dcb1f86a675e395572a090a0cda285568e8ec8af2b0df0b6b6d0069caaf",
+      "output_refs": [
+        "V2-092"
+      ],
+      "output_hash": "ea155b9d2aa256e76169ca689914655543fbc3e55e43fb40540b5fd19cb1db38",
+      "owner": "sol",
+      "next_owner": "sol",
+      "retry_budget": {
+        "max_attempts": 2,
+        "attempts_used": 0,
+        "remaining": 2
+      },
+      "reason": "M5の再判定の着地点をここに1つ決めた。V2-026はfailedで後継がV2-081、V2-081もfailedでretryは2/2、そしてV2-081の後継が決まっていなかった。このtaskがrepair_of V2-081としてそれを引き受ける。§12.2によりこのgateのdependenciesは作成時点で確定し、以後の追加を禁止する。V2-018がdeps 1→6に伸びた末にfailedし、V2-080がdeps 4→17に膨らんで手で9に戻すまでrunningにならなかったのが、依存を後から伸ばすことの実測された帰結である。判定はG1 v2に従い§12.8のP1..P6に対して行う。2026-08-26の規約変更(§12)に伴う再導出である。fan-outが08-24から08-26で完了+48・新規+48の≈1.0で残数が動かず、未完了21件のうちpacket完備は4件だけだった。§12.1のG1 v2でgateの合格条件をtask集合から性質集合へ移し、§12.2でgate依存を凍結した。この再導出はtask-state fileを1件も増やさず、統合・除外・再scopeだけで行う。既存evidenceは再発行せず、完了済みtaskには触れず、M0からM4のgate判定も再計算しない。"
     }
+  ],
+  "repair_of": [
+    "V2-081"
   ]
 }
