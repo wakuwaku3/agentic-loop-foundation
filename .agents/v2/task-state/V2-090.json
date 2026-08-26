@@ -5,9 +5,10 @@
   "task_id": "V2-090",
   "status": "blocked",
   "dependencies": [
-    "V2-084"
+    "V2-084",
+    "V2-089"
   ],
-  "block_reason": "V2-084",
+  "block_reason": "V2-089",
   "outcome": "Give the owner a way to pause and cancel a Requirement, and give the paused state a way out, because today pausing would be a trap with no exit.",
   "non_goals": [
     "Do not add a transition the product does not describe",
@@ -80,6 +81,54 @@
         "remaining": 2
       },
       "reason": "the task that measured this defect lands the first edges the rest build on"
+    },
+    {
+      "sequence": 3,
+      "at": "2026-08-27T02:07:00Z",
+      "from_status": "blocked",
+      "to_status": "queued",
+      "actor": "sol",
+      "input_refs": [
+        "V2-084",
+        "V2-090"
+      ],
+      "input_hash": "efa554c440e4475c61793f8d1c8d1f9548600e4c2037fb44242830e9c36807c3",
+      "output_refs": [
+        "V2-090"
+      ],
+      "output_hash": "b3f57aa72ab77eac9f3ae3722685e9f988b970d601b564eb2d4d33836ba0f468",
+      "owner": "terra",
+      "next_owner": "terra",
+      "retry_budget": {
+        "max_attempts": 2,
+        "attempts_used": 0,
+        "remaining": 2
+      },
+      "reason": "V2-084が完了したのでblockが解消した"
+    },
+    {
+      "sequence": 4,
+      "at": "2026-08-27T02:08:00Z",
+      "from_status": "queued",
+      "to_status": "blocked",
+      "actor": "sol",
+      "input_refs": [
+        "V2-084",
+        "V2-090"
+      ],
+      "input_hash": "efa554c440e4475c61793f8d1c8d1f9548600e4c2037fb44242830e9c36807c3",
+      "output_refs": [
+        "V2-090"
+      ],
+      "output_hash": "b3f57aa72ab77eac9f3ae3722685e9f988b970d601b564eb2d4d33836ba0f468",
+      "owner": "terra",
+      "next_owner": "terra",
+      "retry_budget": {
+        "max_attempts": 2,
+        "attempts_used": 0,
+        "remaining": 2
+      },
+      "reason": "並列度を実装1体に抑える方針なので、鎖の順序どおり待たせる。packet済み実装3件のallowed_pathsは総当たりで衝突する(api.goとapi_test.goを共有)ため、実装同士を並走させると必ずconflictする"
     }
   ]
 }
