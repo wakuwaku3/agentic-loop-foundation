@@ -3,7 +3,7 @@
   "id": "ts-v2-086",
   "kind": "canonical-task-state",
   "task_id": "V2-086",
-  "status": "running",
+  "status": "complete",
   "dependencies": [
     "V2-085"
   ],
@@ -24,7 +24,7 @@
   ],
   "output_hash": "fafcc8d3832eaf04a14ec439e9ec1f1a0541de6ce0e2a8f708a702398a7ffb31",
   "owner": "terra",
-  "next_owner": "terra",
+  "next_owner": null,
   "retry_budget": {
     "max_attempts": 2,
     "attempts_used": 1,
@@ -175,6 +175,30 @@
         "remaining": 1
       },
       "reason": "scheduler roleの到達性の修理に着手した。V2-085が記録して直さなかったinternal/runner/orchestrator.goがCaller{Role: RoleOwner, Subject: \"runner-local-owner\"}を自前で捏造している事実がこのtaskの入力である"
+    },
+    {
+      "sequence": 7,
+      "at": "2026-08-26T22:00:00Z",
+      "from_status": "running",
+      "to_status": "complete",
+      "actor": "terra",
+      "input_refs": [
+        "V2-082",
+        "V2-086"
+      ],
+      "input_hash": "862972bfc613751c1d4c426c32dbf33859dc3d7b44f2b0273468697684b0956c",
+      "output_refs": [
+        "V2-086"
+      ],
+      "output_hash": "fafcc8d3832eaf04a14ec439e9ec1f1a0541de6ce0e2a8f708a702398a7ffb31",
+      "owner": "terra",
+      "next_owner": null,
+      "retry_budget": {
+        "max_attempts": 2,
+        "attempts_used": 1,
+        "remaining": 1
+      },
+      "reason": "schedulerが実在の呼び出し元が担える役割になり、Runner自身がownerを騙るのをやめた。application.LoopCallerが唯一の認可された生産者で、修理前は非test fileにRoleSchedulerのCaller literalが0件、修理後は1件だけであることをgo/astの走査でassertしている(93 non-test fileを解析)。CombinedAuthenticatorはSchedulerIdentityをowner mapより前に見て、両方に設定されたidentityを無条件で拒否する。api.goのreconcile identity checkはbyte不変で、sha256が前後同一かつgit diff -U0のhunkは1件だけである。Orchestratorの捏造Callerは必須注入fieldに替わり、5形状の不完全なcallerでProvider 0回・Journal空のまま拒否される——効果発生前の拒否であることを測っている。A6は最初に未達として正しくescalateされた。3条件(起動時失敗・環境変数を増やさない・unit testで拒否を示す)がcmd/control-planeにtest packageが無いことで衝突していたためである。coordinatorの裁定は述語をinternal/apiに置いてrun()から呼ぶことで、これは3条件を同時に満たす。実装は裁定より強くなった。IdentityConfigurationErrorが重複規則の単一の真実で、起動時constructorとAuthenticateの両方がこれを呼び、2つのerror文字列がbyte一致することをtestがassertするので起動時拒否とrequest時拒否が乖離できない。拒否時はゼロ値のauthenticatorを返すのでerrorを無視した呼び出し元が動くauthenticatorを持つこともない。起動時拒否は実binaryに対して実行して示した。衝突設定では\"control-plane: misconfigured identity: the scheduler identity is also an owner email; an asserted identity must have exactly one role\"を出してexit 1、portには何もlistenしない。非衝突設定では起動し、bounded pollの1回目でhealthzがokを返しstderrは空で、SIGTERMでexit 0。GCPには接触せずbinaryはworktree外に置いた。Work Orderのline番号と件数は19件が陳腐化しており過去最多である。SKIP件数の食い違いも決着した。^--- SKIPが26(top-levelのみ)、^ *--- SKIPが49(subtestを含む)で両方正しく同一事実の2 patternである。coordinatorが49をtop-levelの数字として引用していたのが誤りだった。test名の削除と改名は3 packageすべて0で、apiが63から71へ増えただけである"
     }
   ]
 }

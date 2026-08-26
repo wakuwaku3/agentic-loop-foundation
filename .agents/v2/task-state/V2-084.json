@@ -3,7 +3,7 @@
   "id": "ts-v2-084",
   "kind": "canonical-task-state",
   "task_id": "V2-084",
-  "status": "blocked",
+  "status": "running",
   "dependencies": [
     "V2-086"
   ],
@@ -13,7 +13,7 @@
     "Do not advance a Requirement because a subordinate Increment moved, without the rule that says it should",
     "Do not give a transition an issuer no real caller can be"
   ],
-  "actor": "sol",
+  "actor": "terra",
   "input_refs": [
     "V2-082",
     "V2-084"
@@ -27,8 +27,8 @@
   "next_owner": "terra",
   "retry_budget": {
     "max_attempts": 2,
-    "attempts_used": 0,
-    "remaining": 2
+    "attempts_used": 1,
+    "remaining": 1
   },
   "release_eligible": false,
   "transitions": [
@@ -127,7 +127,54 @@
         "remaining": 2
       },
       "reason": "the measured file overlap orders these: the error classification and the quota true-up hold the api handler and its test, the planning permit is the smallest and touches no contract, the scheduler identity touches the authenticator, and the lifecycle edges touch all of them plus the api contract"
+    },
+    {
+      "sequence": 5,
+      "at": "2026-08-26T22:05:00Z",
+      "from_status": "blocked",
+      "to_status": "queued",
+      "actor": "sol",
+      "input_refs": [
+        "V2-082",
+        "V2-084"
+      ],
+      "input_hash": "be802a401ccb7f95e97aa77ee623d728e29a5082951942eaa892a8eddb05b9e9",
+      "output_refs": [
+        "V2-084"
+      ],
+      "output_hash": "10e7d12522a40dc2f3b97fabfcba3d130723ef76928081bc0abb86ff29116ae4",
+      "owner": "terra",
+      "next_owner": "terra",
+      "retry_budget": {
+        "max_attempts": 2,
+        "attempts_used": 0,
+        "remaining": 2
+      },
+      "reason": "V2-086が完了しinternal/api/api_test.goとcmd/control-plane/main.goの占有が解けたのでblockが解消した"
+    },
+    {
+      "sequence": 6,
+      "at": "2026-08-26T22:06:00Z",
+      "from_status": "queued",
+      "to_status": "running",
+      "actor": "terra",
+      "input_refs": [
+        "V2-082",
+        "V2-084"
+      ],
+      "input_hash": "be802a401ccb7f95e97aa77ee623d728e29a5082951942eaa892a8eddb05b9e9",
+      "output_refs": [
+        "V2-084"
+      ],
+      "output_hash": "10e7d12522a40dc2f3b97fabfcba3d130723ef76928081bc0abb86ff29116ae4",
+      "owner": "terra",
+      "next_owner": "terra",
+      "retry_budget": {
+        "max_attempts": 2,
+        "attempts_used": 1,
+        "remaining": 1
+      },
+      "reason": "lifecycle edge 2本(CompleteFramingとClaimのready→active)の実装に着手した。V2-086が記録して直さなかった「reconcileが載せたloop callerがtick内のどのcommandにも消費されていない」(両TickがCallerを取らない)がこのtaskに隣接する事実である"
     }
-  ],
-  "block_reason": "V2-086"
+  ]
 }
