@@ -22,21 +22,23 @@ import (
 )
 
 // liveRecordRelPath is the approved provider-preflight record's path
-// relative to the repository root (dp-v2-017 B1). It names V2-075's
+// relative to the repository root (dp-v2-017 B1). It names V2-080's pooled
 // re-observation record, which carries its own limits.ledger_path: the gate
-// therefore admits this suite against a ledger of its own and never spends,
-// or exhausts, the headroom of either record this suite was exercised under
-// before (V2-017's and V2-063's bytes are both unchanged, and V2-063's
-// ledger stands at 11 of its 12 invocations). liveTaskID must stay equal to
-// that record's task_id, because CostLedger.Reserve refuses a ledger whose
-// recorded task_id disagrees with the run's.
+// therefore admits this suite against an empty ledger of its own and never
+// spends, or exhausts, the headroom of any record this suite was exercised
+// under before. Those earlier ledgers were measured on 2026-08-26 and stand
+// at 11 of 16 (V2-017), 23 of 24 (V2-022), 11 of 12 (V2-063) and 12 of 12
+// (V2-075), so V2-075's is full and borrowing it is impossible as well as
+// prohibited. liveTaskID must stay equal to the named record's task_id,
+// because CostLedger.Reserve refuses a ledger whose recorded task_id
+// disagrees with the run's.
 //
 // These two constants are inside the runner component's key closure and are
 // therefore the only part of the exercised file set a re-observation task
 // may touch; the edit must land before the exercise is observed and nothing
 // in that set may be edited afterwards (v2-task-dag.md section 4, G6b).
-const liveRecordRelPath = ".agents/v2/provider-preflight/V2-075-provider-live-claude-rebind.json"
-const liveTaskID = "V2-075"
+const liveRecordRelPath = ".agents/v2/provider-preflight/V2-080-provider-live-claude-pooled.json"
+const liveTaskID = "V2-080"
 const liveRepositoryID = "agentic-loop-foundation"
 
 // requireLiveProvider is dp-v2-017 d11's three-condition gate. Every live
@@ -489,6 +491,149 @@ func (fx *liveFixture) testI2(t *testing.T) {
 	if accepted.Status != domain.ExecutionSucceeded {
 		t.Fatalf("terminal status = %s", accepted.Status)
 	}
+
+	// V2-080 A8, second proof, in the two phases the two shipped mechanisms
+	// need. These are nested inside I2 on purpose: I2 is the wire-and-identity
+	// phase, and the exercise's nine top-level subtests are not widened.
+	t.Run("f_declared_working_directory_reported_by_the_real_child_unconfined", func(t *testing.T) {
+		fx.probeWorkingDirectoryFromTheChild(t, "v2080-a8-unconfined", "V2-080-A8-working-directory-unconfined", false)
+	})
+	t.Run("g_declared_working_directory_reported_by_the_real_child_under_confinement", func(t *testing.T) {
+		fx.probeWorkingDirectoryFromTheChild(t, "v2080-a8-confined", "V2-080-A8-working-directory-confined", true)
+	})
+}
+
+// probeWorkingDirectoryFromTheChild is V2-080 A8's second proof: it asks the
+// real CLI to state the working directory it is running in and compares the
+// sha256 the projection carries against the sha256 of the directory the
+// Invocation declared. The comparison is one-way and by digest only, so no
+// response text is ever captured, journalled or recorded -- exactly the
+// mechanism B8 already relies on -- yet the value being compared is one the
+// CHILD produced and not one the harness asserted.
+//
+// It runs twice, once with Confine nil and once with Confine set, because the
+// two are different shipped mechanisms and only one of them can be proved by
+// the kernel read I5 performs. With Confine nil the directory is applied by
+// ProcessSupervisor through cmd.Dir. With Confine set, cmd.Dir is
+// deliberately never assigned (ProcessSupervisor's doc comment and
+// TestProcessSupervisorNeverAssignsCmdDirUnderConfinement) because a cmd.Dir
+// chdir would happen in the forked child before unshare runs and therefore
+// before either mount pair exists, so NamespaceConfinement.wrap emits one
+// shell-quoted cd inside the namespace after both mount pairs and
+// immediately before exec. No live child had ever confirmed either.
+//
+// The unconfined phase doubles as the calibration for the confined one: it
+// runs the identical prompt against a directory the kernel read in I5
+// independently confirms, so a digest match there establishes that the
+// candidate set below can express what this CLI actually emits. If the
+// unconfined phase does not match, the confined phase's non-match says
+// nothing about the working directory and is recorded as UNPROVEN rather
+// than asserted either way. Nothing here is ever asserted from the harness.
+func (fx *liveFixture) probeWorkingDirectoryFromTheChild(t *testing.T, base, purpose string, confine bool) {
+	t.Helper()
+	fx.clock.Advance(25 * time.Hour)
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	owner, runnerCtx := fx.callers(ctx)
+
+	reqID, incID, preparedVersion := fx.capturePlanPrepare(t, owner, base, "V2-080 A8: the working directory an Invocation declares must reach the real child")
+	target := domain.ControlTarget{RequirementID: mustRequirement(reqID), IncrementID: mustIncrement(incID)}
+	claim, err := fx.service.Claim(runnerCtx, application.ClaimRequest{RequestID: base + ":claim", IncrementID: incID, ExpectedIncrementVersion: preparedVersion, Target: target})
+	if err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	ws, err := fx.workspace.Create(claim.ExecutionID)
+	if err != nil {
+		t.Fatalf("workspace: %v", err)
+	}
+	startResp, err := fx.service.Start(runnerCtx, application.StartRequest{RequestID: base + ":start", ExecutionID: claim.ExecutionID, ExpectedExecutionVersion: 1})
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+
+	packet := livePacket(reqID, incID, "Do not use any tools. Do not read or write any file. Reply with ONLY the absolute filesystem path of the working directory you are running in, exactly as it appears in the environment information you were given, with no other words, no quotes, no code fence and no trailing punctuation.")
+	if err := packet.Validate(); err != nil {
+		t.Fatalf("work packet failed to validate: %v", err)
+	}
+	inv, err := provider.ClaudeAdapter{}.Build(provider.Request{OperationID: claim.ExecutionID, Workspace: ws, Packet: packet})
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	if inv.WorkingDirectory != ws {
+		t.Fatalf("the Invocation declares working directory %q but the Increment's workspace is %q", inv.WorkingDirectory, ws)
+	}
+	runner := fx.newRunner(t, purpose, claim.ExecutionID)
+	if confine {
+		runner.Supervisor.Confine = &NamespaceConfinement{Workspace: ws}
+	}
+
+	raw, runErr := runner.Run(ctx, inv)
+	verdict := "UNPROVEN"
+	matched := ""
+	if runErr != nil {
+		t.Logf("A8 %s under confine=%v: the invocation produced no result to compare (%v); recorded as an attempt, never asserted from the harness", verdict, confine, runErr)
+	} else {
+		var projected struct {
+			Output string `json:"output"`
+		}
+		switch {
+		case json.Unmarshal(raw, &projected) != nil:
+			t.Logf("A8 %s under confine=%v: the projection could not be parsed", verdict, confine)
+		case !strings.HasPrefix(projected.Output, "sha256:"):
+			t.Logf("A8 %s under confine=%v: the projection carries no response digest, so the child produced no comparable value", verdict, confine)
+		default:
+			for _, candidate := range []struct{ shape, value string }{
+				{"exact", ws},
+				{"trailing-newline", ws + "\n"},
+				{"trailing-slash", ws + "/"},
+				{"backticked", "`" + ws + "`"},
+				{"double-quoted", "\"" + ws + "\""},
+				{"single-quoted", "'" + ws + "'"},
+				{"trailing-period", ws + "."},
+				{"labelled", "Working directory: " + ws},
+			} {
+				if provider.DigestOutput(candidate.value) == projected.Output {
+					matched, verdict = candidate.shape, "PROVEN"
+					break
+				}
+			}
+			// A negative control, so a match is known not to be an
+			// artefact of the comparison: the same procedure against a
+			// sibling directory of the same shape must NOT match.
+			if provider.DigestOutput(ws+"-not-the-workspace") == projected.Output {
+				t.Errorf("A8 negative control failed under confine=%v: a sibling path digests to the same value as the child's response", confine)
+			}
+			if verdict == "PROVEN" {
+				t.Logf("A8 PROVEN from the real child under confine=%v: the child's own statement of its working directory digests exactly to the declared Invocation.WorkingDirectory (%s), matching shape %q; the mechanism proved is %s", confine, ws, matched, mechanismName(confine))
+			} else {
+				t.Logf("A8 UNPROVEN under confine=%v: the child produced a response digest but it matches none of the 8 exact renderings of the declared directory %s, so nothing is asserted; the mechanism left unproven is %s", confine, ws, mechanismName(confine))
+			}
+		}
+	}
+
+	// Finish the canonical lifecycle either way, so no Execution is left
+	// dangling by a probe.
+	result, parseErr := (provider.ClaudeAdapter{}).Parse(raw)
+	succeeded := parseErr == nil && result.Succeeded
+	if _, err := fx.service.Checkpoint(runnerCtx, application.CheckpointRequest{RequestID: base + ":checkpoint", ExecutionID: claim.ExecutionID, LeaseID: claim.LeaseID, FencingToken: claim.FencingToken}); err != nil {
+		t.Fatalf("checkpoint: %v", err)
+	}
+	resultPermit, err := fx.service.Permit(runnerCtx, application.PermitRequest{RequestID: base + ":result-permit", Kind: domain.PermitExternalEffect, Target: target, FencingToken: claim.FencingToken, ExpectedFencingToken: claim.FencingToken, Resource: claim.ExecutionID})
+	if err != nil || !resultPermit.Allowed {
+		t.Fatalf("result permit: err=%v allowed=%v", err, resultPermit.Allowed)
+	}
+	if _, err := fx.service.AcceptResult(runnerCtx, application.AcceptResultRequest{RequestID: base + ":accept", ExecutionID: claim.ExecutionID, LeaseID: claim.LeaseID, ExpectedExecutionVersion: startResp.Version, FencingToken: claim.FencingToken, Succeeded: succeeded, Target: target}); err != nil {
+		t.Fatalf("accept: %v", err)
+	}
+}
+
+// mechanismName names which of the two shipped working-directory mechanisms a
+// probe exercised, so an evidence transcription cannot confuse them.
+func mechanismName(confine bool) string {
+	if confine {
+		return "NamespaceConfinement.wrap's single cd, emitted inside the namespace after both mount pairs and immediately before exec (V2-077)"
+	}
+	return "ProcessSupervisor.Dir applied through cmd.Dir, which is the path taken whenever Confine is nil"
 }
 
 // testI3 (dp-v2-017 B13/d8): credential isolation, all six sub-proofs
@@ -839,6 +984,37 @@ func (fx *liveFixture) testI5AndI6(t *testing.T) {
 	}()
 
 	pid := findChildPID(t, "claude", 10*time.Second)
+
+	// V2-080 A8, first proof: the working directory the Invocation declares
+	// is read back FROM THE REAL CHILD. /proc/<pid>/cwd is the kernel's own
+	// record of where that process actually is; it is produced by the
+	// child's chdir, not computed by this test, and the harness knows only
+	// what it declared. It is taken here, inside the window I5 already
+	// holds open between finding the live child and signalling it, so no
+	// goroutine, timer or sleep is added to obtain it. The mechanism proved
+	// on this path is ProcessSupervisor.Dir applied through cmd.Dir, which
+	// is what runs when Confine is nil as it is for this whole suite;
+	// NamespaceConfinement's cd-inside-the-wrap-script path, which V2-077
+	// introduced precisely because cmd.Dir would chdir before unshare runs,
+	// is proved separately by I2's confined phase.
+	childCWD, childCWDErr := os.Readlink(filepath.Join("/proc", strconv.Itoa(pid), "cwd"))
+	selfCWD, selfCWDErr := os.Readlink("/proc/self/cwd")
+	switch {
+	case childCWDErr != nil:
+		t.Logf("A8 UNPROVEN on the cmd.Dir path: the real child's /proc/%d/cwd could not be read: %v", pid, childCWDErr)
+	case childCWD != inv1.WorkingDirectory:
+		t.Errorf("A8: the real child's working directory is %q but the Invocation declares %q", childCWD, inv1.WorkingDirectory)
+	default:
+		t.Logf("A8 PROVEN from the real child on the cmd.Dir path: /proc/%d/cwd equals the declared Invocation.WorkingDirectory (%s)", pid, childCWD)
+	}
+	if selfCWDErr != nil {
+		t.Logf("A8 positive control unavailable: the test process's own cwd could not be read: %v", selfCWDErr)
+	} else if selfCWD == inv1.WorkingDirectory {
+		t.Errorf("A8 positive control failed: the test process's own cwd %q already equals the declared directory, so the equality above could hold without the child having moved at all", selfCWD)
+	} else {
+		t.Logf("A8 positive control: the test process's own cwd is %s, which differs from the declared directory, so the equality above is not vacuous", selfCWD)
+	}
+
 	if err := syscall.Kill(-pid, syscall.SIGKILL); err != nil {
 		t.Fatalf("sigkill process group %d: %v", pid, err)
 	}
@@ -1218,10 +1394,18 @@ func (fx *liveFixture) logLedgerSnapshot(t *testing.T) {
 		t.Logf("  seq=%d purpose=%s state=%s reserved_usd=%.4f actual_usd=%.4f session_id_present=%v started_at=%s finished_at=%s",
 			e.Sequence, e.Purpose, e.State, e.ReservedUSD, e.ActualUSD, e.SessionID != "", e.StartedAt.Format(time.RFC3339), e.FinishedAt.Format(time.RFC3339))
 	}
-	if snap.InvocationCount > 16 {
-		t.Fatalf("invocation_count %d exceeds max_invocations 16", snap.InvocationCount)
+	// The two stops below are the APPROVED RECORD's own declared limits,
+	// read from the record this run loaded, not literals carried over from
+	// whichever record the suite was first written against. Until V2-080
+	// they were hard-coded as 16 invocations and 10.00 USD -- V2-017's
+	// values -- which would have made this subtest fail by construction
+	// under any later record with different limits. Reading the record is
+	// not raising a limit: no threshold is changed, and reaching one is
+	// still a fail-closed stop for inspection.
+	if snap.InvocationCount > fx.record.Limits.MaxInvocations {
+		t.Fatalf("invocation_count %d exceeds the approved record's max_invocations %d", snap.InvocationCount, fx.record.Limits.MaxInvocations)
 	}
-	if snap.SettledTotalUSD+snap.ReservedTotalUSD > 10.0 {
-		t.Fatalf("settled+outstanding %.4f exceeds 10.00 USD", snap.SettledTotalUSD+snap.ReservedTotalUSD)
+	if snap.SettledTotalUSD+snap.ReservedTotalUSD > fx.record.Limits.MaxTotalCostUSD {
+		t.Fatalf("settled+outstanding %.4f exceeds the approved record's max_total_cost_usd %.2f", snap.SettledTotalUSD+snap.ReservedTotalUSD, fx.record.Limits.MaxTotalCostUSD)
 	}
 }

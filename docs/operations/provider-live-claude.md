@@ -164,3 +164,31 @@ V2-077（宣言した working directory を子 process に実際に届ける）�
 - 空の workspace で CLI の挙動が違って exercise が落ちたら、**子が到達できる範囲を広げて通すのではなく停止して escalate する**。
 
 なお V2-077 は、子の実 working directory を live に依らず決定的に記録する local test を代わりに持っている（`internal/runner/working_directory_test.go` の `TestSupervisedInvocationRunnerRunsTheChildInTheDeclaredWorkingDirectory`: `t.TempDir()` の workspace に対して実 child を起動し、その child 自身が報告した物理 cwd を宣言値と value-to-value で比較する。実 Provider CLI は使わない）。これは live 再観測の代替ではなく、live が払われるまでの間に「宣言値が実際に子へ届く」ことを保証するものである。
+
+## いま有効な record と最新の観測（V2-080、2026-08-26）
+
+V2-077 が待っていた「全 code 着地後に1回だけ払う」再観測を、V2-080 が pooled record として実行した。
+
+- 承認済み record: `.agents/v2/provider-preflight/V2-080-provider-live-claude-pooled.json`（sha256 `23af04a0e07398cedd90597aa99421a02f986b248274671b8e6d3ca8de60d3a8`）
+- ledger: `/home/takushi/.local/state/agentic-loop/v2/V2-080-provider-live-claude-pooled-cost.json`（専用 file。V2-017／V2-022／V2-063／V2-075 の台帳は1 byte も触っていない）
+- 暴走検知しきい値: `max_invocations` 48・`max_total_cost_usd` 40.00 USD・`worst_case_reservation_usd` 1.00 USD
+- 観測 commit: `563314b45138353baaffb4987424239fb9d61a38`（durable ref `refs/live-observations/v2-080-provider-live-claude`。**origin に push 済み**）
+- 公開した exercise file 集合: `.agents/v2/evidence/artifacts/V2-080-live-exercise-files.json`（103 path。うち compile される closure が 92 path で、V2-075 の 67 から 25 path 増え、削除は0）
+- 実測結果: 9 subtest すべて PASS、消費 invocation は **10 / 48**、settled 合計 **0.5059 USD**、`halted` は **false**、transient 失敗は **0 件**
+
+### 台帳の `actual_usd` は0ではない（V2-080 で実測、記録のみ）
+
+V2-080 の design packet と work order は「flat-rate 契約なので全 invocation が 0.00 USD で settle し、4つの台帳の settled `actual_usd` はいずれも合計 0.00 USD」と述べていたが、これは**実測で誤り**である。2026-08-26 実測: V2-017 が 0.652746 USD／9件、V2-022 が 1.008563 USD／16件、V2-063 が 0.505211 USD／8件、V2-075 が 0.444129 USD／9件、V2-080 が 0.505867 USD／6件。settle 1件あたりおよそ 0.074〜0.105 USD である。`internal/runner/provider_live_test.go` の I2 自身が `entry.ActualUSD > 0` を要求しているので、同じ矛盾は台帳側からも test 側からも見える。ただし packet が引き出した結論そのものは別の実測で成立する: **どの台帳も金額上限には近づいたことがなく、これまで実際に縛ったしきい値は invocation 数だけである**（V2-080 は 0.5059 + 予約 2.00 = 2.51 USD で、上限 40.00 USD の 7% 未満）。
+
+`logLedgerSnapshot` はこの task まで V2-017 の値（16 invocation・10.00 USD）を literal で持っていたため、48 invocation の record では構造的に落ちた。V2-080 で読み込んだ record 自身の `limits` を読むように直した。これはしきい値の引き上げではなく、古い record の値を焼き込むのをやめただけである。
+
+### 宣言した working directory が実子に届くことの実証（A8）
+
+2つの機構があり、片方だけが実証できた。**記録のみで、修正はしていない**（`internal/runner/confinement.go` は V2-080 の禁止 path）。
+
+1. **`Confine` が nil の経路（`ProcessSupervisor.Dir` → `cmd.Dir`）: 実証済み。** I5 が実 child を見つけて SIGKILL する前の窓で、kernel 側の `/proc/<pid>/cwd` を読み、宣言した `Invocation.WorkingDirectory` と一致することを確認した。goroutine・sleep・timer は追加していない（既にある窓を使うだけ）。positive control として test process 自身の cwd（`internal/runner`）が宣言値と異なることも測っており、等号は自明ではない。さらに I2 配下の unconfined phase で、**子自身が述べた作業ディレクトリ**を projection の sha256 経由で宣言値と突き合わせ、`exact` 形で一致した（応答文は一切保持しない。B8 と同じ digest 比較のみ）。
+2. **`Confine` が非 nil の経路（`NamespaceConfinement.wrap` が mount 2組の後・exec 直前に出す1つの `cd`）: UNPROVEN。** I2 配下の confined phase で実 invocation を1回払ったが、子は約 0.96 秒で結果を出さずに終了し、台帳の seq=4 は `session_id` なし・`actual_usd` なしで settle した（API に到達していない）。無償で測れたところまでは切り分けてある: 同じ namespace・同じ mount 2組・同じ `cd` を手で組んで `claude --version` を走らせると `pwd` は workspace を返し version も返る（つまり unshare も mount も cd も CLI の起動そのものも動く）。同じ namespace の中では `/tmp` への書き込みと `mktemp -p /tmp` が `Read-only file system` で拒否され、workspace と `$HOME` への書き込みは通る。**workspace の top-level ancestor が `/tmp` である限り confinement は `/tmp` 全体を read-only で封じる**ので、これが最有力の候補原因だが断定はしていない。次にここを進める者は、confined child の stderr（`BoundedLog`）を取得する診断を**観測より前に**入れてから live を1回払うこと。
+
+### この record を別 machine へ持っていけない理由
+
+台帳 file は repository の外（`/home/takushi/.local/state/agentic-loop/v2/`）にあり git に入っていない。`claude` の実体は `/home/takushi/.local/bin/claude` → `/home/takushi/.local/share/claude/versions/2.1.241` で、これも machine 固有の絶対 path である。したがって**別 machine は自分の preflight record を owner 承認のもとで新しく発行する**。この record を複製してはならない。なお 2026-08-26 実測で `codex` は未 login、`opencode` は credential 0 件なので、3 Provider 揃いの exercise（M6／V2-028）はこの machine では実行できない。
