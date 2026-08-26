@@ -29,8 +29,8 @@ func TestCompileFoundationBaselineContract(t *testing.T) {
 	if err != nil {
 		t.Fatalf("compile foundation baseline contract: %v", err)
 	}
-	if compiled.Version != "0.1.0-baseline" {
-		t.Fatalf("Version = %q, want 0.1.0-baseline", compiled.Version)
+	if compiled.Version != "0.1.0-preview.1" {
+		t.Fatalf("Version = %q, want 0.1.0-preview.1", compiled.Version)
 	}
 	wantIDs := []string{
 		"cap-repository-registration",

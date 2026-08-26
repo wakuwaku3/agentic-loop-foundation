@@ -1,6 +1,6 @@
 # Preview
 
-Release: 0.1.0-baseline
+Release: 0.1.0-preview.1
 
 Preview候補の利用者向け文書の入口です。現在のv2 branchは実装候補であり、
 実環境へdeploy済みのPreview Releaseではありません。上記`Release:`行は
@@ -19,6 +19,14 @@ Preview候補の利用者向け文書の入口です。現在のv2 branchは実�
 候補をPreview Releaseにするには、GCP preflight、pinned image deployment、
 実Runner enrollment、Release Contract全capabilityの実行が必要です。Provider
 依存機能は対象Providerの実物Evidenceがない限りStableへ昇格しません。
+
+2026-08-26に、このrepository自身をPreview対象として環境class `preview-local`
+（owner実機・実process・実CLI・Firestore emulator）で12 capabilityを1件ずつ
+実測しました。手順は `docs/operations/release-live-dogfood.md`
+にあります。実測の結果、証跡idを持つcapabilityは1件だけであり、残る11件の
+理由は `docs/preview/stable-diff.md` に列挙しています。この実測はGCPへの
+deployを含まず、forgeにもremoteにも接続していません。Stable Releaseは
+存在せず、昇格も行っていません。
 
 capability baselineの正本は
 [contracts/release-contract/foundation.json](../../contracts/release-contract/foundation.json)

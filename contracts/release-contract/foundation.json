@@ -1,10 +1,10 @@
 {
   "schema_version": "v1",
-  "id": "rc-foundation-0.1.0-baseline",
+  "id": "rc-foundation-0.1.0-preview.1",
   "kind": "release-contract",
   "created_at": "2026-08-24T00:00:00Z",
   "correlation_id": "v2-009-release-contract",
-  "release": "0.1.0-baseline",
+  "release": "0.1.0-preview.1",
   "capabilities": [
     {
       "id": "cap-repository-registration",
@@ -16,7 +16,9 @@
       "id": "cap-requirement-intake",
       "name": "課題を登録する",
       "status": "preview",
-      "evidence_ids": []
+      "evidence_ids": [
+        "ev-v2-022-release-live-dogfood"
+      ]
     },
     {
       "id": "cap-backlog-visibility",

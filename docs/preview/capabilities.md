@@ -1,44 +1,50 @@
 # Preview capability一覧
 
-更新日: 2026-08-24
+更新日: 2026-08-26
 
 このcapability一覧は、`contracts/release-contract/foundation.json` が宣言する
 baseline capabilityへのanchorだけを提供する。各capabilityの利用者操作、観測結果、
 実証方法、外部依存の正本は `contracts/release-contract/foundation-capabilities.json`
 であり、この文書ではその内容を複製しない。
 
-現時点でv2のPreview Releaseはdeployされていないため、以下の全capabilityは
-Preview実環境で未実施であり、証跡なしである。
+2026-08-26に、このFoundation Repository自身をPreview対象として
+環境class `preview-local`（owner実機・実process・実CLI・Firestore emulator）で
+12 capabilityを1件ずつ実測した（V2-022）。手順は
+`docs/operations/release-live-dogfood.md` にある。
+証跡idを持つのは、宣言する成功条件を全て観測でき、かつ宣言する外部依存の全systemへ
+実接続できた2件だけである。残る10件は証跡なしであり、その理由（初回deploy gate D1、
+後続milestone、または未実装のescalation）を各項に記す。GCP Preview deploymentは
+まだ存在しない。
 
 <a id="cap-repository-registration"></a>
 ## Repositoryを登録する
 
 正本は `contracts/release-contract/foundation-capabilities.json` の
-`cap-repository-registration` 宣言である。Preview Releaseが未deployのため証跡なし。
+`cap-repository-registration` 宣言である。登録route・一覧・詳細の表示はpreview-local dogfood（V2-022）で実測したが、宣言する外部systemのGitHubとGitへは接続していない（本taskの副作用範囲がforgeとremoteを除外する）。ループ実行可否はRunnerが提出するforge Observationからしか決まらないため未観測であり、証跡なし（gate規則G3-1）。
 
 <a id="cap-requirement-intake"></a>
 ## 課題を登録する
 
 正本は `contracts/release-contract/foundation-capabilities.json` の
-`cap-requirement-intake` 宣言である。Preview Releaseが未deployのため証跡なし。
+`cap-requirement-intake` 宣言である。preview-local dogfood（V2-022）で宣言する成功条件を全て観測し、宣言する外部system（owner UIとFirestore）へ実接続した。証跡idは `contracts/release-contract/foundation.json` にある。
 
 <a id="cap-backlog-visibility"></a>
 ## Backlogを見る
 
 正本は `contracts/release-contract/foundation-capabilities.json` の
-`cap-backlog-visibility` 宣言である。Preview Releaseが未deployのため証跡なし。
+`cap-backlog-visibility` 宣言である。preview-local dogfood（V2-022）で宣言する成功条件を全て観測し、宣言する外部system（owner UIとFirestore）へ実接続した。証跡idは `contracts/release-contract/foundation.json` にある。宣言された利用者操作のうち「関連Repositoryで絞り込む」だけは未実装であり、`GET /v1/requirements` は `page_size` と `cursor` しか解釈しない（実測済みの不足、escalation E22-7）。
 
 <a id="cap-autonomous-resolution"></a>
 ## 問題解決を自律実行する
 
 正本は `contracts/release-contract/foundation-capabilities.json` の
-`cap-autonomous-resolution` 宣言である。Preview Releaseが未deployのため証跡なし。
+`cap-autonomous-resolution` 宣言である。preview-local dogfood（V2-022）でenrollmentからclaim・start・renew・heartbeat・checkpoint・resultまでの実protocolを実HTTPで駆動し、実claude invocationを1回行ったが、宣言する成功条件のうち変更・検証・統合は行っていない（GitHubとGitへ接続していない）。宣言する3 Providerのうちclaudeだけを使ったため、証跡なし（残りはM6/V2-028）。
 
 <a id="cap-human-input-request"></a>
 ## 人間の入力を求める
 
 正本は `contracts/release-contract/foundation-capabilities.json` の
-`cap-human-input-request` 宣言である。Preview Releaseが未deployのため証跡なし。
+`cap-human-input-request` 宣言である。preview-local dogfood（V2-022）で実測したところ、質問を記録するcommandとrouteと詳細fieldは存在するが、実surfaceで作られたRequirementはneeds-inputへ遷移できるstatusに到達できない（`captured` を離れるcommandは `start-framing` だけで、これを発行するapplication commandが存在しない）。よって質問の表示も回答による再開も観測できず、証跡なし。
 
 ownerが読めるようになったもの: needs-inputのRequirement詳細（`GET /v1/requirements/{requirement_id}`）に
 質問が載る。載るのは、なぜ自律判断できないかを閉じた3値の理由class（破壊的・不可逆な判断／
@@ -71,7 +77,7 @@ cap-human-input-requestのuser journeyはこの版では実行されていない
 ## Previewを運用する
 
 正本は `contracts/release-contract/foundation-capabilities.json` の
-`cap-preview-operation` 宣言である。Preview Releaseが未deployのため証跡なし。
+`cap-preview-operation` 宣言である。宣言する外部systemにGoogle Cloud Runが含まれるため、このcapabilityの証跡は初回deploy gate（D1）に属する。preview-local dogfood（V2-022）では、稼働processが `GET /v1/release/state` に503 release_observer_not_configuredを返すことも実測した（`cmd/control-plane` がReleaseObserverを組み立てていない配線の残余）。証跡なし。
 
 ownerが読めるようになったもの: owner consoleのRelease evidence欄と、ownerだけが読める
 read-onlyのGET route `/v1/release/state` から、稼働processが組み立てられたPreview release
@@ -92,7 +98,7 @@ scale-to-zero、実Firestoreの権限と競合。これらは初回deploy gate�
 ## Stableへ昇格する
 
 正本は `contracts/release-contract/foundation-capabilities.json` の
-`cap-stable-promotion` 宣言である。Preview Releaseが未deployのため証跡なし。
+`cap-stable-promotion` 宣言である。宣言する外部systemにGoogle Cloud RunとGitHubが含まれるため、このcapabilityの証跡は初回deploy gate（D1）に属する。preview-local dogfood（V2-022）では昇格routeが存在しないことも実測した。証跡なし。
 
 ownerが読めるようになったもの: 昇格に何が足りないかを、同じread-only routeから条件単位で
 読める。昇格の権威は `internal/domain` のReleaseCandidateであり、この面はその拒否理由を
@@ -117,28 +123,28 @@ in-processのsourceが持たない障害・秘密走査台帳を要する。両�
 ## ループを制御する
 
 正本は `contracts/release-contract/foundation-capabilities.json` の
-`cap-loop-control` 宣言である。Preview Releaseが未deployのため証跡なし。
+`cap-loop-control` 宣言である。preview-local dogfood（V2-022）でgraceful stopの発行と受付から検証までの遷移、claim停止と解除、実child process groupの終了までを実測したが、宣言する成功条件が要求する対象Runner・process・lease・新規副作用可否の表示は `ControlReadModel` に無い（escalation E22-8）。宣言する外部systemにGoogle Cloud Runが含まれるためD1にも属する。証跡なし。
 
 <a id="cap-loop-self-update"></a>
 ## ループ自身を更新する
 
 正本は `contracts/release-contract/foundation-capabilities.json` の
-`cap-loop-self-update` 宣言である。Preview Releaseが未deployのため証跡なし。
+`cap-loop-self-update` 宣言である。preview-local dogfood（V2-022）でLoop channel層の切替とrollback、切替前Requirementの同一canonical stateからの再開までを実測した。ただし宣言する外部systemにGoogle Cloud Run・Git・GitHubが含まれるため、このcapabilityの証跡は初回deploy gate（D1）に属する。証跡なし。
 
 <a id="cap-shared-resource-allocation"></a>
 ## Backlogへ共有資源を配分する
 
 正本は `contracts/release-contract/foundation-capabilities.json` の
-`cap-shared-resource-allocation` 宣言である。Preview Releaseが未deployのため証跡なし。
+`cap-shared-resource-allocation` 宣言である。preview-local dogfood（V2-022）で `POST /v1/controls` の上限設定とqueueSummaryの配分・待機理由・枯渇の報告を実測した。宣言する3 Providerのうちclaudeだけが認証済みであり、複数Repositoryの同時処理も未実施のため、証跡なし（Provider側はM6/V2-028、複数RepositoryはM7/V2-030・V2-031）。
 
 <a id="cap-provider-operation"></a>
 ## AI Providerを利用・切替する
 
 正本は `contracts/release-contract/foundation-capabilities.json` の
-`cap-provider-operation` 宣言である。Preview Releaseが未deployのため証跡なし。
+`cap-provider-operation` 宣言である。preview-local dogfood（V2-022）で `GET /v1/providers` が3 Providerの接続状態・上限source・割当先を報告することを実測した。宣言する3 Providerのうちclaudeだけが認証済みで互換providerが存在しないため、障害時のhandoffまたは待機理由の明示は観測できず、証跡なし（M6/V2-028）。
 
 <a id="cap-user-documentation"></a>
 ## 利用者文書を読む
 
 正本は `contracts/release-contract/foundation-capabilities.json` の
-`cap-user-documentation` 宣言である。Preview Releaseが未deployのため証跡なし。
+`cap-user-documentation` 宣言である。preview-local dogfood（V2-022）で `internal/release/docs.go` の決定的な文書routing検査（link・anchor解決、capability anchorの双方向全単射、固定形式のrelease marker、必須4節、Stableからkeyword Previewへのlink不在、code block許可list）が実doc setに対して成立することと、release文字列が契約・compile済み契約・`Release:` markerの3箇所で一致することを実測した。それでも証跡なしである。理由は2つあり、いずれも実測である。第一に、宣言する唯一の外部systemであるowner consoleが文書routeを提供しないため、稼働channel/versionに対応する文書を宣言surfaceから参照できない（escalation E22-10）。第二に、この文書自身が `/v1/release/state` をowner可読と記しているのに稼働processは503を返し、実挙動との差異が存在する。

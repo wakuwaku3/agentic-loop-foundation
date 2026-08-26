@@ -56,8 +56,8 @@ func TestRealTreeFoundationCandidateIsNotPromotable(t *testing.T) {
 		}
 	}
 
-	if assembled.Contract.Version != "0.1.0-baseline" {
-		t.Fatalf("Contract.Version = %q, want 0.1.0-baseline", assembled.Contract.Version)
+	if assembled.Contract.Version != "0.1.0-preview.1" {
+		t.Fatalf("Contract.Version = %q, want 0.1.0-preview.1", assembled.Contract.Version)
 	}
 	wantIDs := []string{
 		"cap-repository-registration", "cap-requirement-intake", "cap-backlog-visibility",

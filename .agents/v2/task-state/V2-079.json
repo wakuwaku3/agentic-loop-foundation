@@ -1,0 +1,60 @@
+{
+  "schema_version": "v1",
+  "id": "ts-v2-079",
+  "kind": "canonical-task-state",
+  "task_id": "V2-079",
+  "status": "queued",
+  "dependencies": [
+    "V2-022"
+  ],
+  "outcome": "Make the Backlog's own cursor work against the real persistence: a cursor the route just returned must be accepted by the next request rather than refused, so paging past the first page is possible at all.",
+  "non_goals": [
+    "Do not change what the route returns to make a broken cursor look accepted",
+    "Do not widen the page bound to avoid needing a cursor",
+    "Do not fix it only for the in-memory adapter"
+  ],
+  "actor": "sol",
+  "input_refs": [
+    "V2-022",
+    "V2-079"
+  ],
+  "input_hash": "c8a1eedba449ec008a92178d1ad25ad3a1d9b761d49fa1375782090ee250d4a6",
+  "output_refs": [
+    "V2-079"
+  ],
+  "output_hash": "9853a0c05b6ae4732a19e7a9bfa8bdc08ad4ec925d838773359b6931ddacdba4",
+  "owner": "terra",
+  "next_owner": "terra",
+  "retry_budget": {
+    "max_attempts": 2,
+    "attempts_used": 0,
+    "remaining": 2
+  },
+  "release_eligible": false,
+  "transitions": [
+    {
+      "sequence": 1,
+      "at": "2026-08-26T03:00:00Z",
+      "from_status": null,
+      "to_status": "queued",
+      "actor": "sol",
+      "input_refs": [
+        "V2-022",
+        "V2-079"
+      ],
+      "input_hash": "c8a1eedba449ec008a92178d1ad25ad3a1d9b761d49fa1375782090ee250d4a6",
+      "output_refs": [
+        "V2-079"
+      ],
+      "output_hash": "9853a0c05b6ae4732a19e7a9bfa8bdc08ad4ec925d838773359b6931ddacdba4",
+      "owner": "terra",
+      "next_owner": "terra",
+      "retry_budget": {
+        "max_attempts": 2,
+        "attempts_used": 0,
+        "remaining": 2
+      },
+      "reason": "the dogfood measured that a cursor the Backlog route itself returned is refused with a client error by the very next request against the real persistence: the page query passes a document path that already carries the collection prefix, and the client prefixes it again. The declared capability's user action is to page through the Backlog, so the capability cannot be exercised at all until the cursor a caller is handed is one the next call accepts"
+    }
+  ]
+}

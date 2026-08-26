@@ -1,12 +1,12 @@
 {
   "schema_version": "v1",
-  "id": "cd-foundation-0.1.0-baseline",
+  "id": "cd-foundation-0.1.0-preview.1",
   "kind": "capability-declaration-set",
   "created_at": "2026-08-24T00:00:00Z",
   "correlation_id": "v2-009-release-contract",
-  "release": "0.1.0-baseline",
+  "release": "0.1.0-preview.1",
   "representative_provider": "claude",
-  "contract_ref": "rc-foundation-0.1.0-baseline",
+  "contract_ref": "rc-foundation-0.1.0-preview.1",
   "capabilities": [
     {
       "id": "cap-repository-registration",

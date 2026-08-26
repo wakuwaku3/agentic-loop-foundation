@@ -1,0 +1,183 @@
+{
+ "schema_version": "v1",
+ "id": "ev-v2-022-provider-live-claude-dogfood",
+ "kind": "evidence",
+ "created_at": "2026-08-26T01:50:00Z",
+ "correlation_id": "v2-022-preview-local-dogfood",
+ "task_id": "V2-022",
+ "component": "provider-live-claude-dogfood",
+ "evidence_key": "13136fba854bdbb96e52f1b78e607ad6728b407d6615e970fd651cfa2be13eb0",
+ "result": "partial",
+ "checks": [
+  {
+   "name": "environment-identifiers",
+   "status": "passed",
+   "argv": [
+    "devbox",
+    "run",
+    "--pure",
+    "-e",
+    "AGENTIC_LOOP_LIVE_DOGFOOD=1",
+    "-e",
+    "AGENTIC_LOOP_LIVE_PROVIDER=1",
+    "-e",
+    "HOME=/home/takushi",
+    "--",
+    "scripts/firestore-emulator.sh",
+    "go",
+    "test",
+    "-count=1",
+    "-v",
+    "-timeout",
+    "3600s",
+    "-run",
+    "TestFoundationPreviewLocalDogfood",
+    "./internal/api"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 3600,
+   "summary": "Captured in the same session as the runs: environment class preview-local; machine D18061 (gethostname) with uname -sr \"Linux 6.18.33.2-microsoft-standard-WSL2\"; emulator firebase firestore emulator, firebase --version 15.27.0, project agentic-loop-test, host 127.0.0.1:<ephemeral port, 127.0.0.1:18451 in run 2>; claude CLI /home/takushi/.local/bin/claude version \"2.1.241 (Claude Code)\"; Go toolchain go1.25.0. claude --version is read-only and consumed no invocation."
+  },
+  {
+   "name": "composite-evidence-key-method",
+   "status": "passed",
+   "argv": [
+    "devbox",
+    "run",
+    "--pure",
+    "--",
+    "go",
+    "test",
+    "-count=1",
+    "./internal/contracts"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 600,
+   "summary": "evidence_key is sha256 of the literal ASCII string api=<key>;application=<key>;control-plane=<key>;docs=<key>;domain=<key>;infra=<key>;provider=<key>;runner=<key>;store-firestore=<key>;update=<key>;web=<key> built from the eleven component keys devbox run --pure -- make evidence-keys reported at the FINAL commit A's green tree (39d2e80, the commit the confirming live run observed), in that fixed order, joined with ';' and no trailing separator, with no other text. The four components commit B moves (contracts, internal-contracts, release, task-ledger) are deliberately absent, so the key cannot stale itself the moment it is committed. This record's component, provider-live-claude-dogfood, begins with 'provider-live-', which opts this task's real-CLI usage into internal/contracts.CheckProviderPreflightLedger's anti-fabrication cross-check: exactly one preflight record shares this task_id, this record carries an artifact_refs entry whose artifact_id is provider-preflight and whose sha256 equals that record file's bytes, and the record's approval.approved_at (2026-08-24T23:22:47Z) is strictly earlier than this record's observed_at."
+  },
+  {
+   "name": "provider-invocation-autonomous-resolution",
+   "status": "failed",
+   "argv": [
+    "devbox",
+    "run",
+    "--pure",
+    "-e",
+    "AGENTIC_LOOP_LIVE_DOGFOOD=1",
+    "-e",
+    "AGENTIC_LOOP_LIVE_PROVIDER=1",
+    "-e",
+    "HOME=/home/takushi",
+    "--",
+    "scripts/firestore-emulator.sh",
+    "go",
+    "test",
+    "-count=1",
+    "-v",
+    "-timeout",
+    "3600s",
+    "-run",
+    "TestFoundationPreviewLocalDogfood",
+    "./internal/api"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 3600,
+   "summary": "One real claude invocation per run inside the runner-facing journey of cap-autonomous-resolution, through runner.SupervisedInvocationRunner with the V2-022 CostLedger and provider.ClaudeAdapter, as a real child process group. Recorded failed because the two runs of the A19 stability probe DISAGREE on it: run 1 returned failure class provider-transport, code 1, retryable true (a settled ledger entry with no session_id and no usage counts), and run 2 succeeded with session_id 11f82069-5fde-48f7-866a-cd577d76b82a, 2 input, 13 output, 16489 cache-read and 7458 cache-creation counts, 0.0843 USD, 3356 ms API duration, 1 turn. Both observations are transcribed and neither is deleted; no third run was made; no evidence id is written for the affected capability; this record's result stays partial. The classification is provider-side and transient. Escalated to the tech lead."
+  },
+  {
+   "name": "provider-invocation-graceful-stop-live-child",
+   "status": "passed",
+   "argv": [
+    "devbox",
+    "run",
+    "--pure",
+    "-e",
+    "AGENTIC_LOOP_LIVE_DOGFOOD=1",
+    "-e",
+    "AGENTIC_LOOP_LIVE_PROVIDER=1",
+    "-e",
+    "HOME=/home/takushi",
+    "--",
+    "scripts/firestore-emulator.sh",
+    "go",
+    "test",
+    "-count=1",
+    "-v",
+    "-timeout",
+    "3600s",
+    "-run",
+    "TestFoundationPreviewLocalDogfood",
+    "./internal/api"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 3600,
+   "summary": "One real claude invocation per run, deliberately terminated while genuinely in flight so the control path of cap-loop-control could be proven to reach a real process. The child was located by scanning /proc for a direct child named claude, its process group was signalled, the supervised invocation returned, and the child's death was confirmed by bounded polling of /proc. Because the process is killed before it produces output, SupervisedInvocationRunner skips TrueUp by design, so each of these invocations stays in the ledger as state=reserved charged at the 1.00 USD worst case forever and carries no session_id and no usage counts. That is the intended fail-closed accounting, not a lost measurement. Sequences 4, 7, 10, 13, 16 and 19 are these invocations."
+  },
+  {
+   "name": "provider-invocation-resume-after-channel-rollback",
+   "status": "passed",
+   "argv": [
+    "devbox",
+    "run",
+    "--pure",
+    "-e",
+    "AGENTIC_LOOP_LIVE_DOGFOOD=1",
+    "-e",
+    "AGENTIC_LOOP_LIVE_PROVIDER=1",
+    "-e",
+    "HOME=/home/takushi",
+    "--",
+    "scripts/firestore-emulator.sh",
+    "go",
+    "test",
+    "-count=1",
+    "-v",
+    "-timeout",
+    "3600s",
+    "-run",
+    "TestFoundationPreviewLocalDogfood",
+    "./internal/api"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 3600,
+   "summary": "One real claude invocation per run driving the Requirement captured before the deliberate Preview break to a terminal execution status of succeeded under the restored Loop channel version, from the same Firestore emulator canonical state. Both runs of the A19 stability probe observed it passing. Run 2's invocation: session_id eaec276b-e444-4902-9f83-9286dce75979, 2 input, 7 output, 16489 cache-read and 7441 cache-creation counts, 0.0839 USD, 3070 ms API duration, 1 turn."
+  },
+  {
+   "name": "ledger-snapshot",
+   "status": "passed",
+   "argv": [
+    "cat",
+    "/home/takushi/.local/state/agentic-loop/v2/V2-022-provider-cost.json"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 60,
+   "summary": "Full V2-022 cost ledger, transcribed. path=/home/takushi/.local/state/agentic-loop/v2/V2-022-provider-cost.json provider=claude task_id=V2-022 halted=false invocations=23 settled_total_usd=1.0086 reserved_total_usd=7.0000 limits(max_invocations=24 max_total_cost_usd=20.00 worst_case_reservation_usd=1.00) single_invocation_anomaly_threshold_usd=2.00 (the code constant runner.CostAnomalyThresholdUSD, not configurable). No threshold was reached, the halted flag is false, and no settled invocation exceeded the anomaly threshold. Usage is reported as input, output, cache-read and cache-creation counts. Entries: sequence=1 purpose=V2-022-autonomous-resolution state=settled reserved_usd=1.0000 actual_usd=0.0842 session_id=31eb106c-367d-4e21-942d-32fc3b30d868 input_count=2 output_count=13 cache_read_count=16489 cache_creation_count=7454 duration_api_ms=4277 duration_ms=3380 num_turns=1 started_at=2026-08-26T01:29:12.570083082Z finished_at=2026-08-26T01:29:17.500784892Z | sequence=2 purpose=V2-022-autonomous-resolution state=settled reserved_usd=1.0000 actual_usd=0.0842 session_id=8e1193ac-a4bc-4931-bb20-0e410ead450a input_count=2 output_count=13 cache_read_count=16489 cache_creation_count=7452 duration_api_ms=2716 duration_ms=1989 num_turns=1 started_at=2026-08-26T01:33:24.206347756Z finished_at=2026-08-26T01:33:27.560234854Z | sequence=3 purpose=V2-022-autonomous-resolution state=settled reserved_usd=1.0000 actual_usd=0.0843 session_id=3af8efe1-d766-4d08-8750-de946e7f8149 input_count=2 output_count=13 cache_read_count=16489 cache_creation_count=7462 duration_api_ms=3252 duration_ms=2565 num_turns=1 started_at=2026-08-26T01:36:16.488811371Z finished_at=2026-08-26T01:36:20.441289388Z | sequence=4 purpose=V2-022-graceful-stop-live-child state=reserved reserved_usd=1.0000 actual_usd=0.0000 session_id= input_count=0 output_count=0 cache_read_count=0 cache_creation_count=0 duration_api_ms=0 duration_ms=0 num_turns=0 started_at=2026-08-26T01:36:20.632062602Z finished_at=0001-01-01T00:00:00Z | sequence=5 purpose=V2-022-resume-after-channel-rollback state=settled reserved_usd=1.0000 actual_usd=0.0000 session_id= input_count=0 output_count=0 cache_read_count=0 cache_creation_count=0 duration_api_ms=0 duration_ms=0 num_turns=0 started_at=2026-08-26T01:36:22.409211868Z finished_at=2026-08-26T01:36:25.969003844Z | sequence=6 purpose=V2-022-autonomous-resolution state=settled reserved_usd=1.0000 actual_usd=0.0000 session_id= input_count=0 output_count=0 cache_read_count=0 cache_creation_count=0 duration_api_ms=0 duration_ms=0 num_turns=0 started_at=2026-08-26T01:37:31.542107666Z finished_at=2026-08-26T01:37:35.024950941Z | sequence=7 purpose=V2-022-graceful-stop-live-child state=reserved reserved_usd=1.0000 actual_usd=0.0000 session_id= input_count=0 output_count=0 cache_read_count=0 cache_creation_count=0 duration_api_ms=0 duration_ms=0 num_turns=0 started_at=2026-08-26T01:37:35.193857864Z finished_at=0001-01-01T00:00:00Z | sequence=8 purpose=V2-022-resume-after-channel-rollback state=settled reserved_usd=1.0000 actual_usd=0.0839 session_id=31384bfe-5729-42e1-b91d-3ef761c438f9 input_count=2 output_count=7 cache_read_count=16489 cache_creation_count=7444 duration_api_ms=5069 duration_ms=4325 num_turns=1 started_at=2026-08-26T01:37:37.028056171Z finished_at=2026-08-26T01:37:42.75734116Z | sequence=9 purpose=V2-022-autonomous-resolution state=settled reserved_usd=1.0000 actual_usd=0.0842 session_id=fb2bfc7a-d2b6-4609-9d08-ad398121b729 input_count=2 output_count=13 cache_read_count=16489 cache_creation_count=7453 duration_api_ms=3229 duration_ms=2395 num_turns=1 started_at=2026-08-26T01:40:04.75131986Z finished_at=2026-08-26T01:40:08.504715436Z | sequence=10 purpose=V2-022-graceful-stop-live-child state=reserved reserved_usd=1.0000 actual_usd=0.0000 session_id= input_count=0 output_count=0 cache_read_count=0 cache_creation_count=0 duration_api_ms=0 duration_ms=0 num_turns=0 started_at=2026-08-26T01:40:08.669550185Z finished_at=0001-01-01T00:00:00Z | sequence=11 purpose=V2-022-resume-after-channel-rollback state=settled reserved_usd=1.0000 actual_usd=0.0839 session_id=af2ebb9b-f2a0-4cc4-bb7d-b77bae431b39 input_count=2 output_count=7 cache_read_count=16489 cache_creation_count=7442 duration_api_ms=2725 duration_ms=2137 num_turns=1 started_at=2026-08-26T01:40:10.318984503Z finished_at=2026-08-26T01:40:13.815522011Z | sequence=12 purpose=V2-022-autonomous-resolution state=settled reserved_usd=1.0000 actual_usd=0.0000 session_id= input_count=0 output_count=0 cache_read_count=0 cache_creation_count=0 duration_api_ms=0 duration_ms=0 num_turns=0 started_at=2026-08-26T01:40:39.891107838Z finished_at=2026-08-26T01:40:43.182824394Z | sequence=13 purpose=V2-022-graceful-stop-live-child state=reserved reserved_usd=1.0000 actual_usd=0.0000 session_id= input_count=0 output_count=0 cache_read_count=0 cache_creation_count=0 duration_api_ms=0 duration_ms=0 num_turns=0 started_at=2026-08-26T01:40:43.333583211Z finished_at=0001-01-01T00:00:00Z | sequence=14 purpose=V2-022-resume-after-channel-rollback state=settled reserved_usd=1.0000 actual_usd=0.0838 session_id=b5b87a07-7e5e-4291-83c8-48e74ad1ef1c input_count=2 output_count=7 cache_read_count=16489 cache_creation_count=7436 duration_api_ms=3497 duration_ms=2763 num_turns=1 started_at=2026-08-26T01:40:44.973014837Z finished_at=2026-08-26T01:40:49.064040276Z | sequence=15 purpose=V2-022-autonomous-resolution state=settled reserved_usd=1.0000 actual_usd=0.0000 session_id= input_count=0 output_count=0 cache_read_count=0 cache_creation_count=0 duration_api_ms=0 duration_ms=0 num_turns=0 started_at=2026-08-26T01:43:09.748108635Z finished_at=2026-08-26T01:43:13.172475316Z | sequence=16 purpose=V2-022-graceful-stop-live-child state=reserved reserved_usd=1.0000 actual_usd=0.0000 session_id= input_count=0 output_count=0 cache_read_count=0 cache_creation_count=0 duration_api_ms=0 duration_ms=0 num_turns=0 started_at=2026-08-26T01:43:13.313570999Z finished_at=0001-01-01T00:00:00Z | sequence=17 purpose=V2-022-resume-after-channel-rollback state=settled reserved_usd=1.0000 actual_usd=0.0838 session_id=1ed4265b-5415-4163-8ee1-f636b01b0182 input_count=2 output_count=7 cache_read_count=16489 cache_creation_count=7434 duration_api_ms=3035 duration_ms=2284 num_turns=1 started_at=2026-08-26T01:43:14.951008441Z finished_at=2026-08-26T01:43:18.732661533Z | sequence=18 purpose=V2-022-autonomous-resolution state=settled reserved_usd=1.0000 actual_usd=0.0843 session_id=11f82069-5fde-48f7-866a-cd577d76b82a input_count=2 output_count=13 cache_read_count=16489 cache_creation_count=7458 duration_api_ms=3356 duration_ms=2237 num_turns=1 started_at=2026-08-26T01:43:39.588438708Z finished_at=2026-08-26T01:43:43.172208298Z | sequence=19 purpose=V2-022-graceful-stop-live-child state=reserved reserved_usd=1.0000 actual_usd=0.0000 session_id= input_count=0 output_count=0 cache_read_count=0 cache_creation_count=0 duration_api_ms=0 duration_ms=0 num_turns=0 started_at=2026-08-26T01:43:43.365249484Z finished_at=0001-01-01T00:00:00Z | sequence=20 purpose=V2-022-resume-after-channel-rollback state=settled reserved_usd=1.0000 actual_usd=0.0839 session_id=eaec276b-e444-4902-9f83-9286dce75979 input_count=2 output_count=7 cache_read_count=16489 cache_creation_count=7441 duration_api_ms=3070 duration_ms=2455 num_turns=1 started_at=2026-08-26T01:43:45.002130988Z finished_at=2026-08-26T01:43:48.831458658Z | sequence=21 purpose=V2-022-autonomous-resolution state=settled reserved_usd=1.0000 actual_usd=0.0843 session_id=024b4fea-add7-4b88-95e3-4d07a35721f3 input_count=2 output_count=13 cache_read_count=16489 cache_creation_count=7458 duration_api_ms=3572 duration_ms=2765 num_turns=1 started_at=2026-08-26T01:54:48.58344391Z finished_at=2026-08-26T01:54:52.750354615Z | sequence=22 purpose=V2-022-graceful-stop-live-child state=reserved reserved_usd=1.0000 actual_usd=0.0000 session_id= input_count=0 output_count=0 cache_read_count=0 cache_creation_count=0 duration_api_ms=0 duration_ms=0 num_turns=0 started_at=2026-08-26T01:54:52.933732639Z finished_at=0001-01-01T00:00:00Z | sequence=23 purpose=V2-022-resume-after-channel-rollback state=settled reserved_usd=1.0000 actual_usd=0.0838 session_id=43a5c55c-c86e-4587-98af-633db7f8d727 input_count=2 output_count=7 cache_read_count=16489 cache_creation_count=7437 duration_api_ms=3172 duration_ms=2011 num_turns=1 started_at=2026-08-26T01:54:54.577071126Z finished_at=2026-08-26T01:54:57.903727961Z. The three purposes this task accounted are V2-022-autonomous-resolution, V2-022-graceful-stop-live-child and V2-022-resume-after-channel-rollback. The 23 entries are three from the confirming run at the final commit A, six from the two runs of the A19 stability probe at 6888edf, and fourteen from four rehearsal runs that fixed real defects in the exercise before it was observed. One invocation of headroom remains and no further invocation was made. No prompt, no raw response, no excerpt of a response and no credential value appears anywhere in this record."
+  },
+  {
+   "name": "default-path-costs-nothing",
+   "status": "passed",
+   "argv": [
+    "devbox",
+    "run",
+    "--pure",
+    "--",
+    "go",
+    "test",
+    "./..."
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 1800,
+   "summary": "The V2-022 ledger's entry count was measured immediately before and immediately after a full default-path verification run with the live gate unset: 8 entries before and 8 after the first measurement, and 20 before and 20 after the measurement on commit B's committed state. The default path therefore starts zero processes and makes zero provider invocations. The invocation-free commit-B digest measurement (-run TestFoundationPreviewLocalDogfood/promotability-negative) was likewise measured at 20 entries before and 20 after."
+  }
+ ],
+ "observed_at": "2026-08-26T01:44:10Z",
+ "artifact_refs": [
+  {
+   "artifact_id": "provider-preflight",
+   "media_type": "application/json",
+   "sha256": "1fe3ea4f2d01769dd44e18a422bd91c9ebb99e5f83db7133780be9c2a9d15b5d",
+   "size_bytes": 4204,
+   "name": ".agents/v2/provider-preflight/V2-022-provider-live-claude-dogfood.json"
+  }
+ ]
+}
