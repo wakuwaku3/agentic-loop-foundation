@@ -1,0 +1,95 @@
+{
+  "schema_version": "v1",
+  "id": "ts-v2-095",
+  "kind": "canonical-task-state",
+  "task_id": "V2-095",
+  "status": "blocked",
+  "block_reason": "external-unavailable: codex and opencode CLI authentication and a GCP project; needs: one interactive login each by the owner, and an owner-designated project, because 7 of this exercise's 12 capabilities are unreachable without them (3 declare codex and opencode, 4 declare Cloud Run)",
+  "dependencies": [
+    "V2-022",
+    "V2-081",
+    "V2-084",
+    "V2-085",
+    "V2-086",
+    "V2-089",
+    "V2-090",
+    "V2-091",
+    "V2-092",
+    "V2-093",
+    "V2-028"
+  ],
+  "outcome": "Re-observe the dogfood exercise so that M5's required live ground is both eligible and fresh, and record each capability the exercise cannot reach as deferred by its own declaration rather than as failed.",
+  "non_goals": [
+    "Do not record a product gap as a deferred capability",
+    "Do not derive a deferral from anything other than the capability's own declared external systems",
+    "Do not re-observe before the gaps this exercise itself measured are closed"
+  ],
+  "actor": "sol",
+  "owner": "sol",
+  "next_owner": "sol",
+  "input_refs": [
+    "V2-022",
+    "V2-081"
+  ],
+  "input_hash": "0d35056c9d60bc6bb4f4be380c6bf7af66444e990fc89f58c537f2276c1f0a07",
+  "output_refs": [
+    "V2-095"
+  ],
+  "output_hash": "e82890efbdb10b0c5036921ec3ae131302f2c3efcd997eee9cb1d538267395f7",
+  "retry_budget": {
+    "max_attempts": 2,
+    "attempts_used": 0,
+    "remaining": 2
+  },
+  "release_eligible": false,
+  "transitions": [
+    {
+      "sequence": 1,
+      "at": "2026-08-26T19:10:00Z",
+      "from_status": null,
+      "to_status": "queued",
+      "actor": "sol",
+      "owner": "luna",
+      "next_owner": "luna",
+      "input_refs": [
+        "V2-022",
+        "V2-081"
+      ],
+      "input_hash": "0d35056c9d60bc6bb4f4be380c6bf7af66444e990fc89f58c537f2276c1f0a07",
+      "output_refs": [
+        "V2-095"
+      ],
+      "output_hash": "e82890efbdb10b0c5036921ec3ae131302f2c3efcd997eee9cb1d538267395f7",
+      "retry_budget": {
+        "max_attempts": 2,
+        "attempts_used": 0,
+        "remaining": 2
+      },
+      "reason": "V2-081がM5を落とした根拠は2つあり、どちらもこの1本のexerciseに帰着する。ev-v2-022-release-live-dogfoodはresultがpartialなのでG2で根拠として使えず、観測commitから判定commitまでの交わりは30 pathなのでG6bで鮮度がない。V2-080はこれを閉じていない。あれが再観測したのはM3liveの根拠であるprovider-live-claudeで、別のexerciseである。partialの内訳を実測すると、失敗した11 capabilityのうち3つは宣言にcodexとopencodeを含みこのmachineではclaudeしか認証されていないため到達不能、4つは宣言にCloud Runを含むのでD1の管轄、残り4つがM5自身が負う実物のproduct gap(cap-repository-registration、cap-backlog-visibility、cap-human-input-request、cap-user-documentation)である。つまり7/12は人の作業が入るまで構造的に到達できず、いま払っても同じpartialが返る。したがって先に払うのは無駄で、gapが閉じ認証とprojectが入ってから1回払う"
+    },
+    {
+      "sequence": 2,
+      "at": "2026-08-26T19:11:00Z",
+      "from_status": "queued",
+      "to_status": "blocked",
+      "actor": "sol",
+      "owner": "sol",
+      "next_owner": "sol",
+      "input_refs": [
+        "V2-022",
+        "V2-081"
+      ],
+      "input_hash": "0d35056c9d60bc6bb4f4be380c6bf7af66444e990fc89f58c537f2276c1f0a07",
+      "output_refs": [
+        "V2-095"
+      ],
+      "output_hash": "e82890efbdb10b0c5036921ec3ae131302f2c3efcd997eee9cb1d538267395f7",
+      "retry_budget": {
+        "max_attempts": 2,
+        "attempts_used": 0,
+        "remaining": 2
+      },
+      "reason": "待つ相手は3種類ある。1つ目はcodexとopencodeの認証で、これがないと3 capabilityは測れない。2つ目はGCP projectで、これがないと4 capabilityはD1のまま。3つ目はM5自身が負う4つのproduct gapを閉じるtask群である。このうちcap-backlog-visibilityのcursor拒否はV2-079が既に直しており、cap-human-input-requestの「capturedからneeds-inputに入れない」はV2-082が入れたframingとV2-084のCompleteFramingが触る範囲なので、再観測すれば正当に反転する見込みがある。block_reasonをtask参照ではなくexternal-unavailableにしたのは、待ち行列の先頭にあるのが人の作業だからである"
+    }
+  ]
+}

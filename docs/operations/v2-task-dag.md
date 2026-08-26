@@ -104,7 +104,7 @@ V2-022へ合流する並行枝として扱う。roadmap M3の完了条件はGCP 
 - V2-048はV2-047後、V2-017のowner承認待ちと並行して進められる
 - V2-027はV2-018 gate後、V2-030はV2-020 gate後にそれぞれ並列
 
-## 4. gate共通判定規則 G1〜G5
+## 4. gate共通判定規則 G1〜G7
 
 すべてのgate task（V2-006, V2-011, V2-015, V2-018, V2-020, V2-026, V2-029,
 V2-032, V2-036, V2-039）は次を満たしてはじめてcompleteにできる。
@@ -432,6 +432,77 @@ D1の管轄であり、M9の最終置換までに払われる。M5が証明し�
 「昇格が起きたから安全性も満たされている」は成立しない（1回の昇格は拒否の網羅性を
 何も語らない）。安全性は列挙か閉包で示すこと。
 
+
+### 8.1への訂正2件（V2-081の判定を受けて）
+
+**訂正1: この節が裁定しているのは条件4のみで、条件1ではない。** 本文は
+「全機能Evidenceを持つcandidateだけStableになる」を逐語で名指しており、3根拠は
+すべてその条件と§3のgovernanceについてのものである。「このFoundation Repositoryを
+Preview対象にしてdogfoodする」を再分類する文は1つもない。**そしてその条件は安全性としては
+読めない**——「だけ」も否定も無く、dogfoodを主題にして「やった」と主張している。
+V2-026のfailure注記とV2-081のWork Orderが「条件1と4を裁定した」と書いたのはcoordinatorの
+誤りである。条件1は到達性として読み、**12 capabilityのうち成功が1件だからではなく、
+適格な根拠が存在しないから**落とす。出来事そのものは争わない。
+
+**訂正2: 上の第1根拠は、この節が2段落後に禁じている形になっている。** A17のpositive halfは
+合成treeでの1回の昇格、negative halfは実treeでの1回の拒否集合である。**単一のoccurrenceで
+安全性を通すのは、まさにこの節の逆向き拘束が禁じたこと**である。V2-081の判定者がこれを指摘し、
+根拠を`internal/domain/release_test.go:230`と`:372`の閉包grid列挙、および`:122`の
+12拒否class分離に置き換えた。**結論は生き残り、根拠だけ強い方に替わった。**
+A17を使えない実務上の理由もある——それはresultがpartialで鮮度も無いlive記録の中にあり、
+閉包列挙の方はG6aのmake checkで判定commitごとに再実行される。
+
+## 8.2 live記録は1本ではない。gateごとに守る記録が違う
+
+**私はここで間違えた。記録しておく。**
+
+§5の表はmilestoneごとに別のlive componentを要求している。
+
+| gate | 必須component | exercise |
+|---|---|---|
+| M2 | `control-plane-local-live` | `./internal/api`の`TestControlPlanePreviewLocalLive` |
+| **M3live** | `provider-live-claude` | `./internal/runner`の`TestProviderLiveVerticalSlice` |
+| **M5live** | `release-live-dogfood` | `./internal/api`の`TestFoundationPreviewLocalDogfood` |
+| M6live | `provider-live-multi` | 3 provider全部 |
+
+V2-080はM3liveの記録を再観測した。私はそれでM5のG6bが閉じると判断し、Work Orderにも
+HANDOFF.mdにも書いたが、**閉じていない。** G6bは「観測commitから判定commitまでのdiffが
+exercise file setと交わらないこと」を要求するが、**どのexerciseのfile setかはgateが決める。**
+別のexerciseを何回再観測してもそのgateの鮮度は動かない。
+
+**手続き: liveの鮮度を主張する前に、§5の表でそのgateの必須component名を引き、
+その名前を持つindex entryを引き、そのrecordが宣言するexerciseのfile setで測る。**
+componentの名前が違えば別の記録である。
+
+## 8.3 partialの原因を分類する。宣言による繰り延べとproduct gapは別物である
+
+G2は「partialなrecordは根拠にできない」と定める。これは正しいが、**partialの原因が
+そのmilestoneの外にあるとき、G2をそのまま適用するとmilestoneが構造的に充足不能になる**
+——§8.1が完了条件について指摘したのと同じ形が、gate規則の層で起きる。
+
+V2-022のdogfoodで失敗した11 capabilityを実測分類すると:
+
+| 原因 | 数 |
+|---|---|
+| 宣言にcodexとopencodeを含み、当該machineで未認証 | 3 |
+| 宣言にCloud Runを含み、D1の管轄 | 4 |
+| **そのmilestone自身が負うproduct gap** | 4 |
+
+**規則**: capabilityのevidenceが *宣言によって繰り延べられている* とは、そのcapability
+自身が宣言する外部systemに、等級が繰り延べられているもの（Cloud Run→D1）か、
+当該machineで認証されていないProvider（codex/opencode→M6）が含まれることをいう。
+これは**判断ではなく、capabilityの宣言から導出できる測定可能な事実**である。
+繰り延べられたcapabilityは`failed`ではなく*ineligible-by-declaration*として記録してよく、
+そのときrecordは`passed`になりうる。
+
+**逆向きの拘束、これが本体である。** **product gapを繰り延べとして記録してはならない。**
+繰り延べは必ずcapability自身の宣言から導出し、「到達できなかった」という観察からは
+導出しない。到達できなかった理由が自分のmilestoneの中にあるなら、それは`failed`である。
+V2-022の4件（`cap-repository-registration`、`cap-backlog-visibility`、
+`cap-human-input-request`、`cap-user-documentation`）はこちら側であり、
+**この規則はそれらを1件も救わない。**
+
+
 ## 9.1 台帳artifactをcommitする前の手順と、禁止git操作の実体
 
 **commitする前に、これからcommitするpathだけをgitleaksで走査すること。**
@@ -527,28 +598,77 @@ recordに載せ、実測もすべて済ませたが、順序はpacket読了→ba
 以後のWork Orderは A1 に「BEFORE any source file is edited」を明記し、
 V2-087が申告した事実を根拠として添える。
 
-## 9.5 flat-rate契約ではledgerは**回数でしか**止まらない
+## 9.5 ledgerを止めるのは**回数**である（ただし理由は「無料だから」ではない）
 
-V2-080の記録を起こすときに4本のledgerを全部読んで測った事実。
-settled `actual_usd`の総和は**4本すべてで0.00 USD**である。契約が定額なので
-1回1回の決済額が0で、`max_total_cost_usd`はこれまで一度も効いたことがない。
-効いてきたのは`max_invocations`だけで、V2-075は**12/12**で止まった。
+**この節は一度間違ったことを書いた。訂正の経緯ごと残す。**
 
-| ledger | invocations | limit | 総額 |
-|---|---|---|---|
-| V2-017 | 11 | 16 | 0.00 |
-| V2-022 | 23 | 24 | 0.00 |
-| V2-063 | 11 | 12 | 0.00 |
-| V2-075 | **12** | **12** | 0.00 |
+2026-08-26にV2-080のrecordを起こしたとき、私は「settled `actual_usd`の総和は4本すべて
+0.00 USDで、定額契約だから1回1回の決済額が0である」と書いた。**これは偽だった。**
+原因は私の集計scriptで、keyに`cost`という部分文字列を含むfieldだけを足していたのに、
+実際のfield名は`actual_usd`だった。**何も足さずに0を報告していた。**
+V2-080の実装者がA2の指示どおり測り直して矛盾を指摘し、私が再測して一致した。
 
-したがってpooled観測の見積りは金額ではなく**回数**で立てる。V2-080の48回は、
-V2-075のvertical slice 12回とV2-022のdogfood 23回を足した**実測の下限35回**に、
-working directory証明と、過去の観測が毎回1〜3回消費した一過性失敗ぶんの余裕を
-加えた値である。金額側の40.00 USDは第二の、これまで不活性な停止線として残す。
+実測値（2026-08-26）:
+
+| ledger | invocations | 上限 | settled `actual_usd` | 金額上限 |
+|---|---|---|---|---|
+| V2-017 | 11 | 16 | **0.652746** | 10.00 |
+| V2-022 | 23 | 24 | **1.008563** | 20.00 |
+| V2-063 | 11 | 12 | **0.505211** | 8.00 |
+| V2-075 | **12** | **12** | **0.444129** | 8.00 |
+| V2-080 | 10 | 48 | **0.505867** | 40.00 |
+
+settle 1件あたり概ね **0.07〜0.11 USD**。
+
+**結論は生き残るが、根拠が変わる。** 止まるのは今も回数だけである。しかしそれは
+決済が無料だからではなく、**この単価では金額の壁がはるか遠いから**である。
+V2-075は12/12で止まったが、そのとき使っていたのは8.00 USDのうち **0.444129**——
+**金額の94%を残して回数で止まった。**
+
+したがって見積りは金額ではなく回数で立てる。V2-080の48回は、V2-075のvertical slice 12回と
+V2-022のdogfood 23回を足した**実測の下限35回**に、working directory証明と一過性失敗ぶんの
+余裕を加えた値である。
+
+**教訓は2つある。**（1）**集計は必ず実測値を目で見る。** 0という結果は「足した結果0」と
+「何も足していない」を区別しない。（2）**私が書いた数字も陳腐化・誤りの対象である。**
+各Work Orderに「ここの数字は陳腐化している前提で読み、測り直して食い違いを全部報告せよ」と
+書いてきたのが、今回は私自身の誤りを捕まえた。**その指示は実装者のためだけのものではない。**
+
+なお偽の記述は`.agents/v2/provider-preflight/V2-080-provider-live-claude-pooled.json`の
+`notes`にも入っているが、**そのfileは訂正していない。** digestがledger fileと
+V2-080のevidence recordの両方から引用されているので、編集すれば両方の引用が壊れる。
+訂正はここと`.agents/v2/HANDOFF.md`、およびev-v2-080-provider-live-claude-pooledの
+`ledger-cost-premise-was-false-and-is-corrected` checkに置いた。**recordのlimitsは無効に
+ならない**——48という数字は回数の算術から出ており、金額の記述には依存していない。
 
 **上限を上げる・ledgerを再初期化する・`halted`を消す・ledger fileを編集する**のは
 どれも禁止で、救済は常に新しいrecordを起こすことである。この規則は今回も守った:
 V2-075のledgerは12/12のまま1 byteも触っていない。
+
+## 9.6 live provider evidence recordの`component`は`provider-live-`で始めること
+
+これも私のWork Orderの穴で、V2-080が報告してきた。
+
+`internal/contracts/provider_preflight.go:160`は、evidence indexのentryを
+**`component`が`provider-live-`で始まるときだけ**選ぶ。選ばれたentryに対してだけ、
+`CheckProviderPreflightLedger`は2つの不変条件を強制する。
+
+1. `artifact_refs`に`artifact_id`が`provider-preflight`で、`sha256`が**preflight record
+   自身のbytesのdigest**と一致するentryがあること
+2. `approval.approved_at`が`observed_at`より**厳密に前**であること
+
+V2-017・V2-022・V2-063・V2-075はどれも`component`が`provider-live-claude`である。
+これは**CI componentではなく分類marker**で、`evidence_key`の方にrunner componentのkeyを
+入れるのが慣習である。
+
+V2-080のWork Order A17で私は`component: runner`と指示した。その結果この record は
+**checkに選ばれず、まさにそのために書かれた2つの不変条件が強制されなかった。**
+実装者はbindingを正しく入れたうえで噛み合わせの不一致を報告してきたので、
+coordinatorが`component`だけを`provider-live-claude`に直し、indexの`evidence_hash`を
+新しいbytesで測り直した。
+
+**次にlive recordを発行するときは`component`を`provider-live-<provider名>`にする。**
+`runner`と書くと静かにcheckの射程から外れる。
 
 
 ## 10. checkpoint pushの手順と既知のdeploy workflow defect

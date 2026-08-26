@@ -1,0 +1,244 @@
+{
+  "schema_version": "v1",
+  "id": "ev-v2-081-m5-gate",
+  "kind": "evidence",
+  "created_at": "2026-08-26T19:40:00Z",
+  "correlation_id": "v2-081-m5-gate",
+  "task_id": "V2-081",
+  "component": "m5-gate",
+  "evidence_key": "fb1a08c48d71b264cbb4cb9be5d5bd39329568b5",
+  "result": "failed",
+  "checks": [
+    {
+      "name": "evidence-key-declaration",
+      "status": "passed",
+      "argv": [
+        "git",
+        "rev-parse",
+        "HEAD"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 1800,
+      "summary": "This is a gate judgment record, not a component record; m5-gate appears in no component list, so its declared evidence_key derivation is the judging commit itself: fb1a08c48d71b264cbb4cb9be5d5bd39329568b5. Every measurement below was taken at that commit, on a clean tracked tree (git status --short printed nothing), in the v2-task-081 worktree on branch v2-task/V2-081. This is V2-081, the repair of the failed V2-026 judgment (repair_of names V2-026). Before any measurement this gate read, in full: docs/operations/v2-task-dag.md sections 2, 4 (including the 2026-08-25 G6a/G6b replacement), 5, 6, 8.1, 9.1 and 11; docs/architecture/roadmap.md M5; docs/architecture/release-contract.md sections 3, 4 and 5; the V2-026 and V2-081 task states; the V2-026 gate record; the V2-022 release-live-dogfood record; the V2-080 pooled live record and its published exercise file set; and V2-076-m3-gate.json as the shape of a gate record that passed. This gate started no Provider CLI and made zero live invocations; no ledger under /home/takushi/.local/state/agentic-loop/v2/ was read for spending or written at all."
+    },
+    {
+      "name": "execution-environment",
+      "status": "passed",
+      "argv": [
+        "sh",
+        "-c",
+        "uname -srm; devbox run --pure -- sh -c 'go version'"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 1800,
+      "summary": "uname -srm printed 'Linux 6.18.33.2-microsoft-standard-WSL2 x86_64'. Resolved inside devbox run --pure, 'go version' printed 'go version go1.25.0 linux/amd64' (the same line make check's environment target prints as its first output). devbox is 0.17.2 and prints an upgrade notice to v0.18.0 on every run, which is noise, not a verdict. Every real command in this record was wrapped as devbox run --pure -- sh -c '...', because devbox run --pure -- <bare-name> is treated as a devbox script name and devbox.json does declare a script named check; each command was judged by its verdict line and never by the shell exit status, which is unreliable in this repository."
+    },
+    {
+      "name": "g1-milestone-tasks-complete",
+      "status": "passed",
+      "argv": [
+        "sh",
+        "-c",
+        "python3 -c \"import json,glob; [print(json.load(open(p))['task_id'], json.load(open(p))['status']) for p in sorted(glob.glob('.agents/v2/task-state/*.json'))]\""
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 1800,
+      "summary": "Every task the DAG document's section 2 table assigns to M5 is complete, re-read from the canonical task states at the judging commit: V2-021 (M5, release) complete, V2-022 (M5, live dogfood) complete, V2-049 (M5 remediation) complete. V2-081's dependency list is exactly [V2-080] and V2-080 is complete. 95 task states exist and this gate counted their statuses itself rather than reading a summary: complete 69, blocked 19, failed 5, running 1 (V2-081 itself), queued 1 (V2-085). Recorded as a disagreement: .agents/v2/HANDOFF.md line 189 states 'complete 68 / 95', which was true before V2-080 completed and is now one short. G1 holds as the rule is written. One finding recorded rather than hidden, because it bears on what a passing M5 gate would mean: the section 2 table assigns a milestone to V2-008 through V2-061 only, so 33 later tasks (V2-062 to V2-094) carry no milestone in the normative table, and G1 cannot be evaluated mechanically for them. Among them, work that roadmap M5's outcome column names by name is not complete: V2-092 ('wire promotion so that a Requirement can be evaluated and completed at all') is blocked, V2-090 (owner pause/cancel and an exit from paused) is blocked, V2-084 is blocked, V2-086 is blocked and V2-085 is queued. This gate does not convert that into a G1 failure, because assigning those tasks a milestone is the coordinator's act and not a judge's; it is reported so the coordinator can decide whether the table's coverage gap is the reason G1 reads as satisfied."
+    },
+    {
+      "name": "g2-record-integrity-and-ground-eligibility",
+      "status": "failed",
+      "argv": [
+        "sh",
+        "-c",
+        "python3 - <<'EOF'\nimport json, hashlib, glob, os\nidx=json.load(open('.agents/v2/evidence/index.json'))\nmis=[e['id'] for e in idx['entries'] if hashlib.sha256(open(e['path'],'rb').read()).hexdigest()!=e['evidence_hash']]\nprint('entries:', len(idx['entries']), 'mismatches:', mis)\nfiles=set(p for p in glob.glob('.agents/v2/evidence/*.json') if os.path.basename(p)!='index.json')\nprint('bijection:', files==set(e['path'] for e in idx['entries']))\nprint([ (e['id'],e['result']) for e in idx['entries'] if e['component'].startswith('release-live') or e['component'].startswith('provider-live-claude-dogfood') ])\nEOF"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 1800,
+      "summary": "Record integrity holds and ground eligibility does not. Integrity, measured: 'entries: 163 mismatches: []' and 'bijection: True' -- all 163 index entries verify, each file's sha256 equals its entry's evidence_hash with no exception, and the set of *.json files directly under .agents/v2/evidence/ equals exactly the set of paths the index names. The index is a single line and release_eligible is false. Ground eligibility FAILS. Section 5 of docs/operations/v2-task-dag.md makes release-live-dogfood the mandatory live component of M5 ('M5live | V2-022 | release-live-dogfood | live must') and G2 requires the entry to carry result == passed. Measured: the index contains exactly one entry whose component is release-live-dogfood, ev-v2-022-release-live-dogfood, and its result is 'partial'; the sibling ev-v2-022-provider-live-claude-dogfood is also 'partial'. A partial record is not a passed record: this is the identical disqualification the passing V2-076 M3 judgment applied to the partial ev-v2-017 record, and the reason V2-076 could still pass is that a passed alternative existed for the same component. No such alternative exists here. Searched all 163 entries: no passed record carries component release-live-dogfood or provider-live-claude-dogfood, at any task id. The passed live record this gate was pointed at, ev-v2-080-provider-live-claude-pooled, carries component provider-live-claude and exercises a different test in a different package (see the g6b checks); it is not a release-live-dogfood record and cannot stand in for one without the local-substitute-for-live move G3 item 3 forbids. Inside the mandatory record the substance matches its result field: of its twelve capability checks exactly one, cap-requirement-intake, is passed and eleven are failed, and contracts/release-contract/foundation.json at the judging commit shows the same shape -- release 0.1.0-preview.1, twelve capabilities all status preview, cap-requirement-intake carrying evidence_ids ['ev-v2-022-release-live-dogfood'] and the other eleven carrying []. G2 is therefore not met for M5, on the same ground V2-026 recorded and re-measured here independently."
+    },
+    {
+      "name": "g3-environment-grade",
+      "status": "passed",
+      "argv": [
+        "sh",
+        "-c",
+        "grep -n 'preview-local' docs/architecture/release-contract.md docs/architecture/roadmap.md | head"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 1800,
+      "summary": "The grade demanded of M5 and the grade actually exercised agree, so G3 is not an independent failure. roadmap.md M5 states plainly that this milestone's Preview is satisfied at preview-local and that D1's four points are not this milestone's completion conditions; release-contract.md section 3's grade table defines preview-local as the owner's machine running the candidate Control Plane and Runner as real processes on localhost with a Firestore emulator as canonical store, and G3 item 2 says that for conditions about the Loop's own observable behaviour this class is the real environment and not a substitute. Both V2-022 records carry the identifiers section 3 requires on every capability check: environment class preview-local, machine D18061, kernel Linux 6.18.33.2-microsoft-standard-WSL2, firebase firestore emulator 15.27.0 against project agentic-loop-test, the claude CLI at an absolute path with resolved version 2.1.241, and Go toolchain go1.25.0. Capabilities whose declared external systems were not connected to were recorded failed rather than substituted, which is the producer applying G3 correctly. G3 does not rescue G2: exercising at the right grade does not turn partial into passed, and it does not make a stale observation fresh."
+    },
+    {
+      "name": "g4-no-unsettled-failed-dependency",
+      "status": "passed",
+      "argv": [
+        "sh",
+        "-c",
+        "python3 -c \"import json; d=json.load(open('.agents/v2/task-state/V2-081.json')); print(d['dependencies'], d['repair_of'])\""
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 1800,
+      "summary": "Output: ['V2-080'] ['V2-026']. V2-081's sole dependency V2-080 is complete, so no failed task appears in the dependency set and the section 6 superseded rule is not triggered on the dependency edge. The ledger's five failed tasks are settled or settling under section 6's definition (a failed task is superseded when some complete task's repair_of or input_refs names it): V2-023 and V2-024 through complete V2-025 whose repair_of names V2-024; V2-007 through complete V2-010 whose input_refs name V2-007; V2-018 through complete V2-076 whose repair_of and input_refs both name V2-018. V2-026 is the judgment this task repairs, and V2-081's repair_of and input_refs both name it. One consequence must be stated rather than left implicit, since this gate fails: V2-026 becomes superseded only when a task naming it in repair_of reaches complete, so a failed V2-081 leaves V2-026 unsettled. No queued or running task lists any failed task in dependencies, so the ledger test's item 8 does not fire; but the coordinator should expect M5 to need a further successor rather than treating V2-081's completion as the settlement."
+    },
+    {
+      "name": "g5-flaky-disclosed-not-overwritten",
+      "status": "passed",
+      "argv": [
+        "sh",
+        "-c",
+        "python3 -c \"import json; d=json.load(open('.agents/v2/evidence/V2-022-release-live-dogfood.json')); print([(k['name'],k['status']) for k in d['checks'] if k['name'] in ('A19-stability-probe','cap-autonomous-resolution')])\""
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 1800,
+      "summary": "Output: [('A19-stability-probe', 'failed'), ('cap-autonomous-resolution', 'failed')]. The two runs of the full live argv at the same observation commit disagreed on cap-autonomous-resolution (run 1 a real provider-transport failure with no session id and zero usage counts, run 2 a success carrying a provider-issued session id), and V2-022 handled it exactly as G5 requires: the affected check is recorded failed, both observations are transcribed, the first was neither deleted nor overwritten, no evidence id was written for the capability, both records stay partial, and the third run at the final commit is explicitly declared not to be a tie-breaker. So the record contains no flaky retry-overwrite and G5 is satisfied as the record-integrity rule it is. The consequence is unchanged and this gate counts it: cap-autonomous-resolution is failed. Recorded for the coordinator as an observation and not a gate condition: the same zero-usage, no-session-id shape has now been seen as a transient in V2-022 (one phase), V2-063 (one phase), V2-075 (two phases) and V2-080 (disclosed in its a9 check), which is a rising rate across four observations of two different exercises."
+    },
+    {
+      "name": "g7-no-skip-counted",
+      "status": "passed",
+      "argv": [
+        "sh",
+        "-c",
+        "devbox run --pure -- sh -c 'scripts/firestore-emulator.sh go test -race -v ./internal/store/firestore'; devbox run --pure -- sh -c 'go test -count=1 -v ./internal/store/firestore'"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 1800,
+      "summary": "No skipped test is counted as a pass anywhere in this judgment, and the one place where a skip could have been miscounted was measured on both sides rather than assumed. Under the emulator, via the same harness make check uses: 119 '--- PASS' lines, 0 '--- SKIP' lines, 0 '--- FAIL' lines, terminal 'PASS' and 'ok github.com/takushi/agentic-loop-foundation/v2/internal/store/firestore 14.900s'. Ungated, the same package: 10 '--- PASS' lines, 49 '--- SKIP' lines, 0 '--- FAIL', and it still prints 'ok ... 0.015s' -- the exact vacuous shape G7 exists to refuse. make check contains both runs (the test target's go test ./... produces the vacuous one at 0.024s, and check's explicit component-store-firestore target produces the emulator one at 14.166s), so the green make check this gate rests on does include a real, non-skipping firestore execution. DISAGREEMENT with the Work Order, re-measured: it said a bare go test ./internal/store/firestore produces 26 '--- SKIP' lines; the measured count at this commit is 49. The V2-022 live records report skip 0 for every subtest they claim, and their only SKIP is the default-path cost gate (with the live variable unset the test skips and starts zero processes), which neither V2-022 nor this gate counts as a pass. ev-v2-080's nine subtests all printed PASS with no SKIP, verified in its a7 verdict transcription."
+    },
+    {
+      "name": "g6a-make-check-green-at-the-judging-commit",
+      "status": "passed",
+      "argv": [
+        "devbox",
+        "run",
+        "--pure",
+        "--",
+        "sh",
+        "-c",
+        "make check"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 1800,
+      "summary": "G6a is satisfied. The Work Order's first ground against V2-026 is closed, and this gate re-ran the check itself rather than accepting that it had been fixed. Verdict at judging commit fb1a08c48d71b264cbb4cb9be5d5bd39329568b5 on a clean tree, judged by the three signals the rule offers because make check emits no FAILS 0 line: (1) zero lines matching ^FAIL in 32 lines of output, and every tested package printed ok -- cmd/bootstrap 0.030s, cmd/ci-plan 0.006s, internal/api 0.117s, internal/application 0.289s, internal/ci 0.187s, internal/contracts 0.195s, internal/domain 0.713s, internal/legacyimport 0.002s, internal/provider 0.308s, internal/quota 0.002s, internal/reconciler 0.125s, internal/release 0.174s, internal/runner 3.341s, internal/scheduler 0.011s, internal/store/firestore 0.024s, internal/store/memory 0.173s, internal/update 0.039s, plus internal/contracts (cached) from the contracts target and internal/store/firestore 14.166s from the emulator-gated component target, with cmd/control-plane, cmd/legacy-import, cmd/runner and internal/web reporting [no test files]; (2) gitleaks printed '523 commits scanned.' then 'no leaks found'; (3) 'workflow-pins: 3 unique (owner/repo, version) -> sha pins, no disagreement', which is the last of check's ten prerequisites (environment format lint test contracts docs secrets ownership component-store-firestore workflow-pins), so the target ran to completion. The specific defect that made V2-026's commit red -- internal/api's live_dogfood_test.go importing internal/provider without manifest coverage -- is gone: internal/ci is green, which is the package whose TestManifestDependencySurface reported it. Per the rule and the instruction, per-component evidence key equality is provenance and not a verdict, so the 23 component keys were not re-derived as a freshness claim; one key is transcribed as corroboration in a later check. NOTE ON ARGV: the instruction spelled the command 'devoxed run --pure -- make check'; the binary is devbox, and the command actually executed is the argv recorded here, wrapped in sh -c because devbox run --pure -- <bare-name> resolves against devbox.json's script list."
+    },
+    {
+      "name": "g6b-v2-080-observation-commit-and-durable-ref",
+      "status": "passed",
+      "argv": [
+        "sh",
+        "-c",
+        "git cat-file -t 563314b45138353baaffb4987424239fb9d61a38; git ls-remote origin 'refs/live-observations/*'"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 1800,
+      "summary": "G6b requirement one holds for ev-v2-080-provider-live-claude-pooled. The record and its published artifact both name observation commit 563314b45138353baaffb4987424239fb9d61a38; git cat-file -t reports 'commit', so the object exists in this worktree's repository. The durability remediation V2-076 proposed was paid and this gate confirmed it on the remote rather than locally: git ls-remote origin 'refs/live-observations/*' returns exactly two lines, 'd9f98ae573e617aafd82d87fa1c35f9bd6e26ffb refs/live-observations/v2-075-provider-live-claude' and '563314b45138353baaffb4987424239fb9d61a38 refs/live-observations/v2-080-provider-live-claude', so the observation this gate measures against is anchored by a pushed ref and its G6b diff stays measurable after any future local gc. The artifact at .agents/v2/evidence/artifacts/V2-080-live-exercise-files.json has measured sha256 b56538d9546f7b620ca370ce3dc26e96ffde7f28057e8e0f45553c80a2297cf3, which equals the sha256 its record's artifact_refs entry declares, and reads back as 103 paths matching its own path_count."
+    },
+    {
+      "name": "g6b-v2-080-set-recomputed-and-intersection-measured-empty",
+      "status": "passed",
+      "argv": [
+        "sh",
+        "-c",
+        "set -eu; OBS=563314b45138353baaffb4987424239fb9d61a38; JUDGE=\"$1\"; python3 -c \"import json;print(chr(10).join(json.load(open('.agents/v2/evidence/artifacts/V2-080-live-exercise-files.json'))['paths']))\" | LC_ALL=C sort -u > /tmp/v2-081-set.txt; git diff --name-only \"$OBS\" \"$JUDGE\" | LC_ALL=C sort -u > /tmp/v2-081-diff.txt; comm -12 /tmp/v2-081-set.txt /tmp/v2-081-diff.txt; printf \"intersection_lines=%s\\n\" \"$(comm -12 /tmp/v2-081-set.txt /tmp/v2-081-diff.txt | wc -l)\"",
+        "sh",
+        "fb1a08c48d71b264cbb4cb9be5d5bd39329568b5"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 1800,
+      "summary": "Measured with the artifact's published reproduction argv run verbatim, passing the judging commit as the single positional argument, and not by reusing any number V2-080 reported. Output: no path lines, then 'intersection_lines=0'. The whole diff from the observation commit to the judging commit is nine paths, all under .agents/v2/ and docs/: .agents/v2/DEFERRED.md, .agents/v2/HANDOFF.md, .agents/v2/evidence/V2-080-provider-live-claude-pooled.json, .agents/v2/evidence/artifacts/V2-080-live-exercise-files.json, .agents/v2/evidence/index.json, .agents/v2/task-state/V2-080.json, .agents/v2/task-state/V2-081.json, docs/operations/provider-live-claude.md and docs/operations/v2-task-dag.md; none is among the 103 published paths, and the three .agents/v2/evidence paths sit in the artifact's excluded_with_reason group for the reason recorded there. The acquisition is also reproducible by a judge who did not produce it: this gate re-ran the artifact's recompute_the_compiled_set argv at the judging commit and got 92 paths, compared path for path against the published compiled group of 92 with the result identical: True. So ev-v2-080-provider-live-claude-pooled is fresh under G6b at this judging commit. What that does and does not buy is stated in the next check."
+    },
+    {
+      "name": "g6b-v2-080-positive-and-negative-controls",
+      "status": "passed",
+      "argv": [
+        "sh",
+        "-c",
+        "printf 'devbox.lock\\ninternal/provider/pool.go\\ninternal/runner/provider_live_test.go\\ninternal/scheduler/scheduler.go\\n' | LC_ALL=C sort -u > /tmp/v2-081-pos.txt; comm -12 /tmp/v2-081-set.txt /tmp/v2-081-pos.txt; printf 'positive=%s\\n' \"$(comm -12 /tmp/v2-081-set.txt /tmp/v2-081-pos.txt | wc -l)\"; printf '.agents/v2/HANDOFF.md\\ndocs/operations/v2-task-dag.md\\n' | LC_ALL=C sort -u > /tmp/v2-081-neg.txt; comm -12 /tmp/v2-081-set.txt /tmp/v2-081-neg.txt; printf 'negative=%s\\n' \"$(comm -12 /tmp/v2-081-set.txt /tmp/v2-081-neg.txt | wc -l)\""
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 1800,
+      "summary": "The zero above is known not to be vacuous, because this gate ran its own controls against fictional diff lists, editing no tracked file. POSITIVE CONTROL: a four-path fictional diff naming devbox.lock, internal/provider/pool.go, internal/runner/provider_live_test.go and internal/scheduler/scheduler.go printed all four path lines and 'positive=4'. Two of the four (internal/provider/pool.go and internal/scheduler/scheduler.go) are paths V2-075's older 76-path set did not contain, so the control also confirms the republished set genuinely covers the surface the runner component grew into. NEGATIVE CONTROL: a fictional diff of two paths that are real lines of the observation-to-judgment diff but outside the set printed no path line and 'negative=0', matching the real measurement. So the procedure discriminates in both directions: a change to the exercise's own test file, to a toolchain pin, or to a newly-covered dependency source would have printed a line and this gate would have failed that record's freshness regardless of the nature of the change."
+    },
+    {
+      "name": "g6b-m5live-record-intersection-measured-not-empty",
+      "status": "failed",
+      "argv": [
+        "sh",
+        "-c",
+        "set -eu; S=$(git rev-parse --show-toplevel); OBS=39d2e809b02527d1e8b56f44cbb4fc20473344ef; JUDGE=fb1a08c48d71b264cbb4cb9be5d5bd39329568b5; devbox run --pure -- go list -deps -test -f '{{if .Module}}{{if eq .Module.Path \"github.com/takushi/agentic-loop-foundation/v2\"}}{{range .GoFiles}}{{$.Dir}}/{{.}}{{\"\\n\"}}{{end}}{{range .CgoFiles}}{{$.Dir}}/{{.}}{{\"\\n\"}}{{end}}{{range .EmbedFiles}}{{$.Dir}}/{{.}}{{\"\\n\"}}{{end}}{{end}}{{end}}' ./internal/api | sed \"s|^$S/||\" | LC_ALL=C sort -u > /tmp/v2-081-api.raw; git ls-files | LC_ALL=C sort -u > /tmp/v2-081-tracked.txt; comm -12 /tmp/v2-081-api.raw /tmp/v2-081-tracked.txt > /tmp/v2-081-api-set.txt; git diff --name-only \"$OBS\" \"$JUDGE\" | LC_ALL=C sort -u > /tmp/v2-081-dogfood-diff.txt; comm -12 /tmp/v2-081-api-set.txt /tmp/v2-081-dogfood-diff.txt; printf \"intersection_lines=%s\\n\" \"$(comm -12 /tmp/v2-081-api-set.txt /tmp/v2-081-dogfood-diff.txt | wc -l)\""
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 1800,
+      "summary": "This is the decisive measurement and it fails. The live record M5's gate must stand on is ev-v2-022-release-live-dogfood, whose exercise is TestFoundationPreviewLocalDogfood in package ./internal/api (internal/api/live_dogfood_test.go), and whose observation commit, recorded in its own A23 check, is 39d2e809b02527d1e8b56f44cbb4fc20473344ef. That record publishes no exercise file set artifact, so this gate derived the set mechanically as G6b prescribes, using the same argv shape V2-080's artifact publishes and only substituting the exercising package: the compiled closure of ./internal/api intersected with git ls-files is 88 paths at the judging commit. The diff from the observation commit to the judging commit is 149 paths. The intersection is NOT empty: intersection_lines=30, and the thirty are internal/api/api.go, internal/api/api_test.go, internal/api/live_dogfood_test.go, internal/api/live_local_test.go, internal/api/operator_record.go, internal/api/operator_record_test.go, internal/api/repositories_test.go, internal/application/errors.go, internal/application/framing.go, internal/application/outbox.go, internal/application/ports.go, internal/application/provider_registry.go, internal/application/publication.go, internal/application/readmodels.go, internal/application/service.go, internal/domain/repository.go, internal/provider/adapters.go, internal/provider/compatibility.go, internal/provider/handoff.go, internal/provider/pool.go, internal/provider/provider.go, internal/runner/forgepublish.go, internal/runner/provider.go, internal/runner/publishsource.go, internal/runner/secret_broker.go, internal/runner/supervisor.go, internal/store/firestore/store.go, internal/store/memory/store.go, internal/web/owner.html and internal/web/owner.js. The first line that matters most is internal/api/live_dogfood_test.go: the exercise's own test file has been edited since the observation, which is the strongest form this failure takes. Widening the derivation to include dependency packages' own test files (adding TestGoFiles and XTestGoFiles) gives a 184-path set and an intersection of 54; narrowing it to the V2-080 methodology gives 30. Either way it is not empty, so under G6b re-observation is required regardless of the nature of the changes, and this gate does not get to argue that any of the thirty was harmless. DISAGREEMENT WITH THE WORK ORDER, and it is the central one: the Work Order states that G6b 'is now closed by V2-080'. It is not. V2-080 re-observed a different exercise -- TestProviderLiveVerticalSlice in ./internal/runner, nine subtests, component provider-live-claude -- and its own artifact names that package and that test. Nothing in V2-080 re-observed TestFoundationPreviewLocalDogfood, no invocation of it appears in V2-080's ledger, and V2-080's a19 check itself describes its consumer only as 'V2-081, which re-judges M5' without claiming to have re-observed M5's dogfood. So the record whose staleness failed V2-026 is still stale, and the number moved the wrong way: V2-026 measured 26 intersecting files and this gate measures 30. The same wrong-target shape appears in a durable document: .agents/v2/HANDOFF.md lines 192 and 193 record that of M5's two failure grounds one was G6a's red make check, already cleared, and 'the other is the G6b intersection, and that is what V2-080 is for'. There is a further disagreement of count in the same account: V2-026 did not fail on two checks but on four -- G2, G6a, G6b and the completion-condition mapping -- and G2 is the one no live re-observation of any other exercise can cure. One constructive fact for the coordinator: the reason V2-026 gave for the re-observation being impossible no longer holds. V2-022's ledger is spent at 23 of 24, but the owner's standing authorization (ev-v2-055-standing-authorization) sets no count or monetary ceiling, and V2-080 demonstrated the pattern of issuing a new approved preflight record rather than raising a spent one, so an M5live re-observation is executable by a new task under a new record. It is not executable by this gate, which is barred from starting a Provider CLI and from editing source."
+    },
+    {
+      "name": "m5-completion-condition-mapping",
+      "status": "failed",
+      "argv": [
+        "sh",
+        "-c",
+        "sed -n '144,163p' docs/architecture/roadmap.md; sed -n '400,434p' docs/operations/v2-task-dag.md"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 1800,
+      "summary": "roadmap.md M5 carries four completion conditions and this gate classifies each as the kind of claim it is, as section 8.1 directs, then grounds it accordingly. CONDITION 1, 'dogfood this Foundation Repository as a Preview target' -- LIVENESS. Its grammar demands an event, not a refusal: there is no 'only' and no negation to make it a safety claim. NOT SATISFIED, and this gate is careful about why. It is not failed here because 1 of 12 capabilities succeeded; whether release-contract.md section 3's all-capability requirement reaches into this condition is a question this gate does not need to answer, since section 8.1's ground 2 assigns that requirement's governance to Stable promotion. It is failed because a liveness condition must be grounded on 'what happened' and the only record of what happened is inadmissible twice over at this commit: result partial, so G2 refuses it as a ground, and an intersection of 30 exercised files, so G6b requires re-observation. The event is not in dispute; the admissible evidence of it is absent. CONDITION 2, 'break the Preview on purpose and resume a Requirement on the previous Stable' -- LIVENESS. NOT SATISFIED, for exactly the same reason and no other: its witnesses are the A12 check and the provider record's provider-invocation-resume-after-channel-rollback check, both recorded passed, but both live inside records whose result is partial and whose observation is stale by 30 exercised files. A passed check inside a partial record is not a passed record, and G2 is a rule about the record. CONDITION 3, 'promotion stops even on a docs-only drift' -- SAFETY. SATISFIED, and grounded on refusal rather than on an occurrence. The refusal site is internal/release/pipeline.go lines 39 to 41, where Pipeline.Promote calls VerifySource over the recorded bundle members against the source tree and returns 'promotion refused: source verification' before any gate, store or route step runs; VerifySource itself is internal/release/bundle.go line 318 and its drift type is internal/release/bundle.go lines 301 to 310. The assertions that prove it refuses, both re-executed inside this gate's green make check and re-run verbatim by this gate: internal/release/pipeline_test.go line 101, TestPipelinePromoteDocsDriftHermeticWithNegativeControl (a one-byte flip of a documentation member is refused, with a negative control showing the same candidate promotes unflipped), and internal/release/pipeline_test.go line 60, TestPipelinePromoteRefusesFabricatedMatchingDocsDigest (a fabricated docs digest that matches is still refused, so the guard is not satisfiable by agreeing arithmetic). Both printed PASS. CONDITION 4, 'only a candidate holding evidence for every capability becomes Stable' -- SAFETY, agreeing with section 8.1. SATISFIED, and grounded on an enumeration rather than on one occurrence, which section 8.1's reverse constraint requires. The refusal site is internal/domain/release.go lines 98 to 102, where ReleaseCandidate.CanPromote loops over every declared capability and returns ErrEvidenceIncomplete naming the capability for which no verified, fresh, digest-bound evidence was seen; the evidence admissibility test the loop depends on is internal/domain/release.go line 90, and the parallel enumerating form is PromotionRejections at internal/domain/release.go line 351 with the per-capability refusal added at line 397. The assertions that prove refusal, all re-executed at this commit: internal/domain/release_test.go line 230, TestPromotionRejectionsAgreeWithCanPromoteOverTheCapabilityClosure, and line 372, TestPromotionRejectionsAgreeWithCanPromoteOverTheIdentityClosure, which are exhaustive grids rather than examples; line 122, TestPromotionRejectionsIsolateEachRefusalClass, which isolates each of the twelve refusal classes; line 41, TestPromotionRejectionKindsAreTwelveAndDistinct, which pins the closure's size; and internal/release/promotion_report_test.go line 187, TestRealTreeReportIsNotPromotableAndNamesEveryCapabilityWithoutEvidence, which runs the guard against the real repository tree and gets a refusal naming the capabilities that hold no evidence. All printed PASS with no SKIP. MAPPING VERDICT: two of four conditions have no admissible ground, so the mapping fails. No condition was waived and none was passed on an occurrence."
+    },
+    {
+      "name": "eight-promotion-conditions-each-read-and-each-refusal-site-named",
+      "status": "passed",
+      "argv": [
+        "devbox",
+        "run",
+        "--pure",
+        "--",
+        "sh",
+        "-c",
+        "go test -count=1 -v -run 'TestPromotion|TestPromotable|TestRealTree|TestConditionsOneAndFive|TestEveryRefusal|TestPipelinePromote|TestStableDiff|TestCapabilityAnchor|TestNoStableToPreview|TestReleaseMarker|TestOneVersion|TestDocumentationConditions|TestFullyEvidenced' ./internal/domain ./internal/release"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 1800,
+      "summary": "None of release-contract.md section 4's eight promotion conditions is waived. Each is read as the kind of claim it is at this milestone: section 4 governs Stable promotion, and section 8.1's ground 3 establishes that M5 cannot be required to have promoted, so what M5 owes for each condition is that the guard refuses -- the safety reading -- while the liveness fact stays openly unproven where it is unproven. The whole surface that decides them is internal/release/promotion_report.go, which maps the eight conditions by id at lines 60 to 69 and their contract wording at lines 90 to 99, and whose aggregate refusal is Promotable at lines 225 to 246: it returns false unless the condition list is exactly the eight ids, each present once, each in state met (the refusal is the c.State != ConditionMet return at lines 232 to 234). CONDITION 1, deterministic tests and static verification: safety, satisfied by refusal. The report declares it not-observable-here with a reason at promotion_report.go lines 355 to 361, and because Promotable admits only met, a not-observable-here condition can never yield a promotable candidate; the assertions are internal/release/promotion_report_test.go line 235 (TestConditionsOneAndFiveAreNotObservableHereWithAReason) and line 86 (TestPromotableIsTrueOnlyWhenAllEightConditionsAreMet), both PASS. The underlying fact was also measured directly: make check is green at the judging commit, while make candidate is not -- it printed 'ci-plan: missing evidence for ci key b0d72f58382e062887a32bfec13f5011dea1f6eee7346699daa643597b9965f8' and exit status 1. Under the revised G6a that key staleness is provenance and not a gate condition, so it is recorded and not counted against the gate. CONDITION 2, every contract capability succeeded in Preview: safety satisfied, liveness unproven and said so. Refusal site internal/domain/release.go lines 98 to 102 and the empty-set refusal at lines 76 to 78, attributed to this condition at promotion_report.go lines 110 and 111; assertions internal/domain/release_test.go line 230 and internal/release/promotion_report_test.go lines 187 and 360 (TestEveryRefusalIsNamedByItsOwnConditionOverAClosedGrid), all PASS. The liveness fact is measured and unmet: eleven of twelve capabilities in contracts/release-contract/foundation.json carry empty evidence_ids. Section 8.1 says this openly too. CONDITION 3, succeeded on the real external systems and Providers: safety satisfied. Refusal site internal/domain/release.go lines 82 to 87, where a capability with no target declaring both a target and a Provider is refused, plus lines 93 to 95 where evidence whose target or Provider disagrees with the declared one is not counted; attributed at promotion_report.go line 114; assertions internal/domain/release_test.go lines 122 and 230, PASS. Liveness unmet for the D1-gated and M6-gated capabilities. CONDITION 4, stop, rollback and resume on Stable confirmed: safety satisfied. Refusal site internal/domain/release.go lines 103 to 105; attributed at promotion_report.go lines 116 and 117; assertions internal/domain/release_test.go lines 122 and 230, PASS. CONDITION 5, no unresolved major failure, leak or unapproved cost: safety satisfied by refusal. Declared not-observable-here with its reason at promotion_report.go lines 371 to 377, so Promotable stays false; assertion promotion_report_test.go line 235, PASS. The leak half was independently measured: gitleaks inside make check printed 'no leaks found'. CONDITION 6, Preview documentation describes every capability: safety satisfied. Refusal sites internal/release/docs.go line 129 (VerifyCapabilityAnchorBijection, refusing in both directions), line 167 (VerifyPreviewReleaseMarker) and line 93 (VerifyLinksResolve), wired at promotion_report.go lines 378 to 386; assertions internal/release/docs_test.go line 89 (TestCapabilityAnchorBijectionBothDirections), line 72 (TestDocSetLinksResolveRefusesBrokenTarget), line 80 (TestDocSetLinksResolveRefusesUnresolvedAnchor), line 131 (TestReleaseMarkerMustOccurExactlyOnce) and promotion_report_test.go line 445, all PASS. On the real tree the verifiers also pass, so this condition reports met. CONDITION 7, Stable diff, migration and rollback documented: safety satisfied. Refusal sites internal/release/docs.go line 197 (VerifyRequiredSections) over the four required sections declared at lines 30 to 38, and line 222 (VerifyNoStableToPreviewLinks), wired at promotion_report.go lines 387 to 392; assertions internal/release/docs_test.go line 149 (TestStableDiffMissingSectionIsRefused) and line 163 (TestNoStableToPreviewLinksRefusesViolation), PASS. CONDITION 8, one version across implementation, schema, migration, configuration and documentation: safety satisfied. Refusal composed at promotion_report.go lines 459 to 493 from the seven bundle roles (empty-role refusal at lines 471 to 473) plus internal/release/bundle.go line 318 (VerifySource), line 363 (VerifyCandidateDigests) and line 384 (VerifyCandidateAgainstContract), plus the seven candidate-identity refusal classes attributed at promotion_report.go lines 121 to 127 whose site is internal/domain/release.go lines 73 to 81; assertions internal/release/promotion_report_test.go line 504 (TestOneVersionConditionIsDecidedByTheSourceVerifiers), internal/release/pipeline_test.go line 195 (TestPipelinePromoteRefusesCapabilitySubsetAgreeingDigests) and line 60, PASS. VERDICT LINES of the run that re-executed all of these at the judging commit: 'ok github.com/takushi/agentic-loop-foundation/v2/internal/domain 0.058s' and 'ok github.com/takushi/agentic-loop-foundation/v2/internal/release 0.088s', 26 top-level PASS lines, zero SKIP, zero FAIL. So every one of the eight is enforced by a refusal that this gate located and re-executed, and the two that are also liveness facts remain unproven, which is stated rather than converted into a pass."
+    },
+    {
+      "name": "the-reading-checked-not-only-applied",
+      "status": "passed",
+      "argv": [
+        "sh",
+        "-c",
+        "sed -n '400,434p' docs/operations/v2-task-dag.md"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 1800,
+      "summary": "This gate agrees with section 8.1's reading of M5's fourth completion condition, applies it, and records two places where the reading as transmitted goes further than the text supports. AGREEMENT: 'only a candidate holding evidence for every capability becomes Stable' is dominated by 'only'; what it demands is that a candidate without that evidence does not become Stable, and that is satisfied by the guard refusing. Section 8.1's third ground is decisive and this gate re-verified its premises rather than accepting them: three capabilities (cap-autonomous-resolution, cap-shared-resource-allocation, cap-provider-operation) declare codex or opencode and so need M6's live exercise, and V2-028's own task state lists V2-026 among its dependencies, so M6 live is downstream of M5's gate; four (cap-preview-operation, cap-stable-promotion, cap-loop-self-update, cap-loop-control) declare Cloud Run, which release-contract.md section 3 puts out of preview-local's reach and into D1, and V2-014 and V2-054 are both blocked on a GCP project. A condition unsatisfiable at its own milestone by construction is a misreading, not a condition. Section 8.1's reverse constraint is also honoured here: every safety condition this gate passes is grounded on a closed enumeration or an exhaustive grid, never on one occurrence. FIRST CORRECTION, and it is a correction of section 8.1's own first ground: that ground says the previous judge 'proved the guard in both directions' and offers A17 as the reason condition 4 is satisfied. A17's positive half is a single synthetic promotion of one hermetic tree, and its negative half is one measured refusal set on the real tree. Resting condition 4 on A17 alone would be passing a safety condition on the strength of one occurrence in each direction, which is precisely what the same section forbids two paragraphs later. This gate therefore does not ground condition 4 on A17. It grounds it on the closed-grid enumerations in internal/domain/release_test.go at lines 230 and 372, which prove that the refusal enumeration and the authority agree over every cell of a closed grid, plus the twelve-class isolation at line 122 -- and it may do so without A17 because those are G6a claims re-executed by make check at the judging commit, whereas A17 lives in a partial, stale live record. The section's conclusion survives; its ground is replaced by a stronger one. SECOND CORRECTION: the Work Order states that section 8.1 rules on M5's conditions 1 and 4, and V2-026's own failure notes are recorded the same way. The text rules on one condition. Its opening sentence names it verbatim -- the fourth condition, about which candidates become Stable -- and all three of its grounds are about that condition and about section 3's all-capability requirement governing promotion; no sentence in section 8.1 reclassifies 'dogfood this Foundation Repository as a Preview target'. That condition cannot be read as safety in any case: it contains no 'only' and no negation, and a milestone whose subject is dogfooding is asserting that something was done. This gate reads it as liveness, which is not the misreading section 8.1 corrects, and fails it for want of an admissible ground rather than for want of twelve successful capabilities. Section 8.1's own closing instruction is followed literally: safety conditions are grounded on the refusal working, liveness conditions on what happened."
+    },
+    {
+      "name": "corroboration-and-what-this-gate-refused-to-spend",
+      "status": "passed",
+      "argv": [
+        "devbox",
+        "run",
+        "--pure",
+        "--",
+        "sh",
+        "-c",
+        "make evidence-keys"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 1800,
+      "summary": "Two corroborations, neither used as a freshness basis. First, make evidence-keys at the judging commit reports for the runner component the value 1ea8ccaa7d836d32c600fa644eeed4395cfbdff90d79cb7c1f88eed86ee5391b, which is byte-identical to the evidence_key ev-v2-080-provider-live-claude-pooled declares from its observation commit; so even the superseded per-component rule would have been satisfied for that record, and the judgment nevertheless rests on the measured intersection as the revised G6b directs. Second, all 23 component keys were printed by that single command but were deliberately NOT compared one by one against the index, and no component evidence was re-issued: under revised G6a per-component key equality is provenance and not a verdict, the instruction says so explicitly, and paying make evidence-all would add provenance while changing nothing about G2's partial live record or G6b's non-empty intersection. This gate started no Provider CLI, made zero live invocations, read no credential value, and recorded no prompt text and no provider response in any form; the only provider-issued identifiers anywhere in this record are referred to, not reproduced. No source file and no test file was edited: git status --short is empty apart from this record and the index entry that registers it, and the two prohibited-path cures V2-026 identified (ci/components.json and internal/api) were already fixed by the coordinator before this judgment and were not touched here."
+    },
+    {
+      "name": "gate-verdict",
+      "status": "failed",
+      "argv": [
+        "sh",
+        "-c",
+        "true"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 1800,
+      "summary": "M5 gate verdict: FAILED at judging commit fb1a08c48d71b264cbb4cb9be5d5bd39329568b5, and no Stable promotion is decided. Satisfied: G1 (with the milestone-coverage finding recorded), G3, G4, G5, G7, and G6a -- make check is green at the judging commit, which closes the first of the two grounds the Work Order named. Not satisfied, on two independent and sufficient grounds, each measured by this gate rather than inherited: (i) G2 ground eligibility -- section 5's mandatory M5live component release-live-dogfood has exactly one entry in the index, ev-v2-022-release-live-dogfood, and its result is partial, not passed; the only other M5 live record, ev-v2-022-provider-live-claude-dogfood, is also partial; no passed record for either component exists among the 163 entries, and eleven of the twelve Release Contract capabilities carry empty evidence_ids at this commit. (ii) G6b freshness of that same mandatory record -- the intersection between the diff from its observation commit 39d2e809b02527d1e8b56f44cbb4fc20473344ef to the judging commit and the file set its exercise compiles is 30 paths, one of which is the exercise's own test file internal/api/live_dogfood_test.go, so re-observation is required regardless of the nature of the changes. V2-026 measured 26 for the same record; the number has grown. The Work Order's second premise, that V2-080 closed G6b, does not hold: V2-080 re-observed TestProviderLiveVerticalSlice in ./internal/runner under component provider-live-claude, which this gate independently verified is fresh (intersection 0, positive control 4, negative control 0, published set recomputed identical at 92 paths), and that record is the correct ground for M3, not for M5. Consequently roadmap M5's completion conditions 1 and 2, both liveness, have no admissible ground; conditions 3 and 4, both safety, are satisfied by refusals this gate located by file and line and re-executed, and all eight of release-contract.md section 4's promotion conditions are enforced by refusals likewise located and re-executed, with none waived and none passed on a single occurrence. REMEDIATION, for the coordinator and not for this gate: M5 needs one task that re-observes the dogfood exercise at a commit at or after the fixes its own failures caused (V2-079 for the Backlog cursor, V2-082 for the reachability of the state that asks a person a question, V2-083, V2-087 and V2-088), under a new approved provider-preflight record rather than V2-022's spent ledger, publishing an exercise file set artifact and anchoring its observation commit under a pushed refs/live-observations ref exactly as V2-080 did, and issuing a record whose result is passed for the capabilities it can actually exercise at preview-local. Two second-order items: the section 2 task table assigns no milestone to V2-062 through V2-094, several of which carry work roadmap M5 names, and .agents/v2/HANDOFF.md lines 192 and 193 record the two-grounds account of V2-026's failure that this judgment contradicts on both the count (four of V2-026's checks failed, G2 and G6a and G6b and the condition mapping) and the target of the G6b remedy, while its line 189 undercounts complete tasks by one."
+    }
+  ],
+  "observed_at": "2026-08-26T19:40:00Z"
+}
