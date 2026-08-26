@@ -1450,3 +1450,84 @@ func TestTheNewStatusesReadThroughEveryExistingReadModel(t *testing.T) {
 	}
 	t.Logf("A19/A26 data claim: waiting, recovering, evaluating and cancelled all read through the requirement detail and the export with no read-model change; nextAction branches on completed and cancelled and on Increment and Execution status only (internal/application/readmodels.go:333-356, re-measured -- the Work Order says :306-329)")
 }
+
+// TestTheIncrementReadTakesIncrementIdsBecauseTheAdaptersDisagree is the test
+// that exists because of a MEASURED ADAPTER DIVERGENCE this task found while
+// executing the preview-local exercise, and it is the assertion that keeps the
+// repair from regressing.
+//
+// THE DIVERGENCE. The port is named IncrementsForRequirements and its two
+// pre-existing non-test callers pass DIFFERENT id kinds through it:
+// internal/application/readmodels.go:307 passes INCREMENT ids built from
+// Requirement.Increments, while internal/reconciler/orphan.go:67 passes
+// REQUIREMENT ids. The adapters disagree too: internal/store/memory/store.go:466
+// filters on EITHER the Increment's own id or its RequirementID, so it answers
+// both; internal/store/firestore/store.go:707 is a batch GET of one document per
+// id from the `increments` collection, so it answers ONLY Increment ids and
+// returns NOTHING for a requirement id.
+//
+// CONSEQUENCE, recorded and not fixed here (internal/reconciler/**,
+// internal/store/** and internal/application/ports.go are all outside this
+// task's allowed paths): internal/reconciler/orphan.go's orphan scan reads an
+// empty Increment set against the Firestore adapter while reading a correct one
+// against the in-memory adapter, so its tests pass and its production behaviour
+// is a no-op. That is a row (3) finding, not this task's repair.
+//
+// WHAT THIS TASK DID: it passes INCREMENT ids, derived from the page's own
+// Requirement.Increments, which is the form BOTH adapters answer.
+func TestTheIncrementReadTakesIncrementIdsBecauseTheAdaptersDisagree(t *testing.T) {
+	// (1) Structural: loop.go builds the batch from Requirement.Increments and
+	// not from the Requirement id list. The assertion is over the AST so a
+	// comment naming either form cannot satisfy or break it.
+	fn := loopFunctionDecl(t, "loop.go", "loopObserve")
+	usesOwnIncrements := false
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		sel, ok := n.(*ast.SelectorExpr)
+		if ok && sel.Sel != nil && sel.Sel.Name == "Increments" {
+			usesOwnIncrements = true
+		}
+		call, isCall := n.(*ast.CallExpr)
+		if !isCall {
+			return true
+		}
+		fun, isSel := call.Fun.(*ast.SelectorExpr)
+		if !isSel || fun.Sel == nil || fun.Sel.Name != "IncrementsForRequirements" {
+			return true
+		}
+		if len(call.Args) != 2 {
+			t.Fatalf("IncrementsForRequirements is called with %d arguments", len(call.Args))
+		}
+		arg, isIdent := call.Args[1].(*ast.Ident)
+		if !isIdent || arg.Name != "incrementIDs" {
+			t.Fatalf("IncrementsForRequirements is called with %v, want the incrementIDs list: the Firestore adapter answers ONLY Increment ids", call.Args[1])
+		}
+		return true
+	})
+	if !usesOwnIncrements {
+		t.Fatal("loopObserve never reads Requirement.Increments; the Increment id list must come from the page's own aggregates")
+	}
+
+	// (2) Behavioural: the pass really observes the Increments of a Requirement
+	// it read, which is what the failure this test was written for looked like
+	// from the outside -- an offer that named nothing.
+	s, st, clk := allocService(t)
+	ctx := owner(context.Background())
+	version := loopReadyNamed(t, s, st, ctx, clk.now, "req-adapter")
+	loopLoseExecution(t, s, st, ctx, clk.now, "req-adapter", version, "adapter")
+	report, err := s.LoopPass(loopScheduler(t, context.Background()), application.LoopPassRequest{RequestID: "pass-adapter"})
+	if err != nil {
+		t.Fatalf("LoopPass: %v", err)
+	}
+	if report.IncrementsExamined != 1 {
+		t.Fatalf("the pass examined %d Increments, want 1: it read a Requirement holding exactly one", report.IncrementsExamined)
+	}
+	if report.IncrementReadBound != application.LoopIncrementReadBound {
+		t.Fatalf("report increment read bound = %d, want %d", report.IncrementReadBound, application.LoopIncrementReadBound)
+	}
+	if report.TrimmedForIncrementBound {
+		t.Fatal("the pass reported a trimmed page for one Requirement holding one Increment")
+	}
+	if report.Recover.Transitions != 1 {
+		t.Fatalf("recover transitions = %d, want 1: the lost Execution belongs to an Increment the batch read must have returned", report.Recover.Transitions)
+	}
+}

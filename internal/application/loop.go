@@ -79,6 +79,34 @@ const LoopPlanCap = 4
 // than one tick's worth of planning, and the offer mutates nothing.
 const LoopOfferedWorkCap = 16
 
+// LoopIncrementReadBound bounds the ONE batched Increment read this pass makes.
+//
+// IT IS NOT scheduler.MaxCandidates, and the reason is a MEASURED ADAPTER FACT.
+// The port is named IncrementsForRequirements, and its two pre-existing non-test
+// callers disagree about what it takes: internal/application/readmodels.go:307
+// passes INCREMENT ids (built from Requirement.Increments) and
+// internal/reconciler/orphan.go:67 passes REQUIREMENT ids. The two adapters
+// disagree too -- internal/store/memory/store.go:466 filters on EITHER the
+// Increment's own id or its RequirementID, while
+// internal/store/firestore/store.go:707 is a batch GET of one document per id
+// from the `increments` collection, so it answers ONLY to Increment ids.
+//
+// This pass therefore passes INCREMENT ids, derived from the page's own
+// Requirement.Increments exactly as readmodels.go does. That is the form both
+// adapters answer, so a count measured against the in-memory adapter is the
+// count the Firestore adapter reserves -- and it needs no port change, no store
+// edit and no new read: internal/application/ports.go and internal/store/** are
+// both outside this task's allowed paths.
+//
+// The bound is separate because the number of Increments on a page of
+// Requirements is not bounded by the number of Requirements. A page whose
+// Increments would exceed it is TRIMMED at a Requirement boundary and the cursor
+// stops there, so every conclusion the pass draws about a Requirement is drawn
+// from that Requirement's COMPLETE Increment set -- a partially-read set would
+// make stage D plan a second Increment beside one it did not see, and would make
+// stage P read "all released" off a truncated list.
+const LoopIncrementReadBound = 200
+
 // MaxDriverClaims is declared here, beside the offer it bounds, so the driver
 // in internal/runner and the route that feeds it cannot disagree about how much
 // work one bounded pass may take. internal/runner reads it through this
@@ -193,6 +221,14 @@ type LoopPassReport struct {
 	RequirementsExamined  int       `json:"requirements_examined"`
 	MoreRequirementsExist bool      `json:"more_requirements_exist"`
 	NextCursor            string    `json:"next_cursor,omitempty"`
+	// IncrementsExamined and IncrementReadBound report the second bounded read,
+	// and TrimmedForIncrementBound says whether the page was cut short at a
+	// Requirement boundary because the next Requirement's Increments would have
+	// exceeded it. All three are reported so a trimmed page is auditable rather
+	// than reading as "covered everything".
+	IncrementsExamined       int  `json:"increments_examined"`
+	IncrementReadBound       int  `json:"increment_read_bound"`
+	TrimmedForIncrementBound bool `json:"trimmed_for_increment_bound"`
 
 	Wait      LoopStageReport     `json:"wait"`
 	Recover   LoopStageReport     `json:"recover"`
@@ -327,15 +363,20 @@ type loopLostExecution struct {
 // transaction re-verifies the fact it is about to act on, so a race produces no
 // transition rather than a wrong one.
 type loopObservation struct {
-	page         []domain.Requirement
-	examined     int
-	more         bool
-	nextCursor   string
-	decisions    map[string]scheduler.Decision
-	lost         map[string]loopLostExecution
-	inFlight     map[string]bool
-	increments   map[string][]domain.Increment
-	readyOffered []LoopOfferedIncrement
+	page       []domain.Requirement
+	examined   int
+	more       bool
+	nextCursor string
+	// trimmedForIncrementBound records that the page was cut short at a
+	// Requirement boundary because the next Requirement's Increments would have
+	// exceeded LoopIncrementReadBound. It is reported, never hidden.
+	trimmedForIncrementBound bool
+	incrementsExamined       int
+	decisions                map[string]scheduler.Decision
+	lost                     map[string]loopLostExecution
+	inFlight                 map[string]bool
+	increments               map[string][]domain.Increment
+	readyOffered             []LoopOfferedIncrement
 }
 
 // loopObserve makes the pass's fixed set of bounded reads. NONE of them grows
@@ -376,9 +417,40 @@ func loopObserve(ctx context.Context, u UnitOfWork, now time.Time, cursor string
 	if err != nil {
 		return obs, err
 	}
+	// THE INCREMENT-ID ACCOUNTING COMES FIRST, before anything is derived from
+	// the page, because it can TRIM the page. Trimming after the snapshot was
+	// built would leave decisions attached to Requirements the pass then refused
+	// to examine.
+	incrementIDs := make([]string, 0, LoopIncrementReadBound)
+	included := 0
+	for _, r := range page {
+		own := r.Increments
+		if len(own) > LoopIncrementReadBound {
+			// ONE Requirement whose own Increment set exceeds the whole bound
+			// cannot be examined completely by any page size, so this fails
+			// CLOSED rather than drawing a conclusion from a partial set.
+			return obs, fmt.Errorf("requirement %s holds %d Increments, which exceeds the bounded Increment read of %d", r.ID, len(own), LoopIncrementReadBound)
+		}
+		if len(incrementIDs)+len(own) > LoopIncrementReadBound {
+			obs.trimmedForIncrementBound = true
+			break
+		}
+		for _, id := range own {
+			incrementIDs = append(incrementIDs, id.String())
+		}
+		included++
+	}
+	if obs.trimmedForIncrementBound {
+		page = page[:included]
+		// The remainder is genuinely unexamined, so the report must say so and
+		// the cursor must stop here -- exactly the same truth the page's own
+		// `more` flag carries.
+		more = true
+	}
 	obs.page = page
 	obs.examined = len(page)
 	obs.more = more
+	obs.incrementsExamined = len(incrementIDs)
 	if more && len(page) != 0 {
 		obs.nextCursor = encodeCursor(page[len(page)-1].ID.String())
 	}
@@ -412,32 +484,33 @@ func loopObserve(ctx context.Context, u UnitOfWork, now time.Time, cursor string
 	if len(ids) == 0 {
 		return obs, nil
 	}
-	increments, err := u.IncrementsForRequirements(ctx, ids)
-	if err != nil {
-		return obs, err
-	}
 	onPage := map[string]bool{}
 	for _, id := range ids {
 		onPage[id] = true
 	}
-	incrementIDs := make([]string, 0, len(increments))
-	incrementOwner := make(map[string]string, len(increments))
-	for _, inc := range increments {
-		rid := inc.RequirementID.String()
-		if !onPage[rid] {
-			continue
+	incrementOwner := make(map[string]string, len(incrementIDs))
+	if len(incrementIDs) != 0 {
+		sort.Strings(incrementIDs)
+		increments, e := u.IncrementsForRequirements(ctx, incrementIDs)
+		if e != nil {
+			return obs, e
 		}
-		obs.increments[rid] = append(obs.increments[rid], inc)
-		if !loopIncrementIsTerminal(inc.Status) {
-			obs.inFlight[rid] = true
+		for _, inc := range increments {
+			rid := inc.RequirementID.String()
+			if !onPage[rid] {
+				continue
+			}
+			obs.increments[rid] = append(obs.increments[rid], inc)
+			if !loopIncrementIsTerminal(inc.Status) {
+				obs.inFlight[rid] = true
+			}
+			incrementOwner[inc.ID.String()] = rid
 		}
-		incrementIDs = append(incrementIDs, inc.ID.String())
-		incrementOwner[inc.ID.String()] = rid
-	}
-	for rid := range obs.increments {
-		sort.Slice(obs.increments[rid], func(i, j int) bool {
-			return obs.increments[rid][i].ID.String() < obs.increments[rid][j].ID.String()
-		})
+		for rid := range obs.increments {
+			sort.Slice(obs.increments[rid], func(i, j int) bool {
+				return obs.increments[rid][i].ID.String() < obs.increments[rid][j].ID.String()
+			})
+		}
 	}
 	// The offer read is derived HERE, from the same page, so the route a Runner
 	// reads and the pass that plans the work cannot disagree about what is
@@ -470,7 +543,10 @@ func loopObserve(ctx context.Context, u UnitOfWork, now time.Time, cursor string
 	if len(incrementIDs) == 0 {
 		return obs, nil
 	}
-	sort.Strings(incrementIDs)
+	// ExecutionsForIncrements takes INCREMENT ids on BOTH adapters -- measured:
+	// internal/store/memory/store.go:485 filters on IncrementID and
+	// internal/store/firestore/store.go:738 queries the index_increment_id
+	// field -- so the same list serves both reads.
 	executions, err := u.ExecutionsForIncrements(ctx, incrementIDs)
 	if err != nil {
 		return obs, err
@@ -561,6 +637,9 @@ func (s *Service) LoopPass(ctx context.Context, req LoopPassRequest) (LoopPassRe
 	report.RequirementsExamined = obs.examined
 	report.MoreRequirementsExist = obs.more
 	report.NextCursor = obs.nextCursor
+	report.IncrementsExamined = obs.incrementsExamined
+	report.IncrementReadBound = LoopIncrementReadBound
+	report.TrimmedForIncrementBound = obs.trimmedForIncrementBound
 
 	if err = s.loopStageWait(ctx, req, actor, now, obs, &report); err != nil {
 		return report, err
