@@ -1,0 +1,130 @@
+{
+ "schema_version": "v1",
+ "id": "ev-v2-090-domain",
+ "kind": "evidence",
+ "created_at": "2026-08-26T21:30:00Z",
+ "correlation_id": "v2-090-requirement-pause-resume-cancel",
+ "task_id": "V2-090",
+ "component": "domain",
+ "evidence_key": "0000000000000000000000000000000000000000000000000000000000000000",
+ "result": "partial",
+ "observed_at": "2026-08-26T23:30:00Z",
+ "checks": [
+  {
+   "name": "scope-boundary",
+   "status": "passed",
+   "argv": [
+    "git",
+    "status",
+    "--porcelain"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 30,
+   "summary": "A1 SCOPE BOUNDARY for V2-090, recorded against base commit fe040dfe1a13293d526d6c70c4aacee36c03fc28 on branch v2-task/V2-090, BEFORE any source or test file was edited. ORDERING, recorded because A1 demands the order and not only the content: this record's FIRST commit contains the five rows below together with the whole A2/A3/A4/A5/A15/A27 pre-edit baseline, and `git status --porcelain` at that commit showed ONLY .agents/v2/evidence/ paths -- internal/domain/pause_resume_test.go and internal/application/pause.go did not yet exist, and every other file named in allowed_paths was still byte-identical to the base commit. V2-087 produced this table's content only after its edits and had to report that as its one unmet item; V2-084, V2-088 and V2-089 did it in the right order; this task follows them. ROW 1 -- WHAT THIS TASK MAKES TRUE. An owner can pause a Requirement from ready, active, waiting or recovering; a paused Requirement remembers exactly which of those four it came from, in ONE new field domain.Requirement.PausedFrom; the owner can resume it into that same status and into no other, through ONE new command kind domain.RequirementResume admitted from domain.RequirementPaused only; the owner can cancel it; and a paused Requirement has at least one exit under every one of the seven control modes, because pause and cancel evaluate NO domain.Permit while resume evaluates domain.PermitClaim -- so under emergency-stop resume is DENIED and cancel is ALLOWED. The pausable status set is declared ONCE, as one unexported helper in internal/domain/model.go, and READ TWICE: by the pause branch's allowed(...) call and by the resume branch's guard, so resume's legal TARGETS are derived from pause's legal SOURCES rather than declared a second time. Three owner-only application commands live in ONE new file internal/application/pause.go; three POST routes (:pause, :resume, :cancel) join internal/api/api.go's POST default branch; one additive optional resumes_to field joins the requirement detail read model; three openapi paths and their schemas join contracts/openapi/openapi-v1.yaml. ROW 2 -- WHAT IT DELIBERATELY DOES NOT DO. It propagates nothing to a Runner, terminates no Execution, expires no Lease, verifies no stop completion, writes no Control Intent (Service.PauseRequirement stages no control record and Service.Control transitions no Requirement -- re-measured at internal/application/service.go:1457, where the Work Order says :1307), stages no outbox item (every s.record call passes a NIL OutboxItem), adds no port (internal/application/ports.go is prohibited), adds no environment variable, changes nextAction by not one byte (re-measured at internal/application/readmodels.go:309-332: it branches on completed and cancelled and on Increment and Execution status and NEVER on paused), changes no existing response field, adds no RequirementStatus, and adds ZERO product text -- docs/** is PROHIBITED because every edge this task makes reachable is already described (A4). internal/application/service.go, internal/application/framing.go, internal/application/stop_matrix_test.go, internal/application/framing_test.go, internal/domain/source_guard_test.go, internal/domain/control.go, internal/store/**, internal/quota/**, ci/**, Makefile, go.mod, go.sum and devbox.* are all PROHIBITED and all byte-unchanged. ROW 3 -- WHAT IT RECORDS BUT DOES NOT FIX. (a) The TWO CELLS where internal/domain's cancel branch is WIDER than the product table: docs/architecture/domain-model.md:270 lists recovering's 主な遷移先 as active, waiting, needs-input and paused with `cancelled` ABSENT, and :271 lists evaluating's as completed, active and needs-input with `cancelled` ABSENT, while internal/domain/model.go:515-519's cancel branch admits every status except completed and cancelled and therefore admits both. NOT narrowed, NOT asserted (A5). (b) nextAction has no paused branch, so a paused Requirement with a running Execution still reports 'monitor execution'. NOT fixed, NOT asserted (A16). (c) Service.Claim's parent check is V2-089's four-status admitting set, so a CANCELLED Requirement's Increments are now correctly refused, but Service.Plan and Service.Prepare still write the parent without consulting its status, so an Increment can still be PLANNED and PREPARED under a paused or cancelled Requirement -- V2-084's F1, partially closed by V2-089 and recorded here as the surviving half. (d) The six-rung ladder at docs/architecture/domain-model.md:336 names a `paused` rung that domain.controlSeverity (re-measured at internal/domain/control.go:112-128) implements as NO ControlMode: the severities are emergency-stop 7, immediate-stop and cancel 6, graceful-stop 5, pause-claim 3, pause-intake 2, allow 0 -- severity 4 is unoccupied and no ControlMode named `paused` exists. (e) internal/application/framing.go:113-117's comment still says 'Plan and Prepare evaluate no Permit at all', which V2-085 invalidated: re-measured, internal/application/service.go:984 evaluates domain.Permit with domain.PermitClaim inside Service.Plan. framing.go is prohibited; the stale comment is recorded, not repaired. ROW 4 -- WHAT ONLY A LATER TASK CAN ESTABLISH. That pausing actually STOPS running work, which needs the propagation half and the stop-completion observation docs/product/definition.md:164 defines (対象workerのack、process終了、lease解放または失効、新規副作用の不在まで観測して初めて停止完了とする). And that `waiting` and `recovering` can be pause-entered through a REAL journey, which needs non-test issuers for domain.RequirementWait and domain.RequirementRecover that this task does not add: re-measured, `grep -rn '\\bRequirementWait\\b' --include='*.go' . | grep -v _test.go` and the same for RequirementRecover each return only internal/domain/model.go's declaration and switch case, so no journey can put a Requirement into either status. That is why A14's GRADE 3 (over HTTP) covers ready and active ONLY, and it is a LIMIT OF THIS TASK rather than a gap in the assertion: GRADE 1 (internal/domain, exhaustive) and GRADE 2 (internal/application over the real Service and a real store, by seeding) cover all four. ROW 5 -- RELEASE GATES. This task passes NO release gate on its own. release_eligible is false in all four index entries, no capability id is cited anywhere in any of the four records, and no live-provider evidence record is issued."
+  },
+  {
+   "name": "execution-environment",
+   "status": "passed",
+   "argv": [
+    "devbox",
+    "run",
+    "--pure",
+    "--",
+    "sh",
+    "-c",
+    "uname -srm; go version; devbox version"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 120,
+   "summary": "Execution environment for every run recorded here. `uname -srm` = 'Linux 6.18.33.2-microsoft-standard-WSL2 x86_64'. Go as resolved INSIDE devbox run --pure = 'go version go1.25.0 linux/amd64'. devbox version = 0.17.2 (devbox itself reports an available upgrade to v0.18.0; not taken, because devbox.json and devbox.lock are prohibited). Worktree path = /home/takushi/repos/agentic-loop-foundation-worktrees/v2-task-090. Branch = v2-task/V2-090. Base commit = fe040dfe1a13293d526d6c70c4aacee36c03fc28. Every devbox run recorded in this file was judged by its VERDICT LINE and never by the shell exit status (C26), and every environment variable a run needed was passed with `devbox run --pure -e NAME=VALUE`, never as a shell prefix, because --pure strips the ambient environment. PATH was prefixed with /nix/var/nix/profiles/default/bin so devbox can find nix."
+  },
+  {
+   "name": "a2-baseline",
+   "status": "passed",
+   "argv": [
+    "devbox",
+    "run",
+    "--pure",
+    "--",
+    "sh",
+    "-c",
+    "go test -list '.*' ./internal/domain ./internal/application ./internal/api ./internal/contracts ./internal/store/memory ./internal/store/firestore ./internal/reconciler ./internal/runner"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 1800,
+   "summary": "A2 BASELINE, measured by me at fe040df and NOT copied from the Work Order, which states plainly that its numbers are expected to be stale. TOP-LEVEL TEST COUNTS, measured two independent ways that agree cell for cell -- `go test -list '.*' ./<pkg>` filtered to lines beginning Test/Fuzz/Benchmark/Example, and `grep -hc '^func Test' <pkg>/*_test.go | paste -sd+ | bc`: internal/domain 54 (Work Order 54, AGREES), internal/application 211 (Work Order 187, DISAGREES by +24), internal/api 76 (Work Order 60, DISAGREES by +16), internal/contracts 33 (AGREES), internal/store/memory 16 (AGREES), internal/store/firestore 36 (AGREES), internal/reconciler 16 (AGREES), internal/runner 120 (Work Order 118, DISAGREES by +2). LINE COUNTS by `wc -l`: internal/domain/model.go 672 (AGREES), internal/domain/invariant_model_test.go 1144 (AGREES), internal/domain/capture_time_test.go 288 (AGREES), internal/domain/source_guard_test.go 391 (AGREES), internal/application/readmodels.go 627 (AGREES), internal/application/framing.go 391 (Work Order 208, DISAGREES by +183 -- V2-084 appended CompleteFraming), internal/application/service.go 1879 (Work Order 1729, DISAGREES by +150), internal/api/api.go 1429 (Work Order 1335, DISAGREES by +94), internal/api/api_test.go 5911 (Work Order 4392, DISAGREES by +1519), internal/api/live_local_test.go 682 (Work Order 597, DISAGREES by +85), contracts/openapi/openapi-v1.yaml 1097 (Work Order 1044, DISAGREES by +53). DECLARED /v1 PATHS by `grep -c '^  /v1' contracts/openapi/openapi-v1.yaml` = 26 (Work Order 25, DISAGREES by +1 -- V2-084 added /v1/requirements/{requirement_id}:complete-framing). So the Work Order's numbers disagree with the tree in TEN of the twenty-one cells re-measured here, which is the expected outcome C30 describes and not an error."
+  },
+  {
+   "name": "a3-measured-premise",
+   "status": "passed",
+   "argv": [
+    "sh",
+    "-c",
+    "grep -rn '\\bRequirementPause\\b' --include='*.go' . | grep -v _test.go; grep -rn '\\bRequirementCancel\\b' --include='*.go' . | grep -v _test.go; grep -rn '\\bRequirementResume\\b' --include='*.go' ."
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 300,
+   "summary": "A3 THE MEASURED PREMISE, all six sub-claims re-confirmed by me at fe040df BEFORE any edit. (a) `grep -rn '\\bRequirementPause\\b' --include='*.go' . | grep -v _test.go` returns EXACTLY 2 lines, both in internal/domain/model.go -- :444 the declaration `RequirementPause RequirementCommandKind = \"pause\"` and :510 the switch case `case RequirementPause:`. The same grep for RequirementCancel returns EXACTLY 2 lines, also both in internal/domain/model.go -- :445 and :515. Both Work Order line numbers AGREE. So neither command had any issuer anywhere outside internal/domain. (b) `grep -rn '\\bRequirementResume\\b' --include='*.go' .` returns 0 lines -- including test files. (c) domain.Requirement's field list, read from the AST by internal/domain/capture_time_test.go's TestRequirementFieldListAndCaptureTagArePinned, is exactly ID, Status, Version, Increments, StableSnapshot, RequestedBy, CapturedAt -- SEVEN names in that order, pinned by the `want` literal at capture_time_test.go:250 (Work Order :250, AGREES). The no-struct-tag assertion is at capture_time_test.go:285-287 (Work Order :283-285, DISAGREES by +2). The struct itself spans model.go:178-214 (Work Order :178-214, AGREES). NONE of the seven fields can hold a previous status. (d) The pause branch, quoted verbatim from model.go:510-514: 'case RequirementPause:' / 'if !allowed(RequirementReady, RequirementActive, RequirementWaiting, RequirementRecovering) {' / 'return current, ErrInvalidTransition' / '}' / 'next.Status = RequirementPaused'. The cancel branch, verbatim from model.go:515-519: 'case RequirementCancel:' / 'if allowed(RequirementCompleted, RequirementCancelled) {' / 'return current, ErrInvalidTransition' / '}' / 'next.Status = RequirementCancelled'. So pause is admitted from exactly {ready, active, waiting, recovering} and cancel from every status EXCEPT {completed, cancelled} -- nine of eleven. (e) `paused` is a SOURCE status in exactly ONE existing branch, derived by reading all TEN branches of DecideRequirement (model.go:474-521; the ten case labels are at :475, :480, :485, :490, :495, :500, :505, :510, :515 and the default at :520) rather than by grepping: start-framing {captured}; ready {framing, waiting, needs-input}; start {ready, recovering, waiting}; wait {ready, active, recovering}; needs-input {framing, active, evaluating}; recover {active, waiting}; evaluate {active}; pause {ready, active, waiting, recovering}; cancel = all eleven minus {completed, cancelled}, which is the ONLY branch containing paused; and the default, which refuses every unknown kind. Nine branches exclude paused, one includes it. That is the fact that makes the trap real: a pause shipped without an exit hands the owner a button whose only sequel is cancel. (f) ci/components.json declares the `domain` component's \"dependencies\" as the EMPTY list [] (component id \"domain\", roots [\"internal/domain/**\"], public_contracts [], contract_dependencies [], dependencies [], verification_dependencies [], check make component-domain). 23 components are declared in total, and all_on_change is [.github/**, ci/**, devbox.json, devbox.lock, go.mod, go.sum, Makefile, scripts/**, infra/**, Containerfile]. NEITHER (a) NOR (b) had changed, so no other task issued pause or added a resume first and there is no second mechanism to escalate about."
+  },
+  {
+   "name": "a4-product-citation-per-edge",
+   "status": "passed",
+   "argv": [
+    "sh",
+    "-c",
+    "sed -n '265p;266p;267p;269p;270p;271p' docs/architecture/domain-model.md; sed -n '201p' docs/product/user-facing-spec.md; sed -n '146p;147p' docs/product/definition.md"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 120,
+   "summary": "A4 THE PRODUCT CITATION, one row per lifecycle edge this task makes reachable. Every line number below was measured by me at fe040df and every one AGREES with the Work Order. docs/** is PROHIBITED and this task adds zero product text. ROW ready->paused: docs/architecture/domain-model.md:265, verbatim '| `ready` | 優先順位評価済みで実行可能 | `active`, `waiting`, `paused`, `cancelled` |'. ROW active->paused: :266, verbatim '| `active` | 1つ以上のIncrementが進行中 | `evaluating`, `waiting`, `needs-input`, `paused`, `recovering`, `cancelled` |'. ROW waiting->paused: :267, verbatim '| `waiting` | dependency、capacity、time条件を自動待機 | `ready`, `active`, `paused`, `cancelled` |'. ROW recovering->paused: :270, verbatim '| `recovering` | lost ExecutionやPreview failureから再開中 | `active`, `waiting`, `needs-input`, `paused` |'. ROWS paused->the-status-it-came-from AND paused->cancelled, BOTH from :269, quoted in full: '| `paused` | 人間が処理を停止 | 直前の安全な非終端状態、`cancelled` |'. That sentence is what makes the exit a MEMORY rather than a fixed status: 直前の安全な非終端状態 names the status the Requirement was ACTUALLY IN, not a status chosen by a rule. ROW the owner-issued triple: docs/product/user-facing-spec.md:201, verbatim '- Requirementのpause、resume、cancel', under section 4.8 '### 4.8 ループを制御する' (:192) whose subject sentence is ':194 利用者は対象範囲を指定して次を実行できる。' -- 利用者, the user, and nobody else. ROW resume as a product verb: docs/product/definition.md:146, verbatim '- **resume**: 保存したcheckpointと観測済みの外部状態から安全に再開する'. ROW cancel as a product verb: definition.md:147, verbatim '- **cancel requirement**: 指定したRequirementの以後の処理を止める' -- described UNCONDITIONALLY, with no source-status qualifier, which is A5's licence. AGREEMENT IN ALL FOUR POSITIONS AND IN NO MORE: the pause branch's admitted source set is {ready, active, waiting, recovering} and the four table cells naming `paused` as a 主な遷移先 are exactly :265 (ready), :266 (active), :267 (waiting) and :270 (recovering). No fifth cell in the whole table names `paused` as a target: :263 captured -> framing, cancelled; :264 framing -> ready, needs-input, cancelled; :268 needs-input -> framing, ready, active, cancelled; :271 evaluating -> completed, active, needs-input; :272 completed 終端; :273 cancelled 終端. Four cells, four admitted sources, no more and no fewer. DERIVED CONCLUSION, stated explicitly: resume's set of legal TARGETS IS the pause branch's set of legal SOURCES. 直前の安全な非終端状態 names the status the Requirement was actually in; the four pause sources are exactly the non-terminal statuses from which a pause is admitted; therefore the memory can only ever hold one of those four, and restoring it verbatim is the only reading of :269 that does not invent a status the Requirement was never in. That is why the pausable set is declared ONCE and read TWICE and why resume refuses a memory outside it."
+  },
+  {
+   "name": "a5-two-cell-gap-recorded-not-repaired",
+   "status": "passed",
+   "argv": [
+    "sh",
+    "-c",
+    "sed -n '270p;271p' docs/architecture/domain-model.md; sed -n '515,519p' internal/domain/model.go"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 120,
+   "summary": "A5 THE TWO CELLS WHERE THE DOMAIN IS WIDER THAN THE TABLE, measured and NOT repaired. docs/architecture/domain-model.md:270 lists recovering's 主な遷移先 as `active`, `waiting`, `needs-input`, `paused` -- `cancelled` is ABSENT. :271 lists evaluating's as `completed`, `active`, `needs-input` -- `cancelled` is ABSENT. internal/domain/model.go:515-519's cancel branch refuses ONLY completed and cancelled, so it admits BOTH recovering and evaluating. TWO CELLS, and the domain is wider than the table in exactly those two. NEITHER internal/domain NOR the new application command is narrowed. THE LICENCE, cited rather than argued: docs/product/definition.md:147 describes cancel unconditionally -- '- **cancel requirement**: 指定したRequirementの以後の処理を止める' -- with no source-status qualifier at all; definition.md:132 '利用者の停止指示へ確実に従い、停止完了を検証可能にする'; definition.md:137 '自律性は利用者の統制より優先されない。control plane、scheduler、runnerは、利用者が発行した制御状態を共通の正本として扱う'; and docs/architecture/domain-model.md:336's severity ladder, which puts cancel at the second-highest rung. A cancel refused from `recovering` would be a stop the owner cannot issue in the state where a stop is most likely wanted -- lost ExecutionやPreview failureから再開中 (domain-model.md:270) is precisely the state an owner watches go wrong. The gap is LOGGED as a named finding for the tech_lead and asserted NOWHERE. The reason is the one internal/application/framing_test.go already gives for the identical choice, re-measured at framing_test.go:552-561 (the Work Order says :562-564, DISAGREES by roughly -8; at :562-574 the same comment records that V2-085 SUPPLIED the repair the logged finding named): 'The Plan/Prepare outcome was LOGGED rather than asserted ON PURPOSE: asserting the defect would have pinned it in place and turned its future repair into a test failure in a file that task could not edit.' internal/application/claimable.go:55-64 records a structurally identical two-cell gap for the SAME table and makes the same choice. I do NOT conclude the gap should be closed here, so there is nothing to escalate: closing it would narrow a stop, which is the one direction definition.md:132 and :137 forbid."
+  },
+  {
+   "name": "a15-collision-surface-before",
+   "status": "passed",
+   "argv": [
+    "sh",
+    "-c",
+    "grep -n 'HasSuffix' internal/api/api.go; grep -n 'requirementsPrefix\\|\"/v1/requirements\"' internal/api/api.go"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 120,
+   "summary": "A15 THE COLLISION SURFACE, measured BEFORE any route was added, because the Work Order warns V2-084 adds one and it did. `grep -n 'HasSuffix' internal/api/api.go` returns EIGHT lines: SIX in the POST default branch -- :427 /v1/leases/ + ':renew', :432 /v1/executions/ + ':start', :442 requirementsPrefix + requestInputSuffix, :460 requirementsPrefix + answerInputSuffix, :480 requirementsPrefix + startFramingSuffix, :504 requirementsPrefix + completeFramingSuffix -- plus TWO unrelated static-asset checks at :1035 ('.css') and :1038 ('.js'). The Work Order says the only HasSuffix branches are at :401, :406, :416, :434 and :454 -- FIVE branches at five line numbers, none of which matches: DISAGREES on the count (6 vs 5 routing branches) and on all five line numbers. The two method-gated GET /v1/requirements branches are at :176 (`r.URL.Path == \"/v1/requirements\" && r.Method == http.MethodGet`) and :374 (`case \"/v1/requirements\":` inside the POST switch). The Work Order says :176 and :319 -- :176 AGREES, :319 DISAGREES (measured :374). The four existing requirement suffix constants are at api.go:656 requestInputSuffix ':request-input', :657 answerInputSuffix ':answer-input', :660 startFramingSuffix ':start-framing', :668 completeFramingSuffix ':complete-framing', with requirementsPrefix '/v1/requirements/' at :655. The Work Order says startFramingSuffix is at :604-610; measured :660 inside the const block at :654-669. DISAGREES."
+  },
+  {
+   "name": "a27-chain-position-and-manifest",
+   "status": "passed",
+   "argv": [
+    "sh",
+    "-c",
+    "python3 -c \"import json;d=json.load(open('ci/components.json'));print([c for c in d['components'] if c['id']=='domain']);print(d['all_on_change']);print(len(d['components']))\""
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 120,
+   "summary": "A27 CHAIN POSITION AND MANIFEST, recorded as facts. This change creates and removes NO component edge. internal/domain gains one struct field, one string constant, one switch case, one unexported helper function and one Validate clause, using only symbols and imports the package already has -- and ci/components.json declares the `domain` component's \"dependencies\" as the EMPTY list [] (re-measured; AGREES with the Work Order). internal/application gains ONE file, internal/application/pause.go, whose import block is exactly `context` plus the repository's internal/domain package -- both already imported by internal/application/framing.go, so no edge moves. internal/api gains three route branches, three suffix constants, three handlers and three body types, using only net/http, strings, application and domain, all already imported. No test-only import is new in ANY package: internal/domain/pause_resume_test.go imports only `testing` and `time`, both already in internal/domain/source_guard_test.go's testImportAllowlist (ten entries, re-measured at source_guard_test.go:265-276), and internal/application/pause_test.go and internal/api/api_test.go add no import their files did not already have. Because no edge moves, a red manifest, dependency-coverage or key-closure check would mean the design was DEPARTED FROM; none went red. ci/components.json (23 components), Makefile, go.mod, go.sum and devbox.* are untouched -- touching ci/** would additionally move all 23 evidence keys, because ci/** is in all_on_change [.github/**, ci/**, devbox.json, devbox.lock, go.mod, go.sum, Makefile, scripts/**, infra/**, Containerfile]. ORDERING: this task is serialized AFTER V2-084, which landed the ready and active edges, POST :complete-framing and the openapi path these three sit beside, and which also held internal/api/api.go, internal/api/api_test.go, internal/api/live_local_test.go and contracts/openapi/openapi-v1.yaml -- a FOUR-file conflict. Confirmed present at fe040df: Service.CompleteFraming exists at internal/application/framing.go:305, completeFramingSuffix at internal/api/api.go:668, the openapi path at contracts/openapi/openapi-v1.yaml:250, and the live-local :complete-framing segment at internal/api/live_local_test.go:380. Editing contracts/openapi/openapi-v1.yaml MOVES the contracts component evidence key and the release BundleDigest and ENROLS this task in the api-contract chain; contracts_changed is [contracts/openapi/openapi-v1.yaml] and nothing else under contracts/** moves. RESIDUAL WORK, each with the measurement that blocks it, and their ids are the coordinator's to issue, not mine: pause propagation and stop completion (docs/product/definition.md:164 requires worker ack, process exit and lease release or expiry before a stop is complete, and this task observes none of them); non-test issuers for domain.RequirementWait and domain.RequirementRecover so `waiting` and `recovering` become journey-reachable (measured: each has exactly 2 non-test occurrences, both inside internal/domain/model.go); Service.Plan and Service.Prepare consulting the parent Requirement's status (V2-084's F1, half-closed by V2-089 on the Claim side only); nextAction's missing paused branch (internal/application/readmodels.go:309-332); the two-cell cancel gap (docs/architecture/domain-model.md:270 and :271); and the `paused` rung at domain-model.md:336 that internal/domain/control.go:112-128 implements as no ControlMode."
+  },
+  {
+   "name": "pre-edit-ordering-proof",
+   "status": "passed",
+   "argv": [
+    "git",
+    "status",
+    "--porcelain"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 30,
+   "summary": "This record's first commit was made while `git status --porcelain` listed ONLY paths under .agents/v2/evidence/. internal/domain/model.go, internal/domain/invariant_model_test.go and internal/domain/capture_time_test.go were byte-identical to fe040df, and internal/domain/pause_resume_test.go did not exist. The A1 table therefore precedes every source edit in the commit history, which is the ordering A1 demands and which V2-087 could not report."
+  }
+ ]
+}
