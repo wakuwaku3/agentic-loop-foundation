@@ -819,3 +819,113 @@ func keysSorted(m map[string]bool) []string {
 	sort.Strings(out)
 	return out
 }
+
+// TestTheRequirementDetailReportsTheExitOnlyWhileThePauseHoldsIt is V2-090 A16.
+//
+// The read-model change is ONE additive optional field. A way out that is
+// visible only in the response to the pause is still a trap for anyone who
+// closed the tab, so the exit is on the detail too -- and it follows the
+// "omitted entirely" discipline repository_id and captured_at already use
+// (contracts/openapi/openapi-v1.yaml declares all three that way), asserted
+// here at the JSON level rather than only on the Go value, because "absent" and
+// "present and empty" are different answers to the owner.
+//
+// nextAction is asserted to be BYTE-UNCHANGED in the only way a test can assert
+// it: the field is read and compared against the value the same fixture
+// produced before this task, "plan increments" for a Requirement with no
+// Increments. A paused branch is deliberately NOT added and deliberately NOT
+// asserted -- see the evidence record's named finding.
+func TestTheRequirementDetailReportsTheExitOnlyWhileThePauseHoldsIt(t *testing.T) {
+	svc, st := service()
+	ctx := owner(context.Background())
+	captured, err := svc.Capture(ctx, application.CaptureRequest{RequestID: "a16:capture", Text: "a requirement whose exit must be visible"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	detailJSON := func(t *testing.T) (application.RequirementDetailView, map[string]any) {
+		t.Helper()
+		view, found, err := svc.GetRequirementDetail(ctx, captured.RequirementID)
+		if err != nil || !found {
+			t.Fatalf("detail: found=%v err=%v", found, err)
+		}
+		raw, err := json.Marshal(view)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var body map[string]any
+		if err := json.Unmarshal(raw, &body); err != nil {
+			t.Fatal(err)
+		}
+		return view, body
+	}
+
+	// Not paused: the key is absent ENTIRELY, not present and empty.
+	view, body := detailJSON(t)
+	if _, present := body["resumes_to"]; present {
+		t.Fatalf("a captured Requirement's detail carries resumes_to: %v", body["resumes_to"])
+	}
+	if view.NextAction != "plan increments" {
+		t.Fatalf("next_action for a Requirement with no Increments = %q, want %q; nextAction must be byte-unchanged", view.NextAction, "plan increments")
+	}
+
+	seeded := seedRequirementStatus(t, st, captured.RequirementID, domain.RequirementReady)
+	paused, err := svc.PauseRequirement(ctx, application.PauseRequirementRequest{RequestID: "a16:pause", RequirementID: captured.RequirementID, ExpectedVersion: seeded})
+	if err != nil {
+		t.Fatal(err)
+	}
+	view, body = detailJSON(t)
+	if got, _ := body["resumes_to"].(string); got != string(domain.RequirementReady) {
+		t.Fatalf("the paused detail's resumes_to = %v, want ready", body["resumes_to"])
+	}
+	if view.ResumesTo != domain.RequirementReady {
+		t.Fatalf("the paused detail's ResumesTo = %q, want ready", view.ResumesTo)
+	}
+	// The pause did not change nextAction, and did not change the other
+	// additive fields either.
+	if view.NextAction != "plan increments" {
+		t.Fatalf("next_action after a pause = %q; nextAction has no paused branch and must not gain one here", view.NextAction)
+	}
+
+	if _, err = svc.ResumeRequirement(ctx, application.ResumeRequirementRequest{RequestID: "a16:resume", RequirementID: captured.RequirementID, ExpectedVersion: paused.Version}); err != nil {
+		t.Fatal(err)
+	}
+	_, body = detailJSON(t)
+	if _, present := body["resumes_to"]; present {
+		t.Fatalf("a resumed Requirement's detail still carries resumes_to: %v", body["resumes_to"])
+	}
+
+	// A paused Requirement with NO memory -- the shape a record written before
+	// the field existed has -- reads with the key ABSENT rather than as an
+	// invented status. Absent means absent.
+	forgotten := memory.New()
+	svc2, err := application.NewServiceWithConfig(forgotten, clock{}, &ids{}, application.ServiceConfig{InstallationID: "install", LeaseTTL: time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy, err := svc2.Capture(ctx, application.CaptureRequest{RequestID: "a16:legacy", Text: "a paused record with no remembered origin"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedRequirementStatus(t, forgotten, legacy.RequirementID, domain.RequirementPaused)
+	view2, found, err := svc2.GetRequirementDetail(ctx, legacy.RequirementID)
+	if err != nil || !found {
+		t.Fatalf("legacy detail: found=%v err=%v", found, err)
+	}
+	if view2.Status != domain.RequirementPaused {
+		t.Fatalf("the legacy record is %q, want paused", view2.Status)
+	}
+	if view2.ResumesTo != "" {
+		t.Fatalf("a paused record with no memory reports resumes_to=%q; absent must stay absent", view2.ResumesTo)
+	}
+	raw, err := json.Marshal(view2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var legacyBody map[string]any
+	if err := json.Unmarshal(raw, &legacyBody); err != nil {
+		t.Fatal(err)
+	}
+	if _, present := legacyBody["resumes_to"]; present {
+		t.Fatalf("a paused record with no memory carries resumes_to: %v", legacyBody["resumes_to"])
+	}
+}
