@@ -134,7 +134,15 @@ func TestConcurrentClaimOnlyOneSucceeds(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan, err := s.Plan(ctx, application.PlanRequest{RequestID: "plan", RequirementID: p.RequirementID, ExpectedRequirementVersion: p.Version})
+	// V2-089: a claim is refused unless the parent Requirement is in a
+	// status that admits work. This fixture claims, so the parent is moved
+	// to domain.RequirementReady -- '優先順位評価済みで実行可能',
+	// docs/architecture/domain-model.md:265 -- and the Plan below carries
+	// the POST-seed version, because the seed bumps the Requirement's
+	// Version and a dropped or zeroed ExpectedRequirementVersion would
+	// delete a real assertion.
+	readyVersion := seedRequirementStatus(t, st, p.RequirementID, domain.RequirementReady)
+	plan, err := s.Plan(ctx, application.PlanRequest{RequestID: "plan", RequirementID: p.RequirementID, ExpectedRequirementVersion: readyVersion})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -256,7 +264,15 @@ func TestExpiredLeaseCanBeReclaimed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	p, err := s.Plan(ctx, application.PlanRequest{RequestID: "p", RequirementID: c.RequirementID, ExpectedRequirementVersion: c.Version})
+	// V2-089: a claim is refused unless the parent Requirement is in a
+	// status that admits work. This fixture claims, so the parent is moved
+	// to domain.RequirementReady -- '優先順位評価済みで実行可能',
+	// docs/architecture/domain-model.md:265 -- and the Plan below carries
+	// the POST-seed version, because the seed bumps the Requirement's
+	// Version and a dropped or zeroed ExpectedRequirementVersion would
+	// delete a real assertion.
+	readyVersion := seedRequirementStatus(t, st, c.RequirementID, domain.RequirementReady)
+	p, err := s.Plan(ctx, application.PlanRequest{RequestID: "p", RequirementID: c.RequirementID, ExpectedRequirementVersion: readyVersion})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -298,7 +314,15 @@ func TestClaimCannotBypassCanonicalStop(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	p, err := s.Plan(ctx, application.PlanRequest{RequestID: "plan", RequirementID: c.RequirementID, ExpectedRequirementVersion: c.Version})
+	// V2-089: a claim is refused unless the parent Requirement is in a
+	// status that admits work. This fixture claims, so the parent is moved
+	// to domain.RequirementReady -- '優先順位評価済みで実行可能',
+	// docs/architecture/domain-model.md:265 -- and the Plan below carries
+	// the POST-seed version, because the seed bumps the Requirement's
+	// Version and a dropped or zeroed ExpectedRequirementVersion would
+	// delete a real assertion.
+	readyVersion := seedRequirementStatus(t, st, c.RequirementID, domain.RequirementReady)
+	p, err := s.Plan(ctx, application.PlanRequest{RequestID: "plan", RequirementID: c.RequirementID, ExpectedRequirementVersion: readyVersion})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -334,7 +358,15 @@ func TestAcceptResultWritesEffectOutbox(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	p, err := s.Plan(ctx, application.PlanRequest{RequestID: "plan-r", RequirementID: c.RequirementID, ExpectedRequirementVersion: c.Version})
+	// V2-089: a claim is refused unless the parent Requirement is in a
+	// status that admits work. This fixture claims, so the parent is moved
+	// to domain.RequirementReady -- '優先順位評価済みで実行可能',
+	// docs/architecture/domain-model.md:265 -- and the Plan below carries
+	// the POST-seed version, because the seed bumps the Requirement's
+	// Version and a dropped or zeroed ExpectedRequirementVersion would
+	// delete a real assertion.
+	readyVersion := seedRequirementStatus(t, st, c.RequirementID, domain.RequirementReady)
+	p, err := s.Plan(ctx, application.PlanRequest{RequestID: "plan-r", RequirementID: c.RequirementID, ExpectedRequirementVersion: readyVersion})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -429,7 +461,15 @@ func TestClaimReclaimTerminatesSupersededExecutionAtSource(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	p, err := s.Plan(ctx, application.PlanRequest{RequestID: "plan", RequirementID: c.RequirementID, ExpectedRequirementVersion: c.Version})
+	// V2-089: a claim is refused unless the parent Requirement is in a
+	// status that admits work. This fixture claims, so the parent is moved
+	// to domain.RequirementReady -- '優先順位評価済みで実行可能',
+	// docs/architecture/domain-model.md:265 -- and the Plan below carries
+	// the POST-seed version, because the seed bumps the Requirement's
+	// Version and a dropped or zeroed ExpectedRequirementVersion would
+	// delete a real assertion.
+	readyVersion := seedRequirementStatus(t, st, c.RequirementID, domain.RequirementReady)
+	p, err := s.Plan(ctx, application.PlanRequest{RequestID: "plan", RequirementID: c.RequirementID, ExpectedRequirementVersion: readyVersion})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -517,7 +557,15 @@ func TestClaimReclaimAtomicWithSupersededTermination(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	p, err := s.Plan(ctx, application.PlanRequest{RequestID: "plan", RequirementID: c.RequirementID, ExpectedRequirementVersion: c.Version})
+	// V2-089: a claim is refused unless the parent Requirement is in a
+	// status that admits work. This fixture claims, so the parent is moved
+	// to domain.RequirementReady -- '優先順位評価済みで実行可能',
+	// docs/architecture/domain-model.md:265 -- and the Plan below carries
+	// the POST-seed version, because the seed bumps the Requirement's
+	// Version and a dropped or zeroed ExpectedRequirementVersion would
+	// delete a real assertion.
+	readyVersion := seedRequirementStatus(t, st, c.RequirementID, domain.RequirementReady)
+	p, err := s.Plan(ctx, application.PlanRequest{RequestID: "plan", RequirementID: c.RequirementID, ExpectedRequirementVersion: readyVersion})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -614,7 +662,15 @@ func TestClaimReclaimSkipsWhenSupersededExecutionIsAbsent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	p, err := s.Plan(ctx, application.PlanRequest{RequestID: "plan", RequirementID: c.RequirementID, ExpectedRequirementVersion: c.Version})
+	// V2-089: a claim is refused unless the parent Requirement is in a
+	// status that admits work. This fixture claims, so the parent is moved
+	// to domain.RequirementReady -- '優先順位評価済みで実行可能',
+	// docs/architecture/domain-model.md:265 -- and the Plan below carries
+	// the POST-seed version, because the seed bumps the Requirement's
+	// Version and a dropped or zeroed ExpectedRequirementVersion would
+	// delete a real assertion.
+	readyVersion := seedRequirementStatus(t, st, c.RequirementID, domain.RequirementReady)
+	p, err := s.Plan(ctx, application.PlanRequest{RequestID: "plan", RequirementID: c.RequirementID, ExpectedRequirementVersion: readyVersion})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -698,7 +754,15 @@ func TestClaimReclaimSkipsWhenSupersededExecutionAlreadyTerminal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	p, err := s.Plan(ctx, application.PlanRequest{RequestID: "plan", RequirementID: c.RequirementID, ExpectedRequirementVersion: c.Version})
+	// V2-089: a claim is refused unless the parent Requirement is in a
+	// status that admits work. This fixture claims, so the parent is moved
+	// to domain.RequirementReady -- '優先順位評価済みで実行可能',
+	// docs/architecture/domain-model.md:265 -- and the Plan below carries
+	// the POST-seed version, because the seed bumps the Requirement's
+	// Version and a dropped or zeroed ExpectedRequirementVersion would
+	// delete a real assertion.
+	readyVersion := seedRequirementStatus(t, st, c.RequirementID, domain.RequirementReady)
+	p, err := s.Plan(ctx, application.PlanRequest{RequestID: "plan", RequirementID: c.RequirementID, ExpectedRequirementVersion: readyVersion})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -784,7 +848,15 @@ func TestClaimReclaimSkipsWhenSupersededExecutionLinkageMismatches(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	p, err := s.Plan(ctx, application.PlanRequest{RequestID: "plan", RequirementID: c.RequirementID, ExpectedRequirementVersion: c.Version})
+	// V2-089: a claim is refused unless the parent Requirement is in a
+	// status that admits work. This fixture claims, so the parent is moved
+	// to domain.RequirementReady -- '優先順位評価済みで実行可能',
+	// docs/architecture/domain-model.md:265 -- and the Plan below carries
+	// the POST-seed version, because the seed bumps the Requirement's
+	// Version and a dropped or zeroed ExpectedRequirementVersion would
+	// delete a real assertion.
+	readyVersion := seedRequirementStatus(t, st, c.RequirementID, domain.RequirementReady)
+	p, err := s.Plan(ctx, application.PlanRequest{RequestID: "plan", RequirementID: c.RequirementID, ExpectedRequirementVersion: readyVersion})
 	if err != nil {
 		t.Fatal(err)
 	}

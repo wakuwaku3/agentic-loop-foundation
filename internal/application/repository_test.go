@@ -569,7 +569,15 @@ func TestRepositoryScopedControlIntentActuallyMatchesAPlannedIncrement(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	planned, err := s.Plan(ctx, application.PlanRequest{RequestID: "plan-1", RequirementID: captured.RequirementID, ExpectedRequirementVersion: captured.Version})
+	// V2-089: a claim is refused unless the parent Requirement is in a
+	// status that admits work. This fixture claims, so the parent is moved
+	// to domain.RequirementReady -- '優先順位評価済みで実行可能',
+	// docs/architecture/domain-model.md:265 -- and the Plan below carries
+	// the POST-seed version, because the seed bumps the Requirement's
+	// Version and a dropped or zeroed ExpectedRequirementVersion would
+	// delete a real assertion.
+	readyVersion := seedRequirementStatus(t, st, captured.RequirementID, domain.RequirementReady)
+	planned, err := s.Plan(ctx, application.PlanRequest{RequestID: "plan-1", RequirementID: captured.RequirementID, ExpectedRequirementVersion: readyVersion})
 	if err != nil {
 		t.Fatal(err)
 	}

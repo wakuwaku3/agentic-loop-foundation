@@ -1217,7 +1217,7 @@ func (s *Service) Claim(ctx context.Context, req ClaimRequest) (out ClaimRespons
 		if admits, e := requirementAdmitsClaim(ctx, u, inc); e != nil {
 			return e
 		} else if !admits {
-			return fmt.Errorf("%w: increment %q parentstatus=[%s]", ErrRequirementNotClaimable, req.IncrementID, tmpProbeParentStatus)
+			return fmt.Errorf("%w: increment %q", ErrRequirementNotClaimable, req.IncrementID)
 		}
 		if lease, exists, e := u.ActiveLeaseForIncrementAt(ctx, req.IncrementID, issuedAt); e != nil {
 			return e

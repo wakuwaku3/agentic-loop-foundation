@@ -98,11 +98,5 @@ func requirementAdmitsClaim(ctx context.Context, u UnitOfWork, inc domain.Increm
 	if !ok {
 		return false, nil
 	}
-	if !requirementStatusAdmitsClaim(r.Status) {
-		tmpProbeParentStatus = string(r.Status)
-	}
 	return requirementStatusAdmitsClaim(r.Status), nil
 }
-
-// TEMPORARY V2-089 reproduction probe. Removed before the fixture migration.
-var tmpProbeParentStatus string

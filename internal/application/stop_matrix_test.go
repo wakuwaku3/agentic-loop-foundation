@@ -106,7 +106,15 @@ func buildStopMatrixFixture(t *testing.T, mode domain.ControlMode) *stopMatrixFi
 		if err != nil {
 			t.Fatalf("fixture setup: capture %s: %v", name, err)
 		}
-		plan, err := svc.Plan(ownerCtx, application.PlanRequest{RequestID: tag + ":plan-" + name, RequirementID: cap.RequirementID, ExpectedRequirementVersion: cap.Version})
+		// V2-089: a claim is refused unless the parent Requirement is in a
+		// status that admits work. This fixture claims, so the parent is moved
+		// to domain.RequirementReady -- '優先順位評価済みで実行可能',
+		// docs/architecture/domain-model.md:265 -- and the Plan below carries
+		// the POST-seed version, because the seed bumps the Requirement's
+		// Version and a dropped or zeroed ExpectedRequirementVersion would
+		// delete a real assertion.
+		readyVersion := seedRequirementStatus(t, st, cap.RequirementID, domain.RequirementReady)
+		plan, err := svc.Plan(ownerCtx, application.PlanRequest{RequestID: tag + ":plan-" + name, RequirementID: cap.RequirementID, ExpectedRequirementVersion: readyVersion})
 		if err != nil {
 			t.Fatalf("fixture setup: plan %s: %v", name, err)
 		}

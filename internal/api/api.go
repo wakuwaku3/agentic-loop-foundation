@@ -1325,11 +1325,14 @@ func (h *Handler) domainError(w http.ResponseWriter, r *http.Request, err error)
 		code = "conflict"
 		classified = true
 	}
-	if errors.Is(err, application.ErrAwaitingHumanInput) {
+	if errors.Is(err, application.ErrAwaitingHumanInput) || errors.Is(err, application.ErrRequirementNotClaimable) {
 		// The Increment's parent Requirement is waiting for the owner to
-		// answer a question. That is a conflict with existing state, not a
+		// answer a question, or -- V2-089 -- it is not in a state that admits
+		// work at all. That is a conflict with existing state, not a
 		// malformed request and not a policy denial: nothing the caller can
-		// rewrite makes the claim issuable while the question is open.
+		// rewrite makes the claim issuable while the question is open, and
+		// nothing the caller can rewrite makes it issuable while the parent
+		// Requirement is outside the four statuses that admit work.
 		status = http.StatusConflict
 		code = "conflict"
 		classified = true
