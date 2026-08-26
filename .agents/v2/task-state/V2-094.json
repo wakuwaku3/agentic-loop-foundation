@@ -4,10 +4,12 @@
   "kind": "canonical-task-state",
   "task_id": "V2-094",
   "status": "blocked",
-  "block_reason": "V2-088",
+  "block_reason": "V2-084,V2-085,V2-086",
   "dependencies": [
     "V2-087",
-    "V2-088"
+    "V2-084",
+    "V2-085",
+    "V2-086"
   ],
   "outcome": "Settle the three places where the two adapters give different answers to the same question, so that a green test on the fast adapter is evidence about the slow one for the answer and not only for the cost.",
   "non_goals": [
@@ -78,6 +80,52 @@
         "remaining": 2
       },
       "reason": "internal/store/**とinternal/application/**を触るので、いま走っているtaskの占有が解けるまで待つ"
+    },
+    {
+      "sequence": 3,
+      "at": "2026-08-26T15:17:00Z",
+      "from_status": "blocked",
+      "to_status": "queued",
+      "actor": "sol",
+      "owner": "terra",
+      "next_owner": "terra",
+      "input_refs": [
+        "V2-087"
+      ],
+      "input_hash": "e4faeededa7fcd6f575966ffd1b457ea605cb655febf22dd919bdf7bce121381",
+      "output_refs": [
+        "V2-094"
+      ],
+      "output_hash": "a7ca05f96284eee57c67e4ad17565b67cec81ec24d83f9bfdfe750454c72d88c",
+      "retry_budget": {
+        "max_attempts": 2,
+        "attempts_used": 0,
+        "remaining": 2
+      },
+      "reason": "記録されていた事由であるV2-088は完了した"
+    },
+    {
+      "sequence": 4,
+      "at": "2026-08-26T15:18:00Z",
+      "from_status": "queued",
+      "to_status": "blocked",
+      "actor": "sol",
+      "owner": "terra",
+      "next_owner": "terra",
+      "input_refs": [
+        "V2-087"
+      ],
+      "input_hash": "e4faeededa7fcd6f575966ffd1b457ea605cb655febf22dd919bdf7bce121381",
+      "output_refs": [
+        "V2-094"
+      ],
+      "output_hash": "a7ca05f96284eee57c67e4ad17565b67cec81ec24d83f9bfdfe750454c72d88c",
+      "retry_budget": {
+        "max_attempts": 2,
+        "attempts_used": 0,
+        "remaining": 2
+      },
+      "reason": "internal/store/**とinternal/application/**を触るので、同じ範囲を持つV2-085・V2-086・V2-084が先に着地するまで待つ。V2-088は交わらなかったが、これらは交わる"
     }
   ]
 }

@@ -3,7 +3,7 @@
   "id": "ts-v2-085",
   "kind": "canonical-task-state",
   "task_id": "V2-085",
-  "status": "blocked",
+  "status": "queued",
   "dependencies": [
     "V2-088"
   ],
@@ -127,7 +127,30 @@
         "remaining": 2
       },
       "reason": "the measured file overlap orders these: the error classification and the quota true-up hold the api handler and its test, the planning permit is the smallest and touches no contract, the scheduler identity touches the authenticator, and the lifecycle edges touch all of them plus the api contract"
+    },
+    {
+      "sequence": 5,
+      "at": "2026-08-26T15:16:00Z",
+      "from_status": "blocked",
+      "to_status": "queued",
+      "actor": "sol",
+      "input_refs": [
+        "V2-082",
+        "V2-085"
+      ],
+      "input_hash": "bd746c71bd1dc2cfcecba43b30e96643eb1d32b7d645fdb8618abbf4fb7d4f70",
+      "output_refs": [
+        "V2-085"
+      ],
+      "output_hash": "48461041270692ff88877b40fa737f5c450bec0aab33579371520f45b39e2b32",
+      "owner": "terra",
+      "next_owner": "terra",
+      "retry_budget": {
+        "max_attempts": 2,
+        "attempts_used": 0,
+        "remaining": 2
+      },
+      "reason": "V2-088が完了しinternal/api/api.goとapi_test.goの占有が解けたのでblockが解消した"
     }
-  ],
-  "block_reason": "V2-088"
+  ]
 }
