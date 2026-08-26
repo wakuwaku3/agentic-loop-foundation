@@ -296,8 +296,11 @@
       ],
       "verification_dependencies": [
         "control-plane",
+        "provider",
+        "release",
         "store-firestore",
-        "store-memory"
+        "store-memory",
+        "update"
       ],
       "check": {
         "runner": "make",
