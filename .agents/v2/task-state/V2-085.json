@@ -5,7 +5,7 @@
   "task_id": "V2-085",
   "status": "blocked",
   "dependencies": [
-    "V2-087"
+    "V2-088"
   ],
   "outcome": "Make the two commands that change canonical state without asking for permission ask for it, so an emergency stop actually stops them.",
   "non_goals": [
@@ -129,5 +129,5 @@
       "reason": "the measured file overlap orders these: the error classification and the quota true-up hold the api handler and its test, the planning permit is the smallest and touches no contract, the scheduler identity touches the authenticator, and the lifecycle edges touch all of them plus the api contract"
     }
   ],
-  "block_reason": "V2-087"
+  "block_reason": "V2-088"
 }
