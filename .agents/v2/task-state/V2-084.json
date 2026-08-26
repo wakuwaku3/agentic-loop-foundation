@@ -3,7 +3,7 @@
   "id": "ts-v2-084",
   "kind": "canonical-task-state",
   "task_id": "V2-084",
-  "status": "queued",
+  "status": "running",
   "dependencies": [
     "V2-086"
   ],
@@ -13,7 +13,7 @@
     "Do not advance a Requirement because a subordinate Increment moved, without the rule that says it should",
     "Do not give a transition an issuer no real caller can be"
   ],
-  "actor": "sol",
+  "actor": "terra",
   "input_refs": [
     "V2-082",
     "V2-084"
@@ -27,8 +27,8 @@
   "next_owner": "terra",
   "retry_budget": {
     "max_attempts": 2,
-    "attempts_used": 1,
-    "remaining": 1
+    "attempts_used": 2,
+    "remaining": 0
   },
   "release_eligible": false,
   "transitions": [
@@ -223,6 +223,30 @@
         "remaining": 1
       },
       "reason": "待っている相手は無い。packetは完備しており、そのまま着手できる。2026-08-26の規約変更(§12)に伴う再導出である。fan-outが08-24から08-26で完了+48・新規+48の≈1.0で残数が動かず、未完了21件のうちpacket完備は4件だけだった。§12.1のG1 v2でgateの合格条件をtask集合から性質集合へ移し、§12.2でgate依存を凍結した。この再導出はtask-state fileを1件も増やさず、統合・除外・再scopeだけで行う。既存evidenceは再発行せず、完了済みtaskには触れず、M0からM4のgate判定も再計算しない。"
+    },
+    {
+      "sequence": 9,
+      "at": "2026-08-27T00:10:00Z",
+      "from_status": "queued",
+      "to_status": "running",
+      "actor": "terra",
+      "input_refs": [
+        "V2-082",
+        "V2-084"
+      ],
+      "input_hash": "be802a401ccb7f95e97aa77ee623d728e29a5082951942eaa892a8eddb05b9e9",
+      "output_refs": [
+        "V2-084"
+      ],
+      "output_hash": "10e7d12522a40dc2f3b97fabfcba3d130723ef76928081bc0abb86ff29116ae4",
+      "owner": "terra",
+      "next_owner": "terra",
+      "retry_budget": {
+        "max_attempts": 2,
+        "attempts_used": 2,
+        "remaining": 0
+      },
+      "reason": "lifecycle edge 2本の実装に再着手した。owner判断で並列度を2に上げたが、packet済み3件のallowed_pathsの重なりを実測するとV2-084xV2-089が5 file、V2-084xV2-090が4 file、V2-089xV2-090が2 file(api.goとapi_test.go)で、実装同士は総当たりで衝突する。よって並列2は「実装1体＋設計1体」の形にする。設計者はpacketしか書かないので衝突が構造的にゼロで、各実装が終わる頃には後続のpacketが揃っている"
     }
   ]
 }
