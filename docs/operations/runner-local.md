@@ -406,14 +406,59 @@ the same string by construction, and `SupervisedInvocationRunner` refuses
 fail-closed if they ever disagree. See
 `docs/operations/provider-adapters.md`.
 
-**What this does not change.** `Invocation.Environment` is still read by
-nobody on the production path: `Grant.Apply` writes it and only
-`FakeInvocationRunner` observes it, while `Run` builds the child's environment
-itself from the approved record's base names. That is the same-shaped defect,
-recorded and escalated by V2-077 rather than fixed, because making a Secret
-Broker grant reach a real child widens what the child may reach and needs its
-own credential-isolation acceptance. It is latent rather than active only
-because every live exercise so far ran with `granted_names` empty.
+**The child's environment has exactly one authority — resolved (V2-078).**
+
+*Measurement kept as history, 2026-08-25 (V2-077):* `Invocation.Environment`
+was read by nobody on the production path. `Grant.Apply` wrote it and only
+`FakeInvocationRunner` observed it, while `Run` built the child's environment
+itself from the approved record's base names. That was recorded and escalated
+by V2-077 rather than fixed, and it was latent rather than active only because
+every live exercise so far ran with `granted_names` empty.
+
+*Current state, 2026-08-26 (V2-078):* the field is **gone**, and so are
+`Grant.Apply` and `ProviderClient.Grant`, the two things that only existed to
+feed it. Route (b) — delete the field — was chosen over making `Run` read it
+because `Run` already builds the child's environment from the approved
+provider-preflight record and hands it to a supervisor that assigns
+`cmd.Env`, which **replaces** the parent environment rather than extending it.
+The record was therefore already the complete and exclusive description of
+what the child receives; making `Run` read a second contributor would have
+conceded a second authority and then detected their disagreement, whereas
+deleting the field leaves nowhere for a second contributor to travel. Single
+authority stopped being a fact about what `Run` happens to read and became a
+property of the type system. `provider.Invocation`'s exported field set is now
+exactly `{Argv, Stdin, WorkingDirectory}`, and
+`TestInvocationEnvironmentStaysUnconsumedByTheRunner` holds that as a class
+guard: a field added to `Invocation` that `Run` does not consume turns that
+test red the day it is added.
+
+So the child's environment has exactly one authority, the approved
+provider-preflight record's `environment.base_names`, plus one declared
+exception: `SupervisedInvocationRunner.ExtraEnv`, the additive diagnostic
+override dp-v2-017 B16/I7 needs to induce a transport failure. `ExtraEnv`
+extends the `GuardEnvironment` allowlist for its own names, is set in exactly
+one place in the tree, and is nil for every other invocation.
+
+**A record that declares a grant is now refused, not silently narrowed.** A
+provider-preflight record whose `environment.granted_names` is non-empty is
+**refused** by `SupervisedInvocationRunner.Run` with
+`ErrInvocationEnvironmentGrantUndeliverable`: no process is started and no
+ledger reservation is debited, because the refusal sits after the record is
+loaded and strictly before `Ledger.Reserve` (a reservation debited before a
+refusal stays charged at worst case forever). `granted_names` is not deleted
+along with the field — it is schema-required, is forbidden non-empty for
+`provider.name` `claude`, and is bound by the approval digest, so it carries
+real enforcement. It is honoured by refusing rather than removed. An operator
+who hits this reads a refusal that says the runner has no channel to deliver
+the declared names, instead of diagnosing a child that silently ran with a
+narrower environment than its approved record described.
+
+**The sanctioned shape for a future credential path** is the runner leasing
+exactly the names the approved record declares: names from the digest-bound
+record, values from the Secret Broker, never a name the record did not
+authorise. Whoever builds that deletes the refusal above in the same change.
+Do not re-add a field to `provider.Invocation` to do it — that field's
+cheapness was exactly why nobody noticed it delivered nothing.
 
 ## Durable store: fsync'd JSONL journal, not SQLite — resolved (V2-044)
 

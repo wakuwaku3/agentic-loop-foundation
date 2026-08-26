@@ -138,11 +138,20 @@ func TestAdapterArgvIsExactlyWhatHelpDeclares(t *testing.T) {
 // codex and opencode the flag is no longer the only representation of the
 // workspace that reaches the child.
 //
-// (Both measurements were, and are, silent on Invocation.Environment: the
-// runner has never read it. It is set by internal/runner's Grant.Apply and
-// observed only by FakeInvocationRunner, so a Secret Broker grant does not
-// reach a real child. That is a second, same-shaped defect, recorded by
-// V2-077 and owned by its follow-up, not fixed here.)
+// (HISTORICAL MEASUREMENT, 2026-08-25, V2-077: both measurements above were
+// silent on a fourth field, Invocation.Environment, which the runner had
+// never read. It was set by internal/runner's Grant.Apply and observed only
+// by FakeInvocationRunner, so a Secret Broker grant did not reach a real
+// child -- a second, same-shaped defect, recorded by V2-077 and owned by its
+// follow-up. CURRENT MEASUREMENT, 2026-08-26, V2-078: that follow-up chose
+// dp-v2-078 route (b) and DELETED the field, together with Grant.Apply and
+// ProviderClient.Grant, because the runner already rebuilds the child's
+// environment from the approved provider-preflight record and hands it to a
+// supervisor that replaces the parent environment. Invocation's exported
+// field set is now exactly {Argv, Stdin, WorkingDirectory}, all three
+// consumed by SupervisedInvocationRunner.Run, and
+// TestInvocationEnvironmentStaysUnconsumedByTheRunner in internal/runner
+// holds that as a class guard.)
 //
 // The flags nevertheless stay, and the conclusion is unchanged -- but it now
 // rests on an equality that is asserted mechanically rather than on the old

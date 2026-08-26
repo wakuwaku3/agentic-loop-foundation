@@ -18,10 +18,17 @@ package provider
 // authentication token, no session identifier, no owner identity, no
 // executable path and no threshold number:
 //
-//   - the credential already has exactly one home (the runner's Secret
-//     Broker, whose Grant.Apply is the only path that merges a value into an
-//     Invocation environment), so a second home here would be a second
-//     place for it to leak from;
+//   - the credential already has exactly one home, the runner's Secret
+//     Broker, so a second home here would be a second place for it to leak
+//     from. HISTORICAL MEASUREMENT, 2026-08-25 (V2-077): this clause named
+//     "the runner's Grant.Apply" as "the only path that merges a value into
+//     an Invocation environment". CURRENT MEASUREMENT, 2026-08-26 (V2-078):
+//     that path never reached a process and has been deleted along with
+//     Invocation's Environment field, so there is no merge path at all;
+//     internal/runner builds the child's environment from the approved
+//     provider-preflight record alone. The clause's conclusion is unchanged
+//     -- a slot still holds no credential value -- but it no longer rests on
+//     a channel that does not exist;
 //   - the approved provider-preflight record carries the executable path
 //     bound by its approval digest, and the runner's cost ledger refuses an
 //     invocation whose resolved argv[0] disagrees with it, so a copy here

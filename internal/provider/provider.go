@@ -185,11 +185,31 @@ type Adapter interface {
 type Provider interface {
 	Run(context.Context, Request) (Result, error)
 }
+
+// Invocation is the description of the child process to start. Its exported
+// field set is exactly {Argv, Stdin, WorkingDirectory}, and every one of
+// those three is consumed by internal/runner's SupervisedInvocationRunner.Run
+// on the production path.
+//
+// MEASUREMENT, 2026-08-25 (V2-077): a fourth field, Environment, was declared
+// here and was written only by internal/runner's Grant.Apply, whose only
+// caller was reached only when ProviderClient.Grant was non-nil -- and no
+// file in the tree ever assigned it. The only reader was a test fake, so no
+// value it carried ever reached a process.
+//
+// V2-078 removed it (dp-v2-078 route (b)): rebuilding the child's environment
+// from the approved provider-preflight record is the stronger guarantee,
+// because the runner's supervisor REPLACES the parent environment rather than
+// extending it, so the record is already the complete and exclusive
+// description of what the child receives. Deleting the field makes that a
+// property of the type system instead of a fact about what Run happens to
+// read. Do not re-add a field here to carry a credential: the sanctioned
+// shape (dp-v2-078 d7) is the runner leasing exactly the names the approved
+// record's environment.granted_names declares.
 type Invocation struct {
 	Argv             []string
 	Stdin            []byte
 	WorkingDirectory string
-	Environment      []string
 }
 
 var forbidden = regexp.MustCompile(`(?i)(raw[_ -]?conversation|raw[_ -]?prompt|credential|password|private[_ -]?key|api[_ -]?key)`)

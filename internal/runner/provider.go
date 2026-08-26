@@ -82,9 +82,18 @@ type InvocationRunner interface {
 }
 
 // FakeInvocationRunner never starts a process. It records every Invocation it
-// is given (including its Environment, so a Secret Broker grant merged onto
-// the Invocation is observable by a test as the positive control for A11) and
-// returns a fixed fixture.
+// is given and returns a fixed fixture.
+//
+// HISTORICAL MEASUREMENT, 2026-08-25 (V2-077): this doc said the recorded
+// Invocation included "its Environment, so a Secret Broker grant merged onto
+// the Invocation is observable by a test as the positive control for A11".
+// That was true of the fake and false of every real child: this fake was the
+// ONLY reader of provider.Invocation's Environment field in the tree.
+//
+// CURRENT MEASUREMENT, 2026-08-26 (V2-078): the field is gone, so what this
+// fake records is exactly {Argv, Stdin, WorkingDirectory}. A11's positive
+// control now reads grant.Environment() directly, which is the same value one
+// hop earlier and is where the credential actually lives.
 type FakeInvocationRunner struct {
 	mu      sync.Mutex
 	Calls   []provider.Invocation
@@ -144,6 +153,34 @@ var ErrSupervisedInvocationRunnerIncomplete = errors.New("supervised invocation 
 // request workspace), so a disagreement means something rebuilt one of them
 // and is refused rather than silently preferred one way or the other.
 var ErrInvocationWorkingDirectoryUnusable = errors.New("supervised invocation runner: invocation working directory is unusable")
+
+// ErrInvocationEnvironmentGrantUndeliverable is returned by
+// SupervisedInvocationRunner.Run -- with no process started and no ledger
+// reservation debited -- when the approved provider-preflight record declares
+// a non-empty environment.granted_names (V2-078, dp-v2-078 d3).
+//
+// The runner builds the child's environment solely from the record's
+// environment.base_names and hands it to a supervisor that REPLACES the
+// parent environment, so there is no channel through which a granted name
+// could reach the child. Before V2-078 a declaration of this shape was
+// silently dropped: a field on provider.Invocation looked like the channel,
+// nothing ever wrote it and nothing read it. Deleting that field without
+// adding this refusal would have converted a silently-dropped grant into a
+// silently-ignored declaration, which is the same defect one level up --
+// environment.granted_names is schema-required, semantically enforced (a
+// non-empty value is forbidden for provider.name claude) and bound by the
+// approval digest, so it carries real enforcement that must be honoured
+// rather than deleted.
+//
+// The refusal is therefore fail-closed with no fallback and no repair: the
+// declaration is never partially delivered, never rewritten and never
+// ignored. Its position is load-bearing rather than tidy -- after
+// LoadPreflightRecord, because it needs the record, and STRICTLY before
+// Ledger.Reserve, because a reservation debited before a refusal stays
+// charged at worst case forever (dp-v2-017 d9). When a delivery path is
+// built, in the shape dp-v2-078 d7 names, whoever builds it deletes this
+// refusal in the same change.
+var ErrInvocationEnvironmentGrantUndeliverable = errors.New("supervised invocation runner: the approved provider-preflight record declares environment names the runner has no channel to deliver; refusing rather than running the child with a silently narrower environment")
 
 // validateInvocationWorkingDirectory implements the five fail-closed
 // properties named on ErrInvocationWorkingDirectoryUnusable, plus the
@@ -248,9 +285,13 @@ type SupervisedInvocationRunner struct {
 	// (dp-v2-017 B16/I7: inducing a deterministic transport failure by
 	// pointing the CLI at an unreachable base URL needs one diagnostic
 	// override that is not part of the approved record's base_names). It
-	// is nil for every other invocation in this task; when nil,
-	// Invocation.Environment stays exactly set-equal to
-	// environment.base_names (dp-v2-017 d8(c)).
+	// is nil for every other invocation in this task; when nil, the
+	// environment the child receives stays exactly set-equal to
+	// environment.base_names (dp-v2-017 d8(c)). Re-measured 2026-08-26
+	// (V2-078): the claim used to be phrased about
+	// "Invocation.Environment", a field that no longer exists; the property
+	// it names is unchanged, because the environment was always built here
+	// and never read off the Invocation.
 	ExtraEnv []string
 }
 
@@ -265,8 +306,10 @@ func (r SupervisedInvocationRunner) now() time.Time {
 // baseNames, sourced from this process's own environment. It fails closed
 // (returns an error, builds nothing) if any declared base name is not
 // actually set, so the built environment can never silently be a subset of
-// what the approved record declares (dp-v2-017 d8(c): Invocation.Environment
-// must be set-equal to environment.base_names).
+// what the approved record declares (dp-v2-017 d8(c): the environment handed
+// to the child must be set-equal to environment.base_names; re-measured
+// 2026-08-26 for V2-078, which deleted the provider.Invocation field that
+// clause used to be phrased in terms of without changing the property).
 func buildEnvironmentFromBaseNames(baseNames []string) ([]string, error) {
 	env := make([]string, 0, len(baseNames))
 	for _, name := range baseNames {
@@ -426,6 +469,15 @@ func (r SupervisedInvocationRunner) Run(ctx context.Context, inv provider.Invoca
 	if err != nil {
 		return nil, err
 	}
+	// V2-078: a declared grant the runner cannot deliver stops the
+	// invocation here, after the record is loaded (it is the record that
+	// declares it) and strictly before Ledger.Reserve (a reservation
+	// debited before a refusal stays charged at worst case forever,
+	// dp-v2-017 d9). Nothing is repaired and nothing is dropped.
+	if len(record.EnvironmentGranted) != 0 {
+		return nil, fmt.Errorf("%w: the record declares %d granted name(s)", ErrInvocationEnvironmentGrantUndeliverable, len(record.EnvironmentGranted))
+	}
+
 	adapterArgv0 := inv.Argv[0]
 	seq, err := r.Ledger.Reserve(record, adapterArgv0, r.Purpose, r.now())
 	if err != nil {
@@ -508,14 +560,21 @@ func (r SupervisedInvocationRunner) Run(ctx context.Context, inv provider.Invoca
 // InvocationRunner seam. It is the local Provider implementation that carries
 // a real, validated Work Packet through Build and Parse without starting a
 // real Provider CLI in this task.
+// HISTORICAL MEASUREMENT, 2026-08-25 (V2-077): this type carried a third
+// field, Grant *Grant, documented as "merged into the built Invocation's
+// Environment immediately before the seam runs it". Measured: no file in the
+// tree -- test or otherwise -- ever assigned it, and the merge it guarded
+// wrote a provider.Invocation field that SupervisedInvocationRunner never
+// read.
+//
+// CURRENT MEASUREMENT, 2026-08-26 (V2-078): the field and the merge are gone
+// (dp-v2-078 route (b)). This type composes an adapter with an
+// InvocationRunner seam and contributes nothing to the child's environment;
+// the child's environment has exactly one authority, the approved
+// provider-preflight record that SupervisedInvocationRunner.Run loads.
 type ProviderClient struct {
 	Adapter provider.Adapter
 	Runner  InvocationRunner
-	// Grant, if non-nil, is merged into the built Invocation's Environment
-	// immediately before the seam runs it. Nothing else in this package
-	// (the journal, the Work Packet, the bounded log, the canonical store)
-	// ever observes it.
-	Grant *Grant
 }
 
 func (c ProviderClient) Run(ctx context.Context, req ProviderRequest) (ProviderResult, error) {
@@ -528,9 +587,6 @@ func (c ProviderClient) Run(ctx context.Context, req ProviderRequest) (ProviderR
 	inv, err := c.Adapter.Build(provider.Request{OperationID: req.OperationID, Workspace: req.Workspace, Packet: req.Packet})
 	if err != nil {
 		return ProviderResult{}, err
-	}
-	if c.Grant != nil {
-		inv = c.Grant.Apply(inv)
 	}
 	raw, err := c.Runner.Run(ctx, inv)
 	if err != nil {

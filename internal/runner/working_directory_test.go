@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -11,7 +12,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
+	"slices"
+	"sort"
 	"strings"
 	"syscall"
 	"testing"
@@ -813,20 +817,62 @@ func TestDirectoryFlagArgumentFindsEveryFlagTheAdaptersEmit(t *testing.T) {
 	}
 }
 
-// --- A9: the second unconsumed field is recorded, not fixed. ---
+// --- A9 (V2-077) / A6 (V2-078): the class of "a field the Invocation
+// declares and Run does not consume" is closed mechanically. ---
 
-// TestInvocationEnvironmentStaysUnconsumedByTheRunner records, as an
+// TestInvocationEnvironmentStaysUnconsumedByTheRunner keeps its exact name
+// across two tasks on purpose: nothing else would tell a future reader that
+// this is where a recorded defect became a removal.
+//
+// HISTORICAL MEASUREMENT, 2026-08-25 (V2-077): this test recorded, as an
 // executable measurement rather than as prose, the same-shaped defect V2-077
-// deliberately does NOT fix: SupervisedInvocationRunner never reads
-// Invocation.Environment. It builds the child's environment itself from the
+// deliberately did NOT fix -- SupervisedInvocationRunner never read
+// Invocation.Environment. It built the child's environment itself from the
 // approved record's base names, so a Secret Broker grant merged onto the
-// Invocation does not reach a real child. The defect is latent because every
-// live exercise so far ran with granted_names empty. Fixing it would widen
-// what the child may reach and belongs to a task with its own
-// credential-isolation acceptance (recorded as V2-078); this test exists so
-// that the day someone fixes it, this assertion is the one that tells them
-// this test was the record.
+// Invocation did not reach a real child. The defect was latent because every
+// live exercise so far ran with granted_names empty. Fixing it was left to a
+// task with its own credential-isolation acceptance, recorded as V2-078.
+//
+// CURRENT MEASUREMENT, 2026-08-26 (V2-078): V2-078 chose dp-v2-078 route (b)
+// and DELETED the field, together with Grant.Apply and ProviderClient.Grant,
+// because the child's environment is already an exclusive total description
+// rebuilt from the approved record and handed to a supervisor that REPLACES
+// the parent environment -- so deleting the field makes single authority a
+// property of the type system instead of a fact about what Run happens to
+// read.
+//
+// That deletion is exactly why this test's INTENT had to change rather than
+// its name: V2-077's assertion was the ABSENCE of a read, and a read of a
+// field that does not exist cannot compile, so the old assertion could no
+// longer fail and a guard that cannot fail is not a guard. It is generalised
+// here from "Run does not read Environment" into the class guard "Invocation
+// declares no field that Run does not consume", so the next field of this
+// shape turns this test red the day it is added rather than three live
+// exercises later. Deleting this test instead would let the same defect class
+// return silently, which is the one outcome both V2-077 and V2-078 exist to
+// prevent.
 func TestInvocationEnvironmentStaysUnconsumedByTheRunner(t *testing.T) {
+	// (1) By reflection: provider.Invocation's exported field set is
+	// exactly {Argv, Stdin, WorkingDirectory}, compared as a whole sorted
+	// set so an ADDED field fails just as loudly as a missing one.
+	wantFields := []string{"Argv", "Stdin", "WorkingDirectory"}
+	typ := reflect.TypeOf(provider.Invocation{})
+	var gotFields []string
+	for i := 0; i < typ.NumField(); i++ {
+		f := typ.Field(i)
+		if f.IsExported() {
+			gotFields = append(gotFields, f.Name)
+		}
+	}
+	sort.Strings(gotFields)
+	if !slices.Equal(gotFields, wantFields) {
+		t.Fatalf("provider.Invocation's exported field set is %v, want exactly %v. An Invocation field that SupervisedInvocationRunner.Run does not consume is the defect class this guard closes (V2-077's WorkingDirectory, V2-078's Environment): CONSUME the new field in Run, or update this record deliberately with the measurement that says why it is consumed elsewhere. Do NOT delete this test.", gotFields, wantFields)
+	}
+
+	// (2) The V2-077 AST scan of SupervisedInvocationRunner.Run, kept and
+	// strengthened: Run must read EVERY field in (1), and must read no
+	// selector on inv outside that set. This is the half that can fail
+	// while (1) holds, and vice versa.
 	src, err := os.ReadFile("provider.go")
 	if err != nil {
 		t.Fatal(err)
@@ -867,11 +913,149 @@ func TestInvocationEnvironmentStaysUnconsumedByTheRunner(t *testing.T) {
 	for _, r := range reads {
 		seen[r] = true
 	}
-	if !seen["Argv"] || !seen["Stdin"] || !seen["WorkingDirectory"] {
-		t.Fatalf("SupervisedInvocationRunner.Run must read Argv, Stdin and WorkingDirectory; it reads %v", reads)
+	declared := map[string]bool{}
+	for _, f := range wantFields {
+		declared[f] = true
+		if !seen[f] {
+			t.Fatalf("provider.Invocation declares %s but SupervisedInvocationRunner.Run does not read it; Run reads %v. CONSUME the field in Run, or update this record deliberately with the measurement that says why it is consumed elsewhere. Do NOT delete this test.", f, reads)
+		}
 	}
-	if seen["Environment"] {
-		t.Fatalf("SupervisedInvocationRunner.Run now reads Invocation.Environment. That is the follow-up V2-077 deliberately did not do (it widens what a child may reach and needs its own credential-isolation acceptance): update this record deliberately, do not delete it. Reads = %v", reads)
+	for _, r := range reads {
+		if !declared[r] {
+			t.Fatalf("SupervisedInvocationRunner.Run reads inv.%s, which is not in provider.Invocation's declared exported field set %v; Run reads %v. Reconcile the two deliberately -- either the field belongs in the set or the read does not belong in Run. Do NOT delete this test.", r, wantFields, reads)
+		}
 	}
-	t.Logf("execution fact (A9, recorded not fixed): SupervisedInvocationRunner.Run reads %v from the Invocation; Environment is set by Grant.Apply and observed only by FakeInvocationRunner, so a grant does not reach a real child. Latent because every live exercise so far ran with granted_names empty.", reads)
+
+	// (3) Environment specifically is absent from (1). Kept as its own
+	// assertion because it is the one field whose return this guard exists
+	// to make loud, and because its failure message carries the
+	// instruction that says where a credential path actually belongs.
+	if slices.Contains(gotFields, "Environment") {
+		t.Fatalf("provider.Invocation declares an Environment field again. A future credential path does NOT belong on the Invocation: dp-v2-078 d7's sanctioned shape is SupervisedInvocationRunner leasing exactly the names the approved provider-preflight record's environment.granted_names declares -- names from the digest-bound record, values from the Secret Broker, never a name the record did not authorise. Re-adding this field concedes a second authority over what a child may reach, which is the defect V2-078 removed. Do NOT delete this test.")
+	}
+
+	// (4) By reflection: the two things that only existed to feed the
+	// deleted field are gone, so a revert is loud rather than quiet.
+	if _, ok := reflect.TypeOf(&Grant{}).MethodByName("Apply"); ok {
+		t.Fatal("runner.Grant has a method named Apply again. Grant.Apply was the ONLY writer of provider.Invocation.Environment in the tree and wrote a field no child ever received; restoring it restores the pretence of a delivery channel. dp-v2-078 d7 names the sanctioned shape instead. Do NOT delete this test.")
+	}
+	if _, ok := reflect.TypeOf(ProviderClient{}).FieldByName("Grant"); ok {
+		t.Fatal("runner.ProviderClient has a field named Grant again. It was assigned by no file in the tree, and the merge it guarded reached only a test fake. dp-v2-078 d7 names the sanctioned shape instead. Do NOT delete this test.")
+	}
+
+	t.Logf("execution fact (V2-078 A6, class guard): provider.Invocation's exported field set is exactly %v; SupervisedInvocationRunner.Run reads %v from the Invocation -- every declared field and nothing else; Grant has no Apply method and ProviderClient has no Grant field. The environment a child receives therefore has exactly one authority, the approved provider-preflight record, with no second field able to carry one.", gotFields, reads)
+}
+
+// --- V2-078 A10: nothing about what a real child receives changes, and the
+// single authority over it is asserted rather than assumed. ---
+
+// TestChildEnvironmentIsExactlyTheApprovedRecordBaseNames measures the claim
+// V2-078's deletion rests on: the approved provider-preflight record is
+// already the COMPLETE and EXCLUSIVE description of the environment a child
+// receives, so removing provider.Invocation's Environment field removed the
+// only field that suggested otherwise and changed the bytes a real child
+// receives not at all.
+//
+// The measurement is in two halves, both deterministic and neither timed:
+//
+//	(1) buildEnvironmentFromBaseNames -- the one function Run uses to build
+//	    the child's environment -- returns a set of names exactly equal to
+//	    the record's environment.base_names, no more and no fewer;
+//	(2) a real child run through ProcessSupervisor with that Env reports its
+//	    own environment, and the names it reports are exactly that same set.
+//	    Half (2) is what makes half (1) a fact about a child rather than a
+//	    fact about a slice: ProcessSupervisor assigns cmd.Env, which REPLACES
+//	    the parent environment rather than extending it, so anything the
+//	    parent has and the record does not declare must be absent from the
+//	    child's own report.
+//
+// The child is /usr/bin/env or equivalent -- never a Provider CLI -- and it
+// prints NAMES only. No value is printed, compared or logged.
+func TestChildEnvironmentIsExactlyTheApprovedRecordBaseNames(t *testing.T) {
+	scratch := realDir(t, t.TempDir())
+	execPath := filepath.Join(scratch, "claude")
+	marker := filepath.Join(scratch, "marker")
+	writeFakeExecutable(t, execPath, marker)
+	recordPath := writeFixturePreflightRecord(t, mustRepoRoot(t), scratch, "V2-993", execPath, fixtureLimits{MaxInvocations: 4, MaxTotalCostUSD: 10, WorstCaseReservationUSD: 1})
+	record, err := LoadPreflightRecord(mustRepoRoot(t), recordPath)
+	if err != nil {
+		t.Fatalf("load preflight record: %v", err)
+	}
+	if len(record.EnvironmentBaseNames) == 0 {
+		t.Fatal("the fixture record declares no base names, so this measurement would be vacuous")
+	}
+
+	// (1) Set equality between the built environment and the record.
+	env, err := buildEnvironmentFromBaseNames(record.EnvironmentBaseNames)
+	if err != nil {
+		t.Fatalf("build environment: %v", err)
+	}
+	built := map[string]bool{}
+	for _, kv := range env {
+		name, _, ok := strings.Cut(kv, "=")
+		if !ok {
+			t.Fatalf("built environment entry is not NAME=value shaped")
+		}
+		built[name] = true
+	}
+	declared := map[string]bool{}
+	for _, n := range record.EnvironmentBaseNames {
+		declared[n] = true
+	}
+	if len(built) != len(declared) {
+		t.Fatalf("built environment names = %d, record base names = %d; the two must be set-equal", len(built), len(declared))
+	}
+	for n := range declared {
+		if !built[n] {
+			t.Fatalf("record declares base name %s but the built environment does not carry it", n)
+		}
+	}
+	for n := range built {
+		if !declared[n] {
+			t.Fatalf("built environment carries %s, which the record does not declare", n)
+		}
+	}
+
+	// (2) A real child, with that Env, reports exactly those names.
+	var stdout bytes.Buffer
+	sup := ProcessSupervisor{TermGrace: 2 * time.Second, Env: env, Stdout: &stdout}
+	if err := sup.Run(context.Background(), []string{resolveTool("env")}); err != nil {
+		t.Fatalf("child that reports its own environment: %v", err)
+	}
+	reported := map[string]bool{}
+	for _, line := range strings.Split(strings.TrimSpace(stdout.String()), "\n") {
+		if line == "" {
+			continue
+		}
+		name, _, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		reported[name] = true
+	}
+	if len(reported) == 0 {
+		t.Fatal("the child reported no environment names at all, so this measurement would be vacuous")
+	}
+	for n := range declared {
+		if !reported[n] {
+			t.Fatalf("the child did not receive declared base name %s; it reported %v", n, sortedNames(reported))
+		}
+	}
+	for n := range reported {
+		if !declared[n] {
+			t.Fatalf("the child received %s, which the approved record does not declare; cmd.Env REPLACES the parent environment, so this would mean a second authority exists. Child reported %v, record declares %v", n, sortedNames(reported), sortedNames(declared))
+		}
+	}
+	t.Logf("execution fact (V2-078 A10): the environment a child receives is set-equal to the approved record's environment.base_names, measured as NAMES only (%v) with no value read, compared or logged. ProcessSupervisor assigns cmd.Env, which replaces rather than extends the parent environment, so the record is the complete and exclusive description of what the child can read.", sortedNames(reported))
+}
+
+// sortedNames renders a name set deterministically for a failure message. It
+// exists so no assertion above depends on map iteration order.
+func sortedNames(set map[string]bool) []string {
+	out := make([]string, 0, len(set))
+	for n := range set {
+		out = append(out, n)
+	}
+	sort.Strings(out)
+	return out
 }

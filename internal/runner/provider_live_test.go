@@ -542,12 +542,18 @@ func (fx *liveFixture) testI3(t *testing.T) {
 		}
 	})
 
-	// (c) No Grant is attached; the built Invocation.Environment is
-	// set-equal to environment.base_names. Run's only call site for
-	// building that environment is buildEnvironmentFromBaseNames(record.
+	// (c) The environment the child receives is set-equal to
+	// environment.base_names. Run's only call site for building that
+	// environment is buildEnvironmentFromBaseNames(record.
 	// EnvironmentBaseNames) (provider.go), verified here by calling the
-	// same exported function directly and by AST-scanning provider.go's
-	// single call site.
+	// same function directly and by AST-scanning provider.go's single call
+	// site. Re-measured 2026-08-26 (V2-078): this comment used to say "No
+	// Grant is attached; the built Invocation.Environment is ...". There is
+	// no longer any Grant to attach and no Invocation field to attach it to
+	// -- Grant.Apply, ProviderClient.Grant and Invocation.Environment were
+	// all deleted -- and the assertion below is unchanged, because it always
+	// measured the environment the runner builds rather than anything the
+	// Invocation carried.
 	t.Run("c_environment_set_equal_to_base_names", func(t *testing.T) {
 		env, err := buildEnvironmentFromBaseNames(fx.record.EnvironmentBaseNames)
 		if err != nil {

@@ -195,7 +195,6 @@ func TestSecretBrokerCredentialNeverLeaksExceptIntoOneInvocationEnvironment(t *t
 	if err != nil {
 		t.Fatal(err)
 	}
-	inv = grant.Apply(inv)
 
 	runner := &FakeInvocationRunner{Fixture: []byte(`{"status":"success","checkpoint":"cp-1"}`)}
 	raw, err := runner.Run(context.Background(), inv)
@@ -297,16 +296,36 @@ func TestSecretBrokerCredentialNeverLeaksExceptIntoOneInvocationEnvironment(t *t
 	}
 
 	// Presence (positive control): a search that never finds anything proves
-	// nothing by itself. The credential MUST appear in Invocation.Environment
-	// -- that is the one channel it is supposed to reach.
+	// nothing by itself. The credential MUST appear in the one channel it is
+	// supposed to reach -- the leased Grant's own environment.
+	//
+	// HISTORICAL MEASUREMENT, 2026-08-25 (V2-077): this control read
+	// runner.Calls[0].Environment, i.e. the credential after Grant.Apply had
+	// merged it onto the Invocation and FakeInvocationRunner had recorded it.
+	//
+	// CURRENT MEASUREMENT, 2026-08-26 (V2-078): Grant.Apply,
+	// ProviderClient.Grant and provider.Invocation.Environment are deleted
+	// (dp-v2-078 route (b)), because that merge reached a test fake and never
+	// a process. The control now reads grant.Environment() -- the same value
+	// one hop earlier, at exactly the same strength: its only job is to prove
+	// the crypto/rand fixture this test generated is genuinely the value the
+	// broker produced, so that the absence scans above are over the right
+	// bytes. Every absence target and both argv scans are unchanged.
+	//
+	// The test's NAME is unchanged deliberately, and "one invocation
+	// environment" now names the one leased Grant environment destined for
+	// one invocation -- the CHANNEL, not a struct field. The name is load
+	// bearing outside this package: internal/reconciler's failure matrix
+	// carries it as a string literal for the "secret-like fixture in commit,
+	// log, Provider outbound" row of the failure model.
 	found := false
-	for _, e := range runner.Calls[0].Environment {
+	for _, e := range grant.Environment() {
 		if bytes.Contains([]byte(e), secretBytes) {
 			found = true
 			break
 		}
 	}
 	if !found {
-		t.Fatal("positive control failed: credential did not appear in Invocation.Environment; the absence search above is vacuous")
+		t.Fatal("positive control failed: the credential did not appear in the leased grant's own environment; the absence search above is vacuous")
 	}
 }

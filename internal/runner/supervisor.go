@@ -13,9 +13,27 @@ import (
 // ProcessSupervisor runs one child in its own process group and terminates
 // the whole group (TERM then, after TermGrace, KILL) when ctx is cancelled.
 //
-// Env, if non-nil, is the exact environment the child receives (this is the
-// only place a Secret Broker grant may be merged into a child's environment;
-// nil means "inherit exec.Command's default", matching earlier behaviour).
+// Env, if non-nil, is the exact and EXCLUSIVE environment the child receives:
+// the assignment below REPLACES the parent environment rather than extending
+// it (nil means "inherit exec.Command's default", matching earlier
+// behaviour). That replacement is why the caller's source of Env is the whole
+// authority over what the child can read.
+//
+// HISTORICAL MEASUREMENT, 2026-08-25 (V2-077): this paragraph called Env "the
+// only place a Secret Broker grant may be merged into a child's environment".
+// The uniqueness claim was true and the premise behind it was not: the merge
+// it referred to (internal/runner's Grant.Apply, via ProviderClient.Grant)
+// wrote a provider.Invocation field that no caller of this type ever read, so
+// no grant ever arrived here.
+//
+// CURRENT MEASUREMENT, 2026-08-26 (V2-078): Grant.Apply and
+// ProviderClient.Grant are deleted, so there is no merge to be the only place
+// for. The single caller that sets Env is SupervisedInvocationRunner.Run,
+// which builds it from the approved provider-preflight record's
+// environment.base_names (plus its one declared ExtraEnv diagnostic) and
+// refuses outright when that record declares granted names it cannot deliver.
+// A future credential path belongs there, in the shape dp-v2-078 d7 names,
+// and not in a field on the Invocation.
 //
 // Confine, if non-nil, runs the child inside a rootless user+mount
 // namespace confined to Confine.Workspace (see NamespaceConfinement's doc

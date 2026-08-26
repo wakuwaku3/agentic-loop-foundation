@@ -1,0 +1,106 @@
+{
+ "schema_version": "v1",
+ "id": "ev-v2-078-provider",
+ "kind": "evidence",
+ "created_at": "2026-08-26T02:40:00Z",
+ "correlation_id": "v2-078-invocation-environment",
+ "task_id": "V2-078",
+ "component": "provider",
+ "evidence_key": "df6ccc0b84ba3901b3e8dc162b0cb69fcc43e94e963043a875194338cc60b279",
+ "result": "passed",
+ "checks": [
+  {
+   "name": "a1-scope-boundary-declared-before-any-code",
+   "status": "passed",
+   "argv": [
+    "cat",
+    ".agents/v2/packets/V2-078-work-order.json",
+    ".agents/v2/packets/V2-078-design-packet.json"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 1200,
+   "summary": "SCOPE BOUNDARY, authored before any code edit in this task. ROW 1 -- what this task makes true: the environment a child process receives has exactly one authority, and that is enforced by the ABSENCE of any other field able to carry one -- provider.Invocation loses its Environment field, internal/runner loses Grant.Apply and ProviderClient.Grant -- and a provider-preflight record that declares an environment.granted_names the runner has no channel to deliver now refuses the invocation fail-closed, after LoadPreflightRecord and strictly before Ledger.Reserve, with no process started and no reservation debited. ROW 2 -- what it deliberately does NOT do: it widens nothing any child may reach; it adds no environment entry to any child; it delivers no credential to any child; it changes no mount; it changes no argv; and it changes the bytes a real claude child receives not at all. ROW 3 -- what it RECORDS but does not fix: SupervisedInvocationRunner.ExtraEnv, the one declared additive environment source outside the approved record, set in exactly one place in the tree for dp-v2-017 B16/I7's transport-failure diagnostic; and Grant.id, a field written by randomGrantID and read by nothing (dp-v2-078 d11). Neither is changed. ROW 4 -- what only a LATER task can establish: actual delivery of a granted name to a real child, in the shape dp-v2-078 d7 names (SupervisedInvocationRunner leasing exactly the names the approved record declares, names from the record and values from the broker), with its own credential-isolation acceptance. ROW 5 -- this task closes a LATENT defect and no open hole, in those words: no non-test file constructs a SecretBroker, no file in the tree assigns ProviderClient.Grant, all three approved records declare granted_names empty, contracts rule 4 forbids a non-empty granted_names for claude which is the only provider any record names, and cmd/runner/main.go carries no provider wiring at all. What this task buys is that the day something IS granted, the system refuses loudly instead of running with a silently narrower environment. ROW 6 -- this task passes no release gate and satisfies no M6 completion condition. ORDERING: authored at 2026-08-26T01:53:24Z with the worktree still clean; the first code edit followed it. machine=WSL2 host; uname -srm = Linux 6.18.33.2-microsoft-standard-WSL2 x86_64; go version (resolved inside devbox run --pure) = go1.25.0 linux/amd64; devbox 0.17.2 with --pure; base commit a614414."
+  },
+  {
+   "name": "a4-provider-invocation-loses-its-fourth-field",
+   "status": "passed",
+   "argv": [
+    "git",
+    "diff",
+    "--",
+    "internal/provider/provider.go"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 1200,
+   "summary": "provider.Invocation's Environment field is DELETED. Measured at internal/provider/provider.go:192 on the tree at base a614414 -- a DISAGREEMENT with the Work Order's :165, which was read at 47b53c9 before V2-074 landed. Its exported field set is now exactly {Argv, Stdin, WorkingDirectory}, and a doc comment above the type records why: it keeps V2-077's 2026-08-25 measurement (the field was written only by internal/runner's Grant.Apply, whose caller was reached only when ProviderClient.Grant was non-nil, which no file ever set; the only reader was a test fake) and states V2-078's 2026-08-26 decision (dp-v2-078 route (b)) with the instruction not to re-add a field here for a credential, naming dp-v2-078 d7's shape instead. internal/provider/adapters.go is UNTOUCHED (git diff --stat for it is empty) and its single shared build helper still constructs `Invocation{Argv: argv, Stdin: b, WorkingDirectory: req.Workspace}` -- measured at :66, a DISAGREEMENT with the Work Order's :47 (V2-074 inserted the CLI-version compatibility block above it). That literal never set the deleted field, so the deletion removes a write path and no read path. devbox run --pure -- go test -count=1 ./internal/provider VERDICT: ok. devbox run --pure -- make component-provider VERDICT: 'ok .../internal/provider 0.230s'. All 85 top-level tests in internal/provider pass under their existing names; the count is unchanged before and after. machine=WSL2 host; uname -srm = Linux 6.18.33.2-microsoft-standard-WSL2 x86_64; go version (resolved inside devbox run --pure) = go1.25.0 linux/amd64; devbox 0.17.2 with --pure; base commit a614414."
+  },
+  {
+   "name": "a11-pool-and-adapters-test-comments-corrected-pool-is-comment-only",
+   "status": "passed",
+   "argv": [
+    "git",
+    "diff",
+    "-U0",
+    "--",
+    "internal/provider/pool.go",
+    "internal/provider/adapters_test.go"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 1200,
+   "summary": "TWO sites in this component argued from the deleted field and both are corrected in the same change, each keeping its historical measurement with its date. (1) internal/provider/pool.go:22-25 called the runner's Grant.Apply 'the only path that merges a value into an Invocation environment'. That uniqueness claim becomes FALSE the moment Apply is gone, so it is corrected rather than left: the clause now keeps its conclusion (a pool slot holds no credential value, so it is not a second place to leak from) while recording, as HISTORICAL MEASUREMENT 2026-08-25 and CURRENT MEASUREMENT 2026-08-26, that the path it named never reached a process and has been deleted, and that internal/runner builds the child's environment from the approved provider-preflight record alone. (2) internal/provider/adapters_test.go:141-145 said both of its measurements were 'silent on Invocation.Environment: the runner has never read it ... a second, same-shaped defect, recorded by V2-077 and owned by its follow-up, not fixed here'. V2-077's text is kept verbatim as HISTORICAL MEASUREMENT with its date, and the CURRENT MEASUREMENT records that the follow-up chose route (b), deleted the field together with Grant.Apply and ProviderClient.Grant, and that Invocation's exported field set is now exactly {Argv, Stdin, WorkingDirectory} held by a class guard in internal/runner. COMMENT-ONLY PROOF for internal/provider/pool.go: `git diff -U0 -- internal/provider/pool.go` filtered to drop the +++/--- headers and every added/removed line beginning a // comment leaves ZERO lines. internal/provider/source_guard_test.go was NOT edited and is green; internal/provider/adapters.go, breaker.go, usagewindow.go, handoff.go and testdata/** were not edited. machine=WSL2 host; uname -srm = Linux 6.18.33.2-microsoft-standard-WSL2 x86_64; go version (resolved inside devbox run --pure) = go1.25.0 linux/amd64; devbox 0.17.2 with --pure; base commit a614414."
+  },
+  {
+   "name": "a6-the-class-guard-that-holds-this-component-s-field-set",
+   "status": "passed",
+   "argv": [
+    "devbox",
+    "run",
+    "--pure",
+    "--",
+    "go",
+    "test",
+    "-count=1",
+    "-run",
+    "TestInvocationEnvironmentStaysUnconsumedByTheRunner",
+    "-v",
+    "./internal/runner"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 1200,
+   "summary": "The guard that keeps provider.Invocation's field set closed lives in internal/runner (it must, because half of it AST-scans internal/runner/provider.go's Run), and it is recorded here because the invariant it holds is this component's type. By reflection it pins provider.Invocation's exported field set to exactly {Argv, Stdin, WorkingDirectory} as a whole sorted set, so a field ADDED to this package's Invocation turns that test red immediately. PROVEN ABLE TO FAIL against this very type: a scratch exported field ScratchProbe was added to provider.Invocation and the guard's VERDICT became FAIL -- 'provider.Invocation's exported field set is [Argv ScratchProbe Stdin WorkingDirectory], want exactly [Argv Stdin WorkingDirectory]' with the instruction to consume the field in Run or update the record deliberately, and never to delete the test. The scratch field was removed and the guard returned to ok; it appears in no commit. machine=WSL2 host; uname -srm = Linux 6.18.33.2-microsoft-standard-WSL2 x86_64; go version (resolved inside devbox run --pure) = go1.25.0 linux/amd64; devbox 0.17.2 with --pure; base commit a614414."
+  },
+  {
+   "name": "a15-a16-determinism-and-verification-for-this-component",
+   "status": "passed",
+   "argv": [
+    "devbox",
+    "run",
+    "--pure",
+    "--",
+    "go",
+    "test",
+    "-count=1",
+    "./internal/runner",
+    "./internal/provider"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 1200,
+   "summary": "THREE CONSECUTIVE RUNS of devbox run --pure -- go test -count=1 ./internal/runner ./internal/provider with every live gate unset: verdict line 'ok github.com/takushi/agentic-loop-foundation/v2/internal/provider' each time, outputs byte-identical after normalising only the elapsed-time measurement. RACE: 'ok .../internal/provider 2.796s' with no race reported. devbox run --pure -- go test ./... green everywhere; devbox run --pure -- go vet ./... clean; devbox run --pure -- make component-provider green by its own verdict line; devbox run --pure -- make component-runner and make component-docs green by theirs. The full make check was NOT run -- the coordinator runs it once at integration. No Provider CLI was invoked, not even --version or --help, so no Provider usage was consumed and no live record is claimed. Every run judged by its verdict line, never by the shell exit status. No test in this package was deleted, renamed or skipped; before and after top-level counts are both 85, measured with go test -list. machine=WSL2 host; uname -srm = Linux 6.18.33.2-microsoft-standard-WSL2 x86_64; go version (resolved inside devbox run --pure) = go1.25.0 linux/amd64; devbox 0.17.2 with --pure; base commit a614414."
+  },
+  {
+   "name": "a18-a19-provider-evidence-key-and-manifest",
+   "status": "passed",
+   "argv": [
+    "devbox",
+    "run",
+    "--pure",
+    "--",
+    "make",
+    "evidence-keys"
+   ],
+   "working_directory": ".",
+   "timeout_seconds": 1200,
+   "summary": "evidence_key for this component measured with devbox run --pure -- make evidence-keys on the final tree with every touched file already git-added: provider = df6ccc0b84ba3901b3e8dc162b0cb69fcc43e94e963043a875194338cc60b279. Exactly two keys were measured for this task (runner and provider); no key was copied from an earlier record and all 23 were not measured as such. Under gate rule G6a per-component key equality is provenance, not a pass/fail condition, and neither key movement nor key stability is treated as a verdict. OWNER of the remaining key movement under gate rule G6: V2-045. MANIFEST: the provider component's only root is internal/provider/**, its dependencies list is empty, and this change adds and removes no import in the package -- internal/provider/provider.go loses a field and internal/provider/pool.go changes comment lines only. No new edge, so ci/components.json, Makefile, go.mod, go.sum and devbox.* are untouched. No module-path string literal was written into any file in this package. This task touches none of the six surface-chain groups. machine=WSL2 host; uname -srm = Linux 6.18.33.2-microsoft-standard-WSL2 x86_64; go version (resolved inside devbox run --pure) = go1.25.0 linux/amd64; devbox 0.17.2 with --pure; base commit a614414."
+  }
+ ]
+}

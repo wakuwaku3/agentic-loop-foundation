@@ -186,12 +186,20 @@ func TestJourneyOneLocalIssueIntakeToIncrementArtifact(t *testing.T) {
 			}
 		}
 	}
-	// No Secret Broker grant was merged onto this Invocation, so its
-	// Environment must be empty; the allowlisted-merge case is exercised at
-	// strength in secret_broker_test.go.
-	if len(inv.Environment) != 0 {
-		t.Fatalf("invocation environment was not empty without a grant: %#v", inv.Environment)
-	}
+	// HISTORICAL MEASUREMENT, 2026-08-25: this step asserted
+	// len(inv.Environment) == 0 -- "no Secret Broker grant was merged onto
+	// this Invocation, so its Environment must be empty".
+	//
+	// CURRENT MEASUREMENT, 2026-08-26 (V2-078): the claim is now STRUCTURAL
+	// and cannot be written as a runtime assertion, because
+	// provider.Invocation no longer declares an Environment field at all --
+	// its exported field set is exactly {Argv, Stdin, WorkingDirectory}
+	// (dp-v2-078 route (b)). An Invocation built here can carry no
+	// environment whatsoever, granted or otherwise, so the assertion did not
+	// weaken: it became a property of the type. The field set is held by
+	// TestInvocationEnvironmentStaysUnconsumedByTheRunner, and the
+	// credential-non-leakage case is still exercised at strength in
+	// secret_broker_test.go.
 	if info, err := os.Lstat(ws); err != nil {
 		t.Fatal(err)
 	} else {

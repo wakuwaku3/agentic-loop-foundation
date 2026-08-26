@@ -78,6 +78,19 @@ type fixtureLimits struct {
 // without this test ever writing to a prohibited path.
 func writeFixturePreflightRecord(t *testing.T, repoRoot, dir, taskID, executablePath string, limits fixtureLimits) string {
 	t.Helper()
+	return writeFixturePreflightRecordWithEnvironment(t, repoRoot, dir, taskID, executablePath, limits, "claude", []string{"HOME", "PATH"}, []string{})
+}
+
+// writeFixturePreflightRecordWithEnvironment is the same helper with the two
+// fields V2-078's refusal needs to vary made explicit: provider.name and
+// environment.granted_names. It exists because contracts rule 4 forbids a
+// non-empty granted_names whenever provider.name is claude, so a fixture that
+// declares one must name a different authorised provider -- otherwise the
+// refusal would fire inside LoadPreflightRecord's schema validation instead of
+// in the code under test. Every pre-existing caller reaches this through
+// writeFixturePreflightRecord above with byte-identical behaviour.
+func writeFixturePreflightRecordWithEnvironment(t *testing.T, repoRoot, dir, taskID, executablePath string, limits fixtureLimits, providerName string, baseNames, grantedNames []string) string {
+	t.Helper()
 	subjectPath := filepath.Join(repoRoot, ".agents", "v2", "packets", "V2-017-work-order.json")
 	subjectBytes, err := os.ReadFile(subjectPath)
 	if err != nil {
@@ -91,7 +104,7 @@ func writeFixturePreflightRecord(t *testing.T, repoRoot, dir, taskID, executable
 		"created_at":     "2026-08-25T04:00:00Z",
 		"correlation_id": "costledger-fixture",
 		"task_id":        taskID,
-		"provider":       map[string]any{"name": "claude", "version": "2.1.241", "executable_path": executablePath},
+		"provider":       map[string]any{"name": providerName, "version": "2.1.241", "executable_path": executablePath},
 		"limits": map[string]any{
 			"max_invocations":            limits.MaxInvocations,
 			"max_total_cost_usd":         limits.MaxTotalCostUSD,
@@ -102,7 +115,7 @@ func writeFixturePreflightRecord(t *testing.T, repoRoot, dir, taskID, executable
 			"enforced_by":                "internal/runner.SupervisedInvocationRunner and internal/runner.CostLedger",
 			"fail_closed":                true,
 		},
-		"environment": map[string]any{"base_names": []string{"HOME", "PATH"}, "granted_names": []string{}},
+		"environment": map[string]any{"base_names": baseNames, "granted_names": grantedNames},
 		"rollback": map[string]any{
 			"trigger":               "fixture",
 			"argv":                  []string{"true"},
@@ -585,4 +598,103 @@ func TestClaudeAdapterParseRejectsRealShapeButProjectionSucceeds(t *testing.T) {
 
 func bytesContainsString(b []byte, s string) bool {
 	return strings.Contains(string(b), s)
+}
+
+// --- V2-078 A5: a declared grant the runner cannot deliver is refused, after
+// the record is loaded and strictly before any reservation is debited. ---
+
+// newGrantDeclaringRunnerFixture is newRunnerFixture with provider.name codex
+// and an explicit environment.granted_names. codex rather than claude is
+// forced by the contracts layer, not chosen for variety: rule 4 forbids a
+// non-empty granted_names whenever provider.name is claude, so a claude
+// fixture would be refused inside LoadPreflightRecord's schema validation and
+// the refusal under test would never be reached. The fake executable, the
+// ledger provider and argv[0] are all "codex" so that the empty-granted_names
+// direction below is refused by nothing at all.
+func newGrantDeclaringRunnerFixture(t *testing.T, grantedNames []string) *runnerFixture {
+	t.Helper()
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "marker")
+	execPath := filepath.Join(dir, "codex")
+	writeFakeExecutable(t, execPath, marker)
+	recordPath := writeFixturePreflightRecordWithEnvironment(t, mustRepoRoot(t), dir, "V2-994", execPath,
+		fixtureLimits{MaxInvocations: 16, MaxTotalCostUSD: 10, WorstCaseReservationUSD: 1},
+		"codex", []string{"HOME", "PATH"}, grantedNames)
+	log, err := NewBoundedLog(dir, "grant-declaring-fixture-execution", 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &runnerFixture{
+		runner: SupervisedInvocationRunner{
+			Supervisor: ProcessSupervisor{TermGrace: 2 * time.Second},
+			Log:        log,
+			Ledger:     &CostLedger{Path: filepath.Join(dir, "ledger.json"), Provider: "codex", TaskID: "V2-994"},
+			RepoRoot:   mustRepoRoot(t),
+			RecordPath: recordPath,
+			Purpose:    "grant-declaring-fixture-purpose",
+		},
+		markerPath: marker,
+		ledgerPath: filepath.Join(dir, "ledger.json"),
+		recordPath: recordPath,
+	}
+}
+
+// codexInvocationForFixture is invocationForFixture with argv[0] matching the
+// codex fixture's executable basename, so Reserve's basename cross-check is
+// not what refuses the empty-granted_names direction.
+func codexInvocationForFixture() provider.Invocation {
+	return provider.Invocation{
+		Argv:             []string{"codex", "exec", "--json"},
+		WorkingDirectory: fixtureWorkingDirectory(),
+	}
+}
+
+// TestSupervisedInvocationRunnerRefusesAnUndeliverableEnvironmentGrant is
+// V2-078's replacement for the field it deleted. Deleting
+// provider.Invocation.Environment on its own would have converted a
+// silently-dropped grant into a silently-ignored declaration: the approved
+// record's environment.granted_names is schema-required, is semantically
+// enforced (a non-empty value is forbidden for claude) and is bound by the
+// approval digest, so it carries real enforcement that must be honoured
+// rather than deleted. It is honoured by refusing.
+//
+// The ORDERING is asserted rather than commented, in both of the ways the
+// package already asserts it: the ledger file must not exist afterwards
+// (Reserve persists a reservation to disk before anything may execute, so an
+// absent ledger file is proof Reserve was never reached) and the marker file
+// must not exist (proof no process started). The fixture's limits would admit
+// a reservation, so an absent ledger file is a fact about the ordering rather
+// than a fact about the limits.
+func TestSupervisedInvocationRunnerRefusesAnUndeliverableEnvironmentGrant(t *testing.T) {
+	t.Run("declared_grant_is_refused_before_any_reservation", func(t *testing.T) {
+		fx := newGrantDeclaringRunnerFixture(t, []string{"CODEX_TOKEN"})
+		_, err := fx.runner.Run(context.Background(), codexInvocationForFixture())
+		if !errors.Is(err, ErrInvocationEnvironmentGrantUndeliverable) {
+			t.Fatalf("want ErrInvocationEnvironmentGrantUndeliverable, got %v", err)
+		}
+		fx.assertNoProcessStarted(t)
+		if _, statErr := os.Stat(fx.ledgerPath); !os.IsNotExist(statErr) {
+			t.Fatalf("a ledger file exists after the refusal, so the refusal did not precede Ledger.Reserve (stat error = %v)", statErr)
+		}
+		// The refusal names neither a credential nor a value: it reports
+		// only that names were declared and that there is no channel.
+		if strings.Contains(err.Error(), "CODEX_TOKEN") {
+			t.Fatalf("the refusal must not echo a declared name back: %v", err)
+		}
+		t.Logf("execution fact (V2-078 A5): a record declaring 1 granted name is refused with no ledger file at %s and no process started; the reservation was never debited", fx.ledgerPath)
+	})
+
+	// Both directions, so the refusal is a fact about granted_names and not
+	// a fact about codex, about this fixture, or about the fixture's limits.
+	t.Run("empty_granted_names_is_not_refused_for_this_reason", func(t *testing.T) {
+		fx := newGrantDeclaringRunnerFixture(t, []string{})
+		_, err := fx.runner.Run(context.Background(), codexInvocationForFixture())
+		if errors.Is(err, ErrInvocationEnvironmentGrantUndeliverable) {
+			t.Fatalf("an empty environment.granted_names must not trigger the undeliverable-grant refusal, got %v", err)
+		}
+		if _, statErr := os.Stat(fx.ledgerPath); statErr != nil {
+			t.Fatalf("with granted_names empty, Run must reach Ledger.Reserve and persist a reservation; stat %s: %v", fx.ledgerPath, statErr)
+		}
+		t.Logf("execution fact (V2-078 A5, other direction): the same fixture with environment.granted_names empty reaches Ledger.Reserve (ledger file present) and is refused by nothing on this account; Run returned err=%v", err)
+	})
 }

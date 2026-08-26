@@ -11,17 +11,36 @@ import (
 
 	"github.com/takushi/agentic-loop-foundation/v2/internal/application"
 	"github.com/takushi/agentic-loop-foundation/v2/internal/domain"
-	"github.com/takushi/agentic-loop-foundation/v2/internal/provider"
 )
 
 // The Secret Broker is the runner's two-channel credential boundary
 // (dp-v2-016 d7). The guarded base environment (GuardEnvironment) is what the
 // bounded log and the journal may observe. The granted channel below is
-// produced only by Lease, for one Scope and one Invocation, and is merged
-// into the child environment by the caller (ProviderClient.Run merges it onto
-// the Invocation immediately before the InvocationRunner seam); it is never
+// produced only by Lease, for one Scope and one Invocation, and is never
 // returned to any code path that writes the journal, the Work Packet, the
 // canonical store or the bounded log.
+//
+// HISTORICAL MEASUREMENT, 2026-08-25 (V2-077): this header used to say the
+// granted channel "is merged into the child environment by the caller
+// (ProviderClient.Run merges it onto the Invocation immediately before the
+// InvocationRunner seam)". That claim was measured false: the merge wrote
+// provider.Invocation's Environment field, which SupervisedInvocationRunner
+// never read, so the value reached a test fake and never a process.
+//
+// CURRENT MEASUREMENT, 2026-08-26 (V2-078): there is no delivery path at all,
+// and the claim is gone with it. Grant.Apply and ProviderClient.Grant were
+// deleted (dp-v2-078 route (b)) because the child's environment is built
+// solely from the approved provider-preflight record's environment.base_names
+// and handed to a supervisor that REPLACES the parent environment. The
+// authorisation mechanism below -- Permit under an effective stop, a non-zero
+// and matching fencing token, the per-provider name allowlist, single use and
+// revocation -- is unchanged and is what this type is for. The one sanctioned
+// future delivery shape is dp-v2-078 d7: SupervisedInvocationRunner leases
+// exactly the names the approved record's environment.granted_names declares,
+// names from the record and values from this broker. Until that exists, a
+// record declaring a non-empty granted_names is REFUSED by
+// SupervisedInvocationRunner.Run (ErrInvocationEnvironmentGrantUndeliverable)
+// rather than silently dropped.
 var (
 	ErrSecretExpired          = errors.New("secret broker: scope has already expired")
 	ErrSecretDenied           = errors.New("secret broker: credential permit denied")
@@ -76,8 +95,15 @@ type Scope struct {
 }
 
 // Grant is a single-use, revocable credential handed out by Lease for one
-// Scope. Only Environment() ever exposes the credential value, and only to
-// the code path that is about to merge it into a child process environment.
+// Scope. Only Environment() ever exposes the credential value.
+//
+// The id field is written by randomGrantID and read by nothing (dp-v2-078
+// d11(b), measured 2026-08-26). It is the same "declared but unconsumed"
+// shape as the field V2-078 deleted from provider.Invocation, and it is kept
+// deliberately: it is unexported, so it misleads no caller about what any
+// child receives, and a per-grant identity is what a revocation or an audit
+// record needs. Whether it stays is the tech_lead's call in the task that
+// gives revocation or audit a durable record, not this one's.
 type Grant struct {
 	id  string
 	env []string
@@ -85,17 +111,21 @@ type Grant struct {
 
 // Environment returns the KEY=VALUE environment entries this grant carries.
 // The returned slice is a defensive copy.
+//
+// HISTORICAL MEASUREMENT, 2026-08-25 (V2-077): this accessor's doc promised
+// it exposed the value "only to the code path that is about to merge it into
+// a child process environment".
+//
+// CURRENT MEASUREMENT, 2026-08-26 (V2-078): NO SUCH PATH EXISTS. The only
+// caller that ever merged it (Grant.Apply, via ProviderClient.Run) wrote a
+// provider.Invocation field the runner never read, and both were deleted.
+// This accessor therefore claims nothing about any child: it returns the
+// entries a leased grant carries, and today the only consumers are the tests
+// that prove the broker's five fail-closed refusals and that a credential
+// leaks into none of the durable or observable surfaces. The one sanctioned
+// future consumer is dp-v2-078 d7's delivery inside
+// SupervisedInvocationRunner.
 func (g *Grant) Environment() []string { return append([]string(nil), g.env...) }
-
-// Apply merges this grant's environment onto inv.Environment and returns the
-// updated Invocation. It never mutates any other field.
-func (g *Grant) Apply(inv provider.Invocation) provider.Invocation {
-	if g == nil {
-		return inv
-	}
-	inv.Environment = append(append([]string(nil), inv.Environment...), g.env...)
-	return inv
-}
 
 // SecretBroker is the local, in-process Secret Broker. Lease fails closed
 // on: an expiry at or before now; a domain.PermitCredential denial under an
