@@ -680,7 +680,7 @@ coordinatorが`component`だけを`provider-live-claude`に直し、indexの`evi
 
 V2-095の設計が、私が伝えた前提の誤りを実測で示した。**`provider_preflight.go:160`は
 `provider-live-`で始まるcomponentだけを選ぶ。`release-live-`は選ばない**——
-`grep -rn 'release-live' --include='*.go' .`は**0行**である。私は「どちらでも選ばれる」と
+`grep -rn 'release-live' --include='*.go' .`は**2行**返す（どちらも`internal/api/live_dogfood_test.go:2115`と`:2180`のevidence idを指すstring literal）。**0行になるのは`| grep -v _test.go`を通した形**である。実質的な主張——`release-live-`で選ぶGo codeは存在しない——は無傷だが、私が書いた数字はpatternを添えていなかった。V2-092の設計が実測して指摘した。私は「どちらでも選ばれる」と
 伝えていた。
 
 つまり**M5が立つ根拠であるrelease-live-dogfood recordは、それを守るはずのcheckの射程外**に
@@ -868,6 +868,31 @@ G1 v2は性質集合を要求するので、それが無ければ規則は空で
 
 **P3を必ず含めるのはG1 v2の要求である。** そしてこれがM5 remediation群を1つに統合できた理由でも
 ある——V2-091・V2-092・V2-093は同一の欠陥の別の現れだった。
+
+### 12.8.1 roadmap M5の完了条件2はP1..P6の抜けではなく、繰り延べ側にある
+
+V2-092の設計が、§12.8に穴があると指摘してきた。roadmap M5の完了条件は4つで、
+条件3がP1、条件4がP2、条件1が到達性としてP4..P6に対応する。しかし
+**条件2「Previewを意図的に壊し旧StableでRequirementを再開する」がどの性質にも
+紐づいていない。**
+
+**指摘は正しく、そして答えはP7を作ることではない。** 実測すると条件2の根拠は
+`cap-loop-self-update`で、その宣言は
+`external_dependencies.systems = ['Google Cloud Run', 'Git', 'GitHub', 'Firestore',
+'local Runner machine']`、`promotion_prerequisites`の第1項が逐語で
+「release-contract.md条件2: Preview実環境でcap-loop-self-updateのuser journeyを実行し
+成功すること」である。**Cloud Runを宣言しているので§8.3により宣言によって繰り延べられ、
+§12.9のD1側の4件に既に入っている。**
+
+dogfood exercise自身も同じことを言っている。`live_dogfood_test.go:1999`が
+「channel-break-and-resumeはD1が未通過のあいだrelease-contract.md §3が想定する
+self-host等級でのLoop CHANNEL rollbackとresumeであって、Release ContractのStable releaseでは
+ない」と記録している。
+
+**したがって条件2はM5のgateを止めない。** P7を足せば§12.1が止めたratchetを、
+gateの判定そのものが再演することになる——それが設計がP7を却下した理由で、是認する。
+判定者には条件2の根拠を名指させ、結果を報告させ、**それがG1の判定を変えないことを
+明言させる**。§12.8はP1..P6のままで完全である。
 
 ### 12.9 M5の性質集合に**含まれないもの**（§8.3の適用）
 
