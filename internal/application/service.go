@@ -938,20 +938,19 @@ func (s *Service) Plan(ctx context.Context, req PlanRequest) (out PlanResponse, 
 		if e != nil {
 			return e
 		}
-		next := r
-		next.Increments = append(append([]domain.IncrementID(nil), r.Increments...), iid)
-		next.Version++
-		if e = u.SaveRequirement(ctx, next, r.Version); e != nil {
-			return e
-		}
-		inc := domain.Increment{ID: iid, RequirementID: rid, Status: domain.IncrementProposed, Version: 1}
-		if e = u.SaveIncrement(ctx, inc, 0); e != nil {
-			return e
-		}
 		// A7: the canonical target's RepositoryID comes from the captured
 		// Requirement's own link, read inside this same transaction. A
 		// Requirement with no link yields an empty RepositoryID, which is
 		// not an error: the association is optional.
+		//
+		// V2-085 A3: this read, and the target it builds, are now resolved
+		// BEFORE anything is staged, because the same target is what the
+		// control gate below is evaluated against. Nothing here comes from
+		// the request: PlanRequest carries no control revision, no repository
+		// id and no timestamp, and a caller-supplied revision would be
+		// refused by domain.Permit for a reason unrelated to the owner's
+		// intent, because Permit requires the revision to be exactly the
+		// authoritative one.
 		link, hasLink, e := u.RequirementRepositoryLink(ctx, req.RequirementID)
 		if e != nil {
 			return e
@@ -963,6 +962,38 @@ func (s *Service) Plan(ctx context.Context, req PlanRequest) (out PlanResponse, 
 		target := domain.ControlTarget{InstallationID: s.config.InstallationID, RepositoryID: linkedRepository}
 		target.IncrementID = iid
 		target.RequirementID = rid
+		// V2-085 A3: planning an Increment is what makes new work exist, so
+		// it is gated on domain.PermitClaim -- the same kind and the same
+		// gate Service.StartFraming already uses for the sibling edge in this
+		// lifecycle. pause-intake still ALLOWS it, because a Requirement that
+		// is already captured is work you already have; pause-claim and every
+		// stop mode DENY it. Nothing is passed to domain.EffectFromPermit and
+		// no OutboxItem is staged: PermitKind.SideEffect() is false for claim
+		// and nothing outside the control plane is asked to act. The refusal
+		// happens before the first Save, so a denied Plan stages no
+		// aggregate, no canonical target, no event and no idempotency record.
+		controls, e := u.Controls(ctx)
+		if e != nil {
+			return e
+		}
+		effective := domain.EffectiveControl(controls, target)
+		revision := domain.Revision(0)
+		if effective.Found {
+			revision = effective.Revision
+		}
+		if _, e = domain.Permit(effective, domain.PermitRequest{Kind: domain.PermitClaim, Target: target, ControlRevision: revision, Resource: req.RequirementID}); e != nil {
+			return e
+		}
+		next := r
+		next.Increments = append(append([]domain.IncrementID(nil), r.Increments...), iid)
+		next.Version++
+		if e = u.SaveRequirement(ctx, next, r.Version); e != nil {
+			return e
+		}
+		inc := domain.Increment{ID: iid, RequirementID: rid, Status: domain.IncrementProposed, Version: 1}
+		if e = u.SaveIncrement(ctx, inc, 0); e != nil {
+			return e
+		}
 		if e = u.SaveCanonicalTarget(ctx, id, target); e != nil {
 			return e
 		}
@@ -1026,6 +1057,40 @@ func (s *Service) Prepare(ctx context.Context, req PrepareRequest) (out PrepareR
 		}
 		if inc.Version != req.ExpectedVersion {
 			return domain.ErrStaleVersion
+		}
+		// V2-085 A4: preparing an Increment moves it to the only status a
+		// Claim accepts, so it is gated on domain.PermitClaim, exactly as
+		// Plan is. The ControlTarget and the control revision are resolved
+		// here, inside this same transaction, from the Increment's OWN parent
+		// Requirement and its Repository link -- never from the request:
+		// PrepareRequest carries no control revision, no repository id and no
+		// timestamp. An Increment whose parent Requirement has no Repository
+		// link yields an empty RepositoryID, which is NOT an error. Nothing
+		// is passed to domain.EffectFromPermit and no OutboxItem is staged.
+		// The refusal happens before domain.DecideIncrement and before the
+		// Save, so a denied Prepare stages nothing at all.
+		link, hasLink, e := u.RequirementRepositoryLink(ctx, inc.RequirementID.String())
+		if e != nil {
+			return e
+		}
+		linkedRepository := ""
+		if hasLink {
+			linkedRepository = link.RepositoryID.String()
+		}
+		target := domain.ControlTarget{InstallationID: s.config.InstallationID, RepositoryID: linkedRepository}
+		target.IncrementID = inc.ID
+		target.RequirementID = inc.RequirementID
+		controls, e := u.Controls(ctx)
+		if e != nil {
+			return e
+		}
+		effective := domain.EffectiveControl(controls, target)
+		revision := domain.Revision(0)
+		if effective.Found {
+			revision = effective.Revision
+		}
+		if _, e = domain.Permit(effective, domain.PermitRequest{Kind: domain.PermitClaim, Target: target, ControlRevision: revision, Resource: req.IncrementID}); e != nil {
+			return e
 		}
 		next, e := domain.DecideIncrement(inc, domain.IncrementCommand{
 			Kind:            domain.IncrementPrepare,
