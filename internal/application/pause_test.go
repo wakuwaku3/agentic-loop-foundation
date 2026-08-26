@@ -40,11 +40,19 @@ const pauseWriteCeiling = 16
 // of the three new mutation paths must fit inside it.
 const pauseReadCeiling = 32
 
-// pauseMeasuredWrites is what the shape test below measures for each of the
-// three commands, named so the number in the evidence and the number in the
+// pauseMeasuredWrites is the number of STORE ARTEFACTS each of the three
+// commands produces, named so the number in the evidence and the number in the
 // tree cannot drift apart: the Requirement document, the Event document and the
 // idempotency record. Nothing else is written, and in particular NO outbox item
 // is staged.
+//
+// It is deliberately NOT the same number as the quota-accounted write count.
+// internal/api's TestThePauseTripleStaysInsideTheMutationQuotaReservation
+// measures the real committed counter over the real store and gets FIVE writes
+// for each of the three -- the three artefacts above plus the quota record
+// itself and the store's own accounting write -- and five is the number that
+// matters for the reservation. Both are recorded rather than reconciled into
+// one, because they answer different questions.
 const pauseMeasuredWrites = 3
 
 // pausableSourcesForGradeTwo is A14 GRADE 2's axis: all four statuses a pause
