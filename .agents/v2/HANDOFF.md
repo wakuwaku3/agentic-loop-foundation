@@ -30,19 +30,30 @@ git ls-remote origin 'refs/live-observations/*'
 ### ledger は repo の外にある
 
 ```
-/home/takushi/.local/state/agentic-loop/v2/*-cost.json   ← git 管理外・0600
+/home/takushi/.local/state/agentic-loop/v2/*-cost.json   <- git 管理外・0600
 ```
 
-| ledger | 消費 | 上限 | settled 総額 |
-|---|---|---|---|
-| V2-017 | 11 | 16 | **0.00 USD** |
-| V2-022 | 23 | 24 | **0.00 USD** |
-| V2-063 | 11 | 12 | **0.00 USD** |
-| V2-075 | **12** | **12** | **0.00 USD** |
-| V2-080 | （このマシンで進行中） | 48 | — |
+| ledger | 消費 | 上限 | settled `actual_usd` | 金額上限 |
+|---|---|---|---|---|
+| V2-017 | 11 | 16 | 0.652746 | 10.00 |
+| V2-022 | 23 | 24 | 1.008563 | 20.00 |
+| V2-063 | 11 | 12 | 0.505211 | 8.00 |
+| V2-075 | **12** | **12** | 0.444129 | 8.00 |
+| V2-080 | 10 | 48 | 0.505867 | 40.00 |
 
-**定額契約なので金額上限は一度も効いたことがない。効くのは回数だけである。**
-V2-075 は 12/12 で止まった。見積りは金額ではなく回数で立てること。
+settle 1件あたり概ね **0.07〜0.11 USD**。
+
+**止まるのは回数だけである。ただし決済が無料だからではない** — この単価では金額の壁が
+はるか遠いからである。V2-075 は 12/12 で止まったが、そのとき使っていたのは 8.00 USD の
+うち **0.444129**、つまり**金額の94%を残して回数で止まった**。
+
+**見積りは金額ではなく回数で立てる。**
+
+> この表は一度間違っていた。私は「settled 総額は4本とも 0.00 USD」と書いたが、集計 script が
+> key に `cost` を含む field だけを足していて、実際の field 名は `actual_usd` だった。
+> **何も足さずに0を報告していた。** V2-080 の実装者が測り直して指摘した。経緯は
+> `docs/operations/v2-task-dag.md` 9.5 節にある。**0 という結果は「足して0」と
+> 「何も足していない」を区別しない。**
 
 ### 禁則（例外なし）
 
@@ -127,6 +138,13 @@ V2-089 は「機構は既に1状態について存在していたので、これ
   `runner` と `reconciler` の間に**実在の循環**がある。
 - **source file に module path の文字列 literal を書かない。** manifest check が未宣言 edge と読んで
   `make check` が赤くなる。prefix と suffix を連結する。
+
+**live provider evidence record**
+- `component` は **`provider-live-<provider名>`** で始めること。`internal/contracts/provider_preflight.go:160`
+  は component が `provider-live-` で始まる index entry **だけ**を選び、選ばれたものにだけ
+  「`artifact_refs` が preflight record 自身の digest を名指す」「`approved_at` < `observed_at`」
+  の2つを強制する。**`runner` と書くと静かに check の射程から外れる**（V2-080 で実際に起きた）。
+- `component` は分類 marker で CI component ではない。`evidence_key` の方に runner component の key を入れる。
 
 **gate 規則**（`docs/operations/v2-task-dag.md` §4）
 - **G6a**: component evidence key の一致は**来歴であって合否ではない**。

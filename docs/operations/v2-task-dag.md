@@ -527,28 +527,77 @@ recordに載せ、実測もすべて済ませたが、順序はpacket読了→ba
 以後のWork Orderは A1 に「BEFORE any source file is edited」を明記し、
 V2-087が申告した事実を根拠として添える。
 
-## 9.5 flat-rate契約ではledgerは**回数でしか**止まらない
+## 9.5 ledgerを止めるのは**回数**である（ただし理由は「無料だから」ではない）
 
-V2-080の記録を起こすときに4本のledgerを全部読んで測った事実。
-settled `actual_usd`の総和は**4本すべてで0.00 USD**である。契約が定額なので
-1回1回の決済額が0で、`max_total_cost_usd`はこれまで一度も効いたことがない。
-効いてきたのは`max_invocations`だけで、V2-075は**12/12**で止まった。
+**この節は一度間違ったことを書いた。訂正の経緯ごと残す。**
 
-| ledger | invocations | limit | 総額 |
-|---|---|---|---|
-| V2-017 | 11 | 16 | 0.00 |
-| V2-022 | 23 | 24 | 0.00 |
-| V2-063 | 11 | 12 | 0.00 |
-| V2-075 | **12** | **12** | 0.00 |
+2026-08-26にV2-080のrecordを起こしたとき、私は「settled `actual_usd`の総和は4本すべて
+0.00 USDで、定額契約だから1回1回の決済額が0である」と書いた。**これは偽だった。**
+原因は私の集計scriptで、keyに`cost`という部分文字列を含むfieldだけを足していたのに、
+実際のfield名は`actual_usd`だった。**何も足さずに0を報告していた。**
+V2-080の実装者がA2の指示どおり測り直して矛盾を指摘し、私が再測して一致した。
 
-したがってpooled観測の見積りは金額ではなく**回数**で立てる。V2-080の48回は、
-V2-075のvertical slice 12回とV2-022のdogfood 23回を足した**実測の下限35回**に、
-working directory証明と、過去の観測が毎回1〜3回消費した一過性失敗ぶんの余裕を
-加えた値である。金額側の40.00 USDは第二の、これまで不活性な停止線として残す。
+実測値（2026-08-26）:
+
+| ledger | invocations | 上限 | settled `actual_usd` | 金額上限 |
+|---|---|---|---|---|
+| V2-017 | 11 | 16 | **0.652746** | 10.00 |
+| V2-022 | 23 | 24 | **1.008563** | 20.00 |
+| V2-063 | 11 | 12 | **0.505211** | 8.00 |
+| V2-075 | **12** | **12** | **0.444129** | 8.00 |
+| V2-080 | 10 | 48 | **0.505867** | 40.00 |
+
+settle 1件あたり概ね **0.07〜0.11 USD**。
+
+**結論は生き残るが、根拠が変わる。** 止まるのは今も回数だけである。しかしそれは
+決済が無料だからではなく、**この単価では金額の壁がはるか遠いから**である。
+V2-075は12/12で止まったが、そのとき使っていたのは8.00 USDのうち **0.444129**——
+**金額の94%を残して回数で止まった。**
+
+したがって見積りは金額ではなく回数で立てる。V2-080の48回は、V2-075のvertical slice 12回と
+V2-022のdogfood 23回を足した**実測の下限35回**に、working directory証明と一過性失敗ぶんの
+余裕を加えた値である。
+
+**教訓は2つある。**（1）**集計は必ず実測値を目で見る。** 0という結果は「足した結果0」と
+「何も足していない」を区別しない。（2）**私が書いた数字も陳腐化・誤りの対象である。**
+各Work Orderに「ここの数字は陳腐化している前提で読み、測り直して食い違いを全部報告せよ」と
+書いてきたのが、今回は私自身の誤りを捕まえた。**その指示は実装者のためだけのものではない。**
+
+なお偽の記述は`.agents/v2/provider-preflight/V2-080-provider-live-claude-pooled.json`の
+`notes`にも入っているが、**そのfileは訂正していない。** digestがledger fileと
+V2-080のevidence recordの両方から引用されているので、編集すれば両方の引用が壊れる。
+訂正はここと`.agents/v2/HANDOFF.md`、およびev-v2-080-provider-live-claude-pooledの
+`ledger-cost-premise-was-false-and-is-corrected` checkに置いた。**recordのlimitsは無効に
+ならない**——48という数字は回数の算術から出ており、金額の記述には依存していない。
 
 **上限を上げる・ledgerを再初期化する・`halted`を消す・ledger fileを編集する**のは
 どれも禁止で、救済は常に新しいrecordを起こすことである。この規則は今回も守った:
 V2-075のledgerは12/12のまま1 byteも触っていない。
+
+## 9.6 live provider evidence recordの`component`は`provider-live-`で始めること
+
+これも私のWork Orderの穴で、V2-080が報告してきた。
+
+`internal/contracts/provider_preflight.go:160`は、evidence indexのentryを
+**`component`が`provider-live-`で始まるときだけ**選ぶ。選ばれたentryに対してだけ、
+`CheckProviderPreflightLedger`は2つの不変条件を強制する。
+
+1. `artifact_refs`に`artifact_id`が`provider-preflight`で、`sha256`が**preflight record
+   自身のbytesのdigest**と一致するentryがあること
+2. `approval.approved_at`が`observed_at`より**厳密に前**であること
+
+V2-017・V2-022・V2-063・V2-075はどれも`component`が`provider-live-claude`である。
+これは**CI componentではなく分類marker**で、`evidence_key`の方にrunner componentのkeyを
+入れるのが慣習である。
+
+V2-080のWork Order A17で私は`component: runner`と指示した。その結果この record は
+**checkに選ばれず、まさにそのために書かれた2つの不変条件が強制されなかった。**
+実装者はbindingを正しく入れたうえで噛み合わせの不一致を報告してきたので、
+coordinatorが`component`だけを`provider-live-claude`に直し、indexの`evidence_hash`を
+新しいbytesで測り直した。
+
+**次にlive recordを発行するときは`component`を`provider-live-<provider名>`にする。**
+`runner`と書くと静かにcheckの射程から外れる。
 
 
 ## 10. checkpoint pushの手順と既知のdeploy workflow defect

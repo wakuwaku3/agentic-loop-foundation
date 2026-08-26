@@ -5,7 +5,7 @@
   "created_at": "2026-08-26T18:00:00Z",
   "correlation_id": "v2-080-live-pooled",
   "task_id": "V2-080",
-  "component": "runner",
+  "component": "provider-live-claude",
   "evidence_key": "1ea8ccaa7d836d32c600fa644eeed4395cfbdff90d79cb7c1f88eed86ee5391b",
   "result": "passed",
   "checks": [
@@ -299,6 +299,34 @@
       "working_directory": ".",
       "timeout_seconds": 1800,
       "summary": "All five commands were run after the evidence commit 1100a7f1190e25c2511d945940df0ab6fa085205 and each was judged by its VERDICT LINE, never by the shell exit status, which is unreliable in this repository. (1) 'devbox run --pure -- sh -c \"go test -race -count=1 ./internal/runner ./internal/provider ./internal/contracts\"' -> 'ok github.com/takushi/agentic-loop-foundation/v2/internal/runner 5.572s', 'ok .../internal/provider 2.805s', 'ok .../internal/contracts 1.906s'. The contracts package is green WITH this record and its index entry in place, which is what A17 requires; it was red between the first and the final commit for exactly one reason, TestActiveEvidenceIndex's file-to-index bijection, because the record was deliberately committed before its index entry so that the A1 table could land before any source edit and before any invocation. (2) 'devbox run --pure -- sh -c \"go vet ./...\"' -> no diagnostic output at all before the sentinel, i.e. clean across every package, not only the three. (3) 'devbox run --pure -- sh -c \"gofmt -l internal/runner\"' -> no file listed, so every file in internal/runner is gofmt-clean including the edited one. (4) 'devbox run --pure -- sh -c \"make component-runner\"' -> '? github.com/takushi/agentic-loop-foundation/v2/cmd/runner [no test files]', 'ok .../cmd/bootstrap 0.023s', 'ok .../internal/domain 0.610s', 'ok .../internal/runner 3.125s'. Green, so per A19 no manifest, dependency-coverage or key-closure check went red. (5) 'devbox run --pure -- sh -c \"gitleaks dir .agents --config .gitleaks.toml\"' -> 'INF scanned ~4470608 bytes (4.47 MB) in 309ms' and 'INF no leaks found'. It was deliberately NOT run as 'gitleaks dir .', which reports 26 findings out of the gitignored build/evidence/** subtree. WHAT WAS NOT RUN: the full 'make check'. The coordinator runs it once at integration, and A20 excludes it. Every real command was wrapped as devbox run --pure -- sh -c '...' because devbox run --pure -- <bare-name> is treated as a devbox script name."
+    },
+    {
+      "name": "component-marker-corrected-by-coordinator",
+      "status": "passed",
+      "argv": [
+        "devbox",
+        "run",
+        "--pure",
+        "--",
+        "sh",
+        "-c",
+        "go test -count=1 -run TestProviderPreflightLedger ./internal/contracts"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 600,
+      "summary": "CORRECTION MADE BY THE COORDINATOR AFTER THIS RECORD WAS WRITTEN, and the fault was the Work Order's, not the implementer's. A17 instructed component `runner`. Measured: internal/contracts/provider_preflight.go:160 selects an index entry ONLY when its component has the prefix \"provider-live-\", and all four earlier live records (V2-017, V2-022, V2-063, V2-075) carry component \"provider-live-claude\" -- a CATEGORY MARKER, not a CI component, which is exactly what makes CheckProviderPreflightLedger enforce the two invariants it exists for: that artifact_refs names artifact_id \"provider-preflight\" with the sha256 of the preflight record's own bytes, and that approval.approved_at is strictly before observed_at. With component `runner` this record was silently NOT selected, so both invariants went unenforced on the very record they were written for. The implementer put the binding in correctly and reported the mismatch rather than leaving it. The coordinator changed exactly one field, component runner -> provider-live-claude, in this record and in its index entry, and recomputed the index evidence_hash over the new bytes. evidence_key is left as the runner component key, which is the same convention the four earlier records follow: the marker names the category, the key records provenance. Verified after the change that CheckProviderPreflightLedger now SELECTS this record and passes: artifact_refs carries sha256 23af04a0e07398cedd90597aa99421a02f986b248274671b8e6d3ca8de60d3a8 which equals the measured digest of .agents/v2/provider-preflight/V2-080-provider-live-claude-pooled.json, and approved_at 2026-08-24T23:22:47Z is strictly before observed_at 2026-08-26T07:10:18Z. The preflight record itself was NOT edited: its digest is cited both here and in the ledger file, so editing it would invalidate both citations."
+    },
+    {
+      "name": "ledger-cost-premise-was-false-and-is-corrected",
+      "status": "passed",
+      "argv": [
+        "python3",
+        "-c",
+        "sum actual_usd over entries of each ledger under /home/takushi/.local/state/agentic-loop/v2/"
+      ],
+      "working_directory": ".",
+      "timeout_seconds": 60,
+      "summary": "CORRECTION OF A COORDINATOR MEASUREMENT ERROR, recorded because the false value was propagated into durable documents. The coordinator claimed, in this task's preflight record notes, in its design packet d3, in its Work Order A10 and in docs/operations/v2-task-dag.md section 9.5, that the settled actual_usd of all four earlier ledgers summed to 0.00 USD because a flat-rate subscription settles every invocation at zero. THAT IS FALSE. The coordinator's summing script only added fields whose key contained the substring \"cost\", and the field is named actual_usd, so it summed nothing and reported zero. The implementer measured the real values and contradicted the claim, which is exactly what A2 asks for. Re-measured independently by the coordinator and in agreement: V2-017 0.652746 USD over 11 entries against a 10.00 limit; V2-022 1.008563 USD over 23 entries against 20.00; V2-063 0.505211 USD over 11 entries against 8.00; V2-075 0.444129 USD over 12 entries against 8.00; and this task's own ledger 0.505867 USD over 10 entries against 40.00. Roughly 0.07 to 0.11 USD per settled invocation. THE CONCLUSION SURVIVES BUT ITS GROUND CHANGES: the count is still the only threshold that has ever bound, not because settlement is free but because at this rate the monetary ceiling is far away -- V2-075 halted at 12 of 12 invocations having spent 0.444129 of 8.00 USD, so it hit the count with 94 percent of its money unspent. Any future record must be sized on the count, and the reason to record here is that the arithmetic is now visible instead of resting on a number nobody re-measured."
     }
   ],
   "artifact_refs": [

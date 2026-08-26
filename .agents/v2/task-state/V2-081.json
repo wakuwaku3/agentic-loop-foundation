@@ -3,7 +3,7 @@
   "id": "ts-v2-081",
   "kind": "canonical-task-state",
   "task_id": "V2-081",
-  "status": "blocked",
+  "status": "running",
   "dependencies": [
     "V2-080"
   ],
@@ -28,8 +28,8 @@
   "next_owner": "sol",
   "retry_budget": {
     "max_attempts": 2,
-    "attempts_used": 0,
-    "remaining": 2
+    "attempts_used": 1,
+    "remaining": 1
   },
   "release_eligible": false,
   "transitions": [
@@ -82,10 +82,59 @@
         "remaining": 2
       },
       "reason": "the input this task needs is produced by the task it depends on"
+    },
+    {
+      "sequence": 3,
+      "at": "2026-08-26T18:05:00Z",
+      "from_status": "blocked",
+      "to_status": "queued",
+      "actor": "sol",
+      "input_refs": [
+        "V2-026",
+        "V2-080",
+        "V2-081"
+      ],
+      "input_hash": "cc0bc64587afd63b88f682d0826e8da5d087a52c101f46336e45420cf2f23fff",
+      "output_refs": [
+        "V2-081"
+      ],
+      "output_hash": "d1458256008da994df6b79c32e4fb776040e7546823af9cbec5d629dc22089ac",
+      "owner": "sol",
+      "next_owner": "sol",
+      "retry_budget": {
+        "max_attempts": 2,
+        "attempts_used": 0,
+        "remaining": 2
+      },
+      "reason": "V2-080が完了し、live記録が判定commitで判定可能になったのでblockが解消した。交わりは0で、positive controlは4、negative controlは0"
+    },
+    {
+      "sequence": 4,
+      "at": "2026-08-26T18:06:00Z",
+      "from_status": "queued",
+      "to_status": "running",
+      "actor": "sol",
+      "input_refs": [
+        "V2-026",
+        "V2-080",
+        "V2-081"
+      ],
+      "input_hash": "cc0bc64587afd63b88f682d0826e8da5d087a52c101f46336e45420cf2f23fff",
+      "output_refs": [
+        "V2-081"
+      ],
+      "output_hash": "d1458256008da994df6b79c32e4fb776040e7546823af9cbec5d629dc22089ac",
+      "owner": "sol",
+      "next_owner": "sol",
+      "retry_budget": {
+        "max_attempts": 2,
+        "attempts_used": 1,
+        "remaining": 1
+      },
+      "reason": "M5 gateの再判定に着手した。V2-026が落ちた2つの根拠のうち、G6aの赤いmake checkは既に解消し、G6bの交わりはV2-080が閉じた。完了条件は8.1節の読み方に従い、安全性の主張を到達性の要求として読まないこと"
     }
   ],
   "repair_of": [
     "V2-026"
-  ],
-  "block_reason": "V2-080"
+  ]
 }
