@@ -200,3 +200,151 @@ func readQuotaRecord(ctx context.Context, s *Store, at time.Time) (quotaRecord, 
 	})
 	return record, err
 }
+
+// ===========================================================================
+// V2-087: the two adapters agreeing about what a reservation costs
+// ===========================================================================
+
+// workloadExpectation is one row of the cross-adapter workload table
+// (dp-v2-087 d5 / A6): a named piece of work, and the committed daily
+// quota.Usage the adapter must hold after that work's single transaction has
+// settled its reservation.
+type workloadExpectation struct {
+	name  string
+	usage quota.Usage
+}
+
+// crossAdapterWorkload is that table.
+//
+// THE LITERALS BELOW MUST STAY BYTE-IDENTICAL TO THE COPY IN
+// internal/store/memory/store_test.go, which carries the same table under the
+// same test name over the other adapter. That duplication is deliberate and is
+// the whole point: the two adapters must not disagree about what a reservation
+// costs, and two literals differing is a diff a reader can see, where a shared
+// helper would need a third package and a range-valued expectation would hide
+// exactly the drift being guarded.
+//
+// If a row's two measurements ever disagree, neither literal is adjusted, the
+// row is not deleted and the expectation is not widened into a range or a
+// tolerance: both measurements are reported and the work stops.
+var crossAdapterWorkload = []workloadExpectation{
+	{name: "a bounded first page at page_size 1", usage: quota.Usage{Reads: 4, Writes: 1}},
+	{name: "the same page at page_size 2", usage: quota.Usage{Reads: 6, Writes: 1}},
+	{name: "a Requirement detail read", usage: quota.Usage{Reads: 4, Writes: 1}},
+	{name: "a capture mutation", usage: quota.Usage{Reads: 4, Writes: 5}},
+}
+
+// crossAdapterWorkloadIDs are the Requirement ids the workload seeds, and they
+// are the same ids the memory package's copy of this test seeds. The two
+// adapters order a page differently -- this one by the base64url document key,
+// that one by the raw domain id -- so the two pages may hold different rows;
+// the COUNT of documents a Limit(limit+1) query touches is what this table is
+// about, and that is the same on both.
+var crossAdapterWorkloadIDs = []string{"wl-a", "wl-b", "wl-c"}
+
+// crossAdapterWorkloadInstant is the single fixed injected instant every row
+// runs on, identical in both packages. Nothing advances it.
+func crossAdapterWorkloadInstant() time.Time { return time.Unix(1700000000, 0).UTC() }
+
+// workloadFixture seeds the shared fixture and returns the store, a service on
+// the fixed instant, and an owner context. The seeding transactions call no
+// ReserveQuota at all -- they go straight through the port -- so they settle
+// nothing and leave no quota document: the committed total read back after a
+// workload row is exactly that row's own settled cost.
+func workloadFixture(t *testing.T) (*Store, *application.Service, context.Context) {
+	t.Helper()
+	s := emulatorStore(t)
+	ctx := context.Background()
+	for _, raw := range crossAdapterWorkloadIDs {
+		id, err := domain.NewRequirementID(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := s.Transact(ctx, func(u application.UnitOfWork) error {
+			if e := u.SaveRequirement(ctx, domain.Requirement{ID: id, Version: 1, Status: domain.RequirementCaptured}, 0); e != nil {
+				return e
+			}
+			return u.SaveRequirementText(ctx, raw, "text-"+raw)
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	svc, err := application.NewServiceWithConfig(s, integrationClock{now: crossAdapterWorkloadInstant()}, &integrationIDs{}, application.ServiceConfig{InstallationID: "install", LeaseTTL: time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s, svc, application.ContextWithCaller(ctx, application.Caller{Role: application.RoleOwner, Subject: "workload-owner"})
+}
+
+// committedWorkloadUsage reads the day's committed total back out of the quota
+// document. A day with no document at all is a failure, not a zero total: it
+// would mean the workload reserved nothing.
+func committedWorkloadUsage(t *testing.T, s *Store) quota.Usage {
+	t.Helper()
+	record, err := readQuotaRecord(context.Background(), s, crossAdapterWorkloadInstant())
+	if err != nil {
+		t.Fatalf("no quota record for the workload day: the transaction reserved nothing (%v)", err)
+	}
+	return record.Total
+}
+
+// TestBothAdaptersSettleTheSameReservationForTheSameWorkload is A6. The memory
+// package carries this exact test name over its own adapter, with the same four
+// rows and the same literal expectations. This half runs only under
+// scripts/firestore-emulator.sh: without the emulator it skips and measures
+// nothing, and a skipped case is never a pass (gate rule G7).
+func TestBothAdaptersSettleTheSameReservationForTheSameWorkload(t *testing.T) {
+	runners := []func(t *testing.T) quota.Usage{
+		func(t *testing.T) quota.Usage {
+			s, svc, owner := workloadFixture(t)
+			if _, err := svc.ListRequirementsPage(owner, "", 1); err != nil {
+				t.Fatal(err)
+			}
+			return committedWorkloadUsage(t, s)
+		},
+		func(t *testing.T) quota.Usage {
+			s, svc, owner := workloadFixture(t)
+			if _, err := svc.ListRequirementsPage(owner, "", 2); err != nil {
+				t.Fatal(err)
+			}
+			return committedWorkloadUsage(t, s)
+		},
+		func(t *testing.T) quota.Usage {
+			s, svc, owner := workloadFixture(t)
+			if _, ok, err := svc.GetRequirementDetail(owner, crossAdapterWorkloadIDs[0]); err != nil {
+				t.Fatal(err)
+			} else if !ok {
+				t.Fatal("the seeded Requirement was not found")
+			}
+			return committedWorkloadUsage(t, s)
+		},
+		func(t *testing.T) quota.Usage {
+			s := emulatorStore(t)
+			ctx := context.Background()
+			svc, err := application.NewServiceWithConfig(s, integrationClock{now: crossAdapterWorkloadInstant()}, &integrationIDs{}, application.ServiceConfig{InstallationID: "install", LeaseTTL: time.Minute})
+			if err != nil {
+				t.Fatal(err)
+			}
+			owner := application.ContextWithCaller(ctx, application.Caller{Role: application.RoleOwner, Subject: "workload-owner"})
+			if _, err := svc.Capture(owner, application.CaptureRequest{RequestID: "workload-capture", Text: "x"}); err != nil {
+				t.Fatal(err)
+			}
+			return committedWorkloadUsage(t, s)
+		},
+	}
+	if len(runners) != len(crossAdapterWorkload) {
+		t.Fatalf("%d workload runners for %d table rows; the table and the work must stay paired", len(runners), len(crossAdapterWorkload))
+	}
+	for i, row := range crossAdapterWorkload {
+		i, row := i, row
+		t.Run(row.name, func(t *testing.T) {
+			got := runners[i](t)
+			if got != row.usage {
+				t.Fatalf("%s settled to %+v on the Firestore adapter, want %+v. If the memory half of this test measured %+v for the same row, the two adapters disagree about what a reservation costs: report both measurements and stop -- do not adjust either literal, delete the row, or widen the expectation into a range", row.name, got, row.usage, got)
+			}
+			if got.Reads >= quota.ReadTransactionUsage.Reads {
+				t.Fatalf("%s settled to %+v, which is not below the worst-case read reservation (%d): nothing was credited back", row.name, got, quota.ReadTransactionUsage.Reads)
+			}
+		})
+	}
+}

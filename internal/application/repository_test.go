@@ -842,9 +842,14 @@ func TestRepositoryScopedBacklogIsMeasured(t *testing.T) {
 // TestRequirementRowCarriesItsRepository is acceptance A12: a linked
 // Requirement row reports its repository and an unlinked one omits the field
 // entirely, on both the page row and the detail view. It is a separate test
-// from the backlog above because each read crosses one bounded read-quota
-// reservation (quota.ReadTransactionUsage) and the two together would exceed
-// the hard daily budget the memory adapter enforces.
+// from the backlog above for a reason that no longer holds: each read crosses
+// one bounded read-quota reservation (quota.ReadTransactionUsage, 6,001 reads
+// as the worst case), and until V2-087 the memory adapter never settled that
+// reservation, so the two tests together exceeded the daily budget. V2-087 made
+// that adapter credit back the unused part of the reservation the way the
+// Firestore adapter always has, so the split is no longer required by the
+// budget. It is left alone here because merging the two back together is a
+// judgement about test shape, not part of that repair.
 func TestRequirementRowCarriesItsRepository(t *testing.T) {
 	s, _ := service()
 	ctx := owner(context.Background())
