@@ -27,6 +27,7 @@ import (
 
 	"github.com/takushi/agentic-loop-foundation/v2/internal/api"
 	"github.com/takushi/agentic-loop-foundation/v2/internal/application"
+	"github.com/takushi/agentic-loop-foundation/v2/internal/release"
 	agenticrunner "github.com/takushi/agentic-loop-foundation/v2/internal/runner"
 	"github.com/takushi/agentic-loop-foundation/v2/internal/store/memory"
 )
@@ -422,4 +423,64 @@ func TestTheShippedZeroCandidateReleaseSourceConfigurationActuallyAttaches(t *te
 	}
 	t.Logf("the shipped zero-candidate configuration attaches: release_version=%s promotable=%v route_recorded=%v documents=%d capabilities_without_evidence=%d",
 		state.ReleaseVersion, state.Promotable, state.Route.Recorded, len(index.Documents), len(state.CapabilitiesWithoutEvidence))
+}
+
+// TestTheServedDocumentSetSatisfiesEveryDocSetInvariantDeterministically moves
+// three traps out of the live exercise, where they could only fire AFTER the
+// provider invocations were spent (dp-v2-095 r10), into a deterministic test
+// that `go test ./internal/api` runs on every commit.
+//
+// The three are exactly the ones the live exercise evaluates over the real doc
+// set: zero fenced code blocks across the served set, the capability anchor
+// bijection in BOTH directions against the contract's ids, and the four
+// required Preview sections. VerifyNoStableToPreviewLinks and VerifyLinksResolve
+// are asserted here too, for the same reason. The live exercise still evaluates
+// them -- nothing is removed from it -- but a documentation edit that breaks one
+// now turns this test red first, at no cost.
+func TestTheServedDocumentSetSatisfiesEveryDocSetInvariantDeterministically(t *testing.T) {
+	root := repoRootForLiveTest(t)
+	set := ownerDocsExpectedSet(t, root)
+	assembled, err := release.AssembleFromRoot(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	read := func(rel string) string {
+		b, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(rel)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(b)
+	}
+
+	blocks := 0
+	for _, rel := range set {
+		blocks += len(release.ExtractCodeBlocks(read(rel)))
+	}
+	if blocks != 0 {
+		t.Fatalf("the served document set carries %d fenced code blocks; the live exercise fails unless the total is zero", blocks)
+	}
+	if err := release.VerifyCapabilityAnchorBijection(read("docs/preview/capabilities.md"), assembled.Contract.Capabilities); err != nil {
+		t.Fatalf("capability anchor bijection over the real doc set: %v", err)
+	}
+	if err := release.VerifyRequiredSections(read("docs/preview/stable-diff.md"), release.RequiredPreviewSections); err != nil {
+		t.Fatalf("the four required Preview sections: %v", err)
+	}
+	if err := release.VerifyNoStableToPreviewLinks(root, []string{"docs/stable/index.md"}); err != nil {
+		t.Fatalf("Stable-to-Preview link check: %v", err)
+	}
+	if err := release.VerifyLinksResolve(root, set); err != nil {
+		t.Fatalf("VerifyLinksResolve over the real doc set: %v", err)
+	}
+	if err := release.VerifyPreviewReleaseMarker(read("docs/preview/index.md"), assembled.Contract.Version); err != nil {
+		t.Fatalf("docs/preview/index.md's Release: marker does not name the release in use: %v", err)
+	}
+	// The document that describes the release-state read must keep mentioning
+	// it, because the live exercise measures the document against the observed
+	// behaviour of that exact route and would otherwise be comparing against
+	// nothing.
+	if !strings.Contains(read("docs/preview/capabilities.md"), "/v1/release/state") {
+		t.Fatal("docs/preview/capabilities.md no longer mentions the release-state read; the document-versus-behaviour comparison in the live exercise would be vacuous")
+	}
+	t.Logf("doc-set invariants hold deterministically over %d served documents: %d fenced code blocks, anchor bijection over %d capability ids, all %d required Preview sections",
+		len(set), blocks, len(assembled.Contract.Capabilities), len(release.RequiredPreviewSections))
 }
