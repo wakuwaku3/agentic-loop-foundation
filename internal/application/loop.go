@@ -1252,9 +1252,58 @@ func (s *Service) AttachReleaseSource(cfg ReleaseSourceConfig) error {
 		return errors.New("release source requires an injected assembly instant")
 	}
 	router := release.NewRouter()
-	bundle, _, err := release.AssembleBundle(cfg.Root, cfg.Repository, cfg.Candidate, cfg.AssembledAt)
+	// V2-095, MEASURED AND REPAIRED IN PLACE (section 12.3 boundary revision;
+	// the pre-revision boundary, the revision time and this reason are recorded
+	// verbatim in ev-v2-095-release-live-dogfood and
+	// ev-v2-095-provider-live-claude-dogfood).
+	//
+	// WHAT WAS MEASURED. This function previously called
+	// release.AssembleBundle unconditionally. AssembleBundle calls
+	// release.NewBundle, which calls domain.ValidateRelease, which requires a
+	// NON-EMPTY release id and a POSITIVE version (internal/domain/release.go's
+	// ValidateRelease). cmd/control-plane deliberately leaves
+	// ReleaseSourceConfig.Candidate ZERO -- correctly, because that process
+	// records no capability evidence and must not fabricate any -- so the
+	// SHIPPED wiring could never be enabled at all. Executed in V2-095's
+	// worktree:
+	//
+	//	AGENTIC_LOOP_RELEASE_SOURCE_ROOT=<repo> \
+	//	AGENTIC_LOOP_RELEASE_REPOSITORY=agentic-loop-foundation \
+	//	AGENTIC_LOOP_RELEASE_ENVIRONMENT_CLASS=preview-local <control-plane>
+	//
+	// printed, verbatim, "control-plane: assemble the release source root:
+	// domain id must not be empty" and exited. Every existing test of this
+	// function supplies a fully-evidenced candidate, so the zero-candidate path
+	// -- the only path the shipped binary can take -- was never executed.
+	//
+	// WHAT THE REPAIR IS, AND WHAT IT IS NOT. It adds NO second wiring path, NO
+	// new environment variable, NO new constructor and NO default root: there is
+	// still exactly one release-source producer and it still refuses an
+	// unconfigured root. It separates OBSERVING a release from being able to
+	// PROMOTE one, which release.AssembleCandidate already separates: that
+	// function derives every digest from source bytes and needs no candidate
+	// identity at all. So the observer and the member manifest are built
+	// unconditionally, and the promotable Bundle -- the one thing that needs an
+	// identity domain.ValidateRelease will accept -- is built only when the
+	// caller supplied one. An unevidenced process therefore reports its
+	// assembled version and serves its own documents, and its promotion stage
+	// still refuses: release.Pipeline.Promote calls VerifyCandidateDigests on
+	// the candidate, which a zero candidate cannot satisfy, so nothing here
+	// makes an unevidenced candidate promotable.
+	assembled, _, err := release.AssembleCandidate(cfg.Root, cfg.Candidate)
 	if err != nil {
 		return fmt.Errorf("assemble the release source root: %w", err)
+	}
+	// Members are recorded on both paths, because they are the source manifest
+	// the promotion gate re-verifies AND the set the owner document surface
+	// serves; they are derived from source bytes and are independent of whether
+	// a candidate identity was supplied.
+	bundle := release.Bundle{Repository: cfg.Repository, CreatedAt: cfg.AssembledAt.UTC(), Members: append([]release.Member(nil), assembled.Members...)}
+	if cfg.Candidate.ReleaseID != "" && cfg.Candidate.Version != 0 {
+		bundle, _, err = release.AssembleBundle(cfg.Root, cfg.Repository, cfg.Candidate, cfg.AssembledAt)
+		if err != nil {
+			return fmt.Errorf("assemble the release source root: %w", err)
+		}
 	}
 	if digest := bundle.Candidate.CandidateDigest; digest != "" {
 		if err = router.SetPreview(cfg.Repository, digest); err != nil {

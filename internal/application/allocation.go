@@ -218,6 +218,123 @@ type ExhaustionView struct {
 	BindingLimit BindingLimit `json:"binding_limit"`
 }
 
+// ---------------------------------------------------------------------------
+// 優先度とその根拠: a projection of what the scheduler already decided
+// ---------------------------------------------------------------------------
+
+// PriorityView is cap-backlog-visibility's declared confirmation item
+// "優先度とその根拠", reported as a PROJECTION of decisions the read already
+// made and then threw away (V2-095 A7).
+//
+// allocationReport already calls scheduler.Decide over ONE bounded page of at
+// most scheduler.MaxCandidates Requirements and keeps only a reason histogram.
+// plan.Decisions already carries RequirementID, Rank, Score, Assigned, Reason
+// and Inputs for every candidate it ranked. This view consumes exactly that.
+// IT ADDS NO READ AT ALL: no second page, no second Decide call, no per-row
+// read. That is the property which keeps GET /v1/queue/summary bounded.
+//
+// A Requirement the scheduler did not rank carries NO entry. Bounded says so
+// and Reason says why, following the idiom the owner console already states: a
+// bounded count is reported as a lower bound, never as an exact total, and an
+// unranked Requirement is never given a plausible rank.
+type PriorityView struct {
+	// Bounded is true when the candidate page the scheduler ranked did not
+	// cover the whole Backlog, so entries below is a prefix of the ranking and
+	// not the ranking.
+	Bounded bool `json:"bounded"`
+	// Reason states, in prose, what Bounded and the two counts mean.
+	Reason string `json:"reason"`
+	// CandidatesRanked is len(plan.Decisions): how many Requirements the
+	// scheduler actually produced a decision for in this read.
+	CandidatesRanked int `json:"candidates_ranked"`
+	// CandidateBound is scheduler.MaxCandidates, the scheduler's own bound,
+	// and never a bound this package invents.
+	CandidateBound int `json:"candidate_bound"`
+	// AssessmentSupplied reports whether ANY candidate carried a
+	// domain.PriorityAssessment. It is measured false at this commit for every
+	// candidate, because BuildAllocationSnapshot supplies neither Priority nor
+	// Assessment, so the score in force is the legacy age-only branch. That
+	// fact is REPORTED rather than hidden: a rationale that also says what the
+	// rationale is NOT is the only honest way to report a priority the product
+	// intends to be multi-factor while the code ranks by age.
+	AssessmentSupplied bool `json:"assessment_supplied"`
+	// AssessmentNote states the above in prose and names where the connection
+	// belongs.
+	AssessmentNote string              `json:"assessment_note"`
+	Entries        []PriorityEntryView `json:"entries"`
+}
+
+// PriorityEntryView is one candidate's own decision, exactly as the scheduler
+// recorded it.
+type PriorityEntryView struct {
+	RequirementID string `json:"requirement_id"`
+	// Rank is scheduler.Decision.Rank: 0 is highest, in the sorted candidate
+	// order the scheduler itself produced.
+	Rank     int  `json:"rank"`
+	Assigned bool `json:"assigned"`
+	// Reason is present only when Assigned is false, and is always a member of
+	// scheduler.AllReasons: it is projected through the SAME WaitingReasonFor
+	// mapping the waiting histogram uses, so an unknown reason is a refusal of
+	// the whole read rather than a silent bucket, and the two can never
+	// disagree about the vocabulary.
+	Reason      string                  `json:"reason,omitempty"`
+	Score       int64                   `json:"score"`
+	ScoreInputs PriorityScoreInputsView `json:"score_inputs"`
+}
+
+// PriorityScoreInputsView is scheduler.ScoreInputs: the factors Decide
+// ACTUALLY used for this candidate, not the factors it could have used.
+type PriorityScoreInputsView struct {
+	UsedAssessment bool  `json:"used_assessment"`
+	Priority       int64 `json:"priority"`
+	AgeSeconds     int64 `json:"age_seconds"`
+	// Factors is OMITTED ENTIRELY when UsedAssessment is false. The seven
+	// factor fields are zero in that branch and reporting seven zeroes would
+	// read as seven measured zeroes; absent means absent.
+	Factors *PriorityFactorsView `json:"factors,omitempty"`
+}
+
+// PriorityFactorsView is the seven domain.PriorityAssessment factors, already
+// clamped to [0,100] by the scheduler.
+type PriorityFactorsView struct {
+	ValueScore      int `json:"value_score"`
+	UrgencyScore    int `json:"urgency_score"`
+	RiskScore       int `json:"risk_score"`
+	DependencyScore int `json:"dependency_score"`
+	LearningScore   int `json:"learning_score"`
+	ResourceCost    int `json:"resource_cost"`
+	StarvationRisk  int `json:"starvation_risk"`
+}
+
+const priorityAssessmentAbsentNote = "no candidate carried a domain.PriorityAssessment in this read, so every score below came from the legacy age-only branch and used_assessment is false throughout. The type and its scorer both exist (domain.PriorityAssessment and internal/scheduler/priority.go's multiFactorScore); what is absent is the supply path -- BuildAllocationSnapshot sets neither Priority nor Assessment on any row. Section 5 assigns that connection to V2-030 in M7. This response reports the absence instead of fabricating a factor."
+
+const priorityAssessmentPresentNote = "at least one candidate carried a domain.PriorityAssessment, so the multi-factor branch fed its score and its seven clamped factors are reported under score_inputs.factors."
+
+// priorityScoreInputsView projects scheduler.ScoreInputs onto the wire shape.
+func priorityScoreInputsView(in scheduler.ScoreInputs) PriorityScoreInputsView {
+	out := PriorityScoreInputsView{UsedAssessment: in.UsedAssessment, Priority: in.Priority, AgeSeconds: in.Age}
+	if in.UsedAssessment {
+		out.Factors = &PriorityFactorsView{
+			ValueScore:      in.ValueScore,
+			UrgencyScore:    in.UrgencyScore,
+			RiskScore:       in.RiskScore,
+			DependencyScore: in.DependencyScore,
+			LearningScore:   in.LearningScore,
+			ResourceCost:    in.ResourceCost,
+			StarvationRisk:  in.StarvationRisk,
+		}
+	}
+	return out
+}
+
+// priorityReason states what the bound means, in the two cases it has.
+func priorityReason(ranked, bound int, bounded bool) string {
+	if bounded {
+		return fmt.Sprintf("the scheduler ranked ONE bounded page of %d candidates against its own bound of %d and more Requirements exist beyond it, so entries is a PREFIX of the ranking; a Requirement with no entry was not ranked in this read and is deliberately given no rank", ranked, bound)
+	}
+	return fmt.Sprintf("the scheduler ranked %d candidates within its own bound of %d and no Requirement exists beyond that page, so entries covers every Requirement this read considered; a Requirement with no entry carries no rank because none was computed for it", ranked, bound)
+}
+
 // QueueSummaryResponse is the GET /v1/queue/summary body: the five existing
 // counters, unchanged in name, type and meaning, plus the three allocation
 // objects.
@@ -238,6 +355,12 @@ type QueueSummaryResponse struct {
 	Allocation AllocationView `json:"allocation"`
 	Waiting    WaitingView    `json:"waiting"`
 	Exhaustion ExhaustionView `json:"exhaustion"`
+	// Priority is cap-backlog-visibility's 優先度とその根拠 (V2-095 A7). It is
+	// on this response type and not on the shared QueueSummary for the same
+	// reason the three objects above are: QueueSummary is embedded as
+	// RepositoryBacklogView.InstallationScope by
+	// internal/application/repository.go, which cannot populate it.
+	Priority PriorityView `json:"priority"`
 }
 
 // ---------------------------------------------------------------------------
@@ -575,11 +698,11 @@ func (s *Service) QueueSummary(ctx context.Context) (QueueSummaryResponse, error
 		if base.ByIncrementStatus == nil {
 			base.ByIncrementStatus = map[string]int{}
 		}
-		allocation, waiting, exhaustion, e := allocationReport(ctx, u, now, base.ActiveExecutions)
+		allocation, waiting, exhaustion, priority, e := allocationReport(ctx, u, now, base.ActiveExecutions)
 		if e != nil {
 			return e
 		}
-		out = QueueSummaryResponse{QueueSummary: base, Allocation: allocation, Waiting: waiting, Exhaustion: exhaustion}
+		out = QueueSummaryResponse{QueueSummary: base, Allocation: allocation, Waiting: waiting, Exhaustion: exhaustion, Priority: priority}
 		return nil
 	})
 	if err != nil {
@@ -595,14 +718,17 @@ func (s *Service) QueueSummary(ctx context.Context) (QueueSummaryResponse, error
 // for the effective limit, one bounded page of at most scheduler.MaxCandidates
 // Requirements, one bounded active-Lease read, and one keyed Increment read per
 // active Lease.
-func allocationReport(ctx context.Context, u UnitOfWork, now time.Time, active int) (AllocationView, WaitingView, ExhaustionView, error) {
+func allocationReport(ctx context.Context, u UnitOfWork, now time.Time, active int) (AllocationView, WaitingView, ExhaustionView, PriorityView, error) {
 	limit, source, revision, err := effectiveAllocationLimit(ctx, u)
 	if err != nil {
-		return AllocationView{}, WaitingView{}, ExhaustionView{}, err
+		return AllocationView{}, WaitingView{}, ExhaustionView{}, PriorityView{}, err
 	}
-	candidates, _, err := u.RequirementsPage(ctx, "", scheduler.MaxCandidates)
+	// moreCandidates was previously discarded. It is kept now because it is the
+	// only truthful answer to "was the ranking below the whole Backlog?", and
+	// V2-095 A7 forbids reporting a bounded projection as if it were complete.
+	candidates, moreCandidates, err := u.RequirementsPage(ctx, "", scheduler.MaxCandidates)
 	if err != nil {
-		return AllocationView{}, WaitingView{}, ExhaustionView{}, err
+		return AllocationView{}, WaitingView{}, ExhaustionView{}, PriorityView{}, err
 	}
 	ids := make([]string, 0, len(candidates))
 	for _, r := range candidates {
@@ -612,31 +738,59 @@ func allocationReport(ctx context.Context, u UnitOfWork, now time.Time, active i
 	// read ListRequirementsPage already makes.
 	links, err := u.RequirementRepositoryLinks(ctx, ids)
 	if err != nil {
-		return AllocationView{}, WaitingView{}, ExhaustionView{}, err
+		return AllocationView{}, WaitingView{}, ExhaustionView{}, PriorityView{}, err
 	}
 	claims, err := allocationClaims(ctx, u)
 	if err != nil {
-		return AllocationView{}, WaitingView{}, ExhaustionView{}, err
+		return AllocationView{}, WaitingView{}, ExhaustionView{}, PriorityView{}, err
 	}
 	snapshot, err := BuildAllocationSnapshot(now, limit, active, candidates, links, claims)
 	if err != nil {
-		return AllocationView{}, WaitingView{}, ExhaustionView{}, err
+		return AllocationView{}, WaitingView{}, ExhaustionView{}, PriorityView{}, err
 	}
 	plan, err := scheduler.Decide(snapshot)
 	if err != nil {
-		return AllocationView{}, WaitingView{}, ExhaustionView{}, err
+		return AllocationView{}, WaitingView{}, ExhaustionView{}, PriorityView{}, err
 	}
 	waiting := WaitingView{ByReason: emptyWaitingBuckets()}
+	priority := PriorityView{
+		Bounded:          moreCandidates,
+		CandidatesRanked: len(plan.Decisions),
+		CandidateBound:   scheduler.MaxCandidates,
+		Entries:          make([]PriorityEntryView, 0, len(plan.Decisions)),
+	}
+	priority.Reason = priorityReason(len(plan.Decisions), scheduler.MaxCandidates, moreCandidates)
 	for _, decision := range plan.Decisions {
-		if decision.Assigned {
-			continue
+		entry := PriorityEntryView{
+			RequirementID: decision.RequirementID,
+			Rank:          decision.Rank,
+			Assigned:      decision.Assigned,
+			Score:         decision.Score,
+			ScoreInputs:   priorityScoreInputsView(decision.Inputs),
 		}
-		bucket, ok := WaitingReasonFor(decision.Reason)
-		if !ok {
-			return AllocationView{}, WaitingView{}, ExhaustionView{}, fmt.Errorf("scheduler reported reason %q, which this package has no bucket for", decision.Reason)
+		if decision.Inputs.UsedAssessment {
+			priority.AssessmentSupplied = true
 		}
-		waiting.ByReason[bucket]++
-		waiting.Total++
+		if !decision.Assigned {
+			// ONE mapping, shared with the histogram below, so the projected
+			// reason and the bucket key can never name different vocabularies.
+			// An unknown reason refuses the whole read: the pre-existing
+			// fail-closed behaviour at the waiting-bucket mapping is preserved
+			// exactly, and it now also guards the per-candidate projection.
+			bucket, ok := WaitingReasonFor(decision.Reason)
+			if !ok {
+				return AllocationView{}, WaitingView{}, ExhaustionView{}, PriorityView{}, fmt.Errorf("scheduler reported reason %q, which this package has no bucket for", decision.Reason)
+			}
+			entry.Reason = bucket
+			waiting.ByReason[bucket]++
+			waiting.Total++
+		}
+		priority.Entries = append(priority.Entries, entry)
+	}
+	if priority.AssessmentSupplied {
+		priority.AssessmentNote = priorityAssessmentPresentNote
+	} else {
+		priority.AssessmentNote = priorityAssessmentAbsentNote
 	}
 	remaining := limit - active
 	if remaining < 0 {
@@ -650,7 +804,7 @@ func allocationReport(ctx context.Context, u UnitOfWork, now time.Time, active i
 		Remaining:          remaining,
 		PlannedAssignments: len(plan.Assignments),
 	}
-	return allocation, waiting, AllocationExhaustion(active, limit, source), nil
+	return allocation, waiting, AllocationExhaustion(active, limit, source), priority, nil
 }
 
 // allocationClaims builds one read-only scheduler.Claim per active Lease. The

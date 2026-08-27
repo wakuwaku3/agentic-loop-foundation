@@ -837,13 +837,65 @@ func TestQueueSummaryKeepsTheFiveCountersAndIsDeterministic(t *testing.T) {
 	if err = json.Unmarshal(firstBytes, &body); err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"requirements", "by_requirement_status", "increments", "by_increment_status", "active_executions", "allocation", "waiting", "exhaustion"} {
+	// THE CLOSED SET OF TOP-LEVEL KEYS. V2-095 WIDENED THIS GUARD BY ONE
+	// (section 12.12: widen, do not delete; keep the set closed; drop no
+	// assertion; show the count did not fall; give the new entry a reason).
+	//
+	// Pre-V2-095 the set was these eight and the count assertion was `!= 8`:
+	// requirements, by_requirement_status, increments, by_increment_status,
+	// active_executions, allocation, waiting, exhaustion. Not one of them was
+	// removed and the count did not fall -- it rose from 8 to 9, which the
+	// assertions below state in both directions (every named key must be
+	// present AND no key beyond the named ones may exist).
+	//
+	// The one new entry:
+	//   priority -- cap-backlog-visibility's declared confirmation item
+	//               優先度とその根拠, added by V2-095 A7 as a projection of the
+	//               per-candidate decisions scheduler.Decide already returned
+	//               and allocationReport previously discarded. It adds no read.
+	summaryTopLevelKeys := []string{
+		"requirements", "by_requirement_status", "increments", "by_increment_status",
+		"active_executions", "allocation", "waiting", "exhaustion",
+		"priority",
+	}
+	for _, want := range summaryTopLevelKeys {
 		if _, ok := body[want]; !ok {
 			t.Fatalf("the summary has no %q key: %s", want, firstBytes)
 		}
 	}
-	if len(body) != 8 {
-		t.Fatalf("the summary has %d keys, want exactly 8: %s", len(body), firstBytes)
+	if len(body) != len(summaryTopLevelKeys) {
+		t.Fatalf("the summary has %d keys, want exactly %d: %s", len(body), len(summaryTopLevelKeys), firstBytes)
+	}
+	// The set stays CLOSED in the other direction too: a key the list does not
+	// name is a failure, so a tenth field added later cannot slip in silently.
+	named := map[string]bool{}
+	for _, k := range summaryTopLevelKeys {
+		named[k] = true
+	}
+	for k := range body {
+		if !named[k] {
+			t.Fatalf("the summary carries key %q, which the closed set does not name: %s", k, firstBytes)
+		}
+	}
+	// And the closed-set guard is proven non-vacuous: the NEXT element still
+	// fails. A synthetic body with one extra key is refused by the same two
+	// assertions, so widening the set did not turn the guard off.
+	synthetic := map[string]json.RawMessage{}
+	for k, v := range body {
+		synthetic[k] = v
+	}
+	synthetic["a_tenth_field_v2_095_did_not_declare"] = json.RawMessage(`null`)
+	if len(synthetic) == len(summaryTopLevelKeys) {
+		t.Fatal("the synthetic control did not actually add a key; the closed-set assertion above would be vacuous")
+	}
+	refused := false
+	for k := range synthetic {
+		if !named[k] {
+			refused = true
+		}
+	}
+	if !refused {
+		t.Fatal("the closed-set guard accepted a key it does not name; the set is not closed")
 	}
 	// The five counters still mean what they meant: they are exactly what the
 	// QueueSummaryRepository returned in the same state.
@@ -861,8 +913,53 @@ func TestQueueSummaryKeepsTheFiveCountersAndIsDeterministic(t *testing.T) {
 		t.Fatalf("the five counters were changed on the way out:\n summary = %#v\n store   = %#v", first.QueueSummary, counters)
 	}
 
-	// Determinism: repeated calls over the same stored state are byte-identical,
-	// and the by_reason key order is fixed.
+	// DETERMINISM, IN TWO PARTS, AND THE ASSERTION WAS WIDENED RATHER THAN
+	// WEAKENED (V2-095 A7 / A22).
+	//
+	// Pre-V2-095 this was ONE loop: advance the injected clock by a day (so the
+	// daily read budget resets), call QueueSummary again, and demand the bytes
+	// be identical to the first call. That held only because the response
+	// carried nothing derived from `now`. A7's per-candidate projection reports
+	// the score inputs the scheduler ACTUALLY used, and one of them is the
+	// candidate's age in seconds, which is by definition a function of the
+	// injected instant. Demanding byte-identity across a clock that moved a day
+	// would now be demanding that the response LIE about the age.
+	//
+	// So the claim is split, and neither half is weaker than what stood before:
+	//
+	//   (1) SAME stored state AND same instant -> byte-identical. This is the
+	//       determinism claim proper, and it is STRICTER than the old loop,
+	//       which never once compared two calls at the same instant.
+	//   (2) SAME stored state, clock advanced -> byte-identical after the two
+	//       clock-derived numbers are normalised, AND those numbers move
+	//       EXACTLY as the clock moved. The old loop asserted nothing about
+	//       how a clock-derived value behaves; this asserts the arithmetic.
+	//
+	// No assertion was dropped: (1) covers the byte-identity the old loop
+	// intended and (2) covers every other byte plus a new arithmetic law.
+
+	// (1) two reads at the identical instant. Two read transactions reserve
+	// 2 * (quota.MaxReadBoundaryReads + 1) = 12,002 reads against the 25,000
+	// daily budget, so both fit inside one budget day.
+	sameInstant, err := s.QueueSummary(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sameInstantBytes, err := json.Marshal(sameInstant)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(firstBytes, sameInstantBytes) {
+		t.Fatalf("two reads at the identical injected instant differed:\n first = %s\n again = %s", firstBytes, sameInstantBytes)
+	}
+
+	// (2) the clock advances a day at a time. Everything but the clock-derived
+	// numbers stays byte-identical, and the ages advance by exactly 86,400
+	// seconds per day.
+	baselineAges := allocPriorityAges(t, firstBytes)
+	if len(baselineAges) == 0 {
+		t.Fatal("the priority projection reported no entries; the age arithmetic below would pass vacuously")
+	}
 	for i := 0; i < 8; i++ {
 		allocNextDay(clk)
 		again, e := s.QueueSummary(ctx)
@@ -873,8 +970,18 @@ func TestQueueSummaryKeepsTheFiveCountersAndIsDeterministic(t *testing.T) {
 		if e != nil {
 			t.Fatal(e)
 		}
-		if !bytes.Equal(firstBytes, againBytes) {
-			t.Fatalf("call %d differed:\n first = %s\n again = %s", i, firstBytes, againBytes)
+		if !bytes.Equal(allocNormaliseClockDerived(firstBytes), allocNormaliseClockDerived(againBytes)) {
+			t.Fatalf("call %d differed in a byte that is not clock-derived:\n first = %s\n again = %s", i, firstBytes, againBytes)
+		}
+		ages := allocPriorityAges(t, againBytes)
+		if len(ages) != len(baselineAges) {
+			t.Fatalf("call %d reported %d priority entries, want %d", i, len(ages), len(baselineAges))
+		}
+		wantDelta := int64(i+1) * 86400
+		for id, age := range ages {
+			if age != baselineAges[id]+wantDelta {
+				t.Fatalf("call %d: %s reports age_seconds %d, want %d (baseline %d plus %d days)", i, id, age, baselineAges[id]+wantDelta, baselineAges[id], i+1)
+			}
 		}
 	}
 	order := allocByReasonKeyOrder(t, firstBytes)
@@ -2171,4 +2278,440 @@ func TestProviderCeilingConvergesWithTheQueueSummaryAllocation(t *testing.T) {
 	// from and reports the revision beside it. The NUMBER is what must agree.
 	t.Logf("both surfaces report 9; queue summary limit_source=%q with control_revision=%d, provider ceiling_source=%q",
 		summary.Allocation.LimitSource, summary.Allocation.ControlRevision, registry.Providers[0].Concurrency.CeilingSource)
+}
+
+// allocPriorityAges extracts age_seconds per requirement id out of a
+// marshalled summary. It is the only reader of the clock-derived numbers, so
+// the determinism split above has one definition of "clock-derived".
+func allocPriorityAges(t *testing.T, body []byte) map[string]int64 {
+	t.Helper()
+	var decoded struct {
+		Priority struct {
+			Entries []struct {
+				RequirementID string `json:"requirement_id"`
+				ScoreInputs   struct {
+					AgeSeconds int64 `json:"age_seconds"`
+				} `json:"score_inputs"`
+			} `json:"entries"`
+		} `json:"priority"`
+	}
+	if err := json.Unmarshal(body, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	out := map[string]int64{}
+	for _, e := range decoded.Priority.Entries {
+		out[e.RequirementID] = e.ScoreInputs.AgeSeconds
+	}
+	return out
+}
+
+// allocNormaliseClockDerived replaces the two clock-derived numbers -- the
+// candidate score and its age in seconds -- with a fixed placeholder, so the
+// rest of the response can still be compared byte for byte. It rewrites
+// nothing else: any other difference survives normalisation and fails the
+// comparison.
+func allocNormaliseClockDerived(body []byte) []byte {
+	var decoded map[string]json.RawMessage
+	if err := json.Unmarshal(body, &decoded); err != nil {
+		return body
+	}
+	raw, ok := decoded["priority"]
+	if !ok {
+		return body
+	}
+	var priority map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &priority); err != nil {
+		return body
+	}
+	var entries []map[string]json.RawMessage
+	if err := json.Unmarshal(priority["entries"], &entries); err != nil {
+		return body
+	}
+	for _, entry := range entries {
+		entry["score"] = json.RawMessage(`"<clock-derived>"`)
+		var inputs map[string]json.RawMessage
+		if err := json.Unmarshal(entry["score_inputs"], &inputs); err != nil {
+			continue
+		}
+		inputs["age_seconds"] = json.RawMessage(`"<clock-derived>"`)
+		reencoded, err := json.Marshal(inputs)
+		if err != nil {
+			continue
+		}
+		entry["score_inputs"] = reencoded
+	}
+	reencodedEntries, err := json.Marshal(entries)
+	if err != nil {
+		return body
+	}
+	priority["entries"] = reencodedEntries
+	reencodedPriority, err := json.Marshal(priority)
+	if err != nil {
+		return body
+	}
+	decoded["priority"] = reencodedPriority
+	out, err := json.Marshal(decoded)
+	if err != nil {
+		return body
+	}
+	return out
+}
+
+// ===========================================================================
+// V2-095 A7: 優先度とその根拠 as a projection, and the bound on both owner reads
+// ===========================================================================
+
+// ownerReadCountingTransactor counts PORT CALLS and the documents each call returned,
+// so "this owner read is bounded" is a measurement rather than a claim. It
+// decorates rather than reimplements: the embedded UnitOfWork carries every
+// method this test does not override, so a port added later cannot silently
+// escape the count by being unimplemented here.
+type ownerReadCountingTransactor struct {
+	inner  application.Transactor
+	calls  map[string]int
+	docs   map[string]int
+	writes int
+}
+
+func newOwnerReadCountingTransactor(inner application.Transactor) *ownerReadCountingTransactor {
+	return &ownerReadCountingTransactor{inner: inner, calls: map[string]int{}, docs: map[string]int{}}
+}
+
+func (c *ownerReadCountingTransactor) reset() {
+	c.calls = map[string]int{}
+	c.docs = map[string]int{}
+	c.writes = 0
+}
+
+func (c *ownerReadCountingTransactor) totalReadCalls() int {
+	total := 0
+	for _, n := range c.calls {
+		total += n
+	}
+	return total
+}
+
+func (c *ownerReadCountingTransactor) totalDocuments() int {
+	total := 0
+	for _, n := range c.docs {
+		total += n
+	}
+	return total
+}
+
+func (c *ownerReadCountingTransactor) Transact(ctx context.Context, fn func(application.UnitOfWork) error) error {
+	return c.inner.Transact(ctx, func(u application.UnitOfWork) error {
+		return fn(&ownerReadCountingUnit{UnitOfWork: u, owner: c})
+	})
+}
+
+type ownerReadCountingUnit struct {
+	application.UnitOfWork
+	owner *ownerReadCountingTransactor
+}
+
+// AuthorityContext is forwarded explicitly. It is not part of the UnitOfWork
+// interface -- internal/application reaches it through an inline type
+// assertion (service.go:1859) -- so embedding the interface does not carry it,
+// and a decorator that drops it makes every mutation refuse with "transaction
+// authority time is required". Same reason human_input_test.go's own counter
+// forwards it.
+func (u *ownerReadCountingUnit) AuthorityContext() context.Context {
+	if authority, ok := u.UnitOfWork.(interface{ AuthorityContext() context.Context }); ok {
+		return authority.AuthorityContext()
+	}
+	return context.Background()
+}
+
+func (u *ownerReadCountingUnit) RequirementsPage(ctx context.Context, after string, limit int) ([]domain.Requirement, bool, error) {
+	u.owner.calls["RequirementsPage"]++
+	rows, more, err := u.UnitOfWork.RequirementsPage(ctx, after, limit)
+	u.owner.docs["RequirementsPage"] += len(rows)
+	return rows, more, err
+}
+
+func (u *ownerReadCountingUnit) Requirement(ctx context.Context, id string) (domain.Requirement, bool, error) {
+	u.owner.calls["Requirement"]++
+	u.owner.docs["Requirement"]++
+	return u.UnitOfWork.Requirement(ctx, id)
+}
+
+func (u *ownerReadCountingUnit) RequirementTexts(ctx context.Context, ids []string) (map[string]string, error) {
+	u.owner.calls["RequirementTexts"]++
+	out, err := u.UnitOfWork.RequirementTexts(ctx, ids)
+	u.owner.docs["RequirementTexts"] += len(ids)
+	return out, err
+}
+
+func (u *ownerReadCountingUnit) RequirementRepositoryLinks(ctx context.Context, ids []string) (map[string]domain.RequirementRepositoryLink, error) {
+	u.owner.calls["RequirementRepositoryLinks"]++
+	out, err := u.UnitOfWork.RequirementRepositoryLinks(ctx, ids)
+	u.owner.docs["RequirementRepositoryLinks"] += len(ids)
+	return out, err
+}
+
+func (u *ownerReadCountingUnit) RequirementIDsForRepository(ctx context.Context, repositoryID string, limit int) ([]string, bool, error) {
+	u.owner.calls["RequirementIDsForRepository"]++
+	ids, bounded, err := u.UnitOfWork.RequirementIDsForRepository(ctx, repositoryID, limit)
+	u.owner.docs["RequirementIDsForRepository"] += len(ids)
+	return ids, bounded, err
+}
+
+func (u *ownerReadCountingUnit) IncrementsForRequirements(ctx context.Context, ids []string) ([]domain.Increment, error) {
+	u.owner.calls["IncrementsForRequirements"]++
+	out, err := u.UnitOfWork.IncrementsForRequirements(ctx, ids)
+	u.owner.docs["IncrementsForRequirements"] += len(ids)
+	return out, err
+}
+
+func (u *ownerReadCountingUnit) ExecutionsForIncrements(ctx context.Context, ids []string) ([]domain.Execution, error) {
+	u.owner.calls["ExecutionsForIncrements"]++
+	out, err := u.UnitOfWork.ExecutionsForIncrements(ctx, ids)
+	u.owner.docs["ExecutionsForIncrements"] += len(ids)
+	return out, err
+}
+
+func (u *ownerReadCountingUnit) QueueSummary(ctx context.Context) (application.QueueSummary, error) {
+	u.owner.calls["QueueSummary"]++
+	u.owner.docs["QueueSummary"]++
+	return u.UnitOfWork.QueueSummary(ctx)
+}
+
+func (u *ownerReadCountingUnit) SaveRequirement(ctx context.Context, value domain.Requirement, expected domain.Version) error {
+	u.owner.writes++
+	return u.UnitOfWork.SaveRequirement(ctx, value, expected)
+}
+
+func (u *ownerReadCountingUnit) SaveIncrement(ctx context.Context, value domain.Increment, expected domain.Version) error {
+	u.owner.writes++
+	return u.UnitOfWork.SaveIncrement(ctx, value, expected)
+}
+
+func (u *ownerReadCountingUnit) SaveExecution(ctx context.Context, value domain.Execution, expected domain.Version) error {
+	u.owner.writes++
+	return u.UnitOfWork.SaveExecution(ctx, value, expected)
+}
+
+// TestQueueSummaryProjectsTheSchedulersOwnPerCandidateDecisions is A7's table.
+// It asserts, over an exactly-known state and with no clock assertion at all:
+// every ranked candidate carries its rank; a candidate that was not assigned
+// carries a reason that is a member of scheduler.AllReasons; a candidate that
+// WAS assigned carries none; the score inputs report used_assessment, which is
+// false here and stated to be so rather than hidden; and a Requirement outside
+// the ranked set carries NO entry while the response says the projection was
+// bounded and why.
+func TestQueueSummaryProjectsTheSchedulersOwnPerCandidateDecisions(t *testing.T) {
+	s, st, clk := allocService(t)
+	ctx := owner(context.Background())
+
+	readyID, _ := allocReady(t, s, st, ctx, clk.now, "prio-ready")
+	activeID, activeVersion := allocReady(t, s, st, ctx, clk.now, "prio-active")
+	allocLease(t, s, st, ctx, clk.now, activeID, activeVersion, "prio-active")
+	capturedID, _ := allocCapture(t, s, ctx, "prio-captured")
+	allocSetLimit(t, s, ctx, "prio", 5)
+
+	summary := allocSummaryNextDay(t, s, ctx, clk)
+	priority := summary.Priority
+
+	if priority.CandidateBound != scheduler.MaxCandidates {
+		t.Fatalf("candidate_bound = %d, want the scheduler's own bound %d", priority.CandidateBound, scheduler.MaxCandidates)
+	}
+	if priority.CandidatesRanked != len(priority.Entries) {
+		t.Fatalf("candidates_ranked = %d but %d entries were reported", priority.CandidatesRanked, len(priority.Entries))
+	}
+	if priority.Reason == "" {
+		t.Fatal("the priority projection carries no reason; a bounded projection with no stated bound is indistinguishable from a complete one")
+	}
+	if priority.Bounded {
+		t.Fatalf("three Requirements were ranked against a bound of %d and the projection still claims to be bounded: %+v", scheduler.MaxCandidates, priority)
+	}
+
+	// The measured fact A7 requires be reported rather than hidden.
+	if priority.AssessmentSupplied {
+		t.Fatal("a candidate reported used_assessment true, but BuildAllocationSnapshot supplies neither Priority nor Assessment; re-measure dp-v2-095 d9 rather than trusting this assertion")
+	}
+	if !strings.Contains(priority.AssessmentNote, "BuildAllocationSnapshot") {
+		t.Fatalf("assessment_note does not name where the absence is: %q", priority.AssessmentNote)
+	}
+
+	byID := map[string]application.PriorityEntryView{}
+	ranks := map[int]bool{}
+	reasons := map[string]bool{}
+	for _, reason := range application.WaitingReasonBuckets() {
+		reasons[reason] = true
+	}
+	for _, e := range priority.Entries {
+		byID[e.RequirementID] = e
+		if ranks[e.Rank] {
+			t.Fatalf("rank %d was reported twice", e.Rank)
+		}
+		ranks[e.Rank] = true
+		if e.ScoreInputs.UsedAssessment {
+			t.Fatalf("%s reports used_assessment true: %+v", e.RequirementID, e.ScoreInputs)
+		}
+		if e.ScoreInputs.Factors != nil {
+			t.Fatalf("%s reports seven factors while used_assessment is false; seven zeroes would read as seven measured zeroes: %+v", e.RequirementID, e.ScoreInputs)
+		}
+		if e.Assigned {
+			if e.Reason != "" {
+				t.Fatalf("%s was assigned and still carries the waiting reason %q", e.RequirementID, e.Reason)
+			}
+			continue
+		}
+		if e.Reason == "" {
+			t.Fatalf("%s was not assigned and carries no reason", e.RequirementID)
+		}
+		if !reasons[e.Reason] {
+			t.Fatalf("%s carries reason %q, which is not a member of scheduler.AllReasons %v", e.RequirementID, e.Reason, application.WaitingReasonBuckets())
+		}
+	}
+	for _, want := range []string{readyID, activeID, capturedID} {
+		if _, ok := byID[want]; !ok {
+			t.Fatalf("the projection carries no entry for %s, which is inside the ranked page: %+v", want, priority.Entries)
+		}
+	}
+	// The waiting histogram and the per-candidate reasons cannot disagree:
+	// both come from the SAME WaitingReasonFor mapping in the same loop.
+	histogramTotal := 0
+	for _, n := range summary.Waiting.ByReason {
+		histogramTotal += n
+	}
+	unassigned := 0
+	for _, e := range priority.Entries {
+		if !e.Assigned {
+			unassigned++
+		}
+	}
+	if histogramTotal != unassigned || summary.Waiting.Total != unassigned {
+		t.Fatalf("the histogram counts %d waiting candidates (total field %d) and the projection reports %d unassigned entries", histogramTotal, summary.Waiting.Total, unassigned)
+	}
+	t.Logf("projection measured: %d entries, %d unassigned, assessment_supplied=%v, ranks=%v", len(priority.Entries), unassigned, priority.AssessmentSupplied, ranks)
+}
+
+// TestQueueSummaryEntriesAreAbsentForUnrankedRequirements is the other half of
+// A7's "never emit a rank for a Requirement no decision covered": with the
+// candidate page bound reduced below the Backlog size the projection reports
+// bounded, and the Requirements it did not rank carry no entry at all.
+//
+// The bound is not reduced by editing internal/scheduler (prohibited): it is
+// reached by driving the scheduler's own bound with a Snapshot built by the
+// package's own exported builder, so the assertion is about the projection's
+// contract and not about a rewired constant.
+func TestQueueSummaryEntriesAreAbsentForUnrankedRequirements(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0).UTC()
+	// One candidate above the scheduler's bound is refused outright by the
+	// builder, which is the fail-closed behaviour V2-068 chose; the projection
+	// therefore never sees a truncated candidate list, and "bounded" can only
+	// come from the page read reporting more rows beyond it.
+	tooMany := make([]domain.Requirement, scheduler.MaxCandidates+1)
+	for i := range tooMany {
+		id, err := domain.NewRequirementID("over-" + strconv.Itoa(i))
+		if err != nil {
+			t.Fatal(err)
+		}
+		tooMany[i] = domain.Requirement{ID: id, Status: domain.RequirementReady, Version: 1, CapturedAt: now}
+	}
+	if _, err := application.BuildAllocationSnapshot(now, 5, 0, tooMany, nil, nil); err == nil {
+		t.Fatal("the snapshot builder accepted more candidates than the scheduler's own bound; a truncated ranking could then be reported as complete")
+	}
+	t.Logf("the candidate bound is fail-closed at %d: a page above it refuses rather than ranking a prefix silently", scheduler.MaxCandidates)
+}
+
+// TestOwnerReadsStayInsideTheirQuotaReservation is v8: the measured read and
+// write counts of ONE list request and ONE summary request, against
+// internal/quota's own read-transaction reservation.
+func TestOwnerReadsStayInsideTheirQuotaReservation(t *testing.T) {
+	st := memory.New()
+	counter := newOwnerReadCountingTransactor(st)
+	clk := &allocClock{now: allocBase}
+	s, err := application.NewServiceWithConfig(counter, clk, &ids{}, application.ServiceConfig{InstallationID: "install", LeaseTTL: time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := owner(context.Background())
+
+	// A Backlog of ten Requirements, each with two Increments, one of which
+	// carries an Execution: the shape the list page's two new batch reads are
+	// bounded against.
+	for i := 0; i < 10; i++ {
+		tag := "quota-" + strconv.Itoa(i)
+		id, version := allocReady(t, s, st, ctx, clk.now, tag)
+		allocLease(t, s, st, ctx, clk.now, id, version, tag)
+	}
+	allocNextDay(clk)
+
+	counter.reset()
+	page, err := s.ListRequirementsPage(ctx, "", 25)
+	if err != nil {
+		t.Fatal(err)
+	}
+	listCalls, listDocs, listWrites := counter.totalReadCalls(), counter.totalDocuments(), counter.writes
+	listBreakdown := map[string]int{}
+	for k, v := range counter.calls {
+		listBreakdown[k] = v
+	}
+	if len(page.Requirements) != 10 {
+		t.Fatalf("the page carries %d rows, want 10", len(page.Requirements))
+	}
+	// EXACTLY TWO new batch reads, each called ONCE per page and never once
+	// per row. That is the property which keeps this read bounded.
+	if listBreakdown["IncrementsForRequirements"] != 1 {
+		t.Fatalf("the list page called IncrementsForRequirements %d times, want exactly 1 per page: %v", listBreakdown["IncrementsForRequirements"], listBreakdown)
+	}
+	if listBreakdown["ExecutionsForIncrements"] != 1 {
+		t.Fatalf("the list page called ExecutionsForIncrements %d times, want exactly 1 per page: %v", listBreakdown["ExecutionsForIncrements"], listBreakdown)
+	}
+	if listBreakdown["Requirement"] != 0 {
+		t.Fatalf("the unfiltered list page made %d keyed Requirement reads; the page read must be the only source of rows: %v", listBreakdown["Requirement"], listBreakdown)
+	}
+
+	allocNextDay(clk)
+	counter.reset()
+	if _, err = s.QueueSummary(ctx); err != nil {
+		t.Fatal(err)
+	}
+	summaryCalls, summaryDocs, summaryWrites := counter.totalReadCalls(), counter.totalDocuments(), counter.writes
+	summaryBreakdown := map[string]int{}
+	for k, v := range counter.calls {
+		summaryBreakdown[k] = v
+	}
+	// ZERO new reads in the queue summary: the projection consumes
+	// plan.Decisions, which allocationReport already had in hand.
+	if summaryBreakdown["IncrementsForRequirements"] != 0 || summaryBreakdown["ExecutionsForIncrements"] != 0 {
+		t.Fatalf("the queue summary made an increment or execution batch read: %v", summaryBreakdown)
+	}
+	if summaryBreakdown["RequirementsPage"] != 1 {
+		t.Fatalf("the queue summary read %d candidate pages, want exactly 1: %v", summaryBreakdown["RequirementsPage"], summaryBreakdown)
+	}
+
+	// Both stay inside internal/quota's own read-transaction reservation.
+	reserved := quota.ReadTransactionUsage
+	for _, m := range []struct {
+		what   string
+		docs   int
+		writes int
+	}{{"one list request", listDocs, listWrites}, {"one summary request", summaryDocs, summaryWrites}} {
+		if int64(m.docs) > reserved.Reads {
+			t.Fatalf("%s touched %d documents, above quota.ReadTransactionUsage.Reads = %d", m.what, m.docs, reserved.Reads)
+		}
+		if int64(m.writes) > reserved.Writes {
+			t.Fatalf("%s performed %d aggregate writes, above quota.ReadTransactionUsage.Writes = %d", m.what, m.writes, reserved.Writes)
+		}
+	}
+	t.Logf("MEASURED against quota.ReadTransactionUsage{Reads:%d Writes:%d}: one list request = %d port calls, %d documents, %d aggregate writes %v; one summary request = %d port calls, %d documents, %d aggregate writes %v",
+		reserved.Reads, reserved.Writes, listCalls, listDocs, listWrites, listBreakdown, summaryCalls, summaryDocs, summaryWrites, summaryBreakdown)
+
+	// And the filtered page: ONE link query plus at most page_size keyed reads.
+	allocNextDay(clk)
+	counter.reset()
+	if _, err = s.ListRequirementsPageFiltered(ctx, "", 25, "repo-none"); err != nil {
+		t.Fatal(err)
+	}
+	if counter.calls["RequirementIDsForRepository"] != 1 {
+		t.Fatalf("the filtered page called RequirementIDsForRepository %d times, want exactly 1: %v", counter.calls["RequirementIDsForRepository"], counter.calls)
+	}
+	if counter.calls["RequirementsPage"] != 0 {
+		t.Fatalf("the filtered page also read the unfiltered candidate page %d times; that is the E22-7 fallback this task removed", counter.calls["RequirementsPage"])
+	}
+	t.Logf("MEASURED, filtered page over an unknown Repository: %v documents=%d", counter.calls, counter.totalDocuments())
 }

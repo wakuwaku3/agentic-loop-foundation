@@ -672,3 +672,195 @@ const id=()=>crypto.randomUUID();const json=v=>({headers:{"Content-Type":"applic
   var refresh=el("provider-handoff-refresh");
   if(refresh){refresh.onclick=read;}
 })();
+
+/* V2-095: the user documents surface and the Backlog's declared confirmation
+   items. Appended, self-contained block. Nothing above is rewritten. No
+   external asset is referenced. No threshold number appears here. Every value
+   rendered comes from a response field; nothing is derived, defaulted or
+   guessed, and an absent value is rendered as an absence with its reason. */
+(function(){
+  var el=function(id){return document.getElementById(id);};
+  var setList=function(id,items,empty){
+    var node=el(id);
+    if(!node){return;}
+    node.textContent="";
+    if(!items.length){
+      var only=document.createElement("li");
+      only.className="muted";
+      only.textContent=empty;
+      node.appendChild(only);
+      return;
+    }
+    for(var i=0;i<items.length;i++){
+      var li=document.createElement("li");
+      li.textContent=items[i];
+      node.appendChild(li);
+    }
+  };
+
+  /* --- the user documents --- */
+  var docsFailed=function(message){
+    el("userdocs-state").textContent=message;
+    el("userdocs-reason").textContent="";
+    setList("userdocs-rows",[],message);
+  };
+  var openDocument=function(route,path){
+    return fetch(route).then(function(r){
+      if(!r.ok){
+        el("userdocs-selected").textContent="Unable to read "+path+". The response was not a document.";
+        el("userdocs-body").textContent="";
+        return;
+      }
+      return r.json().then(function(doc){
+        el("userdocs-selected").textContent=doc.path+" — channel "+doc.channel+", version "+doc.release_version+", "+doc.size_bytes+" bytes, digest "+doc.sha256+".";
+        el("userdocs-body").textContent=doc.content;
+      });
+    }).catch(function(){
+      el("userdocs-selected").textContent="Unable to read "+path+".";
+      el("userdocs-body").textContent="";
+    });
+  };
+  var renderDocs=function(index){
+    var rows=(index&&index.documents)||[];
+    el("userdocs-state").textContent="Channel "+index.channel+", version "+index.release_version+", documentation digest "+index.docs_digest+", "+rows.length+" documents.";
+    el("userdocs-reason").textContent=index.allowlist_source||"";
+    var node=el("userdocs-rows");
+    if(!node){return;}
+    node.textContent="";
+    if(!rows.length){
+      var only=document.createElement("li");
+      only.className="muted";
+      only.textContent="The assembled release bundle names no documentation member.";
+      node.appendChild(only);
+      return;
+    }
+    for(var i=0;i<rows.length;i++){
+      var li=document.createElement("li");
+      var button=document.createElement("button");
+      button.type="button";
+      button.textContent=rows[i].path;
+      (function(route,path){button.onclick=function(){openDocument(route,path);};})(rows[i].route,rows[i].path);
+      li.appendChild(button);
+      var note=document.createElement("span");
+      note.className="muted";
+      note.textContent=" digest "+rows[i].sha256;
+      li.appendChild(note);
+      node.appendChild(li);
+    }
+  };
+  var readDocs=function(){
+    return fetch("/owner/docs/").then(function(r){
+      if(r.status===503){
+        return r.json().then(function(body){
+          docsFailed("This process was given no explicit release source root, so it can report no channel, no version and no document. "+(body.message||""));
+        }).catch(function(){docsFailed("This process was given no explicit release source root, so it can report no channel, no version and no document.");});
+      }
+      if(!r.ok){docsFailed("Unable to read the user documents.");return;}
+      return r.json().then(renderDocs);
+    }).catch(function(){docsFailed("Unable to read the user documents.");});
+  };
+  var docsRefresh=el("userdocs-refresh");
+  if(docsRefresh){docsRefresh.onclick=readDocs;}
+
+  /* --- the Backlog's declared confirmation items --- */
+  var describeReflection=function(reflection){
+    if(!reflection){return "release reflection unreported";}
+    if(!reflection.observed){return "reflected in no release ("+(reflection.reason||"no reason reported")+")";}
+    return "reflected in release "+(reflection.release_id||"an unreported id")+" version "+reflection.release_version+", bundle digest "+(reflection.bundle_digest||"unreported");
+  };
+  var describeRow=function(row,ranks){
+    var increments=row.increments||[];
+    var parts=[];
+    for(var i=0;i<increments.length;i++){
+      parts.push(increments[i].increment_id+" ("+increments[i].status+")");
+    }
+    var incrementText=parts.length?parts.join(", "):"no Increment has been read for this Requirement";
+    if(row.increments_truncated){
+      incrementText=incrementText+" — this row's Increments were cut by the page's own Increment bound, so this list and the next action below describe a bounded set";
+    }
+    var rank=ranks[row.requirement_id];
+    var rankText=(rank===undefined)
+      ? "unranked in this read, so no position is shown"
+      : ("rank "+rank.rank+(rank.assigned?" (assigned)":(" (waiting — "+(rank.reason||"no reason reported")+")")));
+    return row.requirement_id
+      +" — "+(row.status||"status unreported")
+      +". Repository: "+(row.repository_id||"records no association")
+      +". Increments: "+incrementText
+      +". Next action: "+(row.next_action||"unreported")
+      +". "+describeReflection(row.release_reflection)
+      +". Priority: "+rankText+".";
+  };
+  var describeInputs=function(inputs){
+    if(!inputs){return "score inputs unreported";}
+    if(!inputs.used_assessment){
+      return "score came from the age-only basis (age "+inputs.age_seconds+"s, priority "+inputs.priority+"); the multi-factor assessment did NOT feed this ranking";
+    }
+    var f=inputs.factors||{};
+    return "score used the multi-factor assessment (age "+inputs.age_seconds+"s; value "+f.value_score+", urgency "+f.urgency_score+", risk "+f.risk_score+", dependency "+f.dependency_score+", learning "+f.learning_score+", resource cost "+f.resource_cost+", starvation risk "+f.starvation_risk+")";
+  };
+  var backlogFailed=function(message){
+    el("backlog-items-state").textContent=message;
+    el("backlog-items-filter").textContent="";
+    setList("backlog-items-rows",[],message);
+    setList("backlog-items-priority",[],message);
+    el("backlog-items-priority-note").textContent="";
+  };
+  var renderBacklog=function(page,summary){
+    var rows=(page&&page.requirements)||[];
+    var priority=(summary&&summary.priority)||{};
+    var entries=priority.entries||[];
+    var ranks={};
+    for(var i=0;i<entries.length;i++){ranks[entries[i].requirement_id]=entries[i];}
+    var described=[];
+    for(var j=0;j<rows.length;j++){described.push(describeRow(rows[j],ranks));}
+    setList("backlog-items-rows",described,"The response carried no Requirement.");
+    var state="Read "+rows.length+" Requirements at page size "+page.page_size+".";
+    if(page.truncated){
+      state=state+" The page's own Increment bound applied to this answer, so at least one row read a bounded Increment set.";
+    }
+    if(page.next_cursor){
+      state=state+" More Requirements exist beyond this page.";
+    }
+    el("backlog-items-state").textContent=state;
+    el("backlog-items-filter").textContent=page.filter
+      ? ("Filtered to Repository "+page.filter.repository_id+": "+page.filter.reason+(page.filter.missing_requirements?(" "+page.filter.missing_requirements+" link rows named a Requirement that could not be read back."):""))
+      : "No Repository filter was applied, so this is the whole Backlog within the page bound.";
+    var priorityRows=[];
+    for(var k=0;k<entries.length;k++){
+      priorityRows.push(entries[k].requirement_id+" — rank "+entries[k].rank+(entries[k].assigned?" (assigned)":(" (waiting — "+(entries[k].reason||"no reason reported")+")"))+"; "+describeInputs(entries[k].score_inputs)+".");
+    }
+    setList("backlog-items-priority",priorityRows,"The scheduler ranked no candidate in this read.");
+    el("backlog-items-priority-note").textContent=(priority.reason||"")+" "+(priority.assessment_note||"");
+  };
+  var readBacklog=function(){
+    var repository=el("backlog-items-repository");
+    var query="/v1/requirements?page_size=25";
+    if(repository&&repository.value){
+      query=query+"&repository_id="+encodeURIComponent(repository.value);
+    }
+    return fetch(query).then(function(r){
+      if(!r.ok){
+        return r.json().then(function(body){
+          backlogFailed("Unable to read the Backlog: "+(body.message||"the response was not a page."));
+        }).catch(function(){backlogFailed("Unable to read the Backlog.");});
+      }
+      return r.json().then(function(page){
+        return fetch("/v1/queue/summary").then(function(s){
+          if(!s.ok){
+            renderBacklog(page,null);
+            el("backlog-items-priority-note").textContent="The queue summary could not be read, so no ranking is shown. No position is guessed.";
+            return;
+          }
+          return s.json().then(function(summary){renderBacklog(page,summary);});
+        }).catch(function(){
+          renderBacklog(page,null);
+          el("backlog-items-priority-note").textContent="The queue summary could not be read, so no ranking is shown. No position is guessed.";
+        });
+      });
+    }).catch(function(){backlogFailed("Unable to read the Backlog.");});
+  };
+  var backlogForm=el("backlog-items");
+  if(backlogForm){
+    backlogForm.onsubmit=function(event){event.preventDefault();readBacklog();};
+  }
+})();
