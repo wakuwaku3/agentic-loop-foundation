@@ -103,5 +103,14 @@
       "summary": "A24 THE GRADE. The environment class is preview-local: the owner's own machine, the real cmd/control-plane process built from this commit, the real claude CLI as a real child process group, the real gh and git CLIs, and the Firestore emulator as the canonical store. Identifiers: machine D18061; kernel Linux D18061 6.18.33.2-microsoft-standard-WSL2 x86_64; emulator 'firebase firestore emulator' firebase-tools 15.23.0, started for real through scripts/firestore-emulator.sh; claude 2.1.246 (Claude Code) at the resolved absolute path /home/takushi/.local/bin/claude; gh 2.92.0 at /usr/bin/gh; git 2.43.0 at /usr/bin/git; go toolchain go1.25.0 linux/amd64; devbox 0.17.2; worktree /home/takushi/repos/agentic-loop-foundation-worktrees/v2-task-095; branch v2-task/V2-095.\nUnder G3 item 2, preview-local IS the real-environment grade for conditions about the Loop's own observable behaviour, and it is not called a substitute for anything. Under G3 item 1, the GitHub and Git halves of cap-repository-registration are satisfied by the real identifiers recorded in this record's cap-repository-registration check: the resolved absolute executable paths, both CLI versions, the forge node id and the observed default branch, all read from the real external systems.\nWHAT preview-local CANNOT ESTABLISH, AND WHOSE IT IS. The IAP authentication boundary, idle scale-to-zero, real Firestore permissions and contention, the approved-plan-digest deploy path, and every other Google Cloud Run fact belong to the initial deploy gate D1. None of them is claimed here.\nFORBIDDEN SENTENCES, GREPPED FOR AND MEASURED ABSENT. Each of the following was searched for in both records: 'this was observed on Cloud Run', 'the deployed environment', 'a Stable promotion occurred', 'all twelve capabilities were exercised', 'all capabilities passed'. Each occurs zero times. No sentence in either record asserts a capability whose check is skipped; no sentence describes any of the seven skipped capabilities as failed; and no sentence describes any of the four M5-owned gaps as deferred."
     }
   ],
+  "artifact_refs": [
+    {
+      "artifact_id": "provider-preflight",
+      "media_type": "application/json",
+      "sha256": "8f37d830c5f7c645b220c480bd429a5315f3579753d583efd7fbac4109f08d8c",
+      "size_bytes": 7169,
+      "name": ".agents/v2/provider-preflight/V2-095-provider-live-claude-redogfood.json"
+    }
+  ],
   "observed_at": "2026-08-27T00:55:00Z"
 }
