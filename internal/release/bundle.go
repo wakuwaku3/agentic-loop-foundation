@@ -417,6 +417,7 @@ type CandidateInput struct {
 	Status                  domain.ReleaseStatus
 	Evidence                []domain.CapabilityEvidence
 	CapabilityTargets       map[string]domain.CapabilityTarget
+	AffectedProviders       []string
 	RollbackEvidence        bool
 	ResumeEvidence          bool
 	ExpectedControlRevision domain.Revision
@@ -450,6 +451,7 @@ func AssembleCandidate(root string, input CandidateInput) (AssembledBundle, doma
 		DocsDigest:              assembled.DocsDigest,
 		EvidenceDigest:          computeEvidenceDigest(input.Evidence),
 		CapabilityTargets:       input.CapabilityTargets,
+		AffectedProviders:       append([]string(nil), input.AffectedProviders...),
 	}
 	return assembled, candidate, nil
 }

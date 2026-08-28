@@ -35,5 +35,9 @@
         "Preview実環境でexample journeyを実行し成功すること"
       ]
     }
-  ]
+  ],
+  "provider_verification": {
+    "unchanged_or_provider_neutral": "any-one-declared",
+    "directly_affected": "every-affected"
+  }
 }

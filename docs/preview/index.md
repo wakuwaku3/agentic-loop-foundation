@@ -23,8 +23,9 @@ Preview候補の利用者向け文書の入口です。現在のv2 branchは実�
 2026-08-28に、このrepository自身を `preview-local` で再実測しました。実
 Control Plane、別Runner process、Firestore emulator、Codex 0.149.1、OpenCode
 1.18.18、GitHub read、Git clone を使用し、fixture/fakeを実物確認の代替にして
-いません。この実測はGCP deploymentとClaudeを含みません。Stable Releaseは
-存在せず、昇格も行っていません。
+いません。この候補はProviderへの直接変更を含まないため、利用可能なProviderの
+実確認としてこの2つで条件を満たします。実測はGCP deploymentを含みません。
+Stable Releaseは存在せず、昇格も行っていません。
 
 capability baselineの正本は
 [contracts/release-contract/foundation.json](../../contracts/release-contract/foundation.json)

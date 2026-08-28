@@ -175,7 +175,7 @@ Previewの障害時は新規claimを止め、必要ならStableへroutingを戻�
 
 - Stable候補が提供する全ユーザー向け機能が、Previewの実稼働環境で動作した
 - 外部systemに依存する各機能が、その対象となる実物との接続で動作した
-- Provider依存機能は、影響するCodex、Claude、opencodeを実際に利用して動作した
+- Providerへの直接変更は影響するProviderをすべて実確認し、それ以外は利用可能なProviderのいずれか1つ以上で動作した
 - 対象versionがStableとして利用されている
 - Requirementと大原則の検証結果が記録されている
 - 切り戻し先が利用可能である

@@ -110,7 +110,7 @@ deploy先はGCPとする。M2 gate通過後の任意の時点で実行でき、M
 
 - Runner enrollment、heartbeat、claim、Lease
 - workspace、process supervisor、Secret Broker
-- 代表Provider Adapter（Release Contractのrepresentative_providerで宣言、現在はclaude）
+- Provider Adapter（直接変更時は影響Providerを全確認、それ以外は利用可能な1 Provider以上を確認）
 - 1 Repository／1 Incrementの変更、検証、integration
 - provider-neutral Work Packet
 
@@ -172,7 +172,7 @@ deploy先はGCPとする。M2 gate通過後の任意の時点で実行でき、M
 完了条件:
 
 - 各Providerのsuccess／error／quota／cancelを実物で確認する
-- 共通adapter変更を3 Providerすべてで実証する
+- 共通adapter変更が3 Providerすべてへ直接影響する場合は3 Providerすべてで実証する
 - Provider変更後もIncrement、Artifact、Evidenceを失わない
 - opencodeも共通sandbox境界を越えない
 

@@ -86,47 +86,26 @@ func TestFoundationReleaseContractBaseline(t *testing.T) {
 		t.Fatalf("release mismatch: foundation-capabilities.json has %q, foundation.json has %q", got, want)
 	}
 
-	// (k1) the declaration set names a representative Provider and it is
-	// "claude" (V2-047: Sol's re-plan of M3 around the representative
-	// Provider role rather than a hardcoded CLI).
-	repProviderRaw, present := decl["representative_provider"]
+	// (k1) unchanged or Provider-neutral behavior needs one declared Provider;
+	// a direct Provider change needs every Provider it affects. The contract
+	// must not name a permanently subscribed representative Provider.
+	policy, present := decl["provider_verification"].(map[string]any)
 	if !present {
-		t.Fatal("k1: foundation-capabilities.json missing representative_provider")
+		t.Fatal("k1: foundation-capabilities.json missing provider_verification")
 	}
-	representativeProvider := stringValue(repProviderRaw)
-	if representativeProvider != "claude" {
-		t.Fatalf("k1: representative_provider = %q, want %q", representativeProvider, "claude")
+	if got := stringValue(policy["unchanged_or_provider_neutral"]); got != "any-one-declared" {
+		t.Fatalf("k1: unchanged_or_provider_neutral = %q, want any-one-declared", got)
 	}
-
-	// (k2) the declared representative Provider must actually be a
-	// dependency of every capability that declares a non-empty providers
-	// array: naming a representative Provider the contract does not depend
-	// on anywhere would be an unenforceable claim.
-	for _, raw := range declCaps {
-		capability := raw.(map[string]any)
-		id := stringValue(capability["id"])
-		deps, _ := capability["external_dependencies"].(map[string]any)
-		providers, _ := deps["providers"].([]any)
-		if len(providers) == 0 {
-			continue
-		}
-		found := false
-		for _, p := range providers {
-			if stringValue(p) == representativeProvider {
-				found = true
-				break
-			}
-		}
-		if !found {
-			t.Errorf("k2: %s: external_dependencies.providers %v does not include representative_provider %q", id, providers, representativeProvider)
-		}
+	if got := stringValue(policy["directly_affected"]); got != "every-affected" {
+		t.Fatalf("k1: directly_affected = %q, want every-affected", got)
+	}
+	if _, present := decl["representative_provider"]; present {
+		t.Fatal("k1: a fixed representative_provider would require a permanent subscription")
 	}
 
-	// (k3) anti-weakening pin: the three Provider-dependent capabilities
-	// must each still declare all three Providers, in the same order.
-	// Promoting a capability by deleting codex or opencode from its
-	// providers array would be a substantive contract weakening that Sol
-	// explicitly prohibited; three-Provider live remains V2-028's M6 work.
+	// (k3) the three Provider-dependent capabilities continue to support all
+	// three Providers. This declares availability, not a requirement to run all
+	// three for every release.
 	wantProviders := []string{"codex", "claude", "opencode"}
 	for _, id := range []string{"cap-autonomous-resolution", "cap-shared-resource-allocation", "cap-provider-operation"} {
 		capability := declByID[id]
@@ -141,16 +120,6 @@ func TestFoundationReleaseContractBaseline(t *testing.T) {
 		}
 		if !reflect.DeepEqual(got, wantProviders) {
 			t.Errorf("k3: %s: external_dependencies.providers = %v, want %v", id, got, wantProviders)
-		}
-	}
-
-	// (k4) forward compatibility: if foundation.json ever gains its own
-	// representative_provider field (a later, sequenced migration once
-	// internal/release/release.go's DisallowUnknownFields decoder gains the
-	// field), it must not disagree with the declaration set's value.
-	if raw, present := contract["representative_provider"]; present {
-		if got := stringValue(raw); got != representativeProvider {
-			t.Errorf("k4: foundation.json representative_provider = %q, want %q (must match declaration set)", got, representativeProvider)
 		}
 	}
 
@@ -230,26 +199,25 @@ func TestFoundationReleaseContractBaseline(t *testing.T) {
 	}
 }
 
-// TestCapabilityDeclarationSetRepresentativeProviderEnumIsEnforced proves
-// dp-v2-047 d3(ii): representative_provider's enum keyword does the
-// rejecting, not some other field of an already-broken fixture. It mutates
-// a decoded copy of the VALID capability-declaration-set fixture (the only
-// way to isolate the enum's effect) to an out-of-enum value and requires
-// Validate to reject it.
-func TestCapabilityDeclarationSetRepresentativeProviderEnumIsEnforced(t *testing.T) {
+// TestCapabilityDeclarationSetProviderVerificationPolicyIsClosed proves the
+// promotion policy cannot be weakened to an unrecognized mode.
+func TestCapabilityDeclarationSetProviderVerificationPolicyIsClosed(t *testing.T) {
 	root := filepath.Join("..", "..")
 	schemaPath := filepath.Join(root, "contracts", "schemas", "capability-declaration-set.json")
 	validPath := filepath.Join(root, "contracts", "fixtures", "valid", "capability-declaration-set.json")
 
 	schema := mustRead(t, schemaPath)
 	decoded := readJSON(t, validPath)
-	decoded["representative_provider"] = "gemini"
+	decoded["provider_verification"] = map[string]any{
+		"unchanged_or_provider_neutral": "none-required",
+		"directly_affected":             "every-affected",
+	}
 	mutated, err := json.Marshal(decoded)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := Validate(schema, mutated, ResolveSchemaRef(filepath.Dir(schemaPath))); err == nil {
-		t.Fatal("representative_provider enum accepted the out-of-enum value \"gemini\"")
+		t.Fatal("provider_verification accepted the weakening none-required")
 	}
 }
 

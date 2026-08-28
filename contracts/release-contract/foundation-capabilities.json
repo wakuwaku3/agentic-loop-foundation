@@ -5,7 +5,6 @@
   "created_at": "2026-08-24T00:00:00Z",
   "correlation_id": "v2-009-release-contract",
   "release": "0.1.0-preview.1",
-  "representative_provider": "claude",
   "contract_ref": "rc-foundation-0.1.0-preview.1",
   "capabilities": [
     {
@@ -142,7 +141,7 @@
       ],
       "promotion_prerequisites": [
         "release-contract.md条件2: Preview実環境でcap-autonomous-resolutionのuser journeyを実行し成功すること",
-        "release-contract.md条件3: local Runner machine、Git、GitHub、Firestore、OS process、および対象Provider（codex、claude、opencode）の実物へ接続して成功すること",
+        "release-contract.md条件3: local Runner machine、Git、GitHub、Firestore、OS process、およびProvider直接変更がなければ宣言Providerのいずれか1つ以上、直接変更があれば影響Providerすべての実物へ接続して成功すること",
         "release-contract.md条件4: stop、rollback、Stableによる再開を確認すること",
         "release-contract.md条件6-8: 同じversionのStable利用者文書区間を公開し、Previewとの差分とmigration/rollback方法を説明すること"
       ]
@@ -352,7 +351,7 @@
       ],
       "promotion_prerequisites": [
         "release-contract.md条件2: Preview実環境でcap-shared-resource-allocationのuser journeyを実行し成功すること",
-        "release-contract.md条件3: Firestore、owner UI、local Runner machine、および対象Provider（codex、claude、opencode）の実物へ接続して成功すること",
+        "release-contract.md条件3: Firestore、owner UI、local Runner machine、およびProvider直接変更がなければ宣言Providerのいずれか1つ以上、直接変更があれば影響Providerすべての実物へ接続して成功すること",
         "release-contract.md条件4: stop、rollback、Stableによる再開を確認すること",
         "release-contract.md条件6-8: 同じversionのStable利用者文書区間を公開し、Previewとの差分とmigration/rollback方法を説明すること"
       ]
@@ -389,7 +388,7 @@
       ],
       "promotion_prerequisites": [
         "release-contract.md条件2: Preview実環境でcap-provider-operationのuser journeyを実行し成功すること",
-        "release-contract.md条件3: local Runner machine、owner UI、Firestore、および対象Provider（codex、claude、opencode）の実物へ接続して成功すること",
+        "release-contract.md条件3: local Runner machine、owner UI、Firestore、およびProvider直接変更がなければ宣言Providerのいずれか1つ以上、直接変更があれば影響Providerすべての実物へ接続して成功すること",
         "release-contract.md条件4: stop、rollback、Stableによる再開を確認すること",
         "release-contract.md条件6-8: 同じversionのStable利用者文書区間を公開し、Previewとの差分とmigration/rollback方法を説明すること",
         "release-contract.md条件8: owner API pathを公開しcontracts/openapi/openapi-v1.yamlへ追加すること"
@@ -427,5 +426,9 @@
         "release-contract.md条件8: owner API pathを公開しcontracts/openapi/openapi-v1.yamlへ追加すること"
       ]
     }
-  ]
+  ],
+  "provider_verification": {
+    "unchanged_or_provider_neutral": "any-one-declared",
+    "directly_affected": "every-affected"
+  }
 }

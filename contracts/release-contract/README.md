@@ -14,3 +14,8 @@ release is `status: "preview"`. See
 [docs/architecture/release-contract.md](../../docs/architecture/release-contract.md)
 for what the fields mean and what promotion requires; this file does not
 restate it.
+
+`provider_verification` は固定の代表Providerを持たない。Providerへの直接変更が
+なければ宣言Providerのどれか1つ以上、直接変更があれば影響Providerすべての
+実確認を要求する。利用可能Provider一覧に含まれることは、毎releaseでの契約を
+要求する意味ではない。

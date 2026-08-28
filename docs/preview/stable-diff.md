@@ -115,8 +115,9 @@ Release ContractのStable Releaseへ戻す操作ではありません。Stable R
 - preview-local: 実Control Plane、Firestore emulator、別Runner process、実Codexで
   claimからprovider resultまで通過し、quota hard guardも実測。
 
-Stable昇格に残る外部条件はGCP Preview deploymentでの全capability journeyと、
-Claude依存機能の実CLI確認です。これらを通すまではcontract statusを`stable`へ
+Stable昇格に残る外部条件はGCP Preview deploymentでの全capability journeyです。
+Providerへの直接変更を含まない今回の候補は、実Codexと実OpenCodeの確認により
+Provider条件を満たしています。GCP確認を通すまではcontract statusを`stable`へ
 書き換えません。
 
 capability baselineの正本は

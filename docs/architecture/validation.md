@@ -126,7 +126,7 @@ fixture更新には、実CLI version、観測日時、変更理由、対応Previ
 Release Contractの各capabilityを実際のPreview revision、Firestore、Runner、Repository、Providerで実行する。canonical storeとdeploy環境の実体はrelease-contract.md §3の環境等級に従う。deploy targetを要する4点はD1の管轄である。
 
 - Stable候補の全capabilityを毎release実行する
-- Provider依存変更は対象Provider、共通adapter変更は3 Providerすべてを実行する
+- Provider直接変更は影響Providerをすべて実行し、それ以外は宣言Providerのいずれか1つ以上を実行する
 - read-onlyで確認できない機能は、専用sandbox Repository／Applicationで可逆に実行する
 - 課金、通知、外部公開、data変更は明示したtest resourceとhard budget内だけで行う
 - Evidenceにはversion、target、operation ID、結果、時刻、duration、usageを残す

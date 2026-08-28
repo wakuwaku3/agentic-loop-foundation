@@ -112,6 +112,35 @@ func TestPromotableFixtureIsAcceptedByBothTheAuthorityAndTheEnumeration(t *testi
 	}
 }
 
+func TestProviderVerificationRequiresOneUnlessProvidersAreDirectlyAffected(t *testing.T) {
+	unchanged := promotableFixture()
+	if err := unchanged.CanPromote(); err != nil {
+		t.Fatalf("an unchanged provider surface was not promotable with real-provider evidence: %v", err)
+	}
+
+	affected := promotableFixture()
+	affected.AffectedProviders = []string{"provider-cap-a", "provider-cap-b"}
+	if err := affected.CanPromote(); err != nil {
+		t.Fatalf("all directly affected providers were observed: %v", err)
+	}
+
+	missing := affected.Clone()
+	missing.AffectedProviders = append(missing.AffectedProviders, "provider-not-observed")
+	if err := missing.CanPromote(); !errors.Is(err, ErrEvidenceIncomplete) {
+		t.Fatalf("missing directly affected provider error = %v, want ErrEvidenceIncomplete", err)
+	}
+	rejections := missing.PromotionRejections()
+	found := false
+	for _, rejection := range rejections {
+		if rejection.Kind == RejectCapabilityTargetMissing && rejection.Capability == "provider:provider-not-observed" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("missing directly affected provider was not reported: %+v", rejections)
+	}
+}
+
 // TestPromotionRejectionsIsolateEachRefusalClass is the separation table the
 // single-capability-projection mechanism could not provide: each row makes
 // exactly one fact false and asserts exactly one refusal, of its own kind.

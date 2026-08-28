@@ -733,7 +733,7 @@ func TestEveryNotSendingValueCarriesItsEvidenceAndItsObservationScope(t *testing
 	if probing.State != provider.CircuitProbing || len(probing.Because) == 0 || probing.ObservationScope == "" {
 		t.Fatalf("probing report = %#v", probing)
 	}
-	t.Log("measured precedent for the scope: docs/operations/provider-live-claude.md records that the runner's ledger sees only invocations that went through SupervisedInvocationRunner, and gives the measured example of six real claude invocations run by hand from a shell during V2-017 that appear nowhere in it. A breaker built on the same population therefore knows how this Loop's own calls went and nothing about the Provider's condition")
+	t.Log("the runner ledger sees only invocations that went through SupervisedInvocationRunner; a breaker built on the same population knows how this Loop's own calls went and nothing about calls made outside the Loop")
 }
 
 func TestBreakerRefusesIncompleteDependenciesAndUnknownProviders(t *testing.T) {

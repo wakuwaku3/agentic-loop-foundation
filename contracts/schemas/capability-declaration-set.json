@@ -12,6 +12,7 @@
     "correlation_id",
     "release",
     "contract_ref",
+    "provider_verification",
     "capabilities"
   ],
   "properties": {
@@ -37,13 +38,21 @@
       "type": "string",
       "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(-[A-Za-z0-9.-]+)?$"
     },
-    "representative_provider": {
-      "type": "string",
-      "enum": [
-        "codex",
-        "claude",
-        "opencode"
-      ]
+    "provider_verification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "unchanged_or_provider_neutral",
+        "directly_affected"
+      ],
+      "properties": {
+        "unchanged_or_provider_neutral": {
+          "const": "any-one-declared"
+        },
+        "directly_affected": {
+          "const": "every-affected"
+        }
+      }
     },
     "contract_ref": {
       "type": "string",

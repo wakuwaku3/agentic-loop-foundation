@@ -54,12 +54,17 @@ type ReleaseCandidate struct {
 	DocsDigest              string
 	EvidenceDigest          string
 	CapabilityTargets       map[string]CapabilityTarget
+	// AffectedProviders is empty when the release contains no direct Provider
+	// change. Otherwise every named Provider must appear in verified, fresh
+	// evidence before promotion.
+	AffectedProviders []string
 }
 
 func (r ReleaseCandidate) Clone() ReleaseCandidate {
 	n := r
 	n.Capabilities = append([]string(nil), r.Capabilities...)
 	n.Evidence = append([]CapabilityEvidence(nil), r.Evidence...)
+	n.AffectedProviders = append([]string(nil), r.AffectedProviders...)
 	if r.CapabilityTargets != nil {
 		n.CapabilityTargets = make(map[string]CapabilityTarget, len(r.CapabilityTargets))
 		for k, v := range r.CapabilityTargets {
@@ -86,10 +91,12 @@ func (r ReleaseCandidate) CanPromote() error {
 		}
 	}
 	seen := make(map[string]bool, len(r.Evidence))
+	observedProviders := make(map[string]bool, len(r.Evidence))
 	for _, evidence := range r.Evidence {
 		if evidence.Capability == "" || evidence.CandidateID != r.CandidateID || evidence.CandidateDigest != r.CandidateDigest || evidence.Digest == "" || evidence.BundleDigest != r.BundleDigest || evidence.ContractDigest != r.ContractDigest || evidence.DocsDigest != r.DocsDigest || !evidence.Verified || !evidence.Fresh || evidence.Target == "" || evidence.Provider == "" {
 			continue
 		}
+		observedProviders[evidence.Provider] = true
 		if requirement, ok := r.CapabilityTargets[evidence.Capability]; ok && (requirement.Target != evidence.Target || requirement.Provider != evidence.Provider) {
 			continue
 		}
@@ -98,6 +105,11 @@ func (r ReleaseCandidate) CanPromote() error {
 	for _, capability := range r.Capabilities {
 		if !seen[capability] {
 			return fmt.Errorf("%w: capability %q", ErrEvidenceIncomplete, capability)
+		}
+	}
+	for _, provider := range r.AffectedProviders {
+		if provider == "" || !observedProviders[provider] {
+			return fmt.Errorf("%w: directly affected provider %q has no verified fresh execution", ErrEvidenceIncomplete, provider)
 		}
 	}
 	if !r.RollbackEvidence || !r.ResumeEvidence {
@@ -383,10 +395,12 @@ func (r ReleaseCandidate) PromotionRejections() []PromotionRejection {
 		}
 	}
 	seen := make(map[string]bool, len(r.Evidence))
+	observedProviders := make(map[string]bool, len(r.Evidence))
 	for _, evidence := range r.Evidence {
 		if evidence.Capability == "" || evidence.CandidateID != r.CandidateID || evidence.CandidateDigest != r.CandidateDigest || evidence.Digest == "" || evidence.BundleDigest != r.BundleDigest || evidence.ContractDigest != r.ContractDigest || evidence.DocsDigest != r.DocsDigest || !evidence.Verified || !evidence.Fresh || evidence.Target == "" || evidence.Provider == "" {
 			continue
 		}
+		observedProviders[evidence.Provider] = true
 		if requirement, ok := r.CapabilityTargets[evidence.Capability]; ok && (requirement.Target != evidence.Target || requirement.Provider != evidence.Provider) {
 			continue
 		}
@@ -395,6 +409,11 @@ func (r ReleaseCandidate) PromotionRejections() []PromotionRejection {
 	for _, capability := range r.Capabilities {
 		if !seen[capability] {
 			add(RejectCapabilityEvidenceMissing, capability, "no verified, fresh evidence record binds this capability to the candidate's own digests and declared target")
+		}
+	}
+	for _, provider := range r.AffectedProviders {
+		if provider == "" || !observedProviders[provider] {
+			add(RejectCapabilityTargetMissing, "provider:"+provider, fmt.Sprintf("directly affected provider %q has no verified fresh execution", provider))
 		}
 	}
 	if !r.RollbackEvidence {

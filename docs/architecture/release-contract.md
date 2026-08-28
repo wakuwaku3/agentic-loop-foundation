@@ -31,10 +31,11 @@ Stable候補は、Release Contractにある全capabilityを、その候補versio
 - 変更されたcapabilityだけでなく、Stableとして提供する全capabilityを対象にする
 - fake、stub、契約testは早期feedbackに使うが、実稼働確認を置き換えない
 - 外部system依存機能は対象systemへ実際に接続する
-- Provider非依存機能は、Release Contractで定めた代表Providerによる実行を確認する（代表Providerはcapability declaration setのrepresentative_providerで宣言する）
-- Provider依存機能は、影響する各Providerを実際に利用する
+- Provider非依存機能とProviderへの直接変更を含まない機能は、宣言されたProviderのうち利用可能な1つ以上で実行を確認する
+- Provider固有adapter、共通adapter、handoffなどProviderへ直接変更を加えた場合は、その変更が影響する各Providerを実際に利用する
 - Codex依存変更はCodex、Claude依存変更はClaude、opencode依存変更はopencodeで確認する
-- 共通Provider adapterやhandoff契約の変更はCodex、Claude、opencodeすべてで確認する
+- 共通Provider adapterやhandoff契約の変更が3 Providerすべてへ影響する場合に限り、3 Providerすべてで確認する
+- Providerを利用可能な選択肢として宣言することは、毎releaseで全Providerの契約・認証・実行を要求しない
 - 実行不能なcapabilityが一つでもあれば、理由にかかわらずStableへ昇格しない
 
 費用やquotaを理由に確認を省略しない。上限内で実証できるよう頻度と入力を設計し、上限内で実行
