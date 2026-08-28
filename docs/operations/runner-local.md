@@ -482,3 +482,23 @@ closed divergence, not an open one.
 A `result_pending` journal record is recovered as described above, so retry
 skips the provider and records one `result_accepted` event after the
 idempotent application acceptance.
+
+## Real mode with Codex or OpenCode
+
+`cmd/runner --real` requires an explicit provider, repository root and approved
+preflight record in addition to its control-plane and session inputs:
+
+```sh
+cmd/runner --real \
+  --data-root /absolute/0700/path \
+  --control-plane http://127.0.0.1:8080 \
+  --session-token-file /absolute/0600/token \
+  --repository-root /absolute/repository \
+  --provider codex \
+  --provider-preflight /absolute/repository/.agents/v2/provider-preflight/V2-028-provider-live-codex.json
+```
+
+`--provider opencode`は対応するOpenCode recordと組み合わせる。Runnerはofferに含まれる
+boundedなRequirement summaryからWork Packetを作り、個別workspace内でCLIを実行し、
+provider名と成功可否だけをControl Planeへ返す。raw response、session ID、認証値はHTTPへ
+送らない。

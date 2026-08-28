@@ -320,21 +320,19 @@ func TestTheClientRefusesToBeConstructedWithoutAnInjectedClientOrClock(t *testin
 	}
 }
 
-// TestTheClientExposesNoResultCallAtAll is the structural half of "it posts NO
-// result": the client's own method set has no result call, so the driver cannot
-// post one even by mistake. It also asserts the four route constants are the
-// only paths this file names.
-func TestTheClientExposesNoResultCallAtAll(t *testing.T) {
+// TestTheClientExposesOnlyTheBoundedRunnerCalls pins the client surface,
+// including the result call needed after a real Provider execution.
+func TestTheClientExposesOnlyTheBoundedRunnerCalls(t *testing.T) {
 	body, err := os.ReadFile("controlplane.go")
 	if err != nil {
 		t.Fatal(err)
 	}
 	text := string(body)
-	if strings.Contains(text, "/v1/executions/result") {
-		t.Fatal("controlplane.go names /v1/executions/result; this client must expose no result call at all")
+	if !strings.Contains(text, "/v1/executions/result") {
+		t.Fatal("controlplane.go does not name the result route")
 	}
 	// The four call names, and no fifth, on *ControlPlaneClient.
-	wanted := []string{"func (c *ControlPlaneClient) OfferedWork(", "func (c *ControlPlaneClient) Claim(", "func (c *ControlPlaneClient) StartExecution(", "func (c *ControlPlaneClient) Heartbeat("}
+	wanted := []string{"func (c *ControlPlaneClient) OfferedWork(", "func (c *ControlPlaneClient) Claim(", "func (c *ControlPlaneClient) StartExecution(", "func (c *ControlPlaneClient) CompleteExecution(", "func (c *ControlPlaneClient) Heartbeat("}
 	for _, want := range wanted {
 		if !strings.Contains(text, want) {
 			t.Fatalf("controlplane.go does not declare %q", want)
@@ -342,7 +340,7 @@ func TestTheClientExposesNoResultCallAtAll(t *testing.T) {
 	}
 	methods := strings.Count(text, "func (c *ControlPlaneClient) ")
 	if methods != len(wanted)+1 {
-		t.Fatalf("*ControlPlaneClient declares %d methods, want exactly %d (the four calls plus the single private request path); a fifth call is a deliberate widening", methods, len(wanted)+1)
+		t.Fatalf("*ControlPlaneClient declares %d methods, want exactly %d (the five calls plus the single private request path)", methods, len(wanted)+1)
 	}
 	// A RESPONSE body is never echoed into an error. `raw` is the response
 	// bytes' only name in this file, so a conversion of it to a string is the

@@ -175,7 +175,7 @@ func TestProviderPreflightLedgerRejectsMissingRecord(t *testing.T) {
 	}, map[string]any{"id": "ev-v2-999-provider-live", "task_id": "V2-999", "component": "provider-live-invoke", "result": "passed", "release_eligible": false, "evidence_hash": strings.Repeat("d", 64)})
 
 	err := CheckProviderPreflightLedger(f.root)
-	if err == nil || !strings.Contains(err.Error(), "expected exactly one preflight record") {
+	if err == nil || !strings.Contains(err.Error(), "no preflight record") {
 		t.Fatalf("expected a missing-preflight-record failure, got %v", err)
 	}
 	t.Logf("before=no preflight record, after=%v", err)
@@ -197,7 +197,7 @@ func TestProviderPreflightLedgerRejectsDigestMismatch(t *testing.T) {
 	}, map[string]any{"id": "ev-v2-998-provider-live", "task_id": "V2-998", "component": "provider-live-invoke", "result": "passed", "release_eligible": false, "evidence_hash": strings.Repeat("d", 64)})
 
 	err := CheckProviderPreflightLedger(f.root)
-	if err == nil || !strings.Contains(err.Error(), "no artifact_refs entry names provider-preflight") {
+	if err == nil || !strings.Contains(err.Error(), "no artifact_refs entry names one of") {
 		t.Fatalf("expected an artifact_refs mismatch failure, got %v", err)
 	}
 	t.Logf("before=artifact_refs points elsewhere, after=%v", err)
@@ -247,6 +247,34 @@ func TestProviderPreflightLedgerPassesWithAWellFormedRecord(t *testing.T) {
 
 	if err := CheckProviderPreflightLedger(f.root); err != nil {
 		t.Fatalf("expected a well-formed record to pass, got %v", err)
+	}
+}
+
+// A multi-provider task may have one independently approved preflight record
+// per provider. Each evidence entry must select exactly one of those records by
+// digest instead of relying on an ambiguous task-level match.
+func TestProviderPreflightLedgerPassesWithMultipleRecordsForOneTask(t *testing.T) {
+	f := newProviderLedgerFixture(t)
+	subjectPath, subjectDigest := f.writeSubject(t, "V2-995-work-order.json", []byte(`{"id":"wo-v2-995"}`))
+	codex := baseProviderPreflightRecord("V2-995", "2026-08-24T10:00:00Z", "2026-08-24T09:00:00Z", subjectPath, subjectDigest)
+	codex["id"] = "pp-v2-995-codex"
+	codexPath := f.writePreflight(t, "V2-995-codex.json", codex)
+	opencode := baseProviderPreflightRecord("V2-995", "2026-08-24T10:00:00Z", "2026-08-24T09:00:00Z", subjectPath, subjectDigest)
+	opencode["id"] = "pp-v2-995-opencode"
+	opencode["provider"] = map[string]any{
+		"name": "opencode", "version": "1.18.18", "executable_path": "/usr/local/bin/opencode",
+	}
+	f.writePreflight(t, "V2-995-opencode.json", opencode)
+	f.writeEvidence(t, ".agents/v2/evidence/V2-995-provider-live.json", map[string]any{
+		"schema_version": "v1", "id": "ev-v2-995-provider-live", "kind": "evidence", "created_at": "2026-08-24T10:00:00Z",
+		"correlation_id": "demo", "task_id": "V2-995", "component": "provider-live-codex", "evidence_key": strings.Repeat("c", 16), "result": "passed",
+		"checks":        []any{map[string]any{"name": "demo", "status": "passed", "argv": []any{"true"}, "working_directory": ".", "timeout_seconds": 1}},
+		"artifact_refs": []any{map[string]any{"artifact_id": "provider-preflight", "media_type": "application/json", "sha256": sha256HexFile(t, codexPath), "size_bytes": 1}},
+		"observed_at":   "2026-08-24T11:00:00Z",
+	}, map[string]any{"id": "ev-v2-995-provider-live", "task_id": "V2-995", "component": "provider-live-codex", "result": "passed", "release_eligible": false, "evidence_hash": strings.Repeat("d", 64)})
+
+	if err := CheckProviderPreflightLedger(f.root); err != nil {
+		t.Fatalf("expected evidence to select one of multiple records, got %v", err)
 	}
 }
 

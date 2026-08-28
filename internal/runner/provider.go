@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -355,10 +356,13 @@ type realCLIOutcome struct {
 // only representation of the response that may reach Adapter.Parse, the
 // journal or evidence, and it carries a sha256 digest of the response text
 // rather than the text itself.
-func projectRealCLIResult(raw []byte, runErr error) ([]byte, realCLIOutcome, error) {
+func projectRealCLIResult(providerName string, raw []byte, runErr error) ([]byte, realCLIOutcome, error) {
 	body := raw
 	if len(body) > provider.MaxFixtureBytes {
 		body = body[:provider.MaxFixtureBytes]
+	}
+	if providerName == "codex" || providerName == "opencode" {
+		return projectJSONLCLIResult(providerName, body, runErr)
 	}
 	var real struct {
 		Type          string  `json:"type"`
@@ -427,6 +431,98 @@ func projectRealCLIResult(raw []byte, runErr error) ([]byte, realCLIOutcome, err
 	}
 	b, mErr := json.Marshal(fixture)
 	return b, outcome, mErr
+}
+
+// projectJSONLCLIResult consumes the documented JSONL event streams emitted by
+// `codex exec --json` and `opencode run --format json`. It retains only the
+// provider-issued session identifier, aggregate usage/cost and a digest of the
+// final assistant text. Raw events and response text never leave this function.
+func projectJSONLCLIResult(providerName string, raw []byte, runErr error) ([]byte, realCLIOutcome, error) {
+	var outcome realCLIOutcome
+	var finalText string
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	seen := false
+	for {
+		var event struct {
+			Type      string `json:"type"`
+			ThreadID  string `json:"thread_id"`
+			SessionID string `json:"sessionID"`
+			Usage     struct {
+				InputTokens       int64 `json:"input_tokens"`
+				CachedInputTokens int64 `json:"cached_input_tokens"`
+				OutputTokens      int64 `json:"output_tokens"`
+			} `json:"usage"`
+			Item struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"item"`
+			Part struct {
+				Type    string  `json:"type"`
+				Text    string  `json:"text"`
+				Cost    float64 `json:"cost"`
+				Session string  `json:"sessionID"`
+				Tokens  struct {
+					Input     int64 `json:"input"`
+					Output    int64 `json:"output"`
+					Reasoning int64 `json:"reasoning"`
+					Cache     struct {
+						Read  int64 `json:"read"`
+						Write int64 `json:"write"`
+					} `json:"cache"`
+				} `json:"tokens"`
+			} `json:"part"`
+		}
+		if err := decoder.Decode(&event); errors.Is(err, io.EOF) {
+			break
+		} else if err != nil {
+			return nil, outcome, err
+		}
+		seen = true
+		if event.ThreadID != "" {
+			outcome.SessionID = event.ThreadID
+		}
+		if event.SessionID != "" {
+			outcome.SessionID = event.SessionID
+		}
+		if event.Part.Session != "" {
+			outcome.SessionID = event.Part.Session
+		}
+		if event.Item.Type == "agent_message" && event.Item.Text != "" {
+			finalText = event.Item.Text
+		}
+		if event.Part.Type == "text" && event.Part.Text != "" {
+			finalText += event.Part.Text
+		}
+		if event.Usage.InputTokens != 0 || event.Usage.OutputTokens != 0 || event.Usage.CachedInputTokens != 0 {
+			outcome.InputCount = event.Usage.InputTokens
+			outcome.OutputCount = event.Usage.OutputTokens
+			outcome.CacheReadCount = event.Usage.CachedInputTokens
+		}
+		if event.Part.Tokens.Input != 0 || event.Part.Tokens.Output != 0 || event.Part.Tokens.Reasoning != 0 || event.Part.Tokens.Cache.Read != 0 || event.Part.Tokens.Cache.Write != 0 {
+			outcome.InputCount += event.Part.Tokens.Input
+			outcome.OutputCount += event.Part.Tokens.Output + event.Part.Tokens.Reasoning
+			outcome.CacheReadCount += event.Part.Tokens.Cache.Read
+			outcome.CacheCreationCount += event.Part.Tokens.Cache.Write
+		}
+		outcome.TotalCostUSD += event.Part.Cost
+	}
+	if !seen || finalText == "" || runErr != nil {
+		outcome.Classification = "error"
+		exitCode := 1
+		var exitErr *exec.ExitError
+		if errors.As(runErr, &exitErr) {
+			exitCode = exitErr.ExitCode()
+		}
+		fixture, err := json.Marshal(map[string]any{"status": "error", "code": "transport", "error": "provider run did not succeed (redacted)", "exit_code": exitCode})
+		return fixture, outcome, err
+	}
+	outcome.Classification = "success"
+	fixture, err := json.Marshal(map[string]any{
+		"status": "success", "checkpoint": providerName + ":" + outcome.SessionID,
+		"output": provider.DigestOutput(finalText),
+		"usage":  map[string]any{"input_tokens": outcome.InputCount, "output_tokens": outcome.OutputCount, "total_tokens": outcome.InputCount + outcome.OutputCount},
+	})
+	return fixture, outcome, err
 }
 
 // wasSignaled reports whether err wraps an *exec.ExitError whose process
@@ -533,7 +629,7 @@ func (r SupervisedInvocationRunner) Run(ctx context.Context, inv provider.Invoca
 		return nil, fmt.Errorf("supervised invocation runner: %w", runErr)
 	}
 
-	projected, outcome, projErr := projectRealCLIResult(raw, runErr)
+	projected, outcome, projErr := projectRealCLIResult(record.ProviderName, raw, runErr)
 	settleErr := r.Ledger.TrueUp(seq, Settlement{
 		ActualUSD:          outcome.TotalCostUSD,
 		SessionID:          outcome.SessionID,

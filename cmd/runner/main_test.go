@@ -112,6 +112,11 @@ func TestTheRealModeRefusesEveryUnsafeInputWithItsOwnStatus(t *testing.T) {
 	goodToken := writeTokenFile(t, tokenDir, 0o600)
 	wideTokenDir := t.TempDir()
 	wideToken := writeTokenFile(t, wideTokenDir, 0o644)
+	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	preflight := filepath.Join(repoRoot, ".agents", "v2", "provider-preflight", "V2-028-provider-live-codex.json")
 
 	for _, tc := range []struct {
 		name       string
@@ -131,7 +136,7 @@ func TestTheRealModeRefusesEveryUnsafeInputWithItsOwnStatus(t *testing.T) {
 		{"a non-positive claim bound", absRoot, base, goodToken, 0, exitControlPlane},
 		{"a claim bound above the declared one", absRoot, base, goodToken, runner.MaxDriverClaims + 1, exitControlPlane},
 	} {
-		err := runReal(tc.root, tc.base, tc.tokenPath, tc.maxClaims)
+		err := runReal(tc.root, tc.base, tc.tokenPath, "codex", preflight, repoRoot, tc.maxClaims)
 		if err == nil {
 			t.Fatalf("%s: runReal returned no error", tc.name)
 		}
@@ -167,7 +172,12 @@ func TestTheRealModeRefusesAControlPlaneItCannotReachWithoutLeakingTheToken(t *t
 		t.Fatal(err)
 	}
 	tokenPath := writeTokenFile(t, t.TempDir(), 0o600)
-	err := runReal(root, "http://127.0.0.1:1", tokenPath, 1)
+	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	preflight := filepath.Join(repoRoot, ".agents", "v2", "provider-preflight", "V2-028-provider-live-codex.json")
+	err = runReal(root, "http://127.0.0.1:1", tokenPath, "codex", preflight, repoRoot, 1)
 	if err == nil {
 		t.Fatal("runReal against a closed port returned no error")
 	}

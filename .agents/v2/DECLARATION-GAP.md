@@ -23,7 +23,7 @@ code evidenceのない行は台帳に載せていない。§4の到達境界表�
 | `IMPLEMENTED` | 振る舞いが存在し、非testのcallerが到達できる |
 | `UNREACHABLE` | 機構はcodeにあるが、testの外から到達する経路が一つもない |
 | `ABSENT` | 機構がまったく存在しない |
-| `DEFERRED-BY-DECLARATION` | 宣言自身が外部systemを名指しており、その等級の管轄。Cloud Run（初回deploy gate D1）、またはこの機械で未認証のProvider（codex／opencode。2026-08-26実測: `codex login status` は "Not logged in"、`opencode auth list` は "0 credentials"）。**到達できなかったという観測からは導かない** |
+| `DEFERRED-BY-DECLARATION` | 宣言自身が外部systemを名指しており、その等級の管轄。Cloud Runは初回deploy gate D1、Provider実物の実証はM6の管轄。**到達できなかったという観測からは導かない** |
 | `WIDER-THAN-CODE` | 文書がcodeの拒否する範囲を許可している、またはcodeより広い集合を記述している |
 
 宣言が箇条書きや表で複数項目をまとめている場合、その1行を **複合行**（分類欄 `混在`）
@@ -41,6 +41,7 @@ code evidenceのない行は台帳に載せていない。§4の到達境界表�
 | 日付 | 行 | 訂正 |
 |---|---|---|
 | 2026-08-27 | L92b（および依存する L179 / L106-118） | `domain.PriorityAssessment` を「型が存在しない」＝ABSENTとしていたのは誤り。型は `internal/domain/model.go:66` にあり採点器も `internal/scheduler/priority.go:128` にある。実際の不在は `BuildAllocationSnapshot` が全rowにAssessmentを入れないことで、分類はUNREACHABLEが正しい。V2-095の設計が実測して指摘した |
+| 2026-08-28 | Codex／OpenCodeの認証・実行を未到達としていた全行 | owner認証後、Codex 0.149.1とOpenCode 1.18.18を`SupervisedInvocationRunner`から実行し、session ID、usage、response digest、ledger settlementを実測した。`cmd/runner --real`から同じ経路へ到達するため、認証待ち・実CLI未実証・出荷caller不在という記述はこの日以降のtreeには適用しない |
 
 ## 2. 網羅範囲
 

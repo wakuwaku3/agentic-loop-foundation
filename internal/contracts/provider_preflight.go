@@ -162,16 +162,9 @@ func CheckProviderPreflightLedger(root string) error {
 		}
 		taskID := stringValue(entry["task_id"])
 		matches := byTaskID[taskID]
-		if len(matches) != 1 {
-			return fmt.Errorf("provider-live evidence %s (task_id %s): expected exactly one preflight record, found %d", stringValue(entry["id"]), taskID, len(matches))
+		if len(matches) == 0 {
+			return fmt.Errorf("provider-live evidence %s (task_id %s): no preflight record", stringValue(entry["id"]), taskID)
 		}
-		recordPath := matches[0]
-		record := byPath[recordPath]
-		recordBytes, err := os.ReadFile(recordPath)
-		if err != nil {
-			return fmt.Errorf("reading %s: %w", recordPath, err)
-		}
-		recordDigest := fmt.Sprintf("%x", sha256.Sum256(recordBytes))
 
 		evidencePath := filepath.Join(root, stringValue(entry["path"]))
 		evidenceRaw, err := os.ReadFile(evidencePath)
@@ -184,20 +177,27 @@ func CheckProviderPreflightLedger(root string) error {
 		}
 
 		refs, _ := evidence["artifact_refs"].([]any)
-		found := false
-		for _, raw := range refs {
-			ref, ok := raw.(map[string]any)
-			if !ok {
-				continue
+		var recordPath string
+		for _, candidatePath := range matches {
+			candidateBytes, readErr := os.ReadFile(candidatePath)
+			if readErr != nil {
+				return fmt.Errorf("reading %s: %w", candidatePath, readErr)
 			}
-			if stringValue(ref["artifact_id"]) == "provider-preflight" && stringValue(ref["sha256"]) == recordDigest {
-				found = true
-				break
+			candidateDigest := fmt.Sprintf("%x", sha256.Sum256(candidateBytes))
+			for _, raw := range refs {
+				ref, ok := raw.(map[string]any)
+				if ok && stringValue(ref["artifact_id"]) == "provider-preflight" && stringValue(ref["sha256"]) == candidateDigest {
+					if recordPath != "" {
+						return fmt.Errorf("provider-live evidence %s: references more than one provider-preflight record", stringValue(entry["id"]))
+					}
+					recordPath = candidatePath
+				}
 			}
 		}
-		if !found {
-			return fmt.Errorf("provider-live evidence %s: no artifact_refs entry names provider-preflight with sha256 %s", stringValue(entry["id"]), recordDigest)
+		if recordPath == "" {
+			return fmt.Errorf("provider-live evidence %s: no artifact_refs entry names one of task %s's provider-preflight records", stringValue(entry["id"]), taskID)
 		}
+		record := byPath[recordPath]
 
 		approval, _ := record["approval"].(map[string]any)
 		approvedAt, err := time.Parse(time.RFC3339, stringValue(approval["approved_at"]))

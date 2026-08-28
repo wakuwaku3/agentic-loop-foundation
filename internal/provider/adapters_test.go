@@ -49,10 +49,10 @@ var helpDeclaredFlags = map[string]map[string]bool{
 }
 
 // wantArgv is the exact argv each adapter builds for a request whose
-// workspace is /workspace. Nothing here is new: this task changes no flag on
-// any of the three adapters. It pins them so a later change is visible.
+// workspace is /workspace. It pins the measured live surface so a later
+// change is visible.
 var wantArgv = map[string][]string{
-	"codex":    {"codex", "exec", "--json", "--ephemeral", "-C", "/workspace"},
+	"codex":    {"codex", "exec", "--json", "--ephemeral", "--skip-git-repo-check", "-C", "/workspace"},
 	"claude":   {"claude", "--print", "--output-format", "json", "--no-session-persistence"},
 	"opencode": {"opencode", "run", "--pure", "--format", "json", "--dir", "/workspace"},
 }
