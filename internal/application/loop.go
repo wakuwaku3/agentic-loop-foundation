@@ -1134,6 +1134,7 @@ type LoopOfferedIncrement struct {
 	RequirementID            string         `json:"requirement_id"`
 	IncrementID              string         `json:"increment_id"`
 	ExpectedIncrementVersion domain.Version `json:"expected_increment_version"`
+	RequirementSummary       string         `json:"requirement_summary"`
 }
 
 // LoopOfferedWork is the offer. Cap is reported so a Runner can tell a full
@@ -1176,7 +1177,21 @@ func (s *Service) OfferedWork(ctx context.Context) (LoopOfferedWork, error) {
 		if e != nil {
 			return e
 		}
-		out.Increments = append(out.Increments, obs.readyOffered...)
+		ids := make([]string, 0, len(obs.readyOffered))
+		for _, offered := range obs.readyOffered {
+			ids = append(ids, offered.RequirementID)
+		}
+		texts, e := u.RequirementTexts(ctx, ids)
+		if e != nil {
+			return e
+		}
+		for _, offered := range obs.readyOffered {
+			offered.RequirementSummary = texts[offered.RequirementID]
+			if strings.TrimSpace(offered.RequirementSummary) == "" {
+				return errors.New("claimable requirement has no work summary")
+			}
+			out.Increments = append(out.Increments, offered)
+		}
 		return nil
 	})
 	if err != nil {

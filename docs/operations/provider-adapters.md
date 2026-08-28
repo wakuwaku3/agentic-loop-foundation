@@ -355,3 +355,15 @@ release identity は `0.1.0-baseline` で、厳密な semver 優先順位では 
 **production の caller はこの field を渡さない。** `internal/runner` は V2-074 が
 意図的に触らないので、この拒否は test でのみ働き production では働かない。
 これを「非互換 CLI は invoke され得ない」と読むのは誤りである。
+
+## 11. Codex／OpenCodeの実行経路（2026-08-28）
+
+V2-028でhelp-onlyの状態を解消した。Codex 0.149.1とOpenCode 1.18.18を、個別の
+provider-preflight record、新規ledger、rootless namespace、明示workspaceの下で実行した。
+両方について成功、provider発行session ID、usage、response digest、ledger settlementを
+確認した。raw responseと認証値は保存しない。
+
+Codexは非Git workspaceを明示的に許可する`--skip-git-repo-check`を必要とした。OpenCodeは
+`--format json`のJSONL、Codexは`--json`のJSONLを返す。`SupervisedInvocationRunner`は
+providerごとのeventをmemory内でprovider-neutralな最小fixtureへ投影し、出荷
+`cmd/runner --real`は明示された`--provider`と`--provider-preflight`で同じ経路を使う。

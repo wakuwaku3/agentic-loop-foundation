@@ -56,6 +56,7 @@ const (
 	controlPlaneWorkPath      = "/v1/runner/work"
 	controlPlaneClaimPath     = "/v1/runner/claims:acquire"
 	controlPlaneHeartbeatPath = "/v1/runner/heartbeat"
+	controlPlaneResultPath    = "/v1/executions/result"
 	controlPlaneExecutionsPfx = "/v1/executions/"
 	controlPlaneStartSuffix   = ":start"
 )
@@ -171,6 +172,7 @@ type OfferedIncrement struct {
 	RequirementID            string `json:"requirement_id"`
 	IncrementID              string `json:"increment_id"`
 	ExpectedIncrementVersion uint64 `json:"expected_increment_version"`
+	RequirementSummary       string `json:"requirement_summary"`
 }
 
 // OfferedWork is the offer route's response.
@@ -198,6 +200,37 @@ type StartedExecution struct {
 	ExecutionID string `json:"execution_id"`
 	Status      string `json:"status"`
 	Version     uint64 `json:"version"`
+}
+
+type ExecutionResultRequest struct {
+	RequestID                string `json:"request_id"`
+	ExecutionID              string `json:"execution_id"`
+	LeaseID                  string `json:"lease_id"`
+	ExpectedExecutionVersion uint64 `json:"expected_execution_version"`
+	FencingToken             uint64 `json:"fencing_token"`
+	Succeeded                bool   `json:"succeeded"`
+	Target                   struct {
+		RequirementID string `json:"requirement_id"`
+		IncrementID   string `json:"increment_id"`
+	} `json:"target"`
+	ProviderObservation *struct {
+		Name string `json:"name"`
+	} `json:"provider_observation,omitempty"`
+}
+
+// CompleteExecution reports only the projected verdict and provider name;
+// provider output and session identifiers are structurally absent.
+func (c *ControlPlaneClient) CompleteExecution(ctx context.Context, req ExecutionResultRequest) error {
+	var out struct {
+		ExecutionID string `json:"execution_id"`
+	}
+	if err := c.call(ctx, http.MethodPost, controlPlaneResultPath, req, &out); err != nil {
+		return err
+	}
+	if out.ExecutionID == "" {
+		return errors.New("control plane returned an empty execution id")
+	}
+	return nil
 }
 
 // HeartbeatAck is the subset of the heartbeat response the driver reports.

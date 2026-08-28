@@ -1,0 +1,17 @@
+{
+  "schema_version": "v1",
+  "id": "ev-v2-028-provider-live-opencode",
+  "kind": "evidence",
+  "created_at": "2026-08-28T01:16:00Z",
+  "correlation_id": "v2-028-provider-live-multi",
+  "task_id": "V2-028",
+  "component": "provider-live-opencode",
+  "evidence_key": "e0e310be201b2909026a14b5ae1486d4748f140fbb33f1861f767e737966f9c6",
+  "result": "passed",
+  "checks": [
+    {"name": "opencode-real-cli-contract", "status": "passed", "argv": ["devbox", "run", "--pure", "-e", "AGENTIC_LOOP_LIVE_MULTI_PROVIDER=1", "--", "go", "test", "-count=1", "-v", "-timeout", "10m", "-run", "^TestCodexAndOpenCodeLiveContract$", "./internal/runner"], "working_directory": ".", "timeout_seconds": 600, "summary": "OpenCode CLI 1.18.18 ran through the approved preflight, namespace confinement and fail-closed cost ledger. The projected result succeeded; a provider-issued session identifier, usage counts and response digest were present. The final paired run observed invocation_count 2 and halted false. Raw response and credential values were not persisted."},
+    {"name": "opencode-production-path", "status": "passed", "argv": ["devbox", "run", "--pure", "--", "go", "test", "-race", "-count=1", "./..."], "working_directory": ".", "timeout_seconds": 1800, "summary": "The shipped cmd/runner real mode requires an explicit OpenCode preflight and uses the same SupervisedInvocationRunner path before posting only the projected verdict to the Control Plane."}
+  ],
+  "artifact_refs": [{"artifact_id": "provider-preflight", "media_type": "application/json", "sha256": "0ad83fb4504fa3a59e736ac92b9196f49868c2db6c75caa60a273efa32b3d149", "size_bytes": 1949, "name": "V2-028-provider-live-opencode.json"}],
+  "observed_at": "2026-08-28T01:14:14Z"
+}

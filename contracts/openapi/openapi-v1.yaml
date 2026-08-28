@@ -1021,8 +1021,8 @@ components:
     OfferedIncrement:
       type: object
       additionalProperties: false
-      required: [requirement_id, increment_id, expected_increment_version]
-      properties: {requirement_id: {type: string}, increment_id: {type: string}, expected_increment_version: {type: integer}}
+      required: [requirement_id, increment_id, expected_increment_version, requirement_summary]
+      properties: {requirement_id: {type: string}, increment_id: {type: string}, expected_increment_version: {type: integer}, requirement_summary: {type: string, minLength: 1, maxLength: 262144}}
     ClaimResponse:
       type: object
       additionalProperties: false

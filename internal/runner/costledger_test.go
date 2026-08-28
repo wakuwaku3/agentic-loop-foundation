@@ -571,7 +571,7 @@ func TestClaudeAdapterParseRejectsRealShapeButProjectionSucceeds(t *testing.T) {
 	// (b) The projection built from the same shape Parses successfully
 	// with a non-empty OutputDigest, and never carries the response text
 	// itself.
-	projected, outcome, err := projectRealCLIResult([]byte(realCLIResponseShape), nil)
+	projected, outcome, err := projectRealCLIResult("claude", []byte(realCLIResponseShape), nil)
 	if err != nil {
 		t.Fatalf("project: %v", err)
 	}

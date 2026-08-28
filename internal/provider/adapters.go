@@ -117,7 +117,7 @@ func build(executable string, flags []string, includeWorkspaceArg bool, req Requ
 // arguments are the one argv in this file that is live-proven wire-compatible
 // against a real CLI, so not one of them is changed here.
 func (CodexAdapter) Build(req Request) (Invocation, error) {
-	return build("codex", []string{"exec", "--json", "--ephemeral", "-C"}, true, req)
+	return build("codex", []string{"exec", "--json", "--ephemeral", "--skip-git-repo-check", "-C"}, true, req)
 }
 func (ClaudeAdapter) Build(req Request) (Invocation, error) {
 	return build("claude", []string{"--print", "--output-format", "json", "--no-session-persistence"}, false, req)

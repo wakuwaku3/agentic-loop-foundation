@@ -26,12 +26,13 @@ func loopDriverFixture(t *testing.T, offered int) (*LoopDriver, *stubRoundTrip) 
 	t.Helper()
 	items := make([]string, 0, offered)
 	responses := map[string]string{
-		"POST /v1/runner/heartbeat": `{"accepted":true}`,
+		"POST /v1/runner/heartbeat":  `{"accepted":true}`,
+		"POST /v1/executions/result": `{"execution_id":"completed"}`,
 	}
 	for i := 0; i < offered; i++ {
 		increment := fmt.Sprintf("i%02d", i)
 		execution := fmt.Sprintf("e%02d", i)
-		items = append(items, fmt.Sprintf(`{"requirement_id":"r%02d","increment_id":%q,"expected_increment_version":2}`, i, increment))
+		items = append(items, fmt.Sprintf(`{"requirement_id":"r%02d","increment_id":%q,"expected_increment_version":2,"requirement_summary":"work %02d"}`, i, increment, i))
 		responses["POST /v1/runner/claims:acquire"] = ""
 		responses["POST /v1/executions/"+execution+":start"] = fmt.Sprintf(`{"execution_id":%q,"status":"running","version":2}`, execution)
 	}
@@ -61,6 +62,10 @@ func loopDriverFixture(t *testing.T, offered int) (*LoopDriver, *stubRoundTrip) 
 		Workspace:        workspace,
 		Journal:          journal,
 		RequestNamespace: "driver-pass-1",
+		ProviderName:     "codex",
+		Execute: func(context.Context, ProviderRequest) (ProviderResult, error) {
+			return ProviderResult{Succeeded: true, Output: "sha256:result", Checkpoint: "codex:session"}, nil
+		},
 	}, stub
 }
 
@@ -84,8 +89,8 @@ func TestTheDriverClaimsAtMostItsBoundAndStopsAtTheProviderBoundary(t *testing.T
 	if report.Heartbeats != 1 {
 		t.Fatalf("report heartbeats = %d, want exactly 1", report.Heartbeats)
 	}
-	if !report.StoppedAtProviderBoundary {
-		t.Fatal("report does not state that the pass stopped at the provider boundary")
+	if report.StoppedAtProviderBoundary {
+		t.Fatal("report says that the pass stopped before the wired provider")
 	}
 	// Every claim really started an Execution and really created a workspace.
 	for _, claim := range report.Claimed {
@@ -100,18 +105,13 @@ func TestTheDriverClaimsAtMostItsBoundAndStopsAtTheProviderBoundary(t *testing.T
 	// The requests the driver made, counted exactly: one offer read, one claim
 	// and one start per claimed Increment, one heartbeat -- and NOTHING else.
 	// A result post would show up here as an extra request.
-	wantRequests := 1 + 2*MaxDriverClaims + 1
+	wantRequests := 1 + 3*MaxDriverClaims + 1
 	if len(stub.seen) != wantRequests {
 		paths := make([]string, 0, len(stub.seen))
 		for _, r := range stub.seen {
 			paths = append(paths, r.Method+" "+r.URL.Path)
 		}
 		t.Fatalf("the driver made %d requests, want exactly %d: %v", len(stub.seen), wantRequests, paths)
-	}
-	for _, r := range stub.seen {
-		if strings.Contains(r.URL.Path, "/result") {
-			t.Fatalf("the driver posted to %s; it obtains no provider result and must post none", r.URL.Path)
-		}
 	}
 	// The journal really recorded each assignment, and its payload carries
 	// identifiers only.
@@ -197,6 +197,8 @@ func TestTheDriverRefusesToRunWithoutItsRealDependencies(t *testing.T) {
 		{"no workspace", func(d *LoopDriver) { d.Workspace = nil }},
 		{"no journal", func(d *LoopDriver) { d.Journal = nil }},
 		{"no request namespace", func(d *LoopDriver) { d.RequestNamespace = "" }},
+		{"no provider execution", func(d *LoopDriver) { d.Execute = nil }},
+		{"no provider name", func(d *LoopDriver) { d.ProviderName = "" }},
 	} {
 		broken := *complete
 		tc.mutate(&broken)
@@ -227,6 +229,7 @@ func TestTheDriverNeverReachesAProviderOrPostsAResult(t *testing.T) {
 		"fmt":           true,
 	}
 	const applicationSuffix = "/internal/application"
+	const providerSuffix = "/internal/provider"
 	imports := 0
 	for _, imp := range file.Imports {
 		path := strings.Trim(imp.Path.Value, `"`)
@@ -234,7 +237,7 @@ func TestTheDriverNeverReachesAProviderOrPostsAResult(t *testing.T) {
 		if allowed[path] {
 			continue
 		}
-		if strings.HasSuffix(path, applicationSuffix) {
+		if strings.HasSuffix(path, applicationSuffix) || strings.HasSuffix(path, providerSuffix) {
 			// The ONE non-standard-library import, and it is for one named
 			// bound (application.MaxDriverClaims) so the offer the server
 			// builds and the bound the Runner applies cannot disagree. It
@@ -242,7 +245,7 @@ func TestTheDriverNeverReachesAProviderOrPostsAResult(t *testing.T) {
 			// already lists application among its dependencies.
 			continue
 		}
-		t.Fatalf("loopdriver.go imports %q, which is not on the allowlist; internal/provider and every store are deliberately absent", path)
+		t.Fatalf("loopdriver.go imports %q, which is not on the allowlist; every store remains deliberately absent", path)
 	}
 	if imports == 0 {
 		t.Fatal("the scan found no import in loopdriver.go; the AST walk is broken and the allowlist would pass vacuously")

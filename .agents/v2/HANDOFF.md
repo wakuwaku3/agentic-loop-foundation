@@ -69,11 +69,11 @@ settle 1件あたり概ね **0.07〜0.11 USD**。
 | CLI | 導入 | 認証 |
 |---|---|---|
 | claude | 2.1.241 | **済** |
-| codex | codex-cli 0.149.1 | `codex login status` → **Not logged in** |
-| opencode | 1.18.22 | `opencode auth list` → **0 credentials** |
+| codex | codex-cli 0.149.1 | **済**（ChatGPT OAuth、2026-08-28実測） |
+| opencode | 1.18.18 | **済**（OpenAI OAuth、2026-08-28実測） |
 
-非対話経路は stdin から api key か access token を読む形しかなく、どちらも owner 本人が
-持つ値なので**代行不能**。`codex login` と `opencode auth login` を1回ずつ。
+V2-028の実装で両CLIを`SupervisedInvocationRunner`から実行し、session ID、usage、response
+digest、fail-closed ledgerを実測した。認証値とraw responseは記録していない。
 
 ---
 
@@ -212,7 +212,7 @@ V2-080 それ自体は正しく、M3 の根拠の鮮度を回復している。
 
 | 原因 | 数 | capability |
 |---|---|---|
-| **codex/opencode 未認証** | 3 | `cap-autonomous-resolution`, `cap-shared-resource-allocation`, `cap-provider-operation` |
+| **M6で実証するProvider依存** | 3 | `cap-autonomous-resolution`, `cap-shared-resource-allocation`, `cap-provider-operation` |
 | **GCP 待ち（D1）** | 4 | `cap-preview-operation`, `cap-stable-promotion`, `cap-loop-control`, `cap-loop-self-update` |
 | **M5 自身が負う product gap** | 4 | `cap-repository-registration`, `cap-backlog-visibility`, `cap-human-input-request`, `cap-user-documentation` |
 
