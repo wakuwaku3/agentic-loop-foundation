@@ -10,11 +10,10 @@ package main
 // second process at all.
 //
 // WHAT IT IS NOW. --real drives one bounded pass over the work a Control Plane
-// OFFERED it, over real HTTP, as a session the server verified, and STOPS at
-// the provider boundary. It posts no Execution result, because all three
-// provider adapters return provider.NoExec and no Provider CLI invocation is
-// authorised: a result posted here would be a result this process did not
-// obtain.
+// OFFERED it, over real HTTP, as a session the server verified. With an
+// explicit provider and approved preflight record it runs Codex or OpenCode
+// through the supervised, ledger-bound execution path and posts the projected
+// verdict; raw provider output never crosses the process boundary.
 //
 // WHAT IT DELIBERATELY DOES NOT IMPORT. No store. Measured in
 // ci/components.json, the store-firestore component declares `runner` among its
@@ -37,6 +36,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/takushi/agentic-loop-foundation/v2/internal/provider"
 	"github.com/takushi/agentic-loop-foundation/v2/internal/runner"
 )
 
@@ -77,6 +77,9 @@ func main() {
 	// passed in an environment variable is inherited by every child process.
 	sessionTokenFile := flags.String("session-token-file", "", "path of a file, no wider than 0600, holding the runner session token (required for --real)")
 	maxClaims := flags.Int("max-claims", runner.MaxDriverClaims, "maximum Increments this pass may claim")
+	providerName := flags.String("provider", "", "provider to execute: codex or opencode (required for --real)")
+	providerPreflight := flags.String("provider-preflight", "", "approved provider-preflight record path (required for --real)")
+	repositoryRoot := flags.String("repository-root", "", "absolute repository root containing provider contracts (required for --real)")
 	if err := flags.Parse(os.Args[1:]); err != nil {
 		os.Exit(exitUsage)
 	}
@@ -85,7 +88,7 @@ func main() {
 		os.Exit(exitUsage)
 	}
 	if *real {
-		if err := runReal(*dataRoot, *controlPlane, *sessionTokenFile, *maxClaims); err != nil {
+		if err := runReal(*dataRoot, *controlPlane, *sessionTokenFile, *providerName, *providerPreflight, *repositoryRoot, *maxClaims); err != nil {
 			// The error is printed as-is. Every error the client and the driver
 			// produce is asserted token-free in
 			// internal/runner/controlplane_test.go, so this line cannot leak the
@@ -149,7 +152,7 @@ func exitStatusFor(err error) int {
 
 // runReal validates every input explicitly -- nothing is defaulted -- and then
 // drives exactly ONE bounded pass.
-func runReal(dataRoot, base, sessionTokenFile string, maxClaims int) error {
+func runReal(dataRoot, base, sessionTokenFile, providerName, providerPreflight, repositoryRoot string, maxClaims int) error {
 	if dataRoot == "" {
 		return fmt.Errorf("%w: --data-root is required with --real; it is never a temporary directory in real mode", errDataRoot)
 	}
@@ -193,6 +196,26 @@ func runReal(dataRoot, base, sessionTokenFile string, maxClaims int) error {
 	if maxClaims > runner.MaxDriverClaims {
 		return fmt.Errorf("%w: --max-claims must not exceed the declared bound of %d", errControlPlaneC, runner.MaxDriverClaims)
 	}
+	if !filepath.IsAbs(repositoryRoot) || !filepath.IsAbs(providerPreflight) {
+		return fmt.Errorf("%w: --repository-root and --provider-preflight must be absolute", errDataRoot)
+	}
+	var adapter provider.Adapter
+	switch providerName {
+	case "codex":
+		adapter = provider.CodexAdapter{}
+	case "opencode":
+		adapter = provider.OpenCodeAdapter{}
+	default:
+		return fmt.Errorf("%w: --provider must be codex or opencode", errDataRoot)
+	}
+	preflight, err := runner.LoadPreflightRecord(repositoryRoot, providerPreflight)
+	if err != nil {
+		return fmt.Errorf("%w: %v", errDataRoot, err)
+	}
+	if preflight.ProviderName != providerName {
+		return fmt.Errorf("%w: provider and preflight record disagree", errDataRoot)
+	}
+	ledger := &runner.CostLedger{Path: preflight.LedgerPath, Provider: providerName, TaskID: "V2-028"}
 	workspaceRoot := filepath.Join(dataRoot, "workspaces")
 	if err := os.MkdirAll(workspaceRoot, 0o700); err != nil {
 		return fmt.Errorf("%w: %v", errDataRoot, err)
@@ -223,6 +246,19 @@ func runReal(dataRoot, base, sessionTokenFile string, maxClaims int) error {
 		Workspace:        workspace,
 		Journal:          journal,
 		RequestNamespace: "runner-pass:" + filepath.Base(dataRoot),
+		ProviderName:     providerName,
+		Execute: func(execCtx context.Context, request runner.ProviderRequest) (runner.ProviderResult, error) {
+			log, logErr := runner.NewBoundedLog(filepath.Join(dataRoot, "provider-logs"), request.OperationID, 0, 0)
+			if logErr != nil {
+				return runner.ProviderResult{}, logErr
+			}
+			invocationRunner := runner.SupervisedInvocationRunner{
+				Supervisor: runner.ProcessSupervisor{TermGrace: 3 * time.Second, Confine: &runner.NamespaceConfinement{Workspace: request.Workspace}},
+				Log:        log, Ledger: ledger, RepoRoot: repositoryRoot, RecordPath: providerPreflight,
+				Purpose: "runner-real-" + providerName,
+			}
+			return (runner.ProviderClient{Adapter: adapter, Runner: invocationRunner}).Run(execCtx, request)
+		},
 	}
 	report, err := driver.RunOnce(ctx)
 	if err != nil {

@@ -373,10 +373,9 @@ test改修が不要**であり、これがV2-010〜V2-039の27件追加をtest�
   非対話経路はそれぞれ `codex exec [PROMPT]`（stdinからprompt可）と
   `opencode run --format json`であり、Work Packetをstdinで渡してJSONを受ける
   `internal/provider`のadapter形と噛み合う。
-  **残る壁は認証だけである**。`codex login status` → `Not logged in`、
-  `opencode auth list` → `0 credentials`、`OPENAI_API_KEY`／`ANTHROPIC_API_KEY`は未設定。
-  codexは`codex login`（browser OAuth）か`--with-api-key`／`--with-access-token`
-  （stdinから秘密を読む）、opencodeは`opencode auth login`（対話選択＋OAuth）を要する。
+  2026-08-28に両方のowner認証を実測し、Codex 0.149.1とOpenCode 1.18.18を
+  `SupervisedInvocationRunner`から実行した。両方でsession ID、usage、response digestと
+  fail-closed ledgerを確認し、raw responseと認証値は保存していない。
   いずれもownerのsubscription identityそのものであり、**agentが代行できる作業ではない**
   （手作業の押し付けではなく、identityの境界である）。
   → V2-027（fixture相手のadapter完成）は認証不要で着手可能。V2-028（実3 provider）は
@@ -1074,9 +1073,8 @@ V2-045待ちである。
 
 **群B: ownerのidentityが要る（作業の押し付けではなく境界）**
 
-- **V2-028**（M6 live）。codexとopencodeのCLIは§9のとおり導入済みで非対話実行できるが、
-  未認証である。`codex login` と `opencode auth login` はownerのsubscription identityを
-  使う操作であり、agentは代行できない。認証が済めばV2-028は介在不要に転じる。
+- **V2-028**（M6 live）。2026-08-28にcodexとopencodeの認証・非対話実行を実測し、
+  出荷Runnerのprovider境界を両者へ接続した。
 - **V2-029**（M6 gate）はV2-028待ち。**V2-031／V2-032**（M7 live／gate）はV2-029待ち。
   **V2-035／V2-036**（M8 live／gate）はV2-032待ち。つまり1回の認証がM6〜M8のliveを解く。
 

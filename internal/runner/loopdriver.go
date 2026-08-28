@@ -15,11 +15,9 @@
 //     driver holds an opaque session token the server issued and the server
 //     decides who it is; it constructs no application.Caller and imports
 //     internal/application for nothing but one named bound.
-//  3. IT DOES NOT CALL Provider.Run. orchestrator.go:123 does. Re-measured:
-//     all three adapters in internal/provider/adapters.go return
-//     provider.NoExec, and no Provider CLI invocation is authorised for this
-//     task -- so accepting a result would be accepting one it did not obtain.
-//     This driver STOPS at the provider boundary and posts NO result.
+//  3. Provider execution is injected as a preflight-enforced function. The
+//     driver constructs only the provider-neutral Work Packet and posts only
+//     the projected verdict after that function succeeds.
 //  4. IT IS BOUNDED. At most MaxDriverClaims Increments per run, over a SINGLE
 //     pass of the offered page. RunFakeJourney has no such bound because it
 //     works on exactly the one Requirement it invented.
@@ -39,6 +37,7 @@ import (
 	"fmt"
 
 	"github.com/takushi/agentic-loop-foundation/v2/internal/application"
+	"github.com/takushi/agentic-loop-foundation/v2/internal/provider"
 )
 
 // MaxDriverClaims is how many offered Increments ONE bounded pass may take. It
@@ -60,6 +59,10 @@ type LoopDriver struct {
 	// deterministic and idempotent, so a repeated pass replays rather than
 	// re-claims.
 	RequestNamespace string
+	// Execute is the provider-neutral, preflight-enforced execution path. The
+	// workspace is already created and belongs to this Execution.
+	Execute      func(context.Context, ProviderRequest) (ProviderResult, error)
+	ProviderName string
 }
 
 // DriverClaim is what one claimed Increment produced. It carries identifiers
@@ -85,20 +88,13 @@ type DriverPassReport struct {
 	// claimed nothing: a Runner that heartbeat without work would be reporting
 	// liveness it was not asked for.
 	Heartbeats int `json:"heartbeats"`
-	// StoppedAtProviderBoundary is always true, and it is a REPORTED FACT rather
-	// than a comment: this driver obtains no provider result and posts none.
+	// StoppedAtProviderBoundary is true only when no execution path was wired.
 	StoppedAtProviderBoundary bool `json:"stopped_at_provider_boundary"`
 }
 
 // RunOnce is the whole driver: read the offer, claim at most MaxDriverClaims of
 // it, create each workspace, journal each assignment, start each Execution,
-// heartbeat once, and STOP.
-//
-// It posts NO result. There is no code path in this file that reaches
-// /v1/executions/result, and none that reaches a Provider: loopdriver_test.go
-// asserts both by scanning this file's AST, and the client this driver holds
-// exposes no result call at all, so the absence is structural rather than
-// disciplined.
+// run the selected Provider, post the projected result and heartbeat once.
 func (d *LoopDriver) RunOnce(ctx context.Context) (DriverPassReport, error) {
 	report := DriverPassReport{StoppedAtProviderBoundary: true, Claimed: []DriverClaim{}}
 	if d.Client == nil {
@@ -112,6 +108,9 @@ func (d *LoopDriver) RunOnce(ctx context.Context) (DriverPassReport, error) {
 	}
 	if d.RequestNamespace == "" {
 		return report, errors.New("loop driver requires a request namespace, so a repeated pass replays rather than re-claims")
+	}
+	if d.Execute == nil || d.ProviderName == "" {
+		return report, errors.New("loop driver requires an explicit provider execution path")
 	}
 	offer, err := d.Client.OfferedWork(ctx)
 	if err != nil {
@@ -136,6 +135,7 @@ func (d *LoopDriver) RunOnce(ctx context.Context) (DriverPassReport, error) {
 		return report, fmt.Errorf("report the heartbeat: %w", err)
 	}
 	report.Heartbeats = 1
+	report.StoppedAtProviderBoundary = false
 	return report, nil
 }
 
@@ -173,6 +173,27 @@ func (d *LoopDriver) claimOne(ctx context.Context, offered OfferedIncrement) (Dr
 	started, err := d.Client.StartExecution(ctx, d.RequestNamespace+":start:"+claimed.ExecutionID, claimed.ExecutionID, 1)
 	if err != nil {
 		return out, fmt.Errorf("start execution %s: %w", claimed.ExecutionID, err)
+	}
+	packet := provider.WorkPacket{
+		Version: provider.ContractVersion, RequirementID: offered.RequirementID,
+		IncrementID: offered.IncrementID, RequirementSummary: offered.RequirementSummary,
+	}
+	providerResult, err := d.Execute(ctx, ProviderRequest{OperationID: claimed.ExecutionID, Packet: packet, Workspace: path})
+	if err != nil {
+		return out, fmt.Errorf("execute provider for %s: %w", claimed.ExecutionID, err)
+	}
+	resultReq := ExecutionResultRequest{
+		RequestID: d.RequestNamespace + ":result:" + claimed.ExecutionID, ExecutionID: claimed.ExecutionID,
+		LeaseID: claimed.LeaseID, ExpectedExecutionVersion: started.Version,
+		FencingToken: claimed.FencingToken, Succeeded: providerResult.Succeeded,
+	}
+	resultReq.Target.RequirementID = offered.RequirementID
+	resultReq.Target.IncrementID = offered.IncrementID
+	resultReq.ProviderObservation = &struct {
+		Name string `json:"name"`
+	}{Name: d.ProviderName}
+	if err := d.Client.CompleteExecution(ctx, resultReq); err != nil {
+		return out, fmt.Errorf("complete execution %s: %w", claimed.ExecutionID, err)
 	}
 	return DriverClaim{
 		RequirementID:  offered.RequirementID,
