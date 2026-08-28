@@ -83,6 +83,11 @@ OpenAPIを契約の正本にし、server、Runner client、test fixture、refere
 
 Linux namespace、git、process signalは実kernel上のintegration testで実物を使う。workspace封じ込めはrootless user+mount namespace（`unshare --user --map-root-user --mount`＋外側pathの`remount,bind,ro`）で非特権のまま証明し、namespaceなしで外側への書き込みが成功する対照をpositive controlとして残す。実行環境のkernelがunprivileged user namespaceを許可しない場合はcontainerまたはVMを代替実行場所とするが、skipをpassとして数えない。gateはtestが実際に実行されたverdictと実行環境識別子（kernel version等）を要求する。
 
+コード化済みdevbox環境では一時workspaceを`/var/tmp`配下に作る。WSL kernelを含む一部の
+Linux環境では`/tmp`自体のself-bindが拒否される一方、`/var`のbindとread-only remountは
+利用できるためである。これは封じ込めの緩和ではなく、外側の`/var`をread-onlyにした後で
+個別workspaceだけをread-writeへ戻す同じ検証経路を、再現可能な一時pathで実行する設定である。
+
 ### Provider adapter contract tests
 
 Codex、Claude、opencodeごとに、実CLIから採取した秘密を含まない最小contract fixtureを保持する。

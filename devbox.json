@@ -23,7 +23,8 @@
     "yq-go@4.53.3"
   ],
   "env": {
-    "DEV_ENVIRONMENT": "agentic-loop-foundation-v2"
+    "DEV_ENVIRONMENT": "agentic-loop-foundation-v2",
+    "TMPDIR": "/var/tmp"
   },
   "shell": {
     "scripts": {
