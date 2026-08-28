@@ -4,15 +4,19 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
 	"unicode/utf8"
 
 	"github.com/takushi/agentic-loop-foundation/v2/internal/domain"
+	"github.com/takushi/agentic-loop-foundation/v2/internal/release"
 )
 
 // MaxPageSize is a hard safety limit for owner read models and exports.
@@ -54,6 +58,50 @@ type RequirementPage struct {
 	Requirements []RequirementView `json:"requirements"`
 	NextCursor   string            `json:"next_cursor,omitempty"`
 	PageSize     int               `json:"page_size"`
+	// Truncated reports that the per-page Increment budget bound this answer
+	// (V2-095 A6). The list page reads each row's Increments and Executions
+	// through two batch ports called ONCE each per page, and the total number
+	// of Increment ids collected across the whole page is capped at
+	// MaxPageSize. When that cap binds, some row's increments and therefore
+	// its next_action were computed over a BOUNDED set, and the page says so
+	// here rather than silently dropping rows. It follows
+	// RequirementDetailView.Truncated's precedent exactly, including the json
+	// tag, so a reader who already understands the detail view's bound
+	// understands this one.
+	Truncated bool `json:"truncated"`
+	// Filter reports the repository_id filter when one was applied (V2-095 A8,
+	// escalation E22-7). It is OMITTED ENTIRELY on an unfiltered page: an
+	// absent filter is reported as absent, never as a filter on the empty
+	// string. When present it also surfaces the bound the
+	// RequirementIDsForRepository port already reports, so a bounded id set is
+	// visibly a lower bound rather than an exact total.
+	Filter *RequirementFilterView `json:"filter,omitempty"`
+}
+
+// RequirementFilterView is the repository_id filter, reported back so the
+// caller can tell an empty page caused by an unknown Repository from an empty
+// page caused by an exhausted cursor, and so the port's own bound is visible.
+type RequirementFilterView struct {
+	RepositoryID string `json:"repository_id"`
+	// LinkedIDsRead is how many Requirement ids the write-once
+	// Requirement-to-Repository link read returned for this Repository, before
+	// the cursor and the page size were applied.
+	LinkedIDsRead int `json:"linked_ids_read"`
+	// LinkedIDsBounded is the bool RequirementIDsForRepository itself returns:
+	// true means the storage query's own bound truncated the id set, so
+	// LinkedIDsRead is a LOWER BOUND on the Repository's linked Requirements
+	// and not an exact count.
+	LinkedIDsBounded bool `json:"linked_ids_bounded"`
+	// Bound is the limit the port was called with.
+	Bound int `json:"bound"`
+	// Reason states what the two numbers above mean, in the idiom the owner
+	// console already uses for a bounded read.
+	Reason string `json:"reason"`
+	// MissingRequirements counts link rows whose Requirement could not be read
+	// back inside the same transaction. It is reported rather than hidden: a
+	// link naming a Requirement that is gone is a real, reportable
+	// inconsistency, and dropping it silently would make the page size lie.
+	MissingRequirements int `json:"missing_requirements"`
 }
 
 type RequirementIncrementView struct {
@@ -133,6 +181,85 @@ type RequirementView struct {
 	// recorded capture instant, or the key omitted entirely for a legacy
 	// Requirement that has none.
 	CapturedAt *time.Time `json:"captured_at,omitempty"`
+	// Increments is the per-row Increment STATUS as well as its id (V2-095 A6).
+	// increment_ids above is unchanged in name, type and meaning and keeps
+	// carrying every id the aggregate holds; this field carries the id AND the
+	// status of each Increment that was actually read, which is what
+	// cap-backlog-visibility's declared confirmation item
+	// "進行中Incrementと進捗" asks for. A row whose Increments were bound by
+	// the page budget reports IncrementsTruncated, so a short list is never
+	// read as a complete one.
+	Increments []RequirementRowIncrementView `json:"increments"`
+	// IncrementsTruncated reports that THIS row's Increments were cut by the
+	// page-wide budget, so both increments and next_action below describe a
+	// bounded set. RequirementPage.Truncated is the same fact at page scope.
+	IncrementsTruncated bool `json:"increments_truncated"`
+	// NextAction is the declared confirmation item "次のaction", computed by
+	// the SAME nextAction function the detail view uses, called with the same
+	// three arguments: this Requirement's status, the Increments read for it,
+	// and the Executions read for those Increments. There is no list-specific
+	// variant of that function, because two variants would drift and the drift
+	// would show as a Backlog row advising something the detail view does not.
+	NextAction string `json:"next_action"`
+	// ReleaseReflection is the declared confirmation item
+	// "Preview/Stable反映状況", projected from
+	// domain.Requirement.StableSnapshot -- a field of the aggregate this page
+	// ALREADY reads, so the projection costs zero additional reads. A zero
+	// snapshot is reported as an explicit ABSENCE with its reason and never as
+	// a plausible release: an owner reading a Backlog must be able to tell
+	// "this Requirement is in no release" from "we did not look".
+	ReleaseReflection RequirementReleaseReflectionView `json:"release_reflection"`
+}
+
+// RequirementRowIncrementView is one Increment as a Backlog row reports it:
+// the id and the status, and nothing else. It is deliberately NOT
+// RequirementIncrementView: that type carries a Version and an Executions
+// list, and putting a per-row Execution list on a page of up to a hundred rows
+// is how a bounded owner read becomes an unbounded one.
+type RequirementRowIncrementView struct {
+	IncrementID string                 `json:"increment_id"`
+	Status      domain.IncrementStatus `json:"status"`
+}
+
+// RequirementReleaseReflectionView is the Preview/Stable reflection of one
+// Requirement, read from domain.Requirement.StableSnapshot.
+//
+// Observed is false when the recorded snapshot is the zero value, and then
+// every identifier field is omitted and Reason says why. This follows
+// internal/application/repository.go's ObservedState idiom and the same
+// discipline requested_by, captured_at and resumes_to already use on this
+// package's read models: absent means absent, and nothing is synthesised.
+type RequirementReleaseReflectionView struct {
+	Observed       bool           `json:"observed"`
+	Reason         string         `json:"reason"`
+	ReleaseID      string         `json:"release_id,omitempty"`
+	ReleaseVersion domain.Version `json:"release_version,omitempty"`
+	BundleDigest   string         `json:"bundle_digest,omitempty"`
+	EvidenceDigest string         `json:"evidence_digest,omitempty"`
+}
+
+// releaseReflectionAbsent and releaseReflectionObserved are the only two
+// answers this projection can give, written once so the absent reason cannot
+// drift between call sites.
+const releaseReflectionAbsentReason = "no Stable release snapshot is recorded on this Requirement, so it is reflected in no Preview or Stable release; this is a recorded absence and not a failure to look"
+const releaseReflectionObservedReason = "the Requirement's own recorded Stable release snapshot, read from canonical state with no additional read"
+
+// releaseReflectionView projects domain.StableReleaseSnapshot onto the wire
+// shape. Its single source is the Requirement record handed to it: no store
+// read, no clock read and no fallback to a release the process happens to
+// know about.
+func releaseReflectionView(snapshot domain.StableReleaseSnapshot) RequirementReleaseReflectionView {
+	if snapshot == (domain.StableReleaseSnapshot{}) {
+		return RequirementReleaseReflectionView{Observed: false, Reason: releaseReflectionAbsentReason}
+	}
+	return RequirementReleaseReflectionView{
+		Observed:       true,
+		Reason:         releaseReflectionObservedReason,
+		ReleaseID:      snapshot.ReleaseID.String(),
+		ReleaseVersion: snapshot.ReleaseVersion,
+		BundleDigest:   snapshot.BundleDigest,
+		EvidenceDigest: snapshot.EvidenceDigest,
+	}
 }
 
 // boundPageSize authors the page_size refusal, so the V2-083 caller-fault
@@ -201,25 +328,186 @@ func capturedAtView(r domain.Requirement) *time.Time {
 // read for exactly the ids on this page; a row absent from it carries no
 // repository_id at all, which is what distinguishes "not linked" from "linked
 // to the empty string".
-func requirementViews(rows []domain.Requirement, texts map[string]string, links map[string]domain.RequirementRepositoryLink) []RequirementView {
+//
+// incrementBudget is the V2-095 A6 per-page Increment plan: which Increment ids
+// were actually read for each row, and whether that row was cut by the
+// page-wide cap. It is computed BEFORE this function by planPageIncrements and
+// handed in, so this projection stays a pure function of values already read
+// and performs no read of its own.
+func requirementViews(rows []domain.Requirement, texts map[string]string, links map[string]domain.RequirementRepositoryLink, plan pageIncrementPlan, incs map[string]domain.Increment, execsByIncrement map[string][]domain.Execution) []RequirementView {
 	out := make([]RequirementView, 0, len(rows))
 	for _, r := range rows {
+		id := r.ID.String()
 		ids := make([]string, len(r.Increments))
-		for i, id := range r.Increments {
-			ids[i] = id.String()
+		for i, incID := range r.Increments {
+			ids[i] = incID.String()
 		}
-		out = append(out, RequirementView{RequirementID: r.ID.String(), Status: r.Status, Version: r.Version, IncrementIDs: ids, Text: texts[r.ID.String()], RequestedBy: requestedByView(r.RequestedBy), RepositoryID: links[r.ID.String()].RepositoryID.String(), CapturedAt: capturedAtView(r)})
+		// The two arguments nextAction takes besides the status, assembled for
+		// exactly this row out of the two batch reads. The SAME function the
+		// detail view calls is called with the SAME kinds of argument; there is
+		// no list-specific variant.
+		rowIncrements := make([]RequirementRowIncrementView, 0, len(plan.readFor[id]))
+		rowIncs := make([]domain.Increment, 0, len(plan.readFor[id]))
+		rowExecs := []domain.Execution{}
+		for _, incID := range plan.readFor[id] {
+			inc, ok := incs[incID]
+			if !ok {
+				// A Requirement naming an Increment the batch read did not
+				// return is reported by OMITTING that Increment rather than by
+				// inventing a status for it. increment_ids above still carries
+				// the id, so the discrepancy stays visible.
+				continue
+			}
+			rowIncrements = append(rowIncrements, RequirementRowIncrementView{IncrementID: inc.ID.String(), Status: inc.Status})
+			rowIncs = append(rowIncs, inc)
+			rowExecs = append(rowExecs, execsByIncrement[incID]...)
+		}
+		out = append(out, RequirementView{
+			RequirementID:       id,
+			Status:              r.Status,
+			Version:             r.Version,
+			IncrementIDs:        ids,
+			Text:                texts[id],
+			RequestedBy:         requestedByView(r.RequestedBy),
+			RepositoryID:        links[id].RepositoryID.String(),
+			CapturedAt:          capturedAtView(r),
+			Increments:          rowIncrements,
+			IncrementsTruncated: plan.truncatedFor[id],
+			NextAction:          nextAction(r.Status, rowIncs, rowExecs),
+			ReleaseReflection:   releaseReflectionView(r.StableSnapshot),
+		})
 	}
 	return out
 }
 
+// pageIncrementPlan is which Increment ids the page will read, per row, and
+// which rows the page-wide cap cut.
+//
+// THE CAP IS ACROSS THE PAGE, NOT PER ROW. A page of a hundred rows each
+// holding a hundred Increments would otherwise turn one bounded owner read
+// into a ten-thousand-id batch read. The total is capped at MaxPageSize ids;
+// rows are filled in page order until the budget is exhausted, and every row
+// that lost ids -- including a row that got none at all -- is marked, so a
+// short list is never readable as a complete one.
+type pageIncrementPlan struct {
+	all          []string
+	readFor      map[string][]string
+	truncatedFor map[string]bool
+	truncated    bool
+}
+
+func planPageIncrements(rows []domain.Requirement, budget int) pageIncrementPlan {
+	plan := pageIncrementPlan{readFor: map[string][]string{}, truncatedFor: map[string]bool{}}
+	remaining := budget
+	if remaining < 0 {
+		remaining = 0
+	}
+	for _, r := range rows {
+		id := r.ID.String()
+		taken := make([]string, 0, len(r.Increments))
+		for _, incID := range r.Increments {
+			if remaining == 0 {
+				plan.truncatedFor[id] = true
+				plan.truncated = true
+				break
+			}
+			taken = append(taken, incID.String())
+			remaining--
+		}
+		plan.readFor[id] = taken
+		plan.all = append(plan.all, taken...)
+	}
+	return plan
+}
+
+// readPageIncrements performs the EXACTLY TWO new batch reads this page makes:
+// one IncrementsForRequirements over the planned id set and one
+// ExecutionsForIncrements over the Increment ids that read actually returned.
+// Both are called ONCE per page and never once per row, and both are skipped
+// entirely when the plan is empty, so a Backlog of Requirements with no
+// Increments costs zero extra reads.
+func readPageIncrements(ctx context.Context, u UnitOfWork, plan pageIncrementPlan) (map[string]domain.Increment, map[string][]domain.Execution, error) {
+	byID := map[string]domain.Increment{}
+	byIncrement := map[string][]domain.Execution{}
+	if len(plan.all) == 0 {
+		return byID, byIncrement, nil
+	}
+	incs, err := u.IncrementsForRequirements(ctx, plan.all)
+	if err != nil {
+		return nil, nil, err
+	}
+	readIDs := make([]string, 0, len(incs))
+	for _, inc := range incs {
+		byID[inc.ID.String()] = inc
+		readIDs = append(readIDs, inc.ID.String())
+	}
+	if len(readIDs) == 0 {
+		return byID, byIncrement, nil
+	}
+	execs, err := u.ExecutionsForIncrements(ctx, readIDs)
+	if err != nil {
+		return nil, nil, err
+	}
+	for _, e := range execs {
+		key := e.IncrementID.String()
+		byIncrement[key] = append(byIncrement[key], e)
+	}
+	return byID, byIncrement, nil
+}
+
+// MaxRepositoryFilterID bounds the repository_id query parameter. A repository
+// id is an opaque identifier (domain.NewRepositoryID refuses only a blank one),
+// so the shape refusal here is length and encoding, in the same style
+// decodeCursor already bounds its own decoded key at 512 bytes.
+const MaxRepositoryFilterID = 512
+
+// ErrInvalidRepositoryFilter is the shape refusal for the repository_id query
+// parameter. It is wrapped as a caller fault, so the route answers 400
+// invalid_request with the existing message style rather than 500.
+var ErrInvalidRepositoryFilter = fmt.Errorf("repository_id must be a non-blank identifier of at most %d bytes", MaxRepositoryFilterID)
+
+// ListRequirementsPage is the unfiltered Backlog page. Its signature is
+// UNCHANGED: every existing caller, including the ones in prohibited packages,
+// keeps compiling and keeps meaning the same thing.
 func (s *Service) ListRequirementsPage(ctx context.Context, cursor string, pageSize int) (RequirementPage, error) {
+	return s.ListRequirementsPageFiltered(ctx, cursor, pageSize, "")
+}
+
+// ListRequirementsPageFiltered is the Backlog page with the optional
+// repository_id filter escalation E22-7 measured absent (V2-095 A8).
+//
+// repositoryID == "" is the unfiltered page and behaves exactly as before: one
+// bounded RequirementsPage read ordered by the adapter's own key.
+//
+// A non-empty repositoryID resolves through the EXISTING
+// RequirementRepositoryLinkRepository.RequirementIDsForRepository port and
+// through nothing else. No new port, no new storage query and no new index is
+// introduced; internal/store/** is byte-unchanged, which is the proof of that.
+// An UNKNOWN repository id therefore yields an EMPTY id set and an EMPTY page,
+// never the unfiltered page -- which is the exact defect E22-7 measured, where
+// the parameter was ignored and the caller was handed every Requirement.
+//
+// ORDERING, stated because the two modes differ and a reader must not assume
+// they do not. The unfiltered page is ordered by the adapter's own document
+// key; the filtered page is ordered by Requirement id, which is the order both
+// adapters' RequirementIDsForRepository already returns. The cursor value is a
+// Requirement id in both modes, so a cursor always means "resume after this
+// Requirement id"; it is not meaningful to carry a cursor from one mode into
+// the other, and neither mode can be made to skip or repeat a row by doing so,
+// because each resumes from a position in its own order.
+func (s *Service) ListRequirementsPageFiltered(ctx context.Context, cursor string, pageSize int, repositoryID string) (RequirementPage, error) {
 	if _, _, err := callerActor(ctx, RoleOwner); err != nil {
 		return RequirementPage{}, err
 	}
 	limit, err := boundPageSize(pageSize)
 	if err != nil {
 		return RequirementPage{}, err
+	}
+	filtered := repositoryID != ""
+	if filtered {
+		if strings.TrimSpace(repositoryID) == "" || len(repositoryID) > MaxRepositoryFilterID || !utf8.ValidString(repositoryID) {
+			return RequirementPage{}, invalidRequest(ErrInvalidRepositoryFilter)
+		}
 	}
 	after, err := decodeCursor(cursor)
 	if err != nil {
@@ -229,7 +517,11 @@ func (s *Service) ListRequirementsPage(ctx context.Context, cursor string, pageS
 	err = s.transact(ctx, func(u UnitOfWork) error {
 		var rows []domain.Requirement
 		var more bool
-		rows, more, err = u.RequirementsPage(ctx, after, limit)
+		if filtered {
+			rows, more, err = repositoryFilteredRows(ctx, u, repositoryID, after, limit, &page)
+		} else {
+			rows, more, err = u.RequirementsPage(ctx, after, limit)
+		}
 		if err != nil {
 			return err
 		}
@@ -247,14 +539,78 @@ func (s *Service) ListRequirementsPage(ctx context.Context, cursor string, pageS
 		if err != nil {
 			return err
 		}
-		page.Requirements = requirementViews(rows, texts, links)
+		plan := planPageIncrements(rows, MaxPageSize)
+		incs, execsByIncrement, e := readPageIncrements(ctx, u, plan)
+		if e != nil {
+			return e
+		}
+		page.Requirements = requirementViews(rows, texts, links, plan, incs, execsByIncrement)
 		page.PageSize = limit
+		page.Truncated = plan.truncated
 		if more && len(rows) != 0 {
 			page.NextCursor = encodeCursor(rows[len(rows)-1].ID.String())
 		}
 		return nil
 	})
-	return page, err
+	if err != nil {
+		return RequirementPage{}, err
+	}
+	return page, nil
+}
+
+// repositoryFilteredRows is the filtered read: ONE bounded link query through
+// the existing port, then at most limit keyed Requirement reads for the ids
+// that survive the cursor. It writes the filter report onto page as it goes,
+// including the port's own truncation bool, so the bound is surfaced rather
+// than hidden.
+//
+// A link row naming a Requirement that cannot be read back is COUNTED and
+// reported, not silently dropped: dropping it would make the page shorter than
+// the page size for no visible reason.
+func repositoryFilteredRows(ctx context.Context, u UnitOfWork, repositoryID, after string, limit int, page *RequirementPage) ([]domain.Requirement, bool, error) {
+	linked, bounded, err := u.RequirementIDsForRepository(ctx, repositoryID, MaxPageSize)
+	if err != nil {
+		return nil, false, err
+	}
+	sorted := append([]string(nil), linked...)
+	sort.Strings(sorted)
+	filter := &RequirementFilterView{
+		RepositoryID:     repositoryID,
+		LinkedIDsRead:    len(sorted),
+		LinkedIDsBounded: bounded,
+		Bound:            MaxPageSize,
+	}
+	if bounded {
+		filter.Reason = fmt.Sprintf("the write-once Requirement-to-Repository link query applied its own bound of %d, so linked_ids_read is a LOWER BOUND on this Repository's linked Requirements and not an exact total", MaxPageSize)
+	} else {
+		filter.Reason = fmt.Sprintf("the write-once Requirement-to-Repository link query returned %d linked Requirement ids within its bound of %d, so this is the whole set", len(sorted), MaxPageSize)
+	}
+	page.Filter = filter
+
+	window := make([]string, 0, len(sorted))
+	for _, id := range sorted {
+		if after != "" && id <= after {
+			continue
+		}
+		window = append(window, id)
+	}
+	more := len(window) > limit
+	if more {
+		window = window[:limit]
+	}
+	rows := make([]domain.Requirement, 0, len(window))
+	for _, id := range window {
+		r, found, e := u.Requirement(ctx, id)
+		if e != nil {
+			return nil, false, e
+		}
+		if !found {
+			filter.MissingRequirements++
+			continue
+		}
+		rows = append(rows, r)
+	}
+	return rows, more, nil
 }
 
 func (s *Service) GetRequirementDetail(ctx context.Context, id string) (RequirementDetailView, bool, error) {
@@ -648,4 +1004,181 @@ type ReleaseStateView struct {
 	Retention                   ReleaseRetentionView         `json:"retention"`
 	NotObserved                 []string                     `json:"not_observed"`
 	ResidualGaps                []string                     `json:"residual_gaps"`
+}
+
+// ===========================================================================
+// The owner-readable documentation surface (V2-095 A9, escalation E22-10)
+// ===========================================================================
+
+// ErrReleaseDocumentNotFound is returned when the requested path is not a
+// member of the assembled documentation-role set. It is distinguishable on
+// purpose: the route maps exactly this error to 404 with an explicit code, and
+// it is returned BEFORE any file is opened.
+var ErrReleaseDocumentNotFound = errors.New("no such document in the assembled documentation set for the channel and version in use")
+
+// ErrReleaseDocumentDrifted is returned when a member's bytes on disk no
+// longer hash to the digest the assembled bundle recorded. It fails closed
+// rather than serving the drifted bytes: cap-user-documentation's declared
+// success condition is that the documents correspond to the channel and
+// version IN USE, and bytes that disagree with the recorded manifest
+// correspond to no version at all.
+var ErrReleaseDocumentDrifted = errors.New("the document's bytes no longer match the digest the assembled release bundle recorded for it")
+
+// ReleaseDocumentIndexView is the answer to the owner document index. It names
+// the channel the release package resolved, the version of the assembled
+// contract, and the documents available -- which is exactly the assembled
+// bundle's documentation-role member set and nothing else.
+type ReleaseDocumentIndexView struct {
+	SchemaVersion string `json:"schema_version"`
+	// Channel is release.ResolveChannel's answer: "stable" when this process
+	// has recorded a Stable route, "preview" otherwise. It is not a literal.
+	Channel string `json:"channel"`
+	// ReleaseVersion is the version of the assembled contract, read from the
+	// SAME observer GET /v1/release/state reads, so the two answers cannot
+	// disagree about which version the documents describe.
+	ReleaseVersion string `json:"release_version"`
+	// DocsDigest is the documentation role's own digest, so a reader can tell
+	// two document sets apart without fetching them.
+	DocsDigest string `json:"docs_digest"`
+	// AllowlistSource states, in prose, that the served set is DERIVED and not
+	// chosen, and how.
+	AllowlistSource string                     `json:"allowlist_source"`
+	Documents       []ReleaseDocumentEntryView `json:"documents"`
+}
+
+// ReleaseDocumentEntryView is one available document: the repository-relative
+// path the bundle recorded, its recorded digest, and the route that serves it.
+type ReleaseDocumentEntryView struct {
+	Path   string `json:"path"`
+	SHA256 string `json:"sha256"`
+	Route  string `json:"route"`
+}
+
+// ReleaseDocumentView is one served document.
+type ReleaseDocumentView struct {
+	Path           string `json:"path"`
+	Channel        string `json:"channel"`
+	ReleaseVersion string `json:"release_version"`
+	SHA256         string `json:"sha256"`
+	SizeBytes      int    `json:"size_bytes"`
+	Content        string `json:"content"`
+}
+
+// ReleaseDocumentRoutePrefix is the owner route prefix the per-document route
+// hangs off. It is declared here, next to the projection that builds the Route
+// field, so the route string a caller is handed and the route string the
+// transport parses come from ONE definition.
+const ReleaseDocumentRoutePrefix = "/owner/"
+
+// releaseDocumentAllowlistSource is fixed prose, not a measurement: it states
+// where the served set came from, so a reader is never left to assume the
+// handler joins a caller-supplied path onto a root.
+const releaseDocumentAllowlistSource = "the documentation-role member set of the release bundle this process assembled from its explicitly configured source root (internal/release's RoleDocumentation, globs docs/preview/**.md and docs/stable/**.md). The set is recomputed from the tree at attachment, never written down here, and a request is answered by SET MEMBERSHIP on the recorded member path: a path outside the set is refused before any file is opened, so there is no path to traverse."
+
+// releaseDocumentSet is the assembled documentation-role members keyed by the
+// path a caller names, plus the channel and version the same observer reports.
+//
+// IT IS THE ONE PLACE the two document routes resolve anything, so the index
+// and the per-document route can never serve different sets. Both answer the
+// SAME not-configured error GET /v1/release/state answers, because both read
+// the same binding: with no explicitly configured release source root this
+// process can report no channel, no version and no document set, and a
+// defaulted root would make it report a version it was not assembled from
+// (internal/application/release_surface.go's own reason).
+func (s *Service) releaseDocumentSet() (members map[string]release.Member, order []string, channel, version, docsDigest, root string, err error) {
+	source, configured := s.releaseSource()
+	observer, attached := s.releaseObserver()
+	if !configured || !attached {
+		return nil, nil, "", "", "", "", ErrReleaseObserverNotConfigured
+	}
+	report, _ := observer.ReleaseSnapshot()
+	route, recorded := observer.RecordedRoute()
+	stableExists := recorded && route.StableDigest != ""
+	members = map[string]release.Member{}
+	for _, m := range source.bundle.Members {
+		if m.Role != release.RoleDocumentation {
+			continue
+		}
+		if existing, clash := members[m.Path]; clash {
+			// Unreachable while assembleMembers yields one member per path.
+			// Failing closed here rather than picking one keeps a duplicate
+			// visible instead of invisible.
+			return nil, nil, "", "", "", "", fmt.Errorf("the assembled documentation set names %s twice (%s and %s)", m.Path, existing.SHA256, m.SHA256)
+		}
+		members[m.Path] = m
+		order = append(order, m.Path)
+	}
+	if len(members) == 0 {
+		return nil, nil, "", "", "", "", fmt.Errorf("the assembled release bundle carries no documentation-role member; there is no document set to serve")
+	}
+	sort.Strings(order)
+	return members, order, release.ResolveChannel(stableExists), report.ReleaseVersion, report.DocsDigest, source.pipeline.Root, nil
+}
+
+// ReleaseDocumentIndex is the owner read behind GET /owner/docs/. It is gated
+// exactly as the other owner reads are and opens no file at all: every value
+// it reports was computed when the release source was attached.
+func (s *Service) ReleaseDocumentIndex(ctx context.Context) (ReleaseDocumentIndexView, error) {
+	if _, _, err := callerActor(ctx, RoleOwner); err != nil {
+		return ReleaseDocumentIndexView{}, err
+	}
+	members, order, channel, version, docsDigest, _, err := s.releaseDocumentSet()
+	if err != nil {
+		return ReleaseDocumentIndexView{}, err
+	}
+	out := ReleaseDocumentIndexView{
+		SchemaVersion:   "v1",
+		Channel:         channel,
+		ReleaseVersion:  version,
+		DocsDigest:      docsDigest,
+		AllowlistSource: releaseDocumentAllowlistSource,
+		Documents:       make([]ReleaseDocumentEntryView, 0, len(order)),
+	}
+	for _, path := range order {
+		m := members[path]
+		out.Documents = append(out.Documents, ReleaseDocumentEntryView{
+			Path:   m.Path,
+			SHA256: m.SHA256,
+			Route:  ReleaseDocumentRoutePrefix + m.Path,
+		})
+	}
+	return out, nil
+}
+
+// ReleaseDocument is the owner read behind GET /owner/{member-path}. path is
+// the caller's string and is used for EXACTLY ONE thing: a lookup in the
+// assembled member map. It is never joined onto a root, never cleaned, never
+// resolved and never passed to the filesystem. The path that IS opened is the
+// member's OWN recorded path, so a traversal attempt, an absolute path, a
+// symlink target and a URL-encoded escape are all simply absent from the map
+// and refused before any file is opened.
+func (s *Service) ReleaseDocument(ctx context.Context, path string) (ReleaseDocumentView, error) {
+	if _, _, err := callerActor(ctx, RoleOwner); err != nil {
+		return ReleaseDocumentView{}, err
+	}
+	members, _, channel, version, _, root, err := s.releaseDocumentSet()
+	if err != nil {
+		return ReleaseDocumentView{}, err
+	}
+	member, ok := members[path]
+	if !ok {
+		return ReleaseDocumentView{}, ErrReleaseDocumentNotFound
+	}
+	data, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(member.Path)))
+	if err != nil {
+		return ReleaseDocumentView{}, err
+	}
+	digest := sha256.Sum256(data)
+	served := hex.EncodeToString(digest[:])
+	if served != member.SHA256 {
+		return ReleaseDocumentView{}, fmt.Errorf("%w: %s", ErrReleaseDocumentDrifted, member.Path)
+	}
+	return ReleaseDocumentView{
+		Path:           member.Path,
+		Channel:        channel,
+		ReleaseVersion: version,
+		SHA256:         served,
+		SizeBytes:      len(data),
+		Content:        string(data),
+	}, nil
 }

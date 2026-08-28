@@ -11,7 +11,15 @@
 を1件ずつ実測しました（V2-022）。手順は
 `docs/operations/release-live-dogfood.md` にあります。
 この実測はGCPへのdeployを一切含まず、forgeにもremoteにも接続していません。
-実測の結果、証跡idを持つcapabilityは1件だけです。
+実測の結果、証跡idを持つcapabilityは1件だけでした。
+
+2026-08-27に同じ環境classで再実測しました（V2-095）。今回はgh CLIとgit CLIの
+実物へ接続し、対象Repositoryをread-onlyで読んだ有界Observationを提出しています。
+証跡idを持つcapabilityは5件です。残る7件は宣言そのものからこの環境classで
+実証できないと判定できるもので、4件は宣言する外部systemにGoogle Cloud Runを
+含むため初回deploy gate（D1）に、3件はcodexとopencodeの両方を宣言し、この機械
+ではclaudeだけが認証済みであるため後続milestoneに属します。この4/3/5の分割は
+散文の主張ではなく、宣言fileから2つの独立した述語で判定するtestです。
 
 ## 既知の問題
 
@@ -24,15 +32,21 @@
   Git/GitHub clientが無い」という測定は偽です。cap-repository-registrationが
   未実証な理由は実装の不在ではなく、本taskの副作用範囲がforgeとremoteを
   除外していることです。
-- E22-2（部分的に解消済みの記録）: needs-inputの質問を記録するcommandとrouteと
-  詳細fieldは存在します。残る決定的な欠落は、実surfaceで作られたRequirementが
-  needs-inputへ遷移できるstatusに到達できないことです。`captured`を離れる
-  commandは`start-framing`だけであり、これを発行するapplication commandが
-  存在しないため、質問の表示も回答による再開も観測できません。
-- E22-3（部分的に解消済みの記録）: `internal/release`はapplication層から
-  importされ、read-onlyの`GET /v1/release/state`が存在します。残る欠落は配線で、
-  `cmd/control-plane`がReleaseObserverを組み立てないため稼働processは503を返し、
-  自分が提供しているversionを報告できません。
+- E22-2（解消済みの記録）: needs-inputの質問を記録するcommandとrouteと
+  詳細fieldは存在します。V2-022が残る欠落として記録した「実surfaceで作られた
+  Requirementがneeds-inputへ遷移できるstatusに到達できない」はすでに偽です。
+  `captured`を離れるcommandは今も`start-framing`だけですが、それを発行する
+  application commandとownerのrouteが存在するため、captured→framing→
+  needs-input→readyを実base URLに対して歩けます。V2-095で実測しました。
+- E22-3（解消済みの記録）: `internal/release`はapplication層から
+  importされ、read-onlyの`GET /v1/release/state`が存在し、release source rootを
+  明示的に与えられたprocessはこの読みに200で答え、自分が組み立てたversionを
+  報告します。rootを与えられていないprocessは今も503を返します。既定rootは
+  存在しません。既定rootを使えば、そのprocessが組み立てられていないversionを
+  名乗ることになるからです。V2-095で、出荷構成（capability証跡を記録しない
+  processなのでcandidate identityを与えない構成）ではこの配線が起動を拒否して
+  いたことも実測し、observeできることとpromoteできることを分けて解消しました。
+  未証跡candidateがpromotableになることはありません。
 - E22-4（解消済みの記録）: Provider registryのread route `GET /v1/providers`は
   存在し、3 Providerの接続状態・上限source・割当先を報告します。
 - E22-5（解消済みの記録）: schedulerはapplication層から配線され、
@@ -41,29 +55,38 @@
 - E22-6: 出荷される`cmd/runner`は`--fake`なしでは起動を拒否し、外部control plane
   への配線が無いと表示します。したがってRunner側protocolの実測は、実HTTPで
   protocolを話すtest processが行っており、Runner daemonについては何も主張できません。
-- E22-7: `GET /v1/requirements`は`page_size`と`cursor`しか解釈しないため、
-  Backlogを関連Repositoryで絞り込めません。
+- E22-7（解消済みの記録）: `GET /v1/requirements`は任意の`repository_id`を
+  解釈します。絞り込みは書き込み一度きりのRequirement-Repository結び付きを通り、
+  `page_size`と`cursor`と合成でき、未知のrepository idは空listを返します。
+  V2-095で実測しました。
 - E22-8: control read modelは対象Runner・process・lease・新規副作用可否を
   projectionとして持たず、owner consoleもそれを描画しません。
 - E22-9: preview-local dogfoodのtest fileのimportは`api` componentが宣言する
   依存edgeを超えています。したがってselective CIは`internal/runner`・
   `internal/update`・`internal/release`の変更でこの実測を選択しません。この実測は
   commit毎のgateではなく、繰り返せるPreview workflowです。
-- E22-10: owner consoleは文書routeを提供しません。`preview-local`ではownerが
-  repositoryのworking treeを直接読むことになります。
-- E22-11（新規、実測）: Firestoreに対してBacklogを2ページ目以降へ進められません。
-  一覧が返すcursorをそのまま渡すとrouteは400を返します。原因はpage実装が
-  document id順の走査に対してcollection pathを含む値をcursorとして渡していることで、
-  clientがその値をdocument idとして扱い、collection pathを二重に組み立てます。
+- E22-10（解消済みの記録）: owner consoleは文書routeを2本提供します。1本は
+  稼働channelと組み立てられたversionと参照できる文書の一覧を答え、もう1本は
+  その文書自身を答えます。提供する集合は組み立てたrelease bundleの
+  documentation role member集合そのもので、集合への所属判定で引きます。集合に
+  無いpathはfileを1つも開く前に拒否されます。V2-095で実測しました。
+- E22-11（解消済みの記録）: Firestoreに対してBacklogを最後のページまで進められます。
+  一覧が返すcursorをそのまま渡す走査で、その実測が作成したRequirementを
+  1件ずつ、重複も欠落もなく網羅できます。V2-022が記録した原因（page実装が
+  document id順の走査に対してcollection pathを含む値をcursorとして渡し、client
+  がcollection pathを二重に組み立てる）はV2-079で除かれています。
 
 実測で確認した不足（capabilityの成功条件そのものではないもの）:
 
-- Backlog（cap-backlog-visibility）: 宣言された利用者操作のうち「関連Repositoryで
-  絞り込む」が未実装です（E22-7）。
+- Backlog（cap-backlog-visibility）: 宣言された確認項目8つすべてを一覧と
+  queue summaryが合わせて持ち、関連Repositoryでの絞り込みも実装されています。
+  残る不足は優先度の根拠の中身です。多要因の優先度評価は型も採点器も存在します
+  が、配分snapshotがそれを供給しないため、rankingへ入っておらず、応答は
+  `used_assessment` をfalseとして報告します。応答が根拠を偽らないという意味では
+  これは不足の報告であり、隠された欠落ではありません。
 - 利用者文書（cap-user-documentation）: 宣言する唯一の外部systemであるowner console
-  から文書を参照できません（E22-10）。加えて、capability文書が`/v1/release/state`を
-  owner可読と記しているのに稼働processは503を返すという、文書と実挙動の差異が
-  存在します。
+  から、稼働channelとversionに対応する文書を参照できます。残る限界は、この
+  環境classがCloud Run上のdeploy済みprocessではないことだけです。
 - 自律実行（cap-autonomous-resolution）: enrollmentからresultまでの実protocolは
   実HTTPで駆動でき実claude invocationも通りますが、Incrementを作るrouteが`/v1`に
   無いため、Runnerだけではclaimに到達できません。変更・検証・統合は行っていません。
@@ -95,11 +118,13 @@ Release ContractのStable Releaseへ戻す操作ではありません。Stable R
   cap-shared-resource-allocation（Provider側）。いずれも3 Providerを宣言し、
   この機械ではclaudeだけが認証済みです。cap-shared-resource-allocationの
   複数Repository側も後続milestoneです。
-- 実装または配線が無いもの: cap-human-input-request（needs-inputへ遷移できる
-  statusに到達する経路が無い）、cap-backlog-visibility（E22-11）、
-  cap-user-documentation（E22-10と文書・実挙動の差異）。
-- 本taskの副作用範囲外のもの: cap-repository-registration。GitHubとGitを宣言し、
-  この実測はforgeにもremoteにも接続していません。
+- V2-022時点で実装または配線が無かったもの: cap-human-input-request、
+  cap-backlog-visibility、cap-user-documentation。3件ともV2-095で実証済みです。
+- V2-022の副作用範囲外だったもの: cap-repository-registration。GitHubとGitを
+  宣言しますが、V2-022の実測はforgeにもremoteにも接続していませんでした。これは
+  外部systemが使えなかったのではなく、別のtaskが自分の範囲をそう決めていた
+  だけであり、宣言由来の実証不能ではありません。V2-095でgh CLIとgit CLIの実物へ
+  接続し、対象Repositoryをread-onlyで読んだ有界Observationを提出して実証しました。
 
 このほかに、GCP Preview deployment、実Codex/opencode接続、複数の利用者管理
 machineとRepositoryによる並列実行が引き続き不足しています。

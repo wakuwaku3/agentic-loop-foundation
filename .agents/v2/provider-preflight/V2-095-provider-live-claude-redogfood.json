@@ -1,0 +1,64 @@
+{
+  "schema_version": "v1",
+  "id": "V2-095-provider-live-claude-redogfood",
+  "kind": "provider-preflight",
+  "created_at": "2026-08-27T01:10:00Z",
+  "correlation_id": "v2-095-m5-gap-closure-and-redogfood",
+  "task_id": "V2-095",
+  "notes": "New owner-issued record for V2-095's M5 re-dogfood. It NAMES NO EXISTING RECORD AND REUSES NO EXISTING LEDGER: its limits.ledger_path is /home/takushi/.local/state/agentic-loop/v2/V2-095-provider-live-claude-redogfood-cost.json, which does not exist yet, and its accounting starts from an empty ledger. Not one byte of V2-017-provider-cost.json, V2-022-provider-cost.json, V2-063-provider-live-claude-refresh-cost.json, V2-075-provider-live-claude-rebind-cost.json or V2-080-provider-live-claude-pooled-cost.json changes; no earlier record's thresholds are raised; no halted flag is cleared; no ledger is re-initialised. internal/runner/costledger.go re-verifies the preflight digest and all three limit values on EVERY reservation, so editing an approved record invalidates its ledger instead of raising the cap, and the only remedy for a reached threshold is a new record. SIZING IS BY INVOCATION COUNT, and the decisive measurement is that costledger.go:364 refuses when len(Entries)+1 exceeds max_invocations, so a RESERVATION counts whether or not it settles. Re-measured in this worktree, all five existing ledgers agree with dp-v2-095 d14 exactly: V2-017 9 settled + 2 reserved = 11 of 16; V2-022 16 + 7 = 23 of 24; V2-063 8 + 3 = 11 of 12; V2-075 9 + 3 = 12 of 12; V2-080 8 + 2 = 10 of 48; halted false on all five. Seventeen of sixty-seven reservations, 25.37 percent, never settled. V2-022's purpose histogram is decisive and is re-measured here: V2-022-autonomous-resolution 9 (all settled), V2-022-graceful-stop-live-child 7 (ALL SEVEN reserved, never settled, because that purpose kills the child by construction), V2-022-resume-after-channel-rollback 7 (all settled). THE ARITHMETIC. One full run of TestFoundationPreviewLocalDogfood is exactly THREE reservations, of which two can settle and one can never settle. Four runs are planned: two for the stability pair A15 requires on the identical final commit, one to BREAK a tie rather than leave one standing (which is the failure V2-022's own A19 reported about itself, at 23 of 24 with no headroom), and one to confirm after any post-observation fix. That is 4 times 3 equals 12. V2-022's measured rate was 23 reservations for seven runs, or 3.29 per run, so 24 admits 24 divided by 3.29 equals 7.2 runs at the measured rate -- nearly twice the plan. max_invocations is therefore 24. THE MONETARY ARITHMETIC, shown because it is NOT true that money is far away for the reason usually given. costledger.go:350-368 blocks the FULL worst_case_reservation_usd for an UNSETTLED reservation and min(actual, reserved) for a settled one, then refuses when settled + reserved + worst_case exceeds max_total_cost_usd. Measured, V2-022 stood at 1.008563 settled plus 7.00 reserved plus the 1.00 worst-case reservation, which is 9.008563 of 20.00 -- 45.0 percent of the money at 96 percent of the count. So money is not the binding threshold, but not because settlements are cheap: because unsettled reservations at 1.00 each are still only a third of the ceiling. At the same shape, 24 reservations of which a third never settle stands near 9 to 10 of 20.00, so max_total_cost_usd is 20.00 and stays a second, so-far-inert runaway stop rather than the operative one. Thresholds here are runaway-detection stops, never billing ceilings; reaching one halts the exercise for inspection and is reported as neither a success nor a failure. environment.base_names is exactly HOME and PATH and granted_names is EMPTY: the claude CLI reads its own on-disk credential store and the Secret Broker has nothing to hand it. provider.version is 2.1.246, RE-MEASURED on this machine; V2-080's record and artifact both record 2.1.241 and neither is edited.",
+  "provider": {
+    "name": "claude",
+    "version": "2.1.246",
+    "executable_path": "/home/takushi/.local/bin/claude"
+  },
+  "limits": {
+    "max_invocations": 24,
+    "max_total_cost_usd": 20.0,
+    "worst_case_reservation_usd": 1.0,
+    "currency": "USD",
+    "window": "total",
+    "ledger_path": "/home/takushi/.local/state/agentic-loop/v2/V2-095-provider-live-claude-redogfood-cost.json",
+    "enforced_by": "internal/runner.SupervisedInvocationRunner and internal/runner.CostLedger",
+    "fail_closed": true
+  },
+  "environment": {
+    "base_names": [
+      "HOME",
+      "PATH"
+    ],
+    "granted_names": []
+  },
+  "rollback": {
+    "trigger": "the ledger reaches max_invocations or max_total_cost_usd (runaway-detection stop), or a single settled invocation exceeds the anomaly threshold and the ledger's halted flag is set",
+    "argv": [
+      "cat",
+      "/home/takushi/.local/state/agentic-loop/v2/V2-095-provider-live-claude-redogfood-cost.json"
+    ],
+    "completion_conditions": [
+      "no further claude invocations are made for this task without a new, freshly-approved provider-preflight record",
+      "the ledger's halted flag, once set, is cleared only by the owner issuing a new approved record, never by editing this record or the ledger file in place",
+      "reaching max_invocations or max_total_cost_usd stops the exercise for inspection and is reported as neither a success nor a failure; the limits in this record are never raised and this ledger is never re-initialised to reset the count",
+      "the observation commit is recorded and made unreachable-proof by a durable ref pushed to origin, because gate rule G6b measures the diff between that commit and the judging commit and an unreachable observation commit makes the intersection unmeasurable",
+      "the intersection between that diff and the published exercise file set is measured with a positive and a negative control, not argued: an unmeasured intersection fails G6b, and a zero with no positive control is not accepted"
+    ]
+  },
+  "verification": [
+    {
+      "name": "provider-cli-version",
+      "argv": [
+        "/home/takushi/.local/bin/claude",
+        "--version"
+      ],
+      "expected": "2.1.246",
+      "read_only": true
+    }
+  ],
+  "approval": {
+    "approver": "takushi.yokoyama@sansan.com",
+    "approved_at": "2026-08-24T23:22:47Z",
+    "approval_reference": "owner instruction recorded in the coordinating session of 2026-08-25, transcribed by the coordinator; see ev-v2-055-standing-authorization",
+    "scope": "The owner authorises the Loop to invoke the contracted flat-rate Provider subscriptions on the owner's own machines with no per-invocation approval and no count or monetary ceiling, for the duration of the v2 work. Preflight limits stay in force only as runaway-detection thresholds; reaching one is a stop for inspection, never a success. Transcribed by the coordinator under the owner's instruction; ev-v2-055-standing-authorization holds the verbatim instruction and the limits of this record's machine check.",
+    "subject_path": ".agents/v2/packets/provider-standing-authorization.json",
+    "subject_digest": "c69a1026f80e8fcd7f6dc05eb5b27c4434c90da43e44cfc0ff6030d62c75f113"
+  }
+}

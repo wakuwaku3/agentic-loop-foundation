@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -946,5 +947,406 @@ func TestTheRequirementDetailReportsTheExitOnlyWhileThePauseHoldsIt(t *testing.T
 	}
 	if _, present := legacyBody["resumes_to"]; present {
 		t.Fatalf("a paused record with no memory carries resumes_to: %v", legacyBody["resumes_to"])
+	}
+}
+
+// ===========================================================================
+// V2-095 A6/A8: the Backlog list projection and the repository_id filter.
+//
+// Every test below is a table test over values written straight into the
+// in-memory store and read back through the Service. NO CLOCK IS READ by any
+// assertion: the three new confirmation items (per-row Increment status,
+// next_action, and the Preview/Stable reflection) and the filter are pure
+// functions of stored values, so a clock would be a sign the design was
+// departed from. There is no sleep, no timer, no goroutine and no randomness.
+// ===========================================================================
+
+// listFixture writes a Requirement, its Increments, their Executions, its text
+// and its Repository link directly through the store, bypassing every command,
+// so a projection can be driven from an exactly-known state.
+// listFixtureAssignedAt is the fixed, injected instant every fixture link
+// carries. It is a constant and not a clock read: nothing in these table tests
+// may depend on when they run.
+var listFixtureAssignedAt = time.Unix(1_699_000_000, 0).UTC()
+
+type listFixture struct {
+	requirementID string
+	status        domain.RequirementStatus
+	snapshot      domain.StableReleaseSnapshot
+	increments    []domain.Increment
+	executions    []domain.Execution
+	text          string
+	repositoryID  string
+}
+
+func writeListFixtures(t *testing.T, fixtures ...listFixture) *memory.Store {
+	t.Helper()
+	st := memory.New()
+	ctx := context.Background()
+	if err := st.Transact(ctx, func(u application.UnitOfWork) error {
+		for _, f := range fixtures {
+			rid, err := domain.NewRequirementID(f.requirementID)
+			if err != nil {
+				return err
+			}
+			incIDs := make([]domain.IncrementID, 0, len(f.increments))
+			for _, inc := range f.increments {
+				incIDs = append(incIDs, inc.ID)
+			}
+			r := domain.Requirement{ID: rid, Status: f.status, Version: 1, Increments: incIDs, StableSnapshot: f.snapshot}
+			if err := u.SaveRequirement(ctx, r, 0); err != nil {
+				return err
+			}
+			if f.text != "" {
+				if err := u.SaveRequirementText(ctx, f.requirementID, f.text); err != nil {
+					return err
+				}
+			}
+			for _, inc := range f.increments {
+				if err := u.SaveIncrement(ctx, inc, 0); err != nil {
+					return err
+				}
+			}
+			for _, e := range f.executions {
+				if err := u.SaveExecution(ctx, e, 0); err != nil {
+					return err
+				}
+			}
+			if f.repositoryID != "" {
+				repoID, err := domain.NewRepositoryID(f.repositoryID)
+				if err != nil {
+					return err
+				}
+				if err := u.SaveRequirementRepositoryLink(ctx, domain.RequirementRepositoryLink{RequirementID: rid, RepositoryID: repoID, AssignedAt: listFixtureAssignedAt}); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return st
+}
+
+func listIncrement(t *testing.T, id, requirementID string, status domain.IncrementStatus) domain.Increment {
+	t.Helper()
+	incID, err := domain.NewIncrementID(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rid, err := domain.NewRequirementID(requirementID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return domain.Increment{ID: incID, RequirementID: rid, Status: status, Version: 1}
+}
+
+func listExecution(t *testing.T, id, incrementID string, status domain.ExecutionStatus) domain.Execution {
+	t.Helper()
+	eid, err := domain.NewExecutionID(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	incID, err := domain.NewIncrementID(incrementID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return domain.Execution{ID: eid, IncrementID: incID, Status: status, Version: 1}
+}
+
+func listRowByID(t *testing.T, page application.RequirementPage, id string) application.RequirementView {
+	t.Helper()
+	for _, row := range page.Requirements {
+		if row.RequirementID == id {
+			return row
+		}
+	}
+	t.Fatalf("the page carries no row for %s: %+v", id, page.Requirements)
+	return application.RequirementView{}
+}
+
+// TestBacklogRowCarriesIncrementStatusNextActionAndReleaseReflection is A6's
+// table: the three declared confirmation items no surface carried, asserted
+// per row against a known state, and asserted to agree with the DETAIL view's
+// next_action so the two cannot drift.
+func TestBacklogRowCarriesIncrementStatusNextActionAndReleaseReflection(t *testing.T) {
+	at := time.Unix(1_700_000_000, 0).UTC()
+	for _, tc := range []struct {
+		name           string
+		fixture        listFixture
+		wantStatuses   map[string]domain.IncrementStatus
+		wantNextAction string
+		wantObserved   bool
+	}{
+		{
+			name: "a running Execution makes the next action monitor execution",
+			fixture: listFixture{
+				requirementID: "req-running", status: domain.RequirementActive, text: "running",
+				increments: []domain.Increment{listIncrement(t, "inc-running", "req-running", domain.IncrementExecuting)},
+				executions: []domain.Execution{listExecution(t, "exe-running", "inc-running", domain.ExecutionRunning)},
+			},
+			wantStatuses:   map[string]domain.IncrementStatus{"inc-running": domain.IncrementExecuting},
+			wantNextAction: "monitor execution",
+		},
+		{
+			name: "a failed Increment makes the next action review failed increment",
+			fixture: listFixture{
+				requirementID: "req-failed", status: domain.RequirementActive, text: "failed",
+				increments: []domain.Increment{listIncrement(t, "inc-failed", "req-failed", domain.IncrementFailed)},
+			},
+			wantStatuses:   map[string]domain.IncrementStatus{"inc-failed": domain.IncrementFailed},
+			wantNextAction: "review failed increment",
+		},
+		{
+			name: "no Increment at all makes the next action plan increments",
+			fixture: listFixture{
+				requirementID: "req-bare", status: domain.RequirementReady, text: "bare",
+			},
+			wantStatuses:   map[string]domain.IncrementStatus{},
+			wantNextAction: "plan increments",
+		},
+		{
+			name: "a completed Requirement has no next action",
+			fixture: listFixture{
+				requirementID: "req-done", status: domain.RequirementCompleted, text: "done",
+				increments: []domain.Increment{listIncrement(t, "inc-done", "req-done", domain.IncrementIntegrated)},
+			},
+			wantStatuses:   map[string]domain.IncrementStatus{"inc-done": domain.IncrementIntegrated},
+			wantNextAction: "none",
+		},
+		{
+			name: "a recorded Stable snapshot is reported as observed",
+			fixture: listFixture{
+				requirementID: "req-released", status: domain.RequirementCompleted, text: "released",
+				snapshot: domain.StableReleaseSnapshot{ReleaseID: "release-7", ReleaseVersion: 3, BundleDigest: "bundle-7", EvidenceDigest: "evidence-7"},
+			},
+			wantStatuses:   map[string]domain.IncrementStatus{},
+			wantNextAction: "none",
+			wantObserved:   true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st := writeListFixtures(t, tc.fixture)
+			svc := serviceOn(t, st, at)
+			ctx := owner(context.Background())
+			page, err := svc.ListRequirementsPage(ctx, "", 10)
+			if err != nil {
+				t.Fatal(err)
+			}
+			row := listRowByID(t, page, tc.fixture.requirementID)
+
+			if len(row.Increments) != len(tc.wantStatuses) {
+				t.Fatalf("the row carries %d increments, want %d: %+v", len(row.Increments), len(tc.wantStatuses), row.Increments)
+			}
+			for _, got := range row.Increments {
+				want, declared := tc.wantStatuses[got.IncrementID]
+				if !declared {
+					t.Fatalf("the row reports an increment %q the fixture never wrote", got.IncrementID)
+				}
+				if got.Status != want {
+					t.Fatalf("increment %s reports status %q, want %q", got.IncrementID, got.Status, want)
+				}
+			}
+			if row.IncrementsTruncated {
+				t.Fatalf("a row with %d increments reports truncation", len(row.Increments))
+			}
+			if row.NextAction != tc.wantNextAction {
+				t.Fatalf("next_action = %q, want %q", row.NextAction, tc.wantNextAction)
+			}
+			if row.ReleaseReflection.Observed != tc.wantObserved {
+				t.Fatalf("release_reflection.observed = %v, want %v", row.ReleaseReflection.Observed, tc.wantObserved)
+			}
+			if row.ReleaseReflection.Reason == "" {
+				t.Fatal("release_reflection carries no reason; an absence with no reason is indistinguishable from a value nobody looked for")
+			}
+			if !tc.wantObserved {
+				// An unobserved reflection reports NO identifier at all. This
+				// is the assertion that stops a zero snapshot from being read
+				// as a real release.
+				if row.ReleaseReflection.ReleaseID != "" || row.ReleaseReflection.BundleDigest != "" ||
+					row.ReleaseReflection.EvidenceDigest != "" || row.ReleaseReflection.ReleaseVersion != 0 {
+					t.Fatalf("an unobserved release reflection carries identifiers: %+v", row.ReleaseReflection)
+				}
+			} else if row.ReleaseReflection.ReleaseID == "" || row.ReleaseReflection.BundleDigest == "" {
+				t.Fatalf("an observed release reflection carries no identifiers: %+v", row.ReleaseReflection)
+			}
+
+			// The list's next_action and the DETAIL view's next_action are the
+			// same function over the same state, so they must agree. Two
+			// variants would drift and the drift would show as a Backlog row
+			// advising something the detail page does not.
+			detail, found, err := svc.GetRequirementDetail(ctx, tc.fixture.requirementID)
+			if err != nil || !found {
+				t.Fatalf("detail read: found=%v err=%v", found, err)
+			}
+			if detail.NextAction != row.NextAction {
+				t.Fatalf("the list reports next_action %q and the detail view reports %q for the same Requirement", row.NextAction, detail.NextAction)
+			}
+		})
+	}
+}
+
+// TestBacklogPageBoundsIncrementIdsAcrossThePageAndSaysSo is v8's truncation
+// table: a page whose Increments exceed the cap must SAY it was bounded rather
+// than silently drop rows.
+func TestBacklogPageBoundsIncrementIdsAcrossThePageAndSaysSo(t *testing.T) {
+	at := time.Unix(1_700_000_000, 0).UTC()
+	// Two Requirements, each holding MaxPageSize Increments, so the page-wide
+	// budget of MaxPageSize ids is exhausted by the first row alone.
+	var fixtures []listFixture
+	for _, tag := range []string{"a", "b"} {
+		f := listFixture{requirementID: "req-" + tag, status: domain.RequirementActive, text: "many " + tag}
+		for i := 0; i < application.MaxPageSize; i++ {
+			f.increments = append(f.increments, listIncrement(t, "inc-"+tag+"-"+strconv.Itoa(i), "req-"+tag, domain.IncrementReady))
+		}
+		fixtures = append(fixtures, f)
+	}
+	st := writeListFixtures(t, fixtures...)
+	svc := serviceOn(t, st, at)
+	ctx := owner(context.Background())
+	page, err := svc.ListRequirementsPage(ctx, "", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !page.Truncated {
+		t.Fatal("a page whose increments exceed the page-wide cap did not report truncation")
+	}
+	total := 0
+	truncatedRows := 0
+	for _, row := range page.Requirements {
+		total += len(row.Increments)
+		if row.IncrementsTruncated {
+			truncatedRows++
+		}
+		// increment_ids is UNCHANGED in meaning: it still carries every id the
+		// aggregate holds, whether or not that row's statuses were read.
+		if len(row.IncrementIDs) != application.MaxPageSize {
+			t.Fatalf("row %s reports %d increment_ids, want the aggregate's full %d", row.RequirementID, len(row.IncrementIDs), application.MaxPageSize)
+		}
+	}
+	if total > application.MaxPageSize {
+		t.Fatalf("the page read %d increment statuses, above the cap of %d", total, application.MaxPageSize)
+	}
+	if truncatedRows == 0 {
+		t.Fatal("the page reports truncation but no row says which one was cut")
+	}
+	t.Logf("page-wide increment budget bound the answer: %d statuses read across %d rows, %d rows marked truncated, page truncated=%v",
+		total, len(page.Requirements), truncatedRows, page.Truncated)
+
+	// The positive half: a page inside the budget reports no truncation at all,
+	// so the flag is not simply always set.
+	small := writeListFixtures(t, listFixture{
+		requirementID: "req-small", status: domain.RequirementActive, text: "small",
+		increments: []domain.Increment{listIncrement(t, "inc-small", "req-small", domain.IncrementReady)},
+	})
+	smallPage, err := serviceOn(t, small, at).ListRequirementsPage(ctx, "", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if smallPage.Truncated {
+		t.Fatalf("a page of one Requirement with one Increment reported truncation: %+v", smallPage)
+	}
+}
+
+// TestBacklogRepositoryFilterUsesTheExistingPortAndNeverFallsBack is A8 and
+// escalation E22-7: an unknown repository id returns an EMPTY list and never
+// the unfiltered page, the parameter composes with page_size and cursor, and
+// a filtered page never contains an unlinked Requirement.
+func TestBacklogRepositoryFilterUsesTheExistingPortAndNeverFallsBack(t *testing.T) {
+	at := time.Unix(1_700_000_000, 0).UTC()
+	st := writeListFixtures(t,
+		listFixture{requirementID: "req-linked-1", status: domain.RequirementReady, text: "linked one", repositoryID: "repo-alpha"},
+		listFixture{requirementID: "req-linked-2", status: domain.RequirementReady, text: "linked two", repositoryID: "repo-alpha"},
+		listFixture{requirementID: "req-other", status: domain.RequirementReady, text: "other repo", repositoryID: "repo-beta"},
+		listFixture{requirementID: "req-unlinked", status: domain.RequirementReady, text: "no link"},
+	)
+	svc := serviceOn(t, st, at)
+	ctx := owner(context.Background())
+
+	unfiltered, err := svc.ListRequirementsPage(ctx, "", 25)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(unfiltered.Requirements) != 4 {
+		t.Fatalf("the unfiltered page carries %d rows, want 4", len(unfiltered.Requirements))
+	}
+	if unfiltered.Filter != nil {
+		t.Fatalf("an unfiltered page reported a filter object: %+v", unfiltered.Filter)
+	}
+
+	filtered, err := svc.ListRequirementsPageFiltered(ctx, "", 25, "repo-alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(filtered.Requirements) != 2 {
+		t.Fatalf("the filtered page carries %d rows, want 2: %+v", len(filtered.Requirements), filtered.Requirements)
+	}
+	if len(filtered.Requirements) == len(unfiltered.Requirements) {
+		t.Fatal("the filtered and unfiltered pages carry the same number of rows; the parameter is being ignored (E22-7)")
+	}
+	for _, row := range filtered.Requirements {
+		if row.RepositoryID != "repo-alpha" {
+			t.Fatalf("the filtered page carries %s, linked to %q, not repo-alpha", row.RequirementID, row.RepositoryID)
+		}
+	}
+	if filtered.Filter == nil || filtered.Filter.RepositoryID != "repo-alpha" {
+		t.Fatalf("the filtered page does not report its filter: %+v", filtered.Filter)
+	}
+	if filtered.Filter.LinkedIDsRead != 2 || filtered.Filter.LinkedIDsBounded {
+		t.Fatalf("the filter report does not surface the port's bound truthfully: %+v", filtered.Filter)
+	}
+	if filtered.Filter.Bound != application.MaxPageSize || filtered.Filter.Reason == "" {
+		t.Fatalf("the filter report hides the bound it was called with: %+v", filtered.Filter)
+	}
+
+	// AN UNKNOWN REPOSITORY ID RETURNS AN EMPTY LIST, NOT THE UNFILTERED PAGE.
+	// This is the exact defect E22-7 measured.
+	unknown, err := svc.ListRequirementsPageFiltered(ctx, "", 25, "repo-does-not-exist")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(unknown.Requirements) != 0 {
+		t.Fatalf("an unknown repository id returned %d rows, want 0: %+v", len(unknown.Requirements), unknown.Requirements)
+	}
+	if unknown.Requirements == nil {
+		t.Fatal("an empty filtered page must marshal as [] and not null")
+	}
+	if unknown.NextCursor != "" {
+		t.Fatalf("an empty filtered page issued a cursor: %q", unknown.NextCursor)
+	}
+
+	// COMPOSITION WITH page_size AND cursor.
+	firstOf, err := svc.ListRequirementsPageFiltered(ctx, "", 1, "repo-alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(firstOf.Requirements) != 1 || firstOf.NextCursor == "" {
+		t.Fatalf("page_size=1 over a two-Requirement Repository: rows=%d cursor=%q", len(firstOf.Requirements), firstOf.NextCursor)
+	}
+	secondOf, err := svc.ListRequirementsPageFiltered(ctx, firstOf.NextCursor, 1, "repo-alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(secondOf.Requirements) != 1 || secondOf.NextCursor != "" {
+		t.Fatalf("the second filtered page: rows=%d cursor=%q", len(secondOf.Requirements), secondOf.NextCursor)
+	}
+	walked := map[string]int{
+		firstOf.Requirements[0].RequirementID:  1,
+		secondOf.Requirements[0].RequirementID: 1,
+	}
+	if len(walked) != 2 {
+		t.Fatalf("the two filtered pages covered the same Requirement twice: %v", walked)
+	}
+
+	// A MALFORMED VALUE IS A 400-SHAPED CALLER FAULT, NOT A 500.
+	for _, bad := range []string{" ", "\t", strings.Repeat("x", application.MaxRepositoryFilterID+1)} {
+		_, err := svc.ListRequirementsPageFiltered(ctx, "", 25, bad)
+		if err == nil {
+			t.Fatalf("a malformed repository_id %q was accepted", bad)
+		}
+		if !errors.Is(err, application.ErrInvalidRequest) {
+			t.Fatalf("a malformed repository_id %q produced %v, which is not a caller fault", bad, err)
+		}
 	}
 }

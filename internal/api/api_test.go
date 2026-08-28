@@ -1746,7 +1746,41 @@ func TestRequirementResponsesCarryTheCaptureTimeAndOmitItWhenAbsent(t *testing.T
 	if !ok || len(rows) != 2 {
 		t.Fatalf("requirements array = %v, want 2 rows: %s", rows, w.Body.String())
 	}
-	wantRowKeys := map[string]bool{"requirement_id": true, "status": true, "version": true, "increment_ids": true, "text": true, "requested_by": true, "repository_id": true, "captured_at": true}
+	// THE CLOSED SET OF LIST-ROW KEYS. V2-095 WIDENED THIS GUARD BY FOUR
+	// (section 12.12: widen, do not delete; keep the set closed; drop no
+	// assertion; show the count did not fall; give each new entry a reason).
+	//
+	// Pre-V2-095 the set was these eight and nothing else: requirement_id,
+	// status, version, increment_ids, text, requested_by, repository_id,
+	// captured_at. Not one was removed or renamed, and no json tag of any of
+	// them changed -- the count rose from 8 to 12. The set stays CLOSED: a
+	// thirteenth key still fails, which the control below proves.
+	//
+	// The four new entries, each a declared confirmation item of
+	// cap-backlog-visibility that no surface carried (V2-095 A6):
+	//   increments           -- 進行中Incrementと進捗: the per-row Increment id
+	//                           AND status, read through the two existing batch
+	//                           ports once per page.
+	//   increments_truncated -- says this row's Increments were cut by the
+	//                           page-wide budget, so a short list is never
+	//                           readable as a complete one.
+	//   next_action          -- 次のaction, computed by the SAME nextAction
+	//                           function the detail view uses.
+	//   release_reflection   -- Preview/Stable反映状況, projected from
+	//                           domain.Requirement.StableSnapshot, reported as
+	//                           an explicit absence when the snapshot is zero.
+	wantRowKeys := map[string]bool{
+		"requirement_id": true, "status": true, "version": true, "increment_ids": true,
+		"text": true, "requested_by": true, "repository_id": true, "captured_at": true,
+		"increments": true, "increments_truncated": true, "next_action": true, "release_reflection": true,
+	}
+	if len(wantRowKeys) != 12 {
+		t.Fatalf("the closed row-key set names %d keys, want 12 (8 pre-existing plus the 4 V2-095 added)", len(wantRowKeys))
+	}
+	// The set is proven non-vacuous: the NEXT key still fails.
+	if wantRowKeys["a_thirteenth_key_v2_095_did_not_declare"] {
+		t.Fatal("the closed row-key set admits a key it does not name")
+	}
 	recorded, legacy := 0, 0
 	for _, raw := range rows {
 		row, ok := raw.(map[string]any)
@@ -2096,13 +2130,30 @@ func TestQueueSummaryRouteAuthorizationIsUnchanged(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
 		t.Fatalf("not json: %s", w.Body.String())
 	}
-	for _, want := range []string{"requirements", "by_requirement_status", "increments", "by_increment_status", "active_executions", "allocation", "waiting", "exhaustion"} {
+	// THE CLOSED SET OF SUMMARY KEYS ON THE WIRE. V2-095 WIDENED THIS GUARD BY
+	// ONE (section 12.12). The eight that stood before are all still required
+	// and none was renamed; the count rose from 8 to 9. The one new entry is
+	// `priority` -- cap-backlog-visibility's 優先度とその根拠, a projection of
+	// the per-candidate decisions scheduler.Decide already returned and
+	// allocationReport previously discarded, adding no read.
+	wantSummaryKeys := []string{"requirements", "by_requirement_status", "increments", "by_increment_status", "active_executions", "allocation", "waiting", "exhaustion", "priority"}
+	for _, want := range wantSummaryKeys {
 		if _, ok := body[want]; !ok {
 			t.Fatalf("the response has no %q key: %s", want, w.Body.String())
 		}
 	}
-	if len(body) != 8 {
-		t.Fatalf("the response has %d keys, want 8: %s", len(body), w.Body.String())
+	if len(body) != len(wantSummaryKeys) {
+		t.Fatalf("the response has %d keys, want %d: %s", len(body), len(wantSummaryKeys), w.Body.String())
+	}
+	// The set stays closed in the other direction: an undeclared key fails.
+	declaredSummaryKeys := map[string]bool{}
+	for _, k := range wantSummaryKeys {
+		declaredSummaryKeys[k] = true
+	}
+	for k := range body {
+		if !declaredSummaryKeys[k] {
+			t.Fatalf("the response carries key %q, which the closed set does not name: %s", k, w.Body.String())
+		}
 	}
 	// No placeholder the Snapshot modelling needed may reach the wire. The scan
 	// is verified first against a body that does contain one.
@@ -6732,5 +6783,158 @@ func TestTheOfferedRouteAnswersWithWorkTheLoopPassItselfPlanned(t *testing.T) {
 	}
 	if !strings.Contains(detail.Body.String(), `"status":"active"`) {
 		t.Fatalf("the Requirement is not active after the claim: %s", detail.Body.String())
+	}
+}
+
+// ===========================================================================
+// V2-095 A8/A9: the repository filter and the owner document routes, over HTTP
+// ===========================================================================
+
+// TestListRequirementsRepositoryFilterChangesThePage is A8's transport half:
+// with and without the parameter the pages differ for a Requirement linked to
+// one Repository, and the filtered page never contains an unlinked Requirement.
+// Escalation E22-7 measured the opposite: the parameter was ignored, so both
+// pages were byte-identical.
+func TestListRequirementsRepositoryFilterChangesThePage(t *testing.T) {
+	h := testHandler(t)
+	// One Repository and two Requirements, exactly one of which is linked to
+	// it. Everything goes through the real HTTP surface: nothing is written
+	// into the store behind the routes, and the link is created the only way
+	// the /v1 surface creates one -- the optional repository_id on the capture
+	// body (V2-071 A12).
+	if w := call(h, http.MethodPost, "/v1/repositories", `{"request_id":"filter-repo","repository_id":"repo-filter","source_url":"https://github.com/wakuwaku3/filter-fixture.git","default_branch":"main"}`, "owner"); w.Code != http.StatusCreated {
+		t.Fatalf("register repository: status=%d body=%s", w.Code, w.Body.String())
+	}
+	for _, body := range []string{
+		`{"request_id":"filter-a","requirement_id":"req-filter-a","text":"linked","repository_id":"repo-filter"}`,
+		`{"request_id":"filter-b","requirement_id":"req-filter-b","text":"unlinked"}`,
+	} {
+		if w := call(h, http.MethodPost, "/v1/requirements", body, "owner"); w.Code != http.StatusCreated {
+			t.Fatalf("capture: status=%d body=%s", w.Code, w.Body.String())
+		}
+	}
+
+	unfiltered := call(h, http.MethodGet, "/v1/requirements?page_size=25", "", "owner")
+	filtered := call(h, http.MethodGet, "/v1/requirements?page_size=25&repository_id=repo-filter", "", "owner")
+	if unfiltered.Code != http.StatusOK || filtered.Code != http.StatusOK {
+		t.Fatalf("statuses %d and %d", unfiltered.Code, filtered.Code)
+	}
+	unfilteredRows, _ := decodeBody(t, unfiltered.Body.Bytes())["requirements"].([]any)
+	filteredBody := decodeBody(t, filtered.Body.Bytes())
+	filteredRows, _ := filteredBody["requirements"].([]any)
+	if len(unfilteredRows) != 2 {
+		t.Fatalf("the unfiltered page carries %d rows, want 2: %s", len(unfilteredRows), unfiltered.Body.String())
+	}
+	if len(filteredRows) != 1 {
+		t.Fatalf("the filtered page carries %d rows, want 1: %s", len(filteredRows), filtered.Body.String())
+	}
+	if len(unfilteredRows) == len(filteredRows) {
+		t.Fatal("the two pages carry the same number of rows; the repository_id parameter is being ignored (E22-7)")
+	}
+	row, _ := filteredRows[0].(map[string]any)
+	if id, _ := row["requirement_id"].(string); id != "req-filter-a" {
+		t.Fatalf("the filtered page carries %q, want the linked req-filter-a: %s", id, filtered.Body.String())
+	}
+	if strings.Contains(filtered.Body.String(), "req-filter-b") {
+		t.Fatalf("the filtered page carries the UNLINKED Requirement: %s", filtered.Body.String())
+	}
+	if _, present := filteredBody["filter"]; !present {
+		t.Fatalf("the filtered page does not report its filter: %s", filtered.Body.String())
+	}
+	if _, present := decodeBody(t, unfiltered.Body.Bytes())["filter"]; present {
+		t.Fatalf("the unfiltered page reports a filter object: %s", unfiltered.Body.String())
+	}
+
+	// An unknown repository id returns an EMPTY list, not the unfiltered page.
+	unknown := call(h, http.MethodGet, "/v1/requirements?page_size=25&repository_id=repo-does-not-exist", "", "owner")
+	if unknown.Code != http.StatusOK {
+		t.Fatalf("unknown repository id: status=%d body=%s", unknown.Code, unknown.Body.String())
+	}
+	unknownRows, ok := decodeBody(t, unknown.Body.Bytes())["requirements"].([]any)
+	if !ok || len(unknownRows) != 0 {
+		t.Fatalf("an unknown repository id returned %v, want an empty array: %s", unknownRows, unknown.Body.String())
+	}
+
+	// A malformed value is 400 with the existing invalid_request shape.
+	for _, query := range []string{"?repository_id=", "?repository_id=%20", "?repository_id=" + strings.Repeat("x", 513)} {
+		w := call(h, http.MethodGet, "/v1/requirements"+query, "", "owner")
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("GET /v1/requirements%s = %d, want 400: %s", query, w.Code, w.Body.String())
+		}
+		if code, _ := decodeBody(t, w.Body.Bytes())["error"].(string); code != "invalid_request" {
+			t.Fatalf("GET /v1/requirements%s answered error %q, want invalid_request", query, code)
+		}
+	}
+}
+
+// TestOpenAPIDeclaresTheV2095OwnerSurface is release-contract.md condition 8
+// for the two new owner API paths and the new query parameter, plus the
+// struct-to-schema bijection for the four schemas V2-095 added.
+func TestOpenAPIDeclaresTheV2095OwnerSurface(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "contracts", "openapi", "openapi-v1.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	document := string(data)
+	for _, want := range []string{
+		"  /owner/docs/:",
+		"  /owner/{document_path}:",
+		"operationId: listOwnerDocuments",
+		"operationId: getOwnerDocument",
+		"OwnerDocumentIndexResponse:",
+		"OwnerDocumentEntry:",
+		"OwnerDocumentResponse:",
+		"QueuePriority:",
+		"QueuePriorityEntry:",
+		"QueuePriorityScoreInputs:",
+		"QueuePriorityFactors:",
+		"RequirementRowIncrement:",
+		"RequirementReleaseReflection:",
+		"RequirementPageFilter:",
+		"{name: repository_id, in: query, required: false",
+	} {
+		if !strings.Contains(document, want) {
+			t.Fatalf("the openapi document does not declare %q", want)
+		}
+	}
+	for _, schema := range []string{
+		"OwnerDocumentIndexResponse", "OwnerDocumentEntry", "OwnerDocumentResponse",
+		"QueuePriority", "QueuePriorityEntry", "QueuePriorityScoreInputs", "QueuePriorityFactors",
+		"RequirementRowIncrement", "RequirementReleaseReflection", "RequirementPageFilter",
+	} {
+		block := openAPISchemaBlock(t, document, schema)
+		if !strings.Contains(block, "additionalProperties: false") {
+			t.Fatalf("schema %s does not declare additionalProperties: false:\n%s", schema, block)
+		}
+	}
+	// The struct-to-schema bijection, in both directions, for every new object
+	// whose Go type emits a fixed field set.
+	for _, pair := range []struct {
+		schema string
+		value  any
+	}{
+		{"OwnerDocumentEntry", application.ReleaseDocumentEntryView{}},
+		{"OwnerDocumentResponse", application.ReleaseDocumentView{}},
+		{"OwnerDocumentIndexResponse", application.ReleaseDocumentIndexView{}},
+		{"QueuePriority", application.PriorityView{}},
+		{"QueuePriorityFactors", application.PriorityFactorsView{}},
+		{"RequirementRowIncrement", application.RequirementRowIncrementView{}},
+		{"RequirementPageFilter", application.RequirementFilterView{}},
+	} {
+		want := openAPIRequiredList(t, document, pair.schema)
+		got := jsonTagsOf(t, pair.value)
+		sort.Strings(want)
+		sort.Strings(got)
+		if !reflect.DeepEqual(want, got) {
+			t.Fatalf("%s required %v, struct emits %v", pair.schema, want, got)
+		}
+	}
+	// The priority entry's reason enum is exactly the scheduler's closed set,
+	// so the document cannot promise a reason the scheduler never gives.
+	entry := openAPISchemaBlock(t, document, "QueuePriorityEntry")
+	for _, bucket := range application.WaitingReasonBuckets() {
+		if !strings.Contains(entry, bucket) {
+			t.Fatalf("the QueuePriorityEntry reason enum does not carry the scheduler's own reason %q:\n%s", bucket, entry)
+		}
 	}
 }

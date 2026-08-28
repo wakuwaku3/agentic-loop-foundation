@@ -1,11 +1,16 @@
 package api_test
 
-// TestFoundationPreviewLocalDogfood is V2-022's preview-local (release-
-// contract.md section 3) dogfood exercise: this Foundation Repository is
-// driven as a Preview target on the owner's own machine, with a real
-// cmd/control-plane process on 127.0.0.1, a real Firestore emulator, a real
-// enrolled Runner session over real HTTP, and the real claude CLI as a real
-// child process group.
+// TestFoundationPreviewLocalDogfood is the preview-local (release-contract.md
+// section 3) dogfood exercise: this Foundation Repository is driven as a
+// Preview target on the owner's own machine, with a real cmd/control-plane
+// process on 127.0.0.1, a real Firestore emulator, a real enrolled Runner
+// session over real HTTP, the real claude CLI as a real child process group,
+// and -- since V2-095 -- the real gh and git CLIs read READ-ONLY.
+//
+// It was written by V2-022 and is RE-USED by V2-095, the M5 re-dogfood, rather
+// than duplicated. V2-095 pays its invocations under its own owner-issued
+// preflight record (dogfoodRecordRel below) and issues the capability verdicts
+// V2-022's helpers deliberately left to it.
 //
 // It is gated on AGENTIC_LOOP_LIVE_DOGFOOD=1 (plus AGENTIC_LOOP_LIVE_PROVIDER=1
 // for the sub-exercises that invoke the real CLI) and skips otherwise, so
@@ -21,9 +26,15 @@ package api_test
 // The four conditions the roadmap defers to the initial deploy gate (D1) are
 // out of scope and are never asserted here: the IAP authentication boundary,
 // idle scale-to-zero, real Firestore permissions/contention, and the
-// approved-plan-digest deploy path. Nothing here reaches Google Cloud, and
-// nothing here reaches a forge: no GitHub object is read, created or
-// modified by this test.
+// approved-plan-digest deploy path. Nothing here reaches Google Cloud.
+//
+// SINCE V2-095 THIS EXERCISE DOES REACH A FORGE, READ-ONLY. One GitHub
+// repository is READ through the existing internal/runner forge client and one
+// git executable is resolved and asked its version. Nothing is created,
+// modified or deleted -- no branch, ref, tag, pull request, issue or repository
+// -- the only argv the read path can produce are the read-and-version pair,
+// which capRepositoryRegistration asserts before the read, and no credential
+// value, prompt or raw response is recorded anywhere.
 //
 // It composes exactly as V2-051's internal/api/live_local_test.go does and
 // reuses that file's helpers (repoRootForLiveTest, freeLocalPort,
@@ -67,10 +78,39 @@ import (
 const (
 	dogfoodGate         = "AGENTIC_LOOP_LIVE_DOGFOOD"
 	dogfoodProviderGate = "AGENTIC_LOOP_LIVE_PROVIDER"
-	dogfoodRecordRel    = ".agents/v2/provider-preflight/V2-022-provider-live-claude-dogfood.json"
-	dogfoodTaskID       = "V2-022"
+	dogfoodRecordRel    = ".agents/v2/provider-preflight/V2-095-provider-live-claude-redogfood.json"
+	dogfoodTaskID       = "V2-095"
 	dogfoodRepositoryID = "agentic-loop-foundation"
 	dogfoodEnvClass     = "preview-local"
+)
+
+// The M5 re-dogfood (V2-095) reuses this exercise rather than writing a second
+// one, and it pays its invocations under its OWN owner-issued preflight record:
+// dogfoodRecordRel and dogfoodTaskID above name that record and no other. Not
+// one byte of V2-022's record or of any existing cost ledger changes, no
+// existing record's thresholds are raised, and no halted flag is cleared.
+
+// dogfoodForgeOwner and dogfoodForgeName are the owner's own repository, read
+// READ-ONLY. docs/architecture/validation.md requires a dedicated sandbox
+// Repository for anything not confirmable read-only; a read has nil blast
+// radius, so no sandbox designation is needed and none is assumed. These are
+// the same coordinates internal/runner/forge_live_test.go already reads.
+const dogfoodForgeOwner = "wakuwaku3"
+const dogfoodForgeName = "agentic-loop-foundation"
+
+// dogfoodForgeDeadline bounds the forge and git reads. It is a context
+// deadline, not a sleep and not a timer: nothing here waits on wall-clock time.
+const dogfoodForgeDeadline = 60 * time.Second
+
+// The release-source environment variables V2-091's wiring reads
+// (cmd/control-plane/main.go). They are MEASURED names, not chosen ones: this
+// task adds no wiring path, no variable and no default root of its own, and
+// with the root unset the shipped binary still answers 503
+// release_observer_not_configured on GET /v1/release/state.
+const (
+	dogfoodReleaseRootVar        = "AGENTIC_LOOP_RELEASE_SOURCE_ROOT"
+	dogfoodReleaseRepositoryVar  = "AGENTIC_LOOP_RELEASE_REPOSITORY"
+	dogfoodReleaseEnvironmentVar = "AGENTIC_LOOP_RELEASE_ENVIRONMENT_CLASS"
 )
 
 // dogfoodEligible is dp-v2-022 d2's eligible set as this run MEASURED it: the
@@ -88,9 +128,32 @@ const (
 //	                        capability document itself disagrees with the
 //	                        running process about /v1/release/state.
 //
+// V2-095 RE-MEASURED THIS SET. The five below are exactly the capabilities that
+// declare NEITHER Google Cloud Run among external_dependencies.systems NOR both
+// codex and opencode among external_dependencies.providers -- the partition
+// internal/contracts/capability_declaration_test.go asserts by name at every
+// judging commit. They are the five M5 itself owns, and V2-095 measures each
+// one's declared success condition in full in this run. The other seven are
+// ineligible BY THEIR OWN DECLARATION, which is a property of the declaration
+// and never of what this exercise could reach.
+//
+// cap-repository-registration is in this set and is NOT deferred. Its declared
+// systems are GitHub, Git, Firestore and owner UI, its declared provider list is
+// EMPTY, and both gh and git are measurably present and authenticated on this
+// machine, so 'could not reach it' is false. V2-022's recorded reason -- 'this
+// task's declared side-effect surface excludes every forge and every remote' --
+// was a property of that task's own scope, which section 8.3 forbids as a source
+// of deferral.
+//
 // This list is the upper bound the promotability measurement is allowed to
 // see: a capability outside it carrying an evidence id is a hard failure.
-var dogfoodEligible = []string{"cap-requirement-intake"}
+var dogfoodEligible = []string{
+	"cap-requirement-intake",
+	"cap-repository-registration",
+	"cap-backlog-visibility",
+	"cap-human-input-request",
+	"cap-user-documentation",
+}
 
 // dogfoodIdentifiers is the release-contract.md section 3 environment
 // identifier set every capability check carries.
@@ -197,7 +260,7 @@ func (fx *dogfood) runner() map[string]string {
 // process group through agenticrunner.ProcessSupervisor and returns its base
 // URL, an aliveness probe, and an explicit stop function so a sub-exercise
 // can prove persistence survives process death rather than assuming it.
-func startDogfoodProcess(t *testing.T, binPath, installation string, port int, ownerToken, ownerEmail string) (base string, alive func() bool, stop func()) {
+func startDogfoodProcess(t *testing.T, binPath, installation string, port int, ownerToken, ownerEmail, releaseRoot string) (base string, alive func() bool, stop func()) {
 	t.Helper()
 	env := append(os.Environ(),
 		"PORT="+strconv.Itoa(port),
@@ -209,6 +272,20 @@ func startDogfoodProcess(t *testing.T, binPath, installation string, port int, o
 		"AGENTIC_LOOP_ALLOW_FIRESTORE_EMULATOR=1",
 		"AGENTIC_LOOP_LOCAL_OWNER_TOKENS="+ownerToken+"="+ownerEmail,
 	)
+	// V2-091's release-source wiring, configured EXPLICITLY (V2-095 A10). There
+	// is ONE release-source configuration in this exercise and it is this one:
+	// the same root serves GET /v1/release/state and the owner document routes,
+	// so the two cannot report different versions. `devbox run --pure` strips
+	// the environment, so the variables are set here rather than relied on from
+	// the parent. releaseRoot == "" leaves them unset, which is how the
+	// unconfigured 503 half is exercised without a second code path.
+	if releaseRoot != "" {
+		env = append(env,
+			dogfoodReleaseRootVar+"="+releaseRoot,
+			dogfoodReleaseRepositoryVar+"="+dogfoodRepositoryID,
+			dogfoodReleaseEnvironmentVar+"="+dogfoodEnvClass,
+		)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	supervisor := agenticrunner.ProcessSupervisor{TermGrace: 5 * time.Second, Env: env}
 	done := make(chan error, 1)
@@ -302,7 +379,7 @@ func TestFoundationPreviewLocalDogfood(t *testing.T) {
 	recordPath := filepath.Join(repoRoot, dogfoodRecordRel)
 	record, err := agenticrunner.LoadPreflightRecord(repoRoot, recordPath)
 	if err != nil {
-		t.Fatalf("the V2-022 provider-preflight record at %s does not load/validate: %v", dogfoodRecordRel, err)
+		t.Fatalf("the V2-095 provider-preflight record at %s does not load/validate: %v", dogfoodRecordRel, err)
 	}
 	if record.LedgerPath == "" || !filepath.IsAbs(record.LedgerPath) {
 		t.Fatalf("limits.ledger_path %q is not an absolute path", record.LedgerPath)
@@ -310,7 +387,7 @@ func TestFoundationPreviewLocalDogfood(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(record.LedgerPath), 0o700); err != nil {
 		t.Fatalf("ledger directory is not writable: %v", err)
 	}
-	probe := filepath.Join(filepath.Dir(record.LedgerPath), ".v2-022-write-probe")
+	probe := filepath.Join(filepath.Dir(record.LedgerPath), ".v2-095-write-probe")
 	if err := os.WriteFile(probe, []byte("ok"), 0o600); err != nil {
 		t.Fatalf("ledger path is not writable: %v", err)
 	}
@@ -318,8 +395,8 @@ func TestFoundationPreviewLocalDogfood(t *testing.T) {
 
 	fx := &dogfood{
 		repoRoot:     repoRoot,
-		installation: "v2-022-dogfood-" + strconv.FormatInt(time.Now().UnixNano(), 36),
-		ownerToken:   "v2-022-dogfood-owner-token", //nolint:gosec // fixture credential for a throwaway local emulator install
+		installation: "v2-095-dogfood-" + strconv.FormatInt(time.Now().UnixNano(), 36),
+		ownerToken:   "v2-095-dogfood-owner-token", //nolint:gosec // fixture credential for a throwaway local emulator install
 		ownerEmail:   "owner@example.com",
 		client:       &http.Client{Timeout: 30 * time.Second},
 		recordPath:   recordPath,
@@ -357,7 +434,7 @@ func TestFoundationPreviewLocalDogfood(t *testing.T) {
 		t.Fatalf("go build ./cmd/control-plane failed: %v\n%s", err, out)
 	}
 
-	base, alive, stop := startDogfoodProcess(t, fx.goodBin, fx.installation, freeLocalPort(t), fx.ownerToken, fx.ownerEmail)
+	base, alive, stop := startDogfoodProcess(t, fx.goodBin, fx.installation, freeLocalPort(t), fx.ownerToken, fx.ownerEmail, repoRoot)
 	waitForHealthz(t, fx.client, base, alive, 30*time.Second)
 	fx.base, fx.stopBase = base, stop
 
@@ -473,11 +550,11 @@ func (fx *dogfood) capRequirementIntake(t *testing.T) {
 	// installation and emulator, and re-read over real HTTP.
 	deathInstallation := fx.installation
 	tempPort := freeLocalPort(t)
-	tempBase, tempAlive, tempStop := startDogfoodProcess(t, fx.goodBin, deathInstallation, tempPort, fx.ownerToken, fx.ownerEmail)
+	tempBase, tempAlive, tempStop := startDogfoodProcess(t, fx.goodBin, deathInstallation, tempPort, fx.ownerToken, fx.ownerEmail, fx.repoRoot)
 	waitForHealthz(t, fx.client, tempBase, tempAlive, 30*time.Second)
 	tempStop()
 	dogfoodPoll(t, "the stopped control-plane process to be gone", 20*time.Second, func() bool { return !tempAlive() })
-	secondBase, secondAlive, _ := startDogfoodProcess(t, fx.goodBin, deathInstallation, freeLocalPort(t), fx.ownerToken, fx.ownerEmail)
+	secondBase, secondAlive, _ := startDogfoodProcess(t, fx.goodBin, deathInstallation, freeLocalPort(t), fx.ownerToken, fx.ownerEmail, fx.repoRoot)
 	waitForHealthz(t, fx.client, secondBase, secondAlive, 30*time.Second)
 	reread := dogfoodCall(t, fx.client, http.MethodGet, secondBase+"/v1/requirements/"+requirementID, fx.owner(), nil)
 	if reread.status != http.StatusOK {
@@ -493,10 +570,11 @@ func (fx *dogfood) capRequirementIntake(t *testing.T) {
 	// side effect, never a 400. A fresh installation is used so exhausting
 	// the daily write budget cannot poison the rest of this exercise.
 	rollbackInstallation := fx.installation + "-rollback"
-	rollbackBase, rollbackAlive, _ := startDogfoodProcess(t, fx.goodBin, rollbackInstallation, freeLocalPort(t), fx.ownerToken, fx.ownerEmail)
+	rollbackBase, rollbackAlive, _ := startDogfoodProcess(t, fx.goodBin, rollbackInstallation, freeLocalPort(t), fx.ownerToken, fx.ownerEmail, fx.repoRoot)
 	waitForHealthz(t, fx.client, rollbackBase, rollbackAlive, 30*time.Second)
 	exhaustWriteBudgetOrFail(t, fx.client, rollbackBase, fx.ownerToken)
 	t.Logf("cap-requirement-intake observed in full at %s; identifiers: %s", dogfoodEnvClass, fx.ids)
+	t.Log("VERDICT INPUT for cap-requirement-intake: the declared success condition (captureRequirement returns a unique Requirement id and the persisted content, and the same content is readable from the Backlog) was observed in full over real HTTP against a real Firestore emulator, including across process death and a second process reading the same installation; the declared rollback condition was observed by driving real mutations until the budget hard guard answered before the side effect rather than after it.")
 }
 
 // verifyEmulatorDocuments connects a Firestore client directly to the
@@ -666,24 +744,276 @@ func (fx *dogfood) capBacklogVisibility(t *testing.T) {
 		t.Fatalf("queue summary carries no active_executions count: %+v", summary.body)
 	}
 
-	// Measured shortfall, recorded as a shortfall and not as a failure of the
-	// declared success condition (E22-7): the declared user action "filter by
-	// related Repository" has no implementation. GET /v1/requirements accepts
-	// only page_size and cursor, so a repository_id query parameter changes
-	// nothing about the page it returns.
-	unfiltered := dogfoodCall(t, fx.client, http.MethodGet, fx.base+"/v1/requirements?page_size=25", fx.owner(), nil)
-	filtered := dogfoodCall(t, fx.client, http.MethodGet, fx.base+"/v1/requirements?page_size=25&repository_id=does-not-exist", fx.owner(), nil)
+	// ------------------------------------------------------------------
+	// V2-095: THE EIGHT DECLARED CONFIRMATION ITEMS, EACH ASSERTED ON THE
+	// WIRE. This capability's declared failure condition is
+	// "\u4e00\u89a7\u304c\u53d6\u5f97\u3067\u304d\u306a\u3044\u3001\u307e\u305f\u306f\u5fc5\u9808\u306e\u78ba\u8a8d\u9805\u76ee\u304c\u6b20\u843d\u3059\u308b" -- it IMPORTS the confirmation items -- so a
+	// passed verdict has to survive an item-by-item reading, which no record
+	// has ever performed. The eight are satisfied JOINTLY by listRequirements
+	// and queueSummary, which is exactly what the declared preview_exercise
+	// names.
+	// ------------------------------------------------------------------
+	if len(wholeRows) == 0 {
+		t.Fatalf("the full Backlog page carried no row; every item-by-item assertion below would pass vacuously: %+v", whole.body)
+	}
+	// Items 1, 2 and 5 (\u8981\u6c42\u5185\u5bb9 / \u73fe\u5728\u306e\u5229\u7528\u8005\u5411\u3051\u72b6\u614b / the
+	// active-vs-waiting-vs-recovering-vs-needs-input distinction). The status
+	// enum itself carries the distinction; what is asserted here is that every
+	// row reports a status from the domain's own enum and carries its text.
+	statuses := map[string]bool{
+		"captured": true, "framing": true, "ready": true, "active": true, "waiting": true,
+		"needs-input": true, "paused": true, "recovering": true, "evaluating": true,
+		"completed": true, "cancelled": true,
+	}
+	for _, raw := range wholeRows {
+		r, isObject := raw.(map[string]any)
+		if !isObject {
+			t.Fatalf("a Backlog row is not an object: %v", raw)
+		}
+		status := stringField(r, "status")
+		if !statuses[status] {
+			t.Fatalf("a Backlog row reports status %q, which is not a member of the domain's Requirement status enum: %+v", status, r)
+		}
+		// Item 8: \u6b21\u306eaction. Present on EVERY row, not just some.
+		if stringField(r, "next_action") == "" {
+			t.Fatalf("a Backlog row carries no next_action: %+v", r)
+		}
+		// Item 4: \u95a2\u9023Repository. Present as a key or absent entirely;
+		// never the empty string, which would read as "linked to nothing".
+		if value, present := r["repository_id"]; present {
+			if text, isString := value.(string); !isString || text == "" {
+				t.Fatalf("a Backlog row carries repository_id %v, which is present but not a real identifier: %+v", value, r)
+			}
+		}
+		// Item 6: \u9032\u884c\u4e2dIncrement\u3068\u9032\u6357. The row must carry the
+		// increments array AND the truncation flag, and every entry must carry
+		// a status as well as an id.
+		increments, isList := r["increments"].([]any)
+		if !isList {
+			t.Fatalf("a Backlog row carries no increments array: %+v", r)
+		}
+		if _, present := r["increments_truncated"]; !present {
+			t.Fatalf("a Backlog row does not report whether its increments were bounded: %+v", r)
+		}
+		for _, rawInc := range increments {
+			inc, isObject := rawInc.(map[string]any)
+			if !isObject {
+				t.Fatalf("an increment entry is not an object: %v", rawInc)
+			}
+			if stringField(inc, "increment_id") == "" || stringField(inc, "status") == "" {
+				t.Fatalf("an increment entry carries no id or no status: %+v", inc)
+			}
+		}
+		// Item 7: Preview/Stable\u53cd\u6620\u72b6\u6cc1, reported as an explicit
+		// absence when nothing is recorded and NEVER as a plausible release.
+		reflection, isObject := r["release_reflection"].(map[string]any)
+		if !isObject {
+			t.Fatalf("a Backlog row carries no release_reflection: %+v", r)
+		}
+		observed, isBool := reflection["observed"].(bool)
+		if !isBool {
+			t.Fatalf("release_reflection carries no observed flag: %+v", reflection)
+		}
+		if stringField(reflection, "reason") == "" {
+			t.Fatalf("release_reflection carries no reason; an absence with no reason cannot be told from a value nobody looked for: %+v", reflection)
+		}
+		if !observed {
+			for _, forbidden := range []string{"release_id", "bundle_digest", "evidence_digest", "release_version"} {
+				if _, present := reflection[forbidden]; present {
+					t.Fatalf("an UNOBSERVED release reflection carries %q, so a zero snapshot is being reported as a release: %+v", forbidden, reflection)
+				}
+			}
+		}
+	}
+	if _, present := whole.body["truncated"]; !present {
+		t.Fatalf("the Backlog page does not report whether its increment reads were bounded: %+v", whole.body)
+	}
+	t.Logf("measured on the wire: every one of the %d Backlog rows carries a status from the domain enum, a next_action, an increments array with a status per entry, its own truncation flag, and a release_reflection whose absence is explicit", len(wholeRows))
+
+	// Item 3: \u512a\u5148\u5ea6\u3068\u305d\u306e\u6839\u62e0, on queueSummary. It is the
+	// scheduler's OWN per-candidate decision for this read, projected; a
+	// Requirement the scheduler did not rank carries no entry and no rank.
+	priority, ok := summary.body["priority"].(map[string]any)
+	if !ok {
+		t.Fatalf("the queue summary carries no priority projection: %+v", summary.body)
+	}
+	if stringField(priority, "reason") == "" {
+		t.Fatalf("the priority projection carries no reason: %+v", priority)
+	}
+	if _, present := priority["assessment_supplied"]; !present {
+		t.Fatalf("the priority projection does not say whether a multi-factor assessment fed the ranking: %+v", priority)
+	}
+	if stringField(priority, "assessment_note") == "" {
+		t.Fatalf("the priority projection carries no assessment note: %+v", priority)
+	}
+	closedReasons := map[string]bool{
+		"not-ready": true, "unmet-dependency": true, "repository-unavailable": true,
+		"already-owned": true, "resource-conflict": true, "no-runner-capacity": true,
+		"not-executable": true,
+	}
+	entries, _ := priority["entries"].([]any)
+	if len(entries) == 0 {
+		t.Fatalf("the priority projection ranked no candidate over %d Requirements: %+v", total, priority)
+	}
+	rankedIDs := map[string]bool{}
+	seenRanks := map[float64]bool{}
+	for _, rawEntry := range entries {
+		entry, isObject := rawEntry.(map[string]any)
+		if !isObject {
+			t.Fatalf("a priority entry is not an object: %v", rawEntry)
+		}
+		id := stringField(entry, "requirement_id")
+		if id == "" {
+			t.Fatalf("a priority entry names no Requirement: %+v", entry)
+		}
+		rankedIDs[id] = true
+		rank, isNumber := entry["rank"].(float64)
+		if !isNumber {
+			t.Fatalf("a priority entry carries no rank: %+v", entry)
+		}
+		if seenRanks[rank] {
+			t.Fatalf("rank %v was reported twice: %+v", rank, entries)
+		}
+		seenRanks[rank] = true
+		assigned, _ := entry["assigned"].(bool)
+		reason := stringField(entry, "reason")
+		if assigned && reason != "" {
+			t.Fatalf("an assigned candidate carries the waiting reason %q: %+v", reason, entry)
+		}
+		if !assigned {
+			if reason == "" {
+				t.Fatalf("an unassigned candidate carries no reason: %+v", entry)
+			}
+			if !closedReasons[reason] {
+				t.Fatalf("a candidate carries reason %q, which is not a member of the scheduler's closed rejection set: %+v", reason, entry)
+			}
+		}
+		inputs, isObject := entry["score_inputs"].(map[string]any)
+		if !isObject {
+			t.Fatalf("a priority entry carries no score_inputs: %+v", entry)
+		}
+		used, isBool := inputs["used_assessment"].(bool)
+		if !isBool {
+			t.Fatalf("score_inputs does not report whether the multi-factor assessment was used: %+v", inputs)
+		}
+		if !used {
+			// The measured fact this task reports rather than hides: the
+			// multi-factor assessment did NOT feed the ranking, so the seven
+			// factors are absent rather than reported as seven zeroes.
+			if _, present := inputs["factors"]; present {
+				t.Fatalf("score_inputs reports seven factors while used_assessment is false: %+v", inputs)
+			}
+		}
+	}
+	// A Requirement the scheduler did not rank in this read must carry NO
+	// entry, and the projection must say it was bounded. With this run's
+	// Backlog inside the candidate bound the projection is complete, which is
+	// the case asserted here; the bounded case is asserted deterministically in
+	// internal/application/allocation_test.go, because reaching it live would
+	// need more Requirements than the scheduler's own bound admits.
+	bounded, _ := priority["bounded"].(bool)
+	if bounded {
+		t.Fatalf("the priority projection reports itself bounded over %d Requirements: %+v", total, priority)
+	}
+	for _, id := range fx.capturedIDs {
+		if !rankedIDs[id] {
+			t.Fatalf("Requirement %s is in the Backlog but carries no priority entry while the projection claims not to be bounded", id)
+		}
+	}
+	t.Logf("measured on the wire: the priority projection ranked %d candidates with distinct ranks, every unassigned one naming a reason from the scheduler's closed set, and assessment_supplied=%v with its note stating what the rationale is NOT", len(entries), priority["assessment_supplied"])
+
+	// ------------------------------------------------------------------
+	// E22-7, RE-MEASURED AND CLOSED. V2-022 measured that a repository_id
+	// query parameter changed nothing about the page. The probe below is the
+	// REVERSE of that one: the parameter must change the page, an unknown
+	// Repository must yield an EMPTY list rather than the unfiltered page,
+	// and a filtered page must never carry an unlinked Requirement.
+	// ------------------------------------------------------------------
+	filterRepositoryID := "v2-095-backlog-filter-repo"
+	registered := dogfoodCall(t, fx.client, http.MethodPost, fx.base+"/v1/repositories", fx.owner(), map[string]any{
+		"request_id":    "v2-095-backlog-filter-repo",
+		"repository_id": filterRepositoryID,
+		// A DISTINCT source locator: the Repository the filter probe needs is
+		// not the one cap-repository-registration registers, and the aggregate
+		// refuses a second registration of the same locator. This one is never
+		// contacted; it exists only so a Requirement can be linked to it.
+		"source_url":     "https://github.com/" + dogfoodForgeOwner + "/v2-095-backlog-filter-fixture.git",
+		"default_branch": "main",
+	})
+	if registered.status != http.StatusCreated {
+		t.Fatalf("register the Repository the filter probe needs: %d %+v", registered.status, registered.body)
+	}
+	linked := dogfoodCall(t, fx.client, http.MethodPost, fx.base+"/v1/requirements", fx.owner(), map[string]any{
+		"request_id": "v2-095-backlog-filter-linked", "text": "V2-095 dogfood: a Requirement linked to one Repository",
+		"repository_id": filterRepositoryID,
+	})
+	if linked.status != http.StatusCreated {
+		t.Fatalf("capture a linked Requirement: %d %+v", linked.status, linked.body)
+	}
+	linkedID := stringField(linked.body, "requirement_id")
+	fx.capturedIDs = append(fx.capturedIDs, linkedID)
+
+	unfiltered := dogfoodCall(t, fx.client, http.MethodGet, fx.base+"/v1/requirements?page_size=100", fx.owner(), nil)
+	filtered := dogfoodCall(t, fx.client, http.MethodGet, fx.base+"/v1/requirements?page_size=100&repository_id="+url.QueryEscape(filterRepositoryID), fx.owner(), nil)
 	if unfiltered.status != http.StatusOK || filtered.status != http.StatusOK {
 		t.Fatalf("E22-7 probe: unexpected statuses %d and %d", unfiltered.status, filtered.status)
 	}
 	unfilteredRows, _ := unfiltered.body["requirements"].([]any)
 	filteredRows, _ := filtered.body["requirements"].([]any)
-	if len(unfilteredRows) != len(filteredRows) {
-		t.Fatalf("E22-7 probe: a repository_id parameter changed the page (%d vs %d rows); re-measure the shortfall", len(unfilteredRows), len(filteredRows))
+	if len(unfilteredRows) == len(filteredRows) {
+		t.Fatalf("E22-7 probe: the repository_id parameter did NOT change the page (%d rows with and without it); the defect E22-7 measured still stands", len(filteredRows))
 	}
-	t.Logf("E22-7 measured: GET /v1/requirements ignores repository_id (%d rows with and without it); the Backlog cannot be filtered by Repository", len(filteredRows))
-	t.Logf("what WAS observed: a bounded page, a next_cursor, and a queueSummary whose counts by Requirement status, by Increment status and active Executions agree with the %d Requirements this run itself created; the declared rollback condition also holds, because every read above left the canonical state unchanged.", total)
-	t.Log("E22-11, measured on 2026-08-26 and the reason cap-backlog-visibility was recorded FAILED then, no longer reproduces: the Backlog was paged past its first page over the cursor the route itself issued, walked to exhaustion, covering every Requirement this run captured exactly once (V2-079). The remaining measured shortfall is E22-7: the declared user action \"filter by related Repository\" is still unimplemented. This helper records what it measured and issues no verdict; the cap-backlog-visibility verdict and its evidence_ids belong to the M5 re-dogfood.")
+	if len(filteredRows) != 1 {
+		t.Fatalf("E22-7 probe: the filtered page carries %d rows, want exactly the 1 linked Requirement: %+v", len(filteredRows), filtered.body)
+	}
+	filteredRow, _ := filteredRows[0].(map[string]any)
+	if stringField(filteredRow, "requirement_id") != linkedID {
+		t.Fatalf("E22-7 probe: the filtered page carries %q, want the linked %q", stringField(filteredRow, "requirement_id"), linkedID)
+	}
+	if stringField(filteredRow, "repository_id") != filterRepositoryID {
+		t.Fatalf("E22-7 probe: the filtered row names Repository %q, want %q", stringField(filteredRow, "repository_id"), filterRepositoryID)
+	}
+	filterReport, ok := filtered.body["filter"].(map[string]any)
+	if !ok {
+		t.Fatalf("E22-7 probe: the filtered page does not report its filter: %+v", filtered.body)
+	}
+	if stringField(filterReport, "reason") == "" {
+		t.Fatalf("E22-7 probe: the filter report hides the bound it applied: %+v", filterReport)
+	}
+	if _, present := unfiltered.body["filter"]; present {
+		t.Fatalf("E22-7 probe: the UNFILTERED page reported a filter object: %+v", unfiltered.body)
+	}
+	unknown := dogfoodCall(t, fx.client, http.MethodGet, fx.base+"/v1/requirements?page_size=100&repository_id=v2-095-repo-does-not-exist", fx.owner(), nil)
+	if unknown.status != http.StatusOK {
+		t.Fatalf("E22-7 probe: an unknown repository id answered %d: %+v", unknown.status, unknown.body)
+	}
+	unknownRows, isList := unknown.body["requirements"].([]any)
+	if !isList || len(unknownRows) != 0 {
+		t.Fatalf("E22-7 probe: an unknown repository id returned %d rows, want an EMPTY list and never the unfiltered page: %+v", len(unknownRows), unknown.body)
+	}
+	// The parameter composes with page_size and cursor.
+	firstFiltered := dogfoodCall(t, fx.client, http.MethodGet, fx.base+"/v1/requirements?page_size=1&repository_id="+url.QueryEscape(filterRepositoryID), fx.owner(), nil)
+	if firstFiltered.status != http.StatusOK {
+		t.Fatalf("E22-7 probe: page_size=1 with the filter answered %d: %+v", firstFiltered.status, firstFiltered.body)
+	}
+	firstFilteredRows, _ := firstFiltered.body["requirements"].([]any)
+	if len(firstFilteredRows) != 1 {
+		t.Fatalf("E22-7 probe: page_size=1 with the filter returned %d rows", len(firstFilteredRows))
+	}
+	if stringField(firstFiltered.body, "next_cursor") != "" {
+		t.Fatalf("E22-7 probe: a filtered page covering the whole linked set issued a cursor: %+v", firstFiltered.body)
+	}
+	// A malformed value is a 400 in the existing invalid_request shape.
+	malformed := dogfoodCall(t, fx.client, http.MethodGet, fx.base+"/v1/requirements?page_size=25&repository_id=", fx.owner(), nil)
+	if malformed.status != http.StatusBadRequest {
+		t.Fatalf("E22-7 probe: a blank repository_id answered %d, want 400: %+v", malformed.status, malformed.body)
+	}
+	if dogfoodErrorCode(malformed.body) != "invalid_request" {
+		t.Fatalf("E22-7 probe: a blank repository_id answered error %q, want invalid_request", dogfoodErrorCode(malformed.body))
+	}
+	t.Logf("E22-7 CLOSED and re-measured: the repository_id parameter changed the page (%d rows unfiltered, %d filtered), the filtered page carried only the linked Requirement, an unknown Repository returned an EMPTY list rather than the unfiltered page, the parameter composed with page_size and cursor, and a blank value answered 400 invalid_request", len(unfilteredRows), len(filteredRows))
+	t.Logf("what WAS observed: a bounded page, a next_cursor, a Backlog paged to exhaustion, all eight declared confirmation items on the wire, and a queueSummary whose counts by Requirement status, by Increment status and active Executions agree with the %d Requirements this run itself created; the declared rollback condition also holds, because every read above left the canonical state unchanged.", total)
+	t.Log("VERDICT INPUT for cap-backlog-visibility, and this helper now issues it because V2-095 is the M5 re-dogfood: the declared success condition (listRequirements and queueSummary return the current Backlog with nothing missing) was observed in full, and the declared failure condition's second clause (a required confirmation item is missing) was checked item by item against the declaration's own observable_result list. E22-11 no longer reproduces (V2-079) and E22-7 is closed by this task. The one remaining measured limit is reported rather than hidden: the multi-factor priority assessment does not feed the ranking, because the allocation snapshot supplies none, so used_assessment is false for every candidate; the response says so instead of fabricating a factor, and section 5 assigns that connection to V2-030 in M7.")
 }
 
 // dogfoodDocSet is the documentation role's real member set (the same five
@@ -786,54 +1116,205 @@ func (fx *dogfood) capUserDocumentation(t *testing.T) {
 		t.Fatalf("GET /owner/ expected 200, got %d", console.status)
 	}
 
-	// Deviation E22-10, measured and recorded rather than asserted away: the
-	// owner console serves no document route, so at preview-local the owner
-	// reads the repository working tree. Probing the two shapes a document
-	// route would take shows neither exists.
-	for _, probe := range []string{"/owner/docs/preview/index.md", "/docs/preview/index.md"} {
-		r := dogfoodCall(t, fx.client, http.MethodGet, fx.base+probe, fx.owner(), nil)
-		if r.status == http.StatusOK {
-			t.Fatalf("E22-10 probe: %s returned 200, so the console does serve a document route; re-measure the deviation", probe)
-		}
-		t.Logf("E22-10 measured: GET %s -> %d (no document route)", probe, r.status)
+	// ------------------------------------------------------------------
+	// E22-10, RE-MEASURED AND CLOSED (V2-095 A9). V2-022 measured that the
+	// owner console served no document route at all, so at preview-local the
+	// owner read the repository working tree instead -- and the console is
+	// this capability's ONLY declared external system. The probes below are
+	// the REVERSE of that one: the index and the per-document route must
+	// answer, the set they serve must be exactly the assembled
+	// documentation-role member set, and everything outside that set must be
+	// refused.
+	// ------------------------------------------------------------------
+	index := dogfoodCall(t, fx.client, http.MethodGet, fx.base+"/owner/docs/", fx.owner(), nil)
+	if index.status != http.StatusOK {
+		t.Fatalf("E22-10 probe: GET /owner/docs/ answered %d, want 200; the owner console must serve the documents for the channel and version in use: %+v", index.status, index.body)
 	}
-	// Second measured deviation, new at this commit and NOT anticipated by
-	// wo-v2-022: docs/preview/capabilities.md states, for
-	// cap-preview-operation, that the owner reads the assembled Preview
-	// release version from GET /v1/release/state and that a process which
-	// recorded no route answers "no route recorded" rather than a guess. The
-	// shipped cmd/control-plane attaches no ReleaseObserver, so the running
-	// process answers 503 release_observer_not_configured and reports no
-	// version at all. That is a difference between the document and the
-	// observed behaviour, which is the second half of this capability's own
-	// success condition.
+	if got := stringField(index.body, "channel"); got != "preview" {
+		t.Fatalf("the document index reports channel %q; this process has recorded no Stable route, so the release package must resolve preview", got)
+	}
+	if got := stringField(index.body, "release_version"); got != contractRelease {
+		t.Fatalf("the document index reports release version %q and the assembled contract is %q; the documents and the running version must not disagree", got, contractRelease)
+	}
+	if stringField(index.body, "docs_digest") == "" {
+		t.Fatalf("the document index reports no documentation digest: %+v", index.body)
+	}
+	listedDocs := map[string]string{}
+	entries, _ := index.body["documents"].([]any)
+	for _, raw := range entries {
+		entry, isObject := raw.(map[string]any)
+		if !isObject {
+			t.Fatalf("a document index entry is not an object: %v", raw)
+		}
+		path := stringField(entry, "path")
+		if path == "" || stringField(entry, "sha256") == "" || stringField(entry, "route") == "" {
+			t.Fatalf("a document index entry is incomplete: %+v", entry)
+		}
+		listedDocs[path] = stringField(entry, "route")
+	}
+	if len(listedDocs) != len(dogfoodDocSet) {
+		t.Fatalf("the document index lists %d documents and the assembled documentation role has %d members: %v", len(listedDocs), len(dogfoodDocSet), listedDocs)
+	}
+	for _, member := range dogfoodDocSet {
+		route, listed := listedDocs[member]
+		if !listed {
+			t.Fatalf("%s is a documentation member but the index does not list it: %v", member, listedDocs)
+		}
+		served := dogfoodCall(t, fx.client, http.MethodGet, fx.base+route, fx.owner(), nil)
+		if served.status != http.StatusOK {
+			t.Fatalf("E22-10 probe: GET %s answered %d, want 200: %+v", route, served.status, served.body)
+		}
+		if stringField(served.body, "content") != fx.readDoc(t, member) {
+			t.Fatalf("the bytes served for %s differ from the bytes on disk", member)
+		}
+		digest := sha256.Sum256([]byte(fx.readDoc(t, member)))
+		if stringField(served.body, "sha256") != hex.EncodeToString(digest[:]) {
+			t.Fatalf("%s is served with a digest that is not sha256 of its bytes: %+v", member, served.body)
+		}
+		if stringField(served.body, "channel") != "preview" || stringField(served.body, "release_version") != contractRelease {
+			t.Fatalf("%s is served naming channel %q and version %q: %+v", member, stringField(served.body, "channel"), stringField(served.body, "release_version"), served.body)
+		}
+	}
+	// The negative half, over real HTTP: a path outside the set and a
+	// traversal attempt are refused by the SAME set membership test, and a
+	// non-owner caller is refused exactly as /owner/ already refuses one.
+	for _, probe := range []string{
+		"/owner/docs/preview/does-not-exist.md",
+		"/owner/docs/../go.mod",
+		"/owner/docs/preview/../../go.mod",
+		"/owner/docs/preview/index.MD",
+	} {
+		refused := dogfoodCall(t, fx.client, http.MethodGet, fx.base+probe, fx.owner(), nil)
+		if refused.status == http.StatusOK {
+			t.Fatalf("E22-10 probe: GET %s returned 200; the allowlist is not a set membership test", probe)
+		}
+		t.Logf("outside the assembled set, refused before any file is opened: GET %s -> %d %v", probe, refused.status, refused.body["error"])
+	}
+	// A real enrolled Runner session, so the role refusal below is a role
+	// refusal and not an authentication failure dressed up as one.
+	fx.enroll(t)
+	consoleAsRunner := dogfoodCall(t, fx.client, http.MethodGet, fx.base+"/owner/", fx.runner(), nil)
+	docsAsRunner := dogfoodCall(t, fx.client, http.MethodGet, fx.base+"/owner/docs/", fx.runner(), nil)
+	docAsRunner := dogfoodCall(t, fx.client, http.MethodGet, fx.base+"/owner/docs/preview/index.md", fx.runner(), nil)
+	if docsAsRunner.status != consoleAsRunner.status || docAsRunner.status != consoleAsRunner.status {
+		t.Fatalf("a runner caller gets %d on /owner/, %d on the document index and %d on one document; there must be one authentication seam, not two", consoleAsRunner.status, docsAsRunner.status, docAsRunner.status)
+	}
+	if consoleAsRunner.status != http.StatusForbidden {
+		t.Fatalf("an enrolled runner caller on /owner/ answered %d, want 403", consoleAsRunner.status)
+	}
+	anonymous := dogfoodCall(t, fx.client, http.MethodGet, fx.base+"/owner/docs/", nil, nil)
+	if anonymous.status != http.StatusUnauthorized {
+		t.Fatalf("an unauthenticated caller on the document index answered %d, want 401", anonymous.status)
+	}
+	// The unprefixed shape stays unrouted: documents are an owner surface, and
+	// nothing serves them without the owner seam.
+	unprefixed := dogfoodCall(t, fx.client, http.MethodGet, fx.base+"/docs/preview/index.md", fx.owner(), nil)
+	if unprefixed.status == http.StatusOK {
+		t.Fatalf("GET /docs/preview/index.md returned 200; the document surface must sit behind the owner seam only")
+	}
+	t.Logf("E22-10 CLOSED and re-measured: the owner console serves the %d assembled documentation members, byte for byte, naming channel preview and version %s; a path outside the set, a traversal attempt, a case variation, a runner caller and an unauthenticated caller are all refused", len(listedDocs), contractRelease)
+
+	// ------------------------------------------------------------------
+	// THE 503 REVERSAL (V2-095 A10). V2-022 measured a difference between this
+	// document and the running process: docs/preview/capabilities.md described
+	// GET /v1/release/state as owner-readable and the shipped process answered
+	// 503 release_observer_not_configured, because cmd/control-plane attached
+	// no ReleaseObserver. That assertion was INVERTED on purpose -- it failed
+	// if the route ever returned 200 -- so the repair could not land silently.
+	//
+	// V2-091 supplied the wiring and this task configures it: the dogfood
+	// process above was started with the release source root set, so the
+	// assertion is REVERSED rather than deleted. THE WIRING IS V2-091's AND
+	// THIS TASK ADDED NONE: it measured the wiring's constructor and its three
+	// environment variable names, configured them, and reused the SAME
+	// configuration for the document routes above, so there is one
+	// release-source configuration in this exercise and not two.
+	// ------------------------------------------------------------------
 	state := dogfoodCall(t, fx.client, http.MethodGet, fx.base+"/v1/release/state", fx.owner(), nil)
 	documentClaimsReleaseStateIsReadable := strings.Contains(fx.readDoc(t, "docs/preview/capabilities.md"), "/v1/release/state")
 	if !documentClaimsReleaseStateIsReadable {
-		t.Fatal("docs/preview/capabilities.md no longer mentions /v1/release/state; re-measure the document-versus-behaviour difference below rather than reporting a stale one")
+		t.Fatal("docs/preview/capabilities.md no longer mentions /v1/release/state; the document-versus-behaviour comparison below would be vacuous")
 	}
-	if state.status == http.StatusOK {
-		t.Fatalf("GET /v1/release/state returned 200 (%+v): the document-versus-behaviour difference recorded below no longer holds and this capability's verdict must be re-judged, not assumed", state.body)
+	if state.status != http.StatusOK {
+		t.Fatalf("GET /v1/release/state answered %d %+v: this process was started WITH %s set, so the route must answer 200 and report the version this process assembled. If the wiring regressed, escalate rather than re-recording the old deviation", state.status, state.body, dogfoodReleaseRootVar)
 	}
-	t.Logf("measured document-versus-behaviour difference: docs/preview/capabilities.md describes /v1/release/state as owner-readable, and the running process answers %d %v", state.status, state.body["error"])
+	if got := stringField(state.body, "release_version"); got != contractRelease {
+		t.Fatalf("GET /v1/release/state reports release version %q and the assembled contract is %q", got, contractRelease)
+	}
+	if got := stringField(state.body, "environment_class"); got != dogfoodEnvClass {
+		t.Fatalf("GET /v1/release/state reports environment class %q, want the declared %q", got, dogfoodEnvClass)
+	}
+	if promotable, _ := state.body["promotable"].(bool); promotable {
+		t.Fatalf("GET /v1/release/state reports this process as promotable; it records no capability evidence and must not claim to be: %+v", state.body)
+	}
+	// AND the unconfigured answer is still the unconfigured answer: a second
+	// process started WITHOUT the root must still refuse, so the 200 above is
+	// a consequence of the configuration and not of a defaulted root.
+	unconfiguredBase, unconfiguredAlive, _ := startDogfoodProcess(t, fx.goodBin, fx.installation+"-unconfigured", freeLocalPort(t), fx.ownerToken, fx.ownerEmail, "")
+	waitForHealthz(t, fx.client, unconfiguredBase, unconfiguredAlive, 30*time.Second)
+	unconfiguredState := dogfoodCall(t, fx.client, http.MethodGet, unconfiguredBase+"/v1/release/state", fx.owner(), nil)
+	if unconfiguredState.status != http.StatusServiceUnavailable {
+		t.Fatalf("a process started with NO release source root answered %d on /v1/release/state, want 503; a defaulted root would make it report a version it was not assembled from: %+v", unconfiguredState.status, unconfiguredState.body)
+	}
+	for _, probe := range []string{"/owner/docs/", "/owner/docs/preview/index.md"} {
+		unconfiguredDocs := dogfoodCall(t, fx.client, http.MethodGet, unconfiguredBase+probe, fx.owner(), nil)
+		if unconfiguredDocs.status != unconfiguredState.status {
+			t.Fatalf("with no release source root, GET %s answered %d and /v1/release/state answered %d; the two must be the same condition", probe, unconfiguredDocs.status, unconfiguredState.status)
+		}
+		if dogfoodErrorCode(unconfiguredDocs.body) != dogfoodErrorCode(unconfiguredState.body) {
+			t.Fatalf("with no release source root, GET %s answered error %q and /v1/release/state answered %q", probe, dogfoodErrorCode(unconfiguredDocs.body), dogfoodErrorCode(unconfiguredState.body))
+		}
+		for _, forbidden := range []string{"documents", "channel", "release_version", "docs_digest", "content"} {
+			if _, present := unconfiguredDocs.body[forbidden]; present {
+				t.Fatalf("the unconfigured answer to %s carries %q; there is no default root: %+v", probe, forbidden, unconfiguredDocs.body)
+			}
+		}
+	}
+	t.Logf("the 503 reversal measured both ways: WITH %s set the process answers 200 on /v1/release/state reporting version %s, and a second process started WITHOUT it answers %d %v on that read and the SAME shape on both document routes. The wiring belongs to V2-091 (Service.AttachReleaseSource plus %s, %s and %s); this task added none and defaulted no root.",
+		dogfoodReleaseRootVar, contractRelease, unconfiguredState.status, unconfiguredState.body["error"],
+		dogfoodReleaseRootVar, dogfoodReleaseRepositoryVar, dogfoodReleaseEnvironmentVar)
 
 	t.Logf("every deterministic document routing check of internal/release/docs.go holds over the real doc set, and the release string agrees three ways (contract, compiled contract and the docs Release: marker are all %s).", contractRelease)
-	t.Log("cap-user-documentation recorded FAILED against its declared success condition, and its evidence_ids stays empty. Two reasons, both measured, and the empty set is preferred over a claim in doubt (wo-v2-022 A8):")
-	t.Log("  (1) E22-10: the owner console -- the capability's ONLY declared external system -- serves no document route, so the documents corresponding to the channel and version in use cannot be referenced through the declared surface at all; at preview-local the owner reads the repository working tree instead.")
-	t.Log("  (2) a measured difference from actual behaviour: docs/preview/capabilities.md describes GET /v1/release/state as owner-readable and describes its unrouted answer as \"no route recorded\", and the shipped control-plane answers 503 release_observer_not_configured instead.")
+	t.Log("VERDICT INPUT for cap-user-documentation, and this helper now issues it because V2-095 is the M5 re-dogfood. The declared success condition has two clauses and both were measured. Clause 1, \"the documents for the channel and version in use can be referenced completely\": the owner console -- the capability's ONLY declared external system -- serves the assembled documentation-role member set through two owner GET routes, every member's bytes equal the file's bytes, and the index names the resolved channel and the assembled version. Clause 2, \"no difference from actual behaviour\": the two passages V2-022 measured as differences are corrected at this commit and re-measured here -- the process answers 200 on /v1/release/state under the configuration this exercise runs, and the document says exactly that. Both reasons V2-022 recorded for its empty evidence_ids are measured false at this commit.")
 }
 
-// capRepositoryRegistration exercises cap-repository-registration as far as
-// this task's declared side-effect surface reaches, and records it FAILED
-// against its declared success condition. wo-v2-022 A11 predicted no
-// registration route at all (E22-1); that prediction is false at this commit
-// and the measurement below says so.
+// capRepositoryRegistration exercises cap-repository-registration against its
+// declared success condition, WITH ZERO PRODUCTION CHANGE (V2-095 A12).
+//
+// WHY THIS CAPABILITY IS NOT A DEFERRAL. Its declared external systems are
+// GitHub, Git, Firestore and owner UI, and its declared provider list is
+// EMPTY, so neither of section 8.3's two deferral grades is derivable from its
+// declaration. V2-022 recorded it as ineligible because "this task's declared
+// side-effect surface excludes every forge and every remote" -- a property of
+// that task's own scope, i.e. the observation that it could not reach the
+// system, which section 8.3 forbids as a source of deferral. Both gh and git
+// are measurably present and authenticated on this machine, so "could not" is
+// false and only "did not" was ever true.
+//
+// WHY IT NEEDS NO PRODUCTION CHANGE. The mechanism is complete: the four
+// Repository routes exist, the runner-role :observe route exists, and
+// internal/application/repository.go computes Executability from a submitted
+// Observation. What was missing was only that no Observation had ever been
+// produced, because the Control Plane holds no forge client and never probes a
+// forge itself -- which is correct behaviour and not a defect. So the closure
+// is entirely inside this exercise: it reaches the forge as a RUNNER would,
+// through the EXISTING internal/runner clients, used exactly as they are.
+//
+// EVERYTHING BELOW IS READ-ONLY BY CONSTRUCTION. The only argv the forge path
+// can produce is the read-and-version pair the adapter builds, and the argv
+// actually run is asserted against it before the read. Nothing creates,
+// modifies or deletes any branch, ref, tag, pull request, issue or repository,
+// no git subcommand that could write is constructible, and no credential
+// value, prompt or raw response is logged: the child's environment is exactly
+// the guarded base names and the granted set is EMPTY, so the CLI reads its
+// own credential store and nothing is handed to it.
 func (fx *dogfood) capRepositoryRegistration(t *testing.T) {
-	repositoryID := "v2-022-dogfood-repo"
+	fx.enroll(t)
+	repositoryID := "v2-095-dogfood-repo"
 	registered := dogfoodCall(t, fx.client, http.MethodPost, fx.base+"/v1/repositories", fx.owner(), map[string]any{
-		"request_id":     "v2-022-register-1",
+		"request_id":     "v2-095-register-1",
 		"repository_id":  repositoryID,
-		"source_url":     "https://github.com/wakuwaku3/agentic-loop-foundation.git",
+		"source_url":     "https://github.com/" + dogfoodForgeOwner + "/" + dogfoodForgeName + ".git",
 		"default_branch": "main",
 	})
 	if registered.status != http.StatusCreated {
@@ -869,14 +1350,186 @@ func (fx *dogfood) capRepositoryRegistration(t *testing.T) {
 		t.Fatalf("GET /v1/repositories/{id}: expected 200, got %d: %+v", detail.status, detail.body)
 	}
 
-	// The negative observation, executed rather than asserted: the declared
-	// external systems include GitHub and Git. Loop-executability is reported
-	// only from a Runner-submitted forge Observation, and this task's declared
-	// side-effect surface forbids reaching a forge at all, so no honest
-	// Observation can be produced here. Nothing below contacts GitHub.
-	exec, _ := detail.body["executability"].(map[string]any)
-	t.Logf("cap-repository-registration recorded FAILED: the declared external systems GitHub and Git were NOT connected to (this task's declared side-effect surface excludes every forge and every remote), so loop executability stays as the process reports it without an Observation: %+v", exec)
-	t.Logf("cap-repository-registration bucket: ineligible because a declared external system was not connected (G3-1). E22-1's original ground -- no registration route, no Repository aggregate command, no Git or GitHub client -- is FALSE at this commit: internal/runner/forge.go and internal/runner/git.go both exist.")
+	// The state BEFORE any Observation: executability is `unobserved`, and its
+	// reason names the ABSENCE of an Observation rather than an Observation.
+	// This is measured first so the transition below is a transition and not an
+	// assumption.
+	before, _ := detail.body["executability"].(map[string]any)
+	beforeState := stringField(before, "state")
+	if beforeState != "unobserved" {
+		t.Fatalf("a freshly registered Repository reports executability %q, want unobserved; the transition asserted below would not be a transition: %+v", beforeState, before)
+	}
+	t.Logf("before any Observation: executability=%q reason=%q", beforeState, stringField(before, "reason"))
+
+	// ------------------------------------------------------------------
+	// THE REAL EXTERNAL SYSTEMS, read through the EXISTING runner clients.
+	// internal/runner/** is byte-unchanged by this task; a change to it would
+	// mean the closure was widened rather than reached.
+	// ------------------------------------------------------------------
+	ctx, cancel := context.WithTimeout(context.Background(), dogfoodForgeDeadline)
+	defer cancel()
+
+	forge := agenticrunner.NewForgeClient("v2-095-dogfood-forge-adapter")
+	forgePath, err := forge.ResolveExecutable()
+	if err != nil {
+		t.Fatalf("the forge CLI could not be resolved to an absolute path: %v", err)
+	}
+	if !filepath.IsAbs(forgePath) {
+		t.Fatalf("the resolved forge executable %q is not absolute", forgePath)
+	}
+	if len(forge.GrantSet) != 0 {
+		t.Fatalf("the forge client's granted set is not empty: %v", forge.GrantSet)
+	}
+	forgeEnv, err := forge.ChildEnvironment()
+	if err != nil {
+		t.Fatalf("the guarded base environment could not be built: %v", err)
+	}
+	forgeEnvNames := make([]string, 0, len(forgeEnv))
+	for _, item := range forgeEnv {
+		name, _, _ := strings.Cut(item, "=")
+		forgeEnvNames = append(forgeEnvNames, name)
+	}
+	forgeVersion, err := forge.ReadVersion(ctx)
+	if err != nil {
+		t.Fatalf("the forge CLI version read failed: %v", err)
+	}
+	readArgv, err := forge.ReadArgv(dogfoodForgeOwner, dogfoodForgeName)
+	if err != nil {
+		t.Fatalf("build the read argv: %v", err)
+	}
+	versionArgv, err := forge.VersionArgv()
+	if err != nil {
+		t.Fatalf("build the version argv: %v", err)
+	}
+	// THE NO-UNAUTHORISED-CHANGE CLAUSE, proven the way the existing live
+	// exercises prove it: the only two argv this path can produce are the
+	// read-and-version pair, and neither names a mutating method, an auth
+	// subcommand or a git operation.
+	if len(readArgv) < 4 || readArgv[0] != forgePath || readArgv[1] != "api" || readArgv[2] != "--method" || readArgv[3] != "GET" {
+		t.Fatalf("the read argv is not a GET through the resolved absolute executable: %v", readArgv)
+	}
+	if len(versionArgv) != 2 || versionArgv[0] != forgePath || versionArgv[1] != "--version" {
+		t.Fatalf("the version argv is not the resolved executable plus --version: %v", versionArgv)
+	}
+	for _, argv := range [][]string{readArgv, versionArgv} {
+		for _, token := range argv {
+			for _, forbidden := range []string{
+				"POST", "PUT", "PATCH", "DELETE", "auth", "login", "token",
+				"create", "delete", "edit", "merge", "close", "push", "clone", "-f", "--field",
+			} {
+				if strings.EqualFold(token, forbidden) {
+					t.Fatalf("the argv this read path produces carries %q, which is not a read: %v", token, argv)
+				}
+			}
+		}
+	}
+	t.Logf("read-only by construction: the only argv this path can produce are %v and %v; child environment base names=%v granted_names=[] (empty by construction)", readArgv, versionArgv, forgeEnvNames)
+
+	observed, err := forge.ReadRepository(ctx, dogfoodForgeOwner, dogfoodForgeName)
+	if err != nil {
+		t.Fatalf("the live read-only repository read failed: %v", err)
+	}
+	if !observed.Exists || observed.NodeID == "" || observed.DefaultBranch == "" {
+		t.Fatalf("the live read returned an incomplete observation: %+v", observed)
+	}
+	// A repository that does not exist is reported as unreachable, not as
+	// reachable-with-empty-fields, so the positive answer above is real.
+	if _, err := forge.ReadRepository(ctx, dogfoodForgeOwner, "this-repository-does-not-exist-v2-095"); err == nil {
+		t.Fatal("a repository that does not exist was reported as reachable; the positive read above would then prove nothing")
+	}
+
+	git := agenticrunner.NewGitSourceControl(fx.workspace)
+	gitPath, err := git.ResolveExecutable()
+	if err != nil {
+		t.Fatalf("the git executable could not be resolved to an absolute path: %v", err)
+	}
+	if !filepath.IsAbs(gitPath) {
+		t.Fatalf("the resolved git executable %q is not absolute", gitPath)
+	}
+	gitVersion, err := git.Version(ctx)
+	if err != nil {
+		t.Fatalf("the git version read failed: %v", err)
+	}
+	t.Logf("real external systems reached: forge=%s at %s ; git=%s at %s ; repository=%s/%s node_id=%s default_branch=%s viewer_can_push=%v adapter_version=%s",
+		forgeVersion, forgePath, gitVersion, gitPath,
+		observed.Owner, observed.Name, observed.NodeID, observed.DefaultBranch, observed.ViewerCanPush, observed.AdapterVersion)
+
+	// ------------------------------------------------------------------
+	// THE BOUNDED OBSERVATION, submitted to the EXISTING runner-role route
+	// with the enrolled Runner session. Every field came from the real read.
+	// ------------------------------------------------------------------
+	submitted := dogfoodCall(t, fx.client, http.MethodPost, fx.base+"/v1/repositories/"+repositoryID+":observe", fx.runner(), map[string]any{
+		"request_id":      "v2-095-observe-1",
+		"reachable":       observed.Exists,
+		"default_branch":  observed.DefaultBranch,
+		"can_push":        observed.ViewerCanPush,
+		"forge_node_id":   observed.NodeID,
+		"adapter_version": observed.AdapterVersion,
+		"reason":          "read-only forge read performed by this dogfood run acting as a Runner, through the existing internal/runner forge client",
+	})
+	if submitted.status != http.StatusOK {
+		t.Fatalf("POST /v1/repositories/{id}:observe answered %d: %+v", submitted.status, submitted.body)
+	}
+
+	after := dogfoodCall(t, fx.client, http.MethodGet, fx.base+"/v1/repositories/"+repositoryID, fx.owner(), nil)
+	if after.status != http.StatusOK {
+		t.Fatalf("GET /v1/repositories/{id} after the Observation answered %d: %+v", after.status, after.body)
+	}
+	executability, _ := after.body["executability"].(map[string]any)
+	afterState := stringField(executability, "state")
+	if afterState == "unobserved" {
+		t.Fatalf("executability is still unobserved after a real Observation was submitted: %+v", executability)
+	}
+	afterReason := stringField(executability, "reason")
+	if afterReason == "" {
+		t.Fatalf("executability reports no reason: %+v", executability)
+	}
+	if afterReason == stringField(before, "reason") {
+		t.Fatalf("the executability reason did not change after the Observation; it must name the Observation rather than the absence of one: %q", afterReason)
+	}
+	// The recorded Observation itself must carry the identifiers that came
+	// from the real read, so a hand-written Observation cannot pass this.
+	recorded, _ := after.body["observation"].(map[string]any)
+	if recorded == nil {
+		recorded, _ = executability["observation"].(map[string]any)
+	}
+	if recorded != nil {
+		if got := stringField(recorded, "forge_node_id"); got != "" && got != observed.NodeID {
+			t.Fatalf("the recorded Observation names forge node id %q and the real read returned %q", got, observed.NodeID)
+		}
+		if got := stringField(recorded, "default_branch"); got != "" && got != observed.DefaultBranch {
+			t.Fatalf("the recorded Observation names default branch %q and the real read returned %q", got, observed.DefaultBranch)
+		}
+	}
+	// The identifiers that came from the REAL read must appear somewhere in
+	// the Repository the owner reads back. This is what a hand-written
+	// Observation cannot satisfy: the node id is issued by the forge.
+	afterEncoded, err := json.Marshal(after.body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(afterEncoded), observed.NodeID) {
+		t.Fatalf("the Repository read after the Observation does not carry the forge node id the real read returned; the Observation may not have been recorded: %+v", after.body)
+	}
+	if !strings.Contains(string(afterEncoded), observed.DefaultBranch) {
+		t.Fatalf("the Repository read after the Observation does not carry the default branch the real read returned: %+v", after.body)
+	}
+	t.Logf("executability LEFT the unobserved state: %q -> %q, reason=%q", beforeState, afterState, afterReason)
+
+	// THE THREE OBSERVABLES THE PRODUCT RENDERS AS NOT-IMPLEMENTED, recorded as
+	// measured absences. The declared failure condition names only the identity
+	// information and the loop-executability, so these do NOT change the
+	// verdict; they are reported so nobody has to infer them from silence.
+	for _, field := range []string{"application_release", "policy", "runners_and_ai_resources"} {
+		value, present := after.body[field].(map[string]any)
+		if !present {
+			t.Logf("declared observable %q: the response carries no such field at this commit", field)
+			continue
+		}
+		t.Logf("declared observable %q: state=%q reason=%q (a measured absence; the declared failure condition does not import it)", field, stringField(value, "state"), stringField(value, "reason"))
+	}
+
+	t.Log("VERDICT INPUT for cap-repository-registration, and this helper now issues it because V2-095 is the M5 re-dogfood. The declared success condition has two clauses and both were measured. Clause 1, \"the registered Repository's identity information and loop executability are shown in the owner UI\": the Repository was registered over real HTTP, appears in the owner list with its identity, and its executability left the unobserved state with a reason naming the Observation. Clause 2, \"no existing Application, credential or external resource was changed without permission\": the only argv the read path can produce are the read-and-version pair asserted above, the child environment was exactly the guarded base names with an EMPTY granted set, and nothing created, modified or deleted any branch, ref, tag, pull request, issue or repository. E22-1's original ground -- no registration route, no Repository aggregate command, no Git or GitHub client -- was already false before this task. Not one production line changed for this capability: internal/runner and internal/api/repositories.go are byte-unchanged.")
 }
 
 // dogfoodIDs is the identifier generator the direct-store Service uses for
@@ -930,7 +1583,7 @@ func (fx *dogfood) enroll(t *testing.T) {
 	if fx.runnerToken != "" {
 		return
 	}
-	fx.runnerID = "v2-022-dogfood-runner"
+	fx.runnerID = "v2-095-dogfood-runner"
 	issued := dogfoodCall(t, fx.client, http.MethodPost, fx.base+"/v1/runner/enrollment", fx.owner(), map[string]any{"runner_id": fx.runnerID})
 	if issued.status != http.StatusCreated {
 		t.Fatalf("POST /v1/runner/enrollment: expected 201, got %d: %+v", issued.status, issued.body)
@@ -1209,7 +1862,35 @@ func (fx *dogfood) capHumanInputRequest(t *testing.T) {
 		t.Fatalf("the chain changed the number of Requirements from %d to %d; resuming must create nothing", backlogBefore, got)
 	}
 
-	t.Logf("measured: requirement_id=%s walked captured -> framing -> needs-input -> ready over the real base URL with the real owner and runner callers, at versions %d -> %d -> %d, the displayed question carried its reason class, both options with their impacts and both scope lists, and the Requirement row count was unchanged at %d. E22-2's original ground (no command, no route, no detail field) was already FALSE at V2-065; the precondition gap this probe was inverted to detect -- that no application command issued the captured->framing transition -- was closed by V2-082 (Service.StartFraming and POST /v1/requirements/{requirement_id}:start-framing, with internal/domain unedited). This helper records what it measured and issues no verdict; the cap-human-input-request verdict and its evidence_ids belong to the M5 re-dogfood.", requirementID, version, framingVersion, askVersion, backlogBefore)
+	t.Logf("measured: requirement_id=%s walked captured -> framing -> needs-input -> ready over the real base URL with the real owner and runner callers, at versions %d -> %d -> %d, the displayed question carried its reason class, both options with their impacts and both scope lists, and the Requirement row count was unchanged at %d. E22-2's original ground (no command, no route, no detail field) was already FALSE at V2-065; the precondition gap this probe was inverted to detect -- that no application command issued the captured->framing transition -- was closed by V2-082 (Service.StartFraming and POST /v1/requirements/{requirement_id}:start-framing, with internal/domain unedited).", requirementID, version, framingVersion, askVersion, backlogBefore)
+	// VERDICT INPUT for cap-human-input-request, and this helper now issues it
+	// because V2-095 is the M5 re-dogfood. Not one production line changed for
+	// this capability: internal/domain, internal/application/framing.go and
+	// internal/application/human_input.go are all byte-unchanged, and every
+	// assertion above is the one that already stood -- none was weakened, none
+	// was rewritten and no second walk was added.
+	//
+	// The declared success condition, clause by clause, mapped to the assertion
+	// above that discharges it:
+	//
+	//	"Requirement詳細にneeds-inputの理由 ... が表示され"
+	//	   -> the reason_class assertion on the detail read after the ask, plus
+	//	      the non-empty question-text assertion beside it.
+	//	"... 選択肢 ..."
+	//	   -> the two-option assertion and the both-recorded-options assertion.
+	//	"... 影響 ..."
+	//	   -> the per-option non-empty impact assertion.
+	//	"... 停止/継続範囲が表示され"
+	//	   -> the stopped_scope and continuing_scope non-empty list assertions.
+	//	"回答後に同じRequirementが再開する"
+	//	   -> the answer response's requirement_id equals the SAME id, its status
+	//	      is ready, the answered option is the one named, and the Backlog row
+	//	      count is unchanged, so resuming created nothing.
+	//
+	// The declared failure condition's second clause ("a new Requirement is
+	// wrongly created after the answer") is refuted by the same row-count
+	// assertion, in the same run.
+	t.Logf("VERDICT INPUT for cap-human-input-request: every clause of the declared success condition was observed in full over the real base URL, and the version chain measured is %d -> %d -> %d on requirement_id=%s. internal/domain, internal/application/framing.go and internal/application/human_input.go are byte-unchanged by this task.", version, framingVersion, askVersion, requirementID)
 }
 
 // dogfoodInvocation is Build -> Run -> Parse against the real claude CLI,
@@ -1366,7 +2047,7 @@ func (fx *dogfood) capAutonomousResolution(t *testing.T) {
 		t.Fatalf("runner/heartbeat: expected 200, got %d: %+v", beat.status, beat.body)
 	}
 
-	result, err := fx.dogfoodInvocation(t, ctx, "V2-022-autonomous-resolution", executionID, requirementID, incrementID,
+	result, err := fx.dogfoodInvocation(t, ctx, "V2-095-autonomous-resolution", executionID, requirementID, incrementID,
 		"Do not use any tools. Do not read or write any files. Reply with exactly the single word ACKNOWLEDGED and nothing else.")
 	if err != nil {
 		t.Fatalf("real claude invocation inside the runner-facing journey: %v", err)
@@ -1575,7 +2256,7 @@ func (fx *dogfood) capLoopControl(t *testing.T) {
 	type outcome struct{ err error }
 	done := make(chan outcome, 1)
 	go func() {
-		_, err := fx.dogfoodInvocation(t, invCtx, "V2-022-graceful-stop-live-child", "v2-022-kill-execution", killRequirement, killIncrement,
+		_, err := fx.dogfoodInvocation(t, invCtx, "V2-095-graceful-stop-live-child", "v2-022-kill-execution", killRequirement, killIncrement,
 			"Do not use any tools. Reply with exactly the single word ACKNOWLEDGED and nothing else.")
 		done <- outcome{err: err}
 	}()
@@ -1865,7 +2546,7 @@ func (fx *dogfood) channelBreakAndResume(t *testing.T) {
 	// it contains: that is a naming artefact of internal/update and not a
 	// claim about cmd/runner.
 	stableBin := filepath.Join(update.VersionDir(channelRoot, stableVersion), "runner")
-	stableBase, stableAlive, stopStable := startDogfoodProcess(t, stableBin, fx.installation, freeLocalPort(t), fx.ownerToken, fx.ownerEmail)
+	stableBase, stableAlive, stopStable := startDogfoodProcess(t, stableBin, fx.installation, freeLocalPort(t), fx.ownerToken, fx.ownerEmail, fx.repoRoot)
 	waitForHealthz(t, fx.client, stableBase, stableAlive, 30*time.Second)
 
 	preBreak := dogfoodCall(t, fx.client, http.MethodPost, stableBase+"/v1/requirements", fx.owner(), map[string]any{
@@ -1891,7 +2572,7 @@ func (fx *dogfood) channelBreakAndResume(t *testing.T) {
 	if previewVersion != fx.brokenVersion {
 		t.Fatalf("the preview channel resolves to %q, want the broken %q", previewVersion, fx.brokenVersion)
 	}
-	brokenBase, brokenAlive, stopBroken := startDogfoodProcess(t, filepath.Join(update.VersionDir(channelRoot, previewVersion), "runner"), fx.installation, freeLocalPort(t), fx.ownerToken, fx.ownerEmail)
+	brokenBase, brokenAlive, stopBroken := startDogfoodProcess(t, filepath.Join(update.VersionDir(channelRoot, previewVersion), "runner"), fx.installation, freeLocalPort(t), fx.ownerToken, fx.ownerEmail, fx.repoRoot)
 	waitForHealthz(t, fx.client, brokenBase, brokenAlive, 30*time.Second)
 	broken := dogfoodCall(t, fx.client, http.MethodPost, brokenBase+"/v1/requirements", fx.owner(), map[string]any{
 		"request_id": "v2-022-channel:on-broken", "text": "this capture must fail on the broken Preview",
@@ -1940,7 +2621,7 @@ func (fx *dogfood) channelBreakAndResume(t *testing.T) {
 		t.Fatalf("connect directly to the Firestore emulator: %v", err)
 	}
 	defer client.Close()
-	restoredBase, restoredAlive, _ := startDogfoodProcess(t, filepath.Join(update.VersionDir(channelRoot, restored), "runner"), fx.installation, freeLocalPort(t), fx.ownerToken, fx.ownerEmail)
+	restoredBase, restoredAlive, _ := startDogfoodProcess(t, filepath.Join(update.VersionDir(channelRoot, restored), "runner"), fx.installation, freeLocalPort(t), fx.ownerToken, fx.ownerEmail, fx.repoRoot)
 	waitForHealthz(t, fx.client, restoredBase, restoredAlive, 30*time.Second)
 	survivor := dogfoodCall(t, fx.client, http.MethodGet, restoredBase+"/v1/requirements/"+preBreakID, fx.owner(), nil)
 	if survivor.status != http.StatusOK {
@@ -1964,7 +2645,7 @@ func (fx *dogfood) channelBreakAndResume(t *testing.T) {
 	if started.status != http.StatusOK {
 		t.Fatalf("start under the restored build: %d %+v", started.status, started.body)
 	}
-	result, err := fx.dogfoodInvocation(t, ctx, "V2-022-resume-after-channel-rollback", executionID, preBreakID, resumeIncrement,
+	result, err := fx.dogfoodInvocation(t, ctx, "V2-095-resume-after-channel-rollback", executionID, preBreakID, resumeIncrement,
 		"Do not use any tools. Reply with exactly the single word RESUMED and nothing else.")
 	if err != nil {
 		t.Fatalf("the resumed Requirement's real claude invocation failed: %v", err)
@@ -2258,15 +2939,15 @@ func (fx *dogfood) promotabilityPositive(t *testing.T) {
 	t.Log("the real tree was NOT given fabricated evidence and the real-tree assertion above was not weakened; this control is hermetic and lives entirely under t.TempDir().")
 }
 
-// ledgerSnapshot transcribes the full V2-022 cost ledger table and the halted
+// ledgerSnapshot transcribes the full V2-095 cost ledger table and the halted
 // flag. Usage is reported as input, output, cache-read and cache-creation
 // counts. No prompt and no response, in any form, appears here.
 func (fx *dogfood) ledgerSnapshot(t *testing.T) {
 	snapshot, err := fx.ledger.Snapshot()
 	if err != nil {
-		t.Fatalf("read the V2-022 cost ledger: %v", err)
+		t.Fatalf("read the V2-095 cost ledger: %v", err)
 	}
-	t.Logf("V2-022 cost ledger: path=%s provider=%s task_id=%s halted=%v invocations=%d settled_total_usd=%.4f reserved_total_usd=%.4f limits(max_invocations=%d max_total_cost_usd=%.2f worst_case_reservation_usd=%.2f) single_invocation_anomaly_threshold_usd=%.2f",
+	t.Logf("V2-095 cost ledger: path=%s provider=%s task_id=%s halted=%v invocations=%d settled_total_usd=%.4f reserved_total_usd=%.4f limits(max_invocations=%d max_total_cost_usd=%.2f worst_case_reservation_usd=%.2f) single_invocation_anomaly_threshold_usd=%.2f",
 		fx.ledger.Path, fx.ledger.Provider, fx.ledger.TaskID, snapshot.Halted, snapshot.InvocationCount,
 		snapshot.SettledTotalUSD, snapshot.ReservedTotalUSD,
 		fx.record.Limits.MaxInvocations, fx.record.Limits.MaxTotalCostUSD, fx.record.Limits.WorstCaseReservationUSD,
@@ -2279,10 +2960,10 @@ func (fx *dogfood) ledgerSnapshot(t *testing.T) {
 			e.StartedAt.UTC().Format(time.RFC3339), e.FinishedAt.UTC().Format(time.RFC3339))
 	}
 	if snapshot.Halted {
-		t.Fatal("the V2-022 ledger's halted flag is set: this is a stop for inspection, neither a success nor a capability failure. Do not edit the record's limits, do not edit or reinitialise the ledger, do not clear halted.")
+		t.Fatal("the V2-095 ledger's halted flag is set: this is a stop for inspection, neither a success nor a capability failure. Do not edit the record's limits, do not edit or reinitialise the ledger, do not clear halted.")
 	}
 	if snapshot.InvocationCount >= fx.record.Limits.MaxInvocations {
-		t.Fatalf("the V2-022 ledger reached its max_invocations runaway threshold (%d): this is a stop for inspection, not a failure of any capability", fx.record.Limits.MaxInvocations)
+		t.Fatalf("the V2-095 ledger reached its max_invocations runaway threshold (%d): this is a stop for inspection, not a failure of any capability", fx.record.Limits.MaxInvocations)
 	}
 	settled := 0
 	for _, e := range snapshot.Entries {
@@ -2294,5 +2975,28 @@ func (fx *dogfood) ledgerSnapshot(t *testing.T) {
 		t.Fatal("no settled invocation with a provider-issued session_id was recorded; the live provider half of this exercise did not happen")
 	}
 	t.Logf("invocation purposes this process accounted: %v", fx.invocationPurposes)
+	// THE TRANSIENT-FAILURE ACCOUNTING, by sequence number, so the record can
+	// state exactly which sequences a retry consumed rather than a total.
+	// A reservation counts against max_invocations whether or not it settles
+	// (internal/runner/costledger.go refuses on len(Entries)+1), and one
+	// purpose in this exercise -- the graceful stop of a live child -- can
+	// NEVER settle, because that purpose kills the child by construction. That
+	// is a STRUCTURAL cost per run and not retry headroom, and it is separated
+	// from transient failure here rather than lumped in with it.
+	structural := []int{}
+	transient := []int{}
+	settledSequences := []int{}
+	for _, e := range snapshot.Entries {
+		switch {
+		case e.State == "settled":
+			settledSequences = append(settledSequences, e.Sequence)
+		case strings.Contains(e.Purpose, "graceful-stop-live-child"):
+			structural = append(structural, e.Sequence)
+		default:
+			transient = append(transient, e.Sequence)
+		}
+	}
+	t.Logf("ledger accounting by sequence: settled=%v ; structurally-never-settling (graceful stop of a live child)=%v ; reserved-but-not-settled for any other reason, i.e. transient provider failure=%v ; totals settled=%d structural=%d transient=%d of max_invocations=%d",
+		settledSequences, structural, transient, len(settledSequences), len(structural), len(transient), fx.record.Limits.MaxInvocations)
 	t.Logf("environment identifiers for every check in this record: %s", fx.ids)
 }

@@ -21,7 +21,7 @@ paths:
     get:
       operationId: listRequirements
       security: [{iapOwner: []}]
-      parameters: [{name: page_size, in: query, schema: {type: integer, minimum: 1, maximum: 100, default: 25}}, {name: cursor, in: query, schema: {type: string, description: opaque cursor from the previous page}}]
+      parameters: [{name: page_size, in: query, schema: {type: integer, minimum: 1, maximum: 100, default: 25}}, {name: cursor, in: query, schema: {type: string, description: opaque cursor from the previous page}}, {name: repository_id, in: query, required: false, schema: {type: string, minLength: 1, maxLength: 512}, description: 'filter the Backlog to the Requirements linked to one Repository. It composes with page_size and cursor. An UNKNOWN repository id returns an EMPTY list, never the unfiltered page. A blank or over-long value is refused with 400 invalid_request. The filter resolves through the write-once Requirement-to-Repository link and the bound that read applies is surfaced in the response filter object rather than hidden.'}]
       responses: {'200': {description: bounded requirement page, content: {application/json: {schema: {$ref: '#/components/schemas/RequirementPageResponse'}}}}, '400': {$ref: '#/components/responses/Error'}, '401': {$ref: '#/components/responses/Error'}, '403': {$ref: '#/components/responses/Error'}, '404': {$ref: '#/components/responses/Error'}, '405': {$ref: '#/components/responses/Error'}, '500': {$ref: '#/components/responses/Error'}, '503': {$ref: '#/components/responses/Error'}}
     post:
       operationId: captureRequirement
@@ -401,6 +401,35 @@ paths:
       parameters: [{name: repository_id, in: path, required: true, schema: {type: string}}]
       requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/ObserveRepositoryRequest'}}}}
       responses: {'200': {description: bounded forge reachability observation accepted, content: {application/json: {schema: {$ref: '#/components/schemas/ObserveRepositoryResponse'}}}}, '400': {$ref: '#/components/responses/Error'}, '401': {$ref: '#/components/responses/Error'}, '403': {$ref: '#/components/responses/Error'}, '404': {$ref: '#/components/responses/Error'}, '409': {$ref: '#/components/responses/Error'}, '415': {$ref: '#/components/responses/Error'}, '500': {$ref: '#/components/responses/Error'}, '503': {$ref: '#/components/responses/Error'}}
+  /owner/docs/:
+    get:
+      operationId: listOwnerDocuments
+      security: [{iapOwner: []}]
+      description: |
+        The owner-readable index of the user documents that correspond to the
+        channel and version this process is actually running. The set listed is
+        EXACTLY the documentation-role member set of the release bundle the
+        process assembled from its explicitly configured source root; it is
+        recomputed from the tree rather than written down, and a path outside it
+        is refused before any file is opened. With NO release source configured
+        this route answers the SAME 503 release_observer_not_configured that
+        GET /v1/release/state answers, and never a defaulted root: a defaulted
+        root would make the process report a version it was not assembled from.
+      responses: {'200': {description: the resolved channel, the assembled release version and the documents available, content: {application/json: {schema: {$ref: '#/components/schemas/OwnerDocumentIndexResponse'}}}}, '401': {$ref: '#/components/responses/Error'}, '403': {$ref: '#/components/responses/Error'}, '404': {$ref: '#/components/responses/Error'}, '405': {$ref: '#/components/responses/Error'}, '500': {$ref: '#/components/responses/Error'}, '503': {$ref: '#/components/responses/Error'}}
+  /owner/{document_path}:
+    get:
+      operationId: getOwnerDocument
+      security: [{iapOwner: []}]
+      parameters: [{name: document_path, in: path, required: true, schema: {type: string}, description: 'the repository-relative member path the index lists, verbatim, for example docs/preview/index.md; it is used for one thing only, a lookup in the assembled member set, and is never joined onto a root'}]
+      description: |
+        One user document, served only when document_path is literally a member
+        of the assembled documentation-role set. A path outside the set, a
+        traversal attempt and a case or separator variation are all simply
+        absent from that set and are refused with 404 before any file is
+        opened. A document whose bytes no longer hash to the digest the bundle
+        recorded is refused with 409 rather than served, because bytes that
+        disagree with the recorded manifest correspond to no version at all.
+      responses: {'200': {description: the document, its digest and the channel and version it belongs to, content: {application/json: {schema: {$ref: '#/components/schemas/OwnerDocumentResponse'}}}}, '401': {$ref: '#/components/responses/Error'}, '403': {$ref: '#/components/responses/Error'}, '404': {$ref: '#/components/responses/Error'}, '405': {$ref: '#/components/responses/Error'}, '409': {$ref: '#/components/responses/Error'}, '500': {$ref: '#/components/responses/Error'}, '503': {$ref: '#/components/responses/Error'}}
 components:
   securitySchemes:
     iapOwner: {type: apiKey, in: header, name: X-Goog-Authenticated-User-Email}
@@ -409,6 +438,27 @@ components:
   responses:
     Error: {description: error, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
   schemas:
+    OwnerDocumentIndexResponse:
+      type: object
+      additionalProperties: false
+      required: [schema_version, channel, release_version, docs_digest, allowlist_source, documents]
+      properties:
+        schema_version: {type: string}
+        channel: {type: string, description: 'the channel the release package resolved for this process: stable when a Stable route is recorded, preview otherwise; never a literal'}
+        release_version: {type: string, description: 'the version of the contract this process assembled, read from the same observer GET /v1/release/state reads, so the two cannot disagree about which version the documents describe'}
+        docs_digest: {type: string}
+        allowlist_source: {type: string, description: 'states that the served set is derived from the assembled bundle and answered by set membership, so a reader is never left to assume the handler joins a caller-supplied path onto a root'}
+        documents: {type: array, items: {$ref: '#/components/schemas/OwnerDocumentEntry'}}
+    OwnerDocumentEntry:
+      type: object
+      additionalProperties: false
+      required: [path, sha256, route]
+      properties: {path: {type: string}, sha256: {type: string}, route: {type: string, description: 'the route that serves this document, so a caller never has to construct one'}}
+    OwnerDocumentResponse:
+      type: object
+      additionalProperties: false
+      required: [path, channel, release_version, sha256, size_bytes, content]
+      properties: {path: {type: string}, channel: {type: string}, release_version: {type: string}, sha256: {type: string}, size_bytes: {type: integer}, content: {type: string}}
     ReleaseRefusal:
       type: object
       additionalProperties: false
@@ -588,8 +638,40 @@ components:
     RequirementResponse:
       type: object
       additionalProperties: false
-      required: [requirement_id, status, version, increment_ids]
-      properties: {requirement_id: {type: string}, status: {type: string}, version: {type: integer}, increment_ids: {type: array, items: {type: string}}, text: {type: string}, requested_by: {$ref: '#/components/schemas/RequestedBy'}, repository_id: {type: string, description: 'the Repository this Requirement is linked to; omitted entirely when no link exists, never reported as an empty or defaulted value'}, captured_at: {type: string, format: date-time, description: 'the instant this Requirement was captured, taken from the transaction authority time at intake; omitted entirely for a Requirement recorded before the field existed, never reported as the zero instant'}}
+      required: [requirement_id, status, version, increment_ids, increments, increments_truncated, next_action, release_reflection]
+      description: |
+        One Backlog row. The four fields V2-095 added -- increments,
+        increments_truncated, next_action and release_reflection -- are
+        cap-backlog-visibility's declared confirmation items 進行中Incrementと
+        進捗, 次のaction and Preview/Stable反映状況. increment_ids is unchanged
+        in name, type and meaning and still carries every Increment id the
+        aggregate holds; increments carries the id AND the status of each
+        Increment actually read, and increments_truncated says the page-wide
+        Increment budget cut this row, so a short increments list is never
+        readable as a complete one.
+      properties: {requirement_id: {type: string}, status: {type: string}, version: {type: integer}, increment_ids: {type: array, items: {type: string}}, text: {type: string}, requested_by: {$ref: '#/components/schemas/RequestedBy'}, repository_id: {type: string, description: 'the Repository this Requirement is linked to; omitted entirely when no link exists, never reported as an empty or defaulted value'}, captured_at: {type: string, format: date-time, description: 'the instant this Requirement was captured, taken from the transaction authority time at intake; omitted entirely for a Requirement recorded before the field existed, never reported as the zero instant'}, increments: {type: array, items: {$ref: '#/components/schemas/RequirementRowIncrement'}}, increments_truncated: {type: boolean, description: 'the page-wide Increment budget bound THIS row, so both increments and next_action describe a bounded set'}, next_action: {type: string, description: 'computed by the same function the detail view uses, over the Increments and Executions actually read for this row'}, release_reflection: {$ref: '#/components/schemas/RequirementReleaseReflection'}}
+    RequirementRowIncrement:
+      type: object
+      additionalProperties: false
+      required: [increment_id, status]
+      description: |
+        One Increment as a Backlog row reports it: the id and the status, and
+        nothing else. It deliberately carries no Execution list, because a
+        per-row Execution list on a page of up to a hundred rows is how a
+        bounded owner read becomes an unbounded one.
+      properties: {increment_id: {type: string}, status: {type: string}}
+    RequirementReleaseReflection:
+      type: object
+      additionalProperties: false
+      required: [observed, reason]
+      description: |
+        The Preview/Stable reflection of one Requirement, projected from the
+        Requirement's own recorded Stable release snapshot with no additional
+        read. observed is false when no snapshot is recorded, and then EVERY
+        identifier is omitted and reason says why: an owner must be able to tell
+        'this Requirement is in no release' from 'we did not look'. A zero
+        snapshot is never reported as a plausible release.
+      properties: {observed: {type: boolean}, reason: {type: string}, release_id: {type: string}, release_version: {type: integer}, bundle_digest: {type: string}, evidence_digest: {type: string}}
     RequirementListResponse:
       type: object
       additionalProperties: false
@@ -598,8 +680,20 @@ components:
     RequirementPageResponse:
       type: object
       additionalProperties: false
-      required: [requirements, page_size]
-      properties: {requirements: {type: array, items: {$ref: '#/components/schemas/RequirementResponse'}}, next_cursor: {type: string}, page_size: {type: integer}}
+      required: [requirements, page_size, truncated]
+      properties: {requirements: {type: array, items: {$ref: '#/components/schemas/RequirementResponse'}}, next_cursor: {type: string}, page_size: {type: integer}, truncated: {type: boolean, description: 'the per-page Increment budget bound this answer, so some row read a bounded Increment set; it follows RequirementDetailResponse.truncated exactly'}, filter: {$ref: '#/components/schemas/RequirementPageFilter'}}
+    RequirementPageFilter:
+      type: object
+      additionalProperties: false
+      required: [repository_id, linked_ids_read, linked_ids_bounded, bound, reason, missing_requirements]
+      description: |
+        The repository_id filter, reported back so an empty page caused by an
+        unknown Repository can be told from an empty page caused by an
+        exhausted cursor, and so the bound the Requirement-to-Repository link
+        query already reports is surfaced rather than hidden. It is OMITTED
+        ENTIRELY on an unfiltered page: an absent filter is reported as absent,
+        never as a filter on the empty string.
+      properties: {repository_id: {type: string}, linked_ids_read: {type: integer}, linked_ids_bounded: {type: boolean, description: 'true means the storage query bound truncated the id set, so linked_ids_read is a LOWER BOUND and not an exact total'}, bound: {type: integer}, reason: {type: string}, missing_requirements: {type: integer, description: 'link rows whose Requirement could not be read back in the same transaction; reported rather than hidden, because dropping one silently would make the page size lie'}}
     RequirementDetailResponse:
       type: object
       additionalProperties: false
@@ -853,7 +947,7 @@ components:
     QueueSummaryResponse:
       type: object
       additionalProperties: false
-      required: [requirements, by_requirement_status, increments, by_increment_status, active_executions, allocation, waiting, exhaustion]
+      required: [requirements, by_requirement_status, increments, by_increment_status, active_executions, allocation, waiting, exhaustion, priority]
       description: |
         The GET /v1/queue/summary body. The five counter fields are the
         QueueSummary schema's own fields, unchanged in name, type and meaning;
@@ -862,7 +956,48 @@ components:
         published as RepositoryBacklogView.installation_scope, where the three
         allocation objects are not computed and must not appear as empty
         placeholders.
-      properties: {requirements: {type: integer}, by_requirement_status: {type: object}, increments: {type: integer}, by_increment_status: {type: object}, active_executions: {type: integer}, allocation: {$ref: '#/components/schemas/QueueAllocation'}, waiting: {$ref: '#/components/schemas/QueueWaiting'}, exhaustion: {$ref: '#/components/schemas/QueueExhaustion'}}
+      properties: {requirements: {type: integer}, by_requirement_status: {type: object}, increments: {type: integer}, by_increment_status: {type: object}, active_executions: {type: integer}, allocation: {$ref: '#/components/schemas/QueueAllocation'}, waiting: {$ref: '#/components/schemas/QueueWaiting'}, exhaustion: {$ref: '#/components/schemas/QueueExhaustion'}, priority: {$ref: '#/components/schemas/QueuePriority'}}
+    QueuePriority:
+      type: object
+      additionalProperties: false
+      required: [bounded, reason, candidates_ranked, candidate_bound, assessment_supplied, assessment_note, entries]
+      description: |
+        cap-backlog-visibility's declared confirmation item 優先度とその根拠,
+        reported as a PROJECTION of the per-candidate decisions the scheduler
+        already returned for this read. It adds no read at all: no second page,
+        no second Decide call and no per-row read. A Requirement the scheduler
+        did not rank carries NO entry, and bounded plus reason say so, so an
+        unranked Requirement is never given a plausible rank.
+        assessment_supplied reports whether any candidate carried a multi-factor
+        priority assessment; it is false at this release because the allocation
+        snapshot supplies none, and that is stated rather than hidden.
+      properties: {bounded: {type: boolean}, reason: {type: string}, candidates_ranked: {type: integer}, candidate_bound: {type: integer}, assessment_supplied: {type: boolean}, assessment_note: {type: string}, entries: {type: array, items: {$ref: '#/components/schemas/QueuePriorityEntry'}}}
+    QueuePriorityEntry:
+      type: object
+      additionalProperties: false
+      required: [requirement_id, rank, assigned, score, score_inputs]
+      description: |
+        One candidate's own decision. reason is present only when assigned is
+        false, and is always a member of the scheduler's closed rejection set --
+        the same projection the waiting histogram uses, so the two can never
+        name different vocabularies.
+      properties: {requirement_id: {type: string}, rank: {type: integer, description: '0 is highest, in the sorted candidate order the scheduler itself produced'}, assigned: {type: boolean}, reason: {type: string, enum: [not-ready, unmet-dependency, repository-unavailable, already-owned, resource-conflict, no-runner-capacity, not-executable]}, score: {type: integer}, score_inputs: {$ref: '#/components/schemas/QueuePriorityScoreInputs'}}
+    QueuePriorityScoreInputs:
+      type: object
+      additionalProperties: false
+      required: [used_assessment, priority, age_seconds]
+      description: |
+        The factors the scheduler ACTUALLY used for this candidate, not the
+        factors it could have used. factors is OMITTED ENTIRELY when
+        used_assessment is false, because the seven factor values are zero in
+        that branch and seven reported zeroes would read as seven measured
+        zeroes.
+      properties: {used_assessment: {type: boolean}, priority: {type: integer}, age_seconds: {type: integer}, factors: {$ref: '#/components/schemas/QueuePriorityFactors'}}
+    QueuePriorityFactors:
+      type: object
+      additionalProperties: false
+      required: [value_score, urgency_score, risk_score, dependency_score, learning_score, resource_cost, starvation_risk]
+      properties: {value_score: {type: integer}, urgency_score: {type: integer}, risk_score: {type: integer}, dependency_score: {type: integer}, learning_score: {type: integer}, resource_cost: {type: integer}, starvation_risk: {type: integer}}
     ExportRecord:
       type: object
       additionalProperties: false

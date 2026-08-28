@@ -173,6 +173,39 @@ func (h *Handler) route(w http.ResponseWriter, r *http.Request) {
 		h.ownerAsset(w, r, strings.TrimPrefix(r.URL.Path, "/owner/assets/"))
 		return
 	}
+	// The owner documentation surface (V2-095 A9, escalation E22-10). It is
+	// dispatched AFTER /owner/assets/ so the embedded console assets keep
+	// their own route, and it refuses a non-owner caller with exactly the
+	// status and code /owner/ already uses -- one authentication seam, not two.
+	// The index is matched exactly before the per-document prefix, so
+	// /owner/docs/ can never be read as a member path.
+	if strings.HasPrefix(r.URL.Path, ownerDocsIndexPath) || r.URL.Path == ownerDocsIndexPath {
+		if r.Method != http.MethodGet {
+			h.error(w, r, 405, "method_not_allowed", "method not allowed")
+			return
+		}
+		caller, err := h.config.Authenticator.Authenticate(r)
+		if err != nil {
+			h.error(w, r, 401, "unauthorized", "authentication failed")
+			return
+		}
+		if caller.Role != application.RoleOwner {
+			h.error(w, r, 403, "forbidden", "owner role required")
+			return
+		}
+		docCtx := application.ContextWithCaller(r.Context(), caller)
+		if r.URL.Path == ownerDocsIndexPath {
+			h.ownerDocsIndex(w, r.WithContext(docCtx))
+			return
+		}
+		member, ok := ownerDocsMember(r.URL.Path)
+		if !ok {
+			h.error(w, r, 404, "document_not_found", "no such document in the assembled documentation set for the channel and version in use")
+			return
+		}
+		h.ownerDocsDocument(w, r.WithContext(docCtx), member)
+		return
+	}
 	if r.URL.Path == "/v1/requirements" && r.Method == http.MethodGet {
 		caller, err := h.config.Authenticator.Authenticate(r)
 		if err != nil {
@@ -1077,8 +1110,9 @@ func (h *Handler) checkpoint(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, out)
 }
 func (h *Handler) listRequirements(w http.ResponseWriter, r *http.Request) {
+	query := r.URL.Query()
 	size := 0
-	if raw := r.URL.Query().Get("page_size"); raw != "" {
+	if raw := query.Get("page_size"); raw != "" {
 		var e error
 		size, e = strconv.Atoi(raw)
 		if e != nil {
@@ -1086,7 +1120,24 @@ func (h *Handler) listRequirements(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	out, err := h.config.Service.ListRequirementsPage(r.Context(), r.URL.Query().Get("cursor"), size)
+	// repository_id is optional and composes with page_size and cursor
+	// (V2-095 A8, escalation E22-7). Has is used rather than Get so
+	// "?repository_id=" -- the parameter PRESENT and empty -- is a refusal
+	// rather than being silently read as absent and answered with the
+	// unfiltered page, which is exactly the shape of the defect E22-7
+	// measured. The refusal itself is authored in
+	// application.ListRequirementsPageFiltered and arrives here as
+	// application.ErrInvalidRequest, so this route restates no bound of its
+	// own and the message the caller sees is the one that site wrote.
+	repositoryID := ""
+	if query.Has("repository_id") {
+		repositoryID = query.Get("repository_id")
+		if repositoryID == "" {
+			h.error(w, r, 400, "invalid_request", "repository_id must be a non-blank identifier of at most 512 bytes")
+			return
+		}
+	}
+	out, err := h.config.Service.ListRequirementsPageFiltered(r.Context(), query.Get("cursor"), size, repositoryID)
 	if err != nil {
 		h.domainError(w, r, err)
 		return

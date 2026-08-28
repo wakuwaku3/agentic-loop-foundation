@@ -32,7 +32,13 @@ baseline capabilityへのanchorだけを提供する。各capabilityの利用者
 ## Backlogを見る
 
 正本は `contracts/release-contract/foundation-capabilities.json` の
-`cap-backlog-visibility` 宣言である。preview-local dogfood（V2-022）で宣言する成功条件を全て観測し、宣言する外部system（owner UIとFirestore）へ実接続した。証跡idは `contracts/release-contract/foundation.json` にある。宣言された利用者操作のうち「関連Repositoryで絞り込む」だけは未実装であり、`GET /v1/requirements` は `page_size` と `cursor` しか解釈しない（実測済みの不足、escalation E22-7）。
+`cap-backlog-visibility` 宣言である。preview-local dogfood（V2-095）で宣言する成功条件を全て観測し、宣言する外部system（owner UIとFirestore）へ実接続した。証跡idは `contracts/release-contract/foundation.json` にある。
+
+この宣言の失敗条件は「一覧が取得できない、または必須の確認項目が欠落する」であり、observable_resultの8項目すべてが判定対象になる。V2-095で3項目を追加した。第一に、一覧の各行がIncrementのidに加えてstatusを持つ（進行中Incrementと進捗）。第二に、各行が次のactionを持ち、これは詳細viewと同じ関数を同じ引数で呼んだ結果である（一覧専用の変種は存在しない。2つあれば必ずずれ、ずれは詳細画面が言わないことを一覧が助言する形で現れる）。第三に、各行がPreview/Stable反映状況を持ち、これはRequirement自身が記録しているStable release snapshotのprojectionである。snapshotが未記録のRequirementは「どのreleaseにも反映されていない」と理由付きで報告され、もっともらしいreleaseとしては決して報告されない。この2つの読みは既存のbatch portを1 pageにつき1回だけ使い、page全体で読むIncrement idの総数に上限がある。上限が効いた行はそのことを言うので、短いlistが完全なlistとして読まれることはない。
+
+優先度とその根拠は `GET /v1/queue/summary` が持つ。これはschedulerがこの読みのために既に返し、以前は捨てられていた候補ごとの決定のprojectionであり、読みを1つも増やさない。各entryはrank、割り当てられたかどうか、割り当てられなかったときはschedulerの閉じた理由集合から取った理由、そして実際にscoreへ入った入力を報告する。この版では多要因の優先度評価がrankingへ入っていない（配分snapshotがそれを供給しない）ため、`used_assessment` は全候補でfalseであり、そのことを隠さず報告する。根拠とは、その根拠が何でないかも言うものである。schedulerがこの読みでrankしなかったRequirementはentryを持たず、推測されたrankを与えられることはない。
+
+escalation E22-7（関連Repositoryで絞り込めない）はV2-095で解消した。`GET /v1/requirements` は任意の `repository_id` を解釈し、`page_size` と `cursor` と合成できる。絞り込みは書き込み一度きりのRequirement-Repository結び付きを通り、未知のrepository idは空listを返す（絞り込み無しのpageを返さない。それがE22-7が実測した欠陥そのものだった）。その読みが適用する上限は応答に現れるので、有界な件数は下限として読める。
 
 <a id="cap-autonomous-resolution"></a>
 ## 問題解決を自律実行する
@@ -44,7 +50,7 @@ baseline capabilityへのanchorだけを提供する。各capabilityの利用者
 ## 人間の入力を求める
 
 正本は `contracts/release-contract/foundation-capabilities.json` の
-`cap-human-input-request` 宣言である。preview-local dogfood（V2-022）で実測したところ、質問を記録するcommandとrouteと詳細fieldは存在するが、実surfaceで作られたRequirementはneeds-inputへ遷移できるstatusに到達できない（`captured` を離れるcommandは `start-framing` だけで、これを発行するapplication commandが存在しない）。よって質問の表示も回答による再開も観測できず、証跡なし。
+`cap-human-input-request` 宣言である。preview-local dogfood（V2-095）で宣言する成功条件を全て観測した。証跡idは `contracts/release-contract/foundation.json` にある。V2-022が証跡なしとした理由（実surfaceで作られたRequirementがneeds-inputへ遷移できるstatusに到達できない）はこの版では成立しない。`captured` を離れるcommandは今も `start-framing` だけだが、それを発行するapplication commandとownerのrouteが存在するので、実base URLに対して captured から framing、needs-input、ready までを1本の鎖として歩ける。実測したのは、needs-inputの理由class、選択肢それぞれとその影響、停止範囲と継続範囲、そして回答後に同じRequirement idが再開しBacklogの行数が変わらないこと（回答は何も作らない）である。この版はこのcapabilityのためにdomainもapplication commandも1行も変えていない。
 
 ownerが読めるようになったもの: needs-inputのRequirement詳細（`GET /v1/requirements/{requirement_id}`）に
 質問が載る。載るのは、なぜ自律判断できないかを閉じた3値の理由class（破壊的・不可逆な判断／
@@ -77,7 +83,9 @@ cap-human-input-requestのuser journeyはこの版では実行されていない
 ## Previewを運用する
 
 正本は `contracts/release-contract/foundation-capabilities.json` の
-`cap-preview-operation` 宣言である。宣言する外部systemにGoogle Cloud Runが含まれるため、このcapabilityの証跡は初回deploy gate（D1）に属する。preview-local dogfood（V2-022）では、稼働processが `GET /v1/release/state` に503 release_observer_not_configuredを返すことも実測した（`cmd/control-plane` がReleaseObserverを組み立てていない配線の残余）。証跡なし。
+`cap-preview-operation` 宣言である。宣言する外部systemにGoogle Cloud Runが含まれるため、このcapabilityの証跡は初回deploy gate（D1）に属する。証跡なし。
+
+V2-022が実測した「稼働processが `GET /v1/release/state` に503 release_observer_not_configuredを返す」はこの版では条件付きである。release source rootを明示的に与えられたprocessはこの読みに200で答え、自分が組み立てたversionを報告する。root を与えられていないprocessは今も503を返し、versionを1つも報告しない。既定rootは存在しない。既定rootを使えば、そのprocessが組み立てられていないversionを名乗ることになるからである。
 
 ownerが読めるようになったもの: owner consoleのRelease evidence欄と、ownerだけが読める
 read-onlyのGET route `/v1/release/state` から、稼働processが組み立てられたPreview release
@@ -147,4 +155,6 @@ in-processのsourceが持たない障害・秘密走査台帳を要する。両�
 ## 利用者文書を読む
 
 正本は `contracts/release-contract/foundation-capabilities.json` の
-`cap-user-documentation` 宣言である。preview-local dogfood（V2-022）で `internal/release/docs.go` の決定的な文書routing検査（link・anchor解決、capability anchorの双方向全単射、固定形式のrelease marker、必須4節、Stableからkeyword Previewへのlink不在、code block許可list）が実doc setに対して成立することと、release文字列が契約・compile済み契約・`Release:` markerの3箇所で一致することを実測した。それでも証跡なしである。理由は2つあり、いずれも実測である。第一に、宣言する唯一の外部systemであるowner consoleが文書routeを提供しないため、稼働channel/versionに対応する文書を宣言surfaceから参照できない（escalation E22-10）。第二に、この文書自身が `/v1/release/state` をowner可読と記しているのに稼働processは503を返し、実挙動との差異が存在する。
+`cap-user-documentation` 宣言である。preview-local dogfood（V2-095）で `internal/release/docs.go` の決定的な文書routing検査（link・anchor解決、capability anchorの双方向全単射、固定形式のrelease marker、必須4節、Stableからkeyword Previewへのlink不在、code block許可list）が実doc setに対して成立することと、release文字列が契約・compile済み契約・`Release:` markerの3箇所で一致することを実測した。証跡idは `contracts/release-contract/foundation.json` にある。
+
+V2-022が証跡なしとした2つの理由はいずれもこの版では成立しない。第一のescalation E22-10（宣言する唯一の外部systemであるowner consoleが文書routeを提供しない）は解消した。ownerだけが読めるGET routeが2本あり、1本は稼働channelと組み立てられたversionと参照できる文書の一覧を答え、もう1本はその文書自身を答える。提供する集合は、そのprocessが自分の明示的なsource rootから組み立てたrelease bundleのdocumentation role member集合そのものである。集合はtreeから再計算されるので書き下されておらず、要求は集合への所属判定で答えられる。集合に無いpathはfileを1つも開く前に拒否されるので、辿るべきpathが存在しない。root を与えられていないprocessは、この2本にも `GET /v1/release/state` と同一の503形で答え、channelもversionも文書も1つも報告しない。第二の理由（この文書が `/v1/release/state` をowner可読と記しているのに稼働processは503を返す）も成立しない。root を与えられたprocessはその読みに200で答える。
