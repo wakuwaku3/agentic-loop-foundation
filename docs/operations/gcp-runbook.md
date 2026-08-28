@@ -49,6 +49,20 @@ true-up すると 1 日 24 read transaction まで通る（`internal/quota` の�
 7.45.0 に固定する。secret、サービスアカウント鍵、tfstate は
 リポジトリへ保存しない。
 
+Google Cloud SDK はDevboxで固定する。ユーザー認証とApplication Default
+Credentialsは1回のbrowser flowで同時に設定する。
+
+```sh
+devbox run --pure -- gcloud auth login --update-adc
+devbox run --pure -- gcloud config set project <PROJECT_ID>
+devbox run --pure -- gcloud auth list
+devbox run --pure -- gcloud auth application-default print-access-token >/dev/null
+```
+
+`--update-adc`は取得した認証情報をgcloudのactive accountだけでなくADCの
+well-known locationにも書くため、`gcloud auth application-default login`を別に
+実行しない。
+
 state は OpenTofu state 用の private/versioned Cloud Storage bucket（`infra/versions.tf`
 の partial `backend "gcs" {}`）を先に用意し、bucket 名を `TF_STATE_BUCKET` として渡す。
 `infra-plan.sh`/`infra-drift.sh` は `TF_STATE_BUCKET` が空だと fail closed する。

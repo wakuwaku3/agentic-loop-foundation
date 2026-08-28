@@ -15,6 +15,7 @@
     "javaPackages.compiler.openjdk21@21.0.12+8",
     "gnused@4.10",
     "go@1.25.0",
+    "google-cloud-sdk@579.0.0",
     "jq@1.8.2",
     "ripgrep@15.2.0",
     "opentofu@1.12.5",
