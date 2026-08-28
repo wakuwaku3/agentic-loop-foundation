@@ -16,16 +16,14 @@ Preview候補の利用者向け文書の入口です。現在のv2 branchは実�
 - Codex、Claude、opencodeのprovider-neutral adapter contract
 - Repository別Preview/Stable routing gateとsigned Runner bundle
 
-候補をPreview Releaseにするには、GCP preflight、pinned image deployment、
+候補をPreview Releaseにするには、GCP plan approval、pinned image deployment、
 実Runner enrollment、Release Contract全capabilityの実行が必要です。Provider
-依存機能は対象Providerの実物Evidenceがない限りStableへ昇格しません。
+依存機能は対象Providerの実 CLI 確認がない限りStableへ昇格しません。
 
-2026-08-26に、このrepository自身をPreview対象として環境class `preview-local`
-（owner実機・実process・実CLI・Firestore emulator）で12 capabilityを1件ずつ
-実測しました。手順は `docs/operations/release-live-dogfood.md`
-にあります。実測の結果、証跡idを持つcapabilityは1件だけであり、残る11件の
-理由は `docs/preview/stable-diff.md` に列挙しています。この実測はGCPへの
-deployを含まず、forgeにもremoteにも接続していません。Stable Releaseは
+2026-08-28に、このrepository自身を `preview-local` で再実測しました。実
+Control Plane、別Runner process、Firestore emulator、Codex 0.149.1、OpenCode
+1.18.18、GitHub read、Git clone を使用し、fixture/fakeを実物確認の代替にして
+いません。この実測はGCP deploymentとClaudeを含みません。Stable Releaseは
 存在せず、昇格も行っていません。
 
 capability baselineの正本は

@@ -107,27 +107,17 @@ Release ContractのStable Releaseへ戻す操作ではありません。Stable R
 
 ## 昇格に不足している実証
 
-実測の結果、証跡idを持つcapabilityは cap-requirement-intake の1件だけです。
-残る11件は証跡なしで、内訳は次のとおりです。
+2026-08-28の再検証で、このマシンから確認可能な境界は次のとおり実物で通過しました。
 
-- 初回deploy gate（D1）に属するもの: cap-preview-operation、cap-stable-promotion、
-  cap-loop-control、cap-loop-self-update。いずれも宣言する外部systemに
-  Google Cloud Runを含むため、どれだけlocalの挙動を観測してもこのgradeでは
-  充足しません。
-- 後続milestoneに属するもの: cap-autonomous-resolution、cap-provider-operation、
-  cap-shared-resource-allocation（Provider側）。いずれも3 Providerを宣言し、
-  この機械ではclaudeだけが認証済みです。cap-shared-resource-allocationの
-  複数Repository側も後続milestoneです。
-- V2-022時点で実装または配線が無かったもの: cap-human-input-request、
-  cap-backlog-visibility、cap-user-documentation。3件ともV2-095で実証済みです。
-- V2-022の副作用範囲外だったもの: cap-repository-registration。GitHubとGitを
-  宣言しますが、V2-022の実測はforgeにもremoteにも接続していませんでした。これは
-  外部systemが使えなかったのではなく、別のtaskが自分の範囲をそう決めていた
-  だけであり、宣言由来の実証不能ではありません。V2-095でgh CLIとgit CLIの実物へ
-  接続し、対象Repositoryをread-onlyで読んだ有界Observationを提出して実証しました。
+- `make check`: 全package、contract、secret scan、Firestore emulator、workflow pin。
+- Codex 0.149.1 / OpenCode 1.18.18: 実CLI、session ID、usage、ledger settlement。
+- GitHub / Git: 認証済みreadとbounded shallow clone。
+- preview-local: 実Control Plane、Firestore emulator、別Runner process、実Codexで
+  claimからprovider resultまで通過し、quota hard guardも実測。
 
-このほかに、GCP Preview deployment、実Codex/opencode接続、複数の利用者管理
-machineとRepositoryによる並列実行が引き続き不足しています。
+Stable昇格に残る外部条件はGCP Preview deploymentでの全capability journeyと、
+Claude依存機能の実CLI確認です。これらを通すまではcontract statusを`stable`へ
+書き換えません。
 
 capability baselineの正本は
 [contracts/release-contract/foundation.json](../../contracts/release-contract/foundation.json)

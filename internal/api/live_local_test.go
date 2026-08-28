@@ -674,8 +674,8 @@ func TestControlPlanePreviewLocalLive(t *testing.T) {
 	t.Logf("V2-091 live-local: the Loop pass planned increment_id=%s for requirement_id=%s, and the offer route named it", offered.incrementID, loopID)
 
 	// THE SECOND REAL PROCESS. It is given the base URL, a 0600 session-token
-	// file and an absolute 0700 data root, and nothing else: it discovers the
-	// work itself.
+	// file, an absolute 0700 data root, and the directly selected Provider: it
+	// discovers the work itself.
 	runnerData := filepath.Join(t.TempDir(), "runner-data")
 	if err := os.MkdirAll(runnerData, 0o700); err != nil {
 		t.Fatal(err)
@@ -692,8 +692,8 @@ func TestControlPlanePreviewLocalLive(t *testing.T) {
 	}
 	runnerOut := runLiveRunnerProcess(t, runnerBin, base, runnerData, tokenFile)
 	t.Logf("V2-091 live-local: the SECOND real process reported: %s", strings.TrimSpace(runnerOut))
-	if !strings.Contains(runnerOut, "stopped_at_provider_boundary=true") {
-		t.Fatalf("the runner process did not report stopping at the provider boundary: %s", runnerOut)
+	if !strings.Contains(runnerOut, "stopped_at_provider_boundary=false") {
+		t.Fatalf("the runner process did not report crossing the provider boundary: %s", runnerOut)
 	}
 	if !strings.Contains(runnerOut, "increment_id="+offered.incrementID) {
 		t.Fatalf("the runner process did not claim the offered increment %s: %s", offered.incrementID, runnerOut)
@@ -1158,11 +1158,12 @@ func runLiveRunnerProcess(t *testing.T, binPath, base, dataRoot, tokenFile strin
 		"--control-plane", base,
 		"--data-root", dataRoot,
 		"--session-token-file", tokenFile,
+		"--provider", "codex",
 	)
 	// The child's environment carries NO token: the token is in a 0600 file the
 	// child opens itself. An environment variable would be inherited by every
 	// grandchild.
-	cmd.Env = []string{"HOME=" + dataRoot, "PATH=" + os.Getenv("PATH")}
+	cmd.Env = []string{"HOME=" + os.Getenv("HOME"), "PATH=" + os.Getenv("PATH")}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
