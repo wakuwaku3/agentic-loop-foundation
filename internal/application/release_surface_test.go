@@ -51,7 +51,7 @@ func newReleaseService(t *testing.T) (*application.Service, *memory.Store) {
 
 // newObserver builds an observer over root with no fabricated capability
 // evidence: the real Foundation contract's twelve baseline capabilities all
-// carry empty evidence_ids, and this surface does not invent any.
+// carry no repository evidence references, and this surface does not invent any.
 func newObserver(t *testing.T, root string, router *release.Router) *application.SourceReleaseObserver {
 	t.Helper()
 	id, err := domain.NewReleaseID("candidate-v2-066-surface")

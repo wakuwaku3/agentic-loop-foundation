@@ -419,7 +419,7 @@ every live exercise so far ran with `granted_names` empty.
 `Grant.Apply` and `ProviderClient.Grant`, the two things that only existed to
 feed it. Route (b) — delete the field — was chosen over making `Run` read it
 because `Run` already builds the child's environment from the approved
-provider-preflight record and hands it to a supervisor that assigns
+runtime invocation policy and hands it to a supervisor that assigns
 `cmd.Env`, which **replaces** the parent environment rather than extending it.
 The record was therefore already the complete and exclusive description of
 what the child receives; making `Run` read a second contributor would have
@@ -433,14 +433,14 @@ guard: a field added to `Invocation` that `Run` does not consume turns that
 test red the day it is added.
 
 So the child's environment has exactly one authority, the approved
-provider-preflight record's `environment.base_names`, plus one declared
+runtime invocation policy's environment allowlist, plus one declared
 exception: `SupervisedInvocationRunner.ExtraEnv`, the additive diagnostic
 override dp-v2-017 B16/I7 needs to induce a transport failure. `ExtraEnv`
 extends the `GuardEnvironment` allowlist for its own names, is set in exactly
 one place in the tree, and is nil for every other invocation.
 
 **A record that declares a grant is now refused, not silently narrowed.** A
-provider-preflight record whose `environment.granted_names` is non-empty is
+runtime invocation policy whose granted environment set is non-empty is
 **refused** by `SupervisedInvocationRunner.Run` with
 `ErrInvocationEnvironmentGrantUndeliverable`: no process is started and no
 ledger reservation is debited, because the refusal sits after the record is
@@ -485,20 +485,20 @@ idempotent application acceptance.
 
 ## Real mode with Codex or OpenCode
 
-`cmd/runner --real` requires an explicit provider, repository root and approved
-preflight record in addition to its control-plane and session inputs:
+`cmd/runner --real` requires an explicit provider in addition to its
+control-plane and session inputs. The executable is resolved from the current
+session and an invocation policy is built in memory; counters are kept under
+the external data root, not in the repository:
 
 ```sh
 cmd/runner --real \
   --data-root /absolute/0700/path \
   --control-plane http://127.0.0.1:8080 \
   --session-token-file /absolute/0600/token \
-  --repository-root /absolute/repository \
-  --provider codex \
-  --provider-preflight /absolute/repository/.agents/v2/provider-preflight/V2-028-provider-live-codex.json
+  --provider codex
 ```
 
-`--provider opencode`は対応するOpenCode recordと組み合わせる。Runnerはofferに含まれる
+`--provider opencode`も同じ直接実行経路を使う。Runnerはofferに含まれる
 boundedなRequirement summaryからWork Packetを作り、個別workspace内でCLIを実行し、
 provider名と成功可否だけをControl Planeへ返す。raw response、session ID、認証値はHTTPへ
 送らない。

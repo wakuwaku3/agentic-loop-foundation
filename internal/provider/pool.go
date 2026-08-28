@@ -26,10 +26,10 @@ package provider
 //     that path never reached a process and has been deleted along with
 //     Invocation's Environment field, so there is no merge path at all;
 //     internal/runner builds the child's environment from the approved
-//     provider-preflight record alone. The clause's conclusion is unchanged
+//     runtime invocation policy alone. The clause's conclusion is unchanged
 //     -- a slot still holds no credential value -- but it no longer rests on
 //     a channel that does not exist;
-//   - the approved provider-preflight record carries the executable path
+//   - the runtime invocation policy carries the executable path
 //     bound by its approval digest, and the runner's cost ledger refuses an
 //     invocation whose resolved argv[0] disagrees with it, so a copy here
 //     could silently diverge from the approved one. The slot therefore names
@@ -120,7 +120,7 @@ func IsProviderName(name string) bool {
 // SlotSeed is everything a caller may declare about one slot at
 // construction. Authorized is whether the owner's standing authorization
 // covers this Provider. PreflightRecordID is the id of the approved
-// provider-preflight record that governs it -- a name only. No limit,
+// runtime invocation policy that governs it -- a name only. No limit,
 // threshold, path or credential is accepted here, because there is no field
 // to put one in.
 type SlotSeed struct {

@@ -147,7 +147,7 @@ func OpeningTableClasses() []FailureClass {
 }
 
 // BreakerPolicy is supplied by the caller. No value here is copied out of an
-// approved provider-preflight record, and no value here is emitted in any
+// runtime invocation policy, and no value here is emitted in any
 // report.
 type BreakerPolicy struct {
 	// TransportCount is the windowed count at which a transport-class or

@@ -29,17 +29,12 @@
         "failure": "登録が拒否される、または識別情報・実行可否のいずれかが表示されない",
         "rollback": "登録前のInstallation状態へ戻し、他Repositoryへ影響が残っていないことを確認する"
       },
-      "evidence_retention": {
-        "location": ".agents/v2/evidence/",
-        "retention": "rollback windowは、旧版を参照するRequirementがなくなり、Stableによる復旧が実証され、対応する利用者文書が保持されるまで閉じない。"
-      },
       "documentation": {
         "preview": "docs/preview/capabilities.md#cap-repository-registration"
       },
       "owner_surfaces": [
         "/owner/"
       ],
-      "evidence_schema": "contracts/schemas/evidence.json",
       "promotion_prerequisites": [
         "release-contract.md条件2: Preview実環境でcap-repository-registrationのuser journeyを実行し成功すること",
         "release-contract.md条件3: GitHub、Git、Firestore、owner UIの実物へ接続して成功すること",
@@ -67,17 +62,12 @@
         "failure": "登録要求が拒否される、またはRequirement IDが発行されない",
         "rollback": "作成されたRequirementを取り消し、Backlogから除去したことを確認する"
       },
-      "evidence_retention": {
-        "location": ".agents/v2/evidence/",
-        "retention": "rollback windowは、旧版を参照するRequirementがなくなり、Stableによる復旧が実証され、対応する利用者文書が保持されるまで閉じない。"
-      },
       "documentation": {
         "preview": "docs/preview/capabilities.md#cap-requirement-intake"
       },
       "owner_surfaces": [
         "/v1/requirements"
       ],
-      "evidence_schema": "contracts/schemas/evidence.json",
       "promotion_prerequisites": [
         "release-contract.md条件2: Preview実環境でcap-requirement-intakeのuser journeyを実行し成功すること",
         "release-contract.md条件3: owner UI、Firestoreの実物へ接続して成功すること",
@@ -104,10 +94,6 @@
         "failure": "一覧が取得できない、または必須の確認項目が欠落する",
         "rollback": "取得処理が失敗してもBacklogのcanonical stateが変更されないことを確認する"
       },
-      "evidence_retention": {
-        "location": ".agents/v2/evidence/",
-        "retention": "rollback windowは、旧版を参照するRequirementがなくなり、Stableによる復旧が実証され、対応する利用者文書が保持されるまで閉じない。"
-      },
       "documentation": {
         "preview": "docs/preview/capabilities.md#cap-backlog-visibility"
       },
@@ -115,7 +101,6 @@
         "/v1/requirements",
         "/v1/queue/summary"
       ],
-      "evidence_schema": "contracts/schemas/evidence.json",
       "promotion_prerequisites": [
         "release-contract.md条件2: Preview実環境でcap-backlog-visibilityのuser journeyを実行し成功すること",
         "release-contract.md条件3: owner UI、Firestoreの実物へ接続して成功すること",
@@ -149,17 +134,12 @@
         "failure": "claim後に進捗が更新されない、またはRequirementとIncrementの関係が失われる",
         "rollback": "実行中の変更を安全な境界まで戻し、Requirementをqueuedまたはpausedへ復帰させる"
       },
-      "evidence_retention": {
-        "location": ".agents/v2/evidence/",
-        "retention": "rollback windowは、旧版を参照するRequirementがなくなり、Stableによる復旧が実証され、対応する利用者文書が保持されるまで閉じない。"
-      },
       "documentation": {
         "preview": "docs/preview/capabilities.md#cap-autonomous-resolution"
       },
       "owner_surfaces": [
         "/v1/requirements/{requirement_id}"
       ],
-      "evidence_schema": "contracts/schemas/evidence.json",
       "promotion_prerequisites": [
         "release-contract.md条件2: Preview実環境でcap-autonomous-resolutionのuser journeyを実行し成功すること",
         "release-contract.md条件3: local Runner machine、Git、GitHub、Firestore、OS process、および対象Provider（codex、claude、opencode）の実物へ接続して成功すること",
@@ -186,17 +166,12 @@
         "failure": "質問内容が表示されない、または回答後に新しいRequirementが誤って作られる",
         "rollback": "未回答のまま処理を安全に待機させ、Requirementの状態を変更しない"
       },
-      "evidence_retention": {
-        "location": ".agents/v2/evidence/",
-        "retention": "rollback windowは、旧版を参照するRequirementがなくなり、Stableによる復旧が実証され、対応する利用者文書が保持されるまで閉じない。"
-      },
       "documentation": {
         "preview": "docs/preview/capabilities.md#cap-human-input-request"
       },
       "owner_surfaces": [
         "/v1/requirements/{requirement_id}"
       ],
-      "evidence_schema": "contracts/schemas/evidence.json",
       "promotion_prerequisites": [
         "release-contract.md条件2: Preview実環境でcap-human-input-requestのuser journeyを実行し成功すること",
         "release-contract.md条件3: owner UI、Firestoreの実物へ接続して成功すること",
@@ -224,17 +199,12 @@
         "failure": "Preview状態が表示されない、または障害時にroutingがStableへ戻らない",
         "rollback": "Previewの障害をStableへ影響させず、Preview routingだけを元に戻す"
       },
-      "evidence_retention": {
-        "location": ".agents/v2/evidence/",
-        "retention": "rollback windowは、旧版を参照するRequirementがなくなり、Stableによる復旧が実証され、対応する利用者文書が保持されるまで閉じない。"
-      },
       "documentation": {
         "preview": "docs/preview/capabilities.md#cap-preview-operation"
       },
       "owner_surfaces": [
         "/owner/"
       ],
-      "evidence_schema": "contracts/schemas/evidence.json",
       "promotion_prerequisites": [
         "release-contract.md条件2: Preview実環境でcap-preview-operationのuser journeyを実行し成功すること",
         "release-contract.md条件3: Google Cloud Run、Firestore、owner UIの実物へ接続して成功すること",
@@ -264,17 +234,12 @@
         "failure": "未充足の条件があるまま昇格する、または昇格根拠が表示されない",
         "rollback": "昇格前のStable版へ戻し、進行中Requirementを継続させる"
       },
-      "evidence_retention": {
-        "location": ".agents/v2/evidence/",
-        "retention": "rollback windowは、旧版を参照するRequirementがなくなり、Stableによる復旧が実証され、対応する利用者文書が保持されるまで閉じない。"
-      },
       "documentation": {
         "preview": "docs/preview/capabilities.md#cap-stable-promotion"
       },
       "owner_surfaces": [
         "/owner/"
       ],
-      "evidence_schema": "contracts/schemas/evidence.json",
       "promotion_prerequisites": [
         "release-contract.md条件2: Preview実環境でcap-stable-promotionのuser journeyを実行し成功すること",
         "release-contract.md条件3: Google Cloud Run、Firestore、owner UI、GitHubの実物へ接続して成功すること",
@@ -305,17 +270,12 @@
         "failure": "制御要求が完了と誤表示される、または到達不能Runnerの状態が隠される",
         "rollback": "発行した制御を解除し、対象Repository/Runnerを制御前の状態へ戻す"
       },
-      "evidence_retention": {
-        "location": ".agents/v2/evidence/",
-        "retention": "rollback windowは、旧版を参照するRequirementがなくなり、Stableによる復旧が実証され、対応する利用者文書が保持されるまで閉じない。"
-      },
       "documentation": {
         "preview": "docs/preview/capabilities.md#cap-loop-control"
       },
       "owner_surfaces": [
         "/v1/controls"
       ],
-      "evidence_schema": "contracts/schemas/evidence.json",
       "promotion_prerequisites": [
         "release-contract.md条件2: Preview実環境でcap-loop-controlのuser journeyを実行し成功すること",
         "release-contract.md条件3: owner UI、Firestore、Google Cloud Run、local Runner machine、OS processの実物へ接続して成功すること",
@@ -345,17 +305,12 @@
         "failure": "rollback後に進行中処理またはcanonical stateの継続性が失われる",
         "rollback": "旧Stable versionを保持したまま新versionを破棄する"
       },
-      "evidence_retention": {
-        "location": ".agents/v2/evidence/",
-        "retention": "rollback windowは、旧版を参照するRequirementがなくなり、Stableによる復旧が実証され、対応する利用者文書が保持されるまで閉じない。"
-      },
       "documentation": {
         "preview": "docs/preview/capabilities.md#cap-loop-self-update"
       },
       "owner_surfaces": [
         "/owner/"
       ],
-      "evidence_schema": "contracts/schemas/evidence.json",
       "promotion_prerequisites": [
         "release-contract.md条件2: Preview実環境でcap-loop-self-updateのuser journeyを実行し成功すること",
         "release-contract.md条件3: Google Cloud Run、Git、GitHub、Firestore、local Runner machineの実物へ接続して成功すること",
@@ -388,10 +343,6 @@
         "failure": "特定Repositoryの要求が他Repositoryの処理を無期限に止める、または割当状況が表示されない",
         "rollback": "配分設定を変更前の上限へ戻し、待機中Requirementの状態を保持する"
       },
-      "evidence_retention": {
-        "location": ".agents/v2/evidence/",
-        "retention": "rollback windowは、旧版を参照するRequirementがなくなり、Stableによる復旧が実証され、対応する利用者文書が保持されるまで閉じない。"
-      },
       "documentation": {
         "preview": "docs/preview/capabilities.md#cap-shared-resource-allocation"
       },
@@ -399,7 +350,6 @@
         "/v1/queue/summary",
         "/v1/controls"
       ],
-      "evidence_schema": "contracts/schemas/evidence.json",
       "promotion_prerequisites": [
         "release-contract.md条件2: Preview実環境でcap-shared-resource-allocationのuser journeyを実行し成功すること",
         "release-contract.md条件3: Firestore、owner UI、local Runner machine、および対象Provider（codex、claude、opencode）の実物へ接続して成功すること",
@@ -431,17 +381,12 @@
         "failure": "provider状態が表示されない、または品質・権限条件を満たさず黙って縮退する",
         "rollback": "handoff前のprovider割当へ戻し、文脈とRequirement、検証結果を保持する"
       },
-      "evidence_retention": {
-        "location": ".agents/v2/evidence/",
-        "retention": "rollback windowは、旧版を参照するRequirementがなくなり、Stableによる復旧が実証され、対応する利用者文書が保持されるまで閉じない。"
-      },
       "documentation": {
         "preview": "docs/preview/capabilities.md#cap-provider-operation"
       },
       "owner_surfaces": [
         "/owner/"
       ],
-      "evidence_schema": "contracts/schemas/evidence.json",
       "promotion_prerequisites": [
         "release-contract.md条件2: Preview実環境でcap-provider-operationのuser journeyを実行し成功すること",
         "release-contract.md条件3: local Runner machine、owner UI、Firestore、および対象Provider（codex、claude、opencode）の実物へ接続して成功すること",
@@ -468,17 +413,12 @@
         "failure": "文書が古いversionを説明する、または実挙動との差異がある",
         "rollback": "rollback対象versionに対応する文書を参照可能な状態で保持する"
       },
-      "evidence_retention": {
-        "location": ".agents/v2/evidence/",
-        "retention": "rollback windowは、旧版を参照するRequirementがなくなり、Stableによる復旧が実証され、対応する利用者文書が保持されるまで閉じない。"
-      },
       "documentation": {
         "preview": "docs/preview/capabilities.md#cap-user-documentation"
       },
       "owner_surfaces": [
         "/owner/"
       ],
-      "evidence_schema": "contracts/schemas/evidence.json",
       "promotion_prerequisites": [
         "release-contract.md条件2: Preview実環境でcap-user-documentationのuser journeyを実行し成功すること",
         "release-contract.md条件3: owner UIの実物へ接続して成功すること",

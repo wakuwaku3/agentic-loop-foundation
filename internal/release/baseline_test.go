@@ -11,8 +11,8 @@ import (
 // succeeds (all seven roles resolve, the documentation role resolves to
 // exactly the real doc set, the contract compiles with the twelve baseline
 // ids), but the assembled candidate is NOT promotable, because every
-// capability has status preview with empty evidence_ids in the real
-// contract. No capability evidence is fabricated for the real tree.
+// the direct session has supplied no runtime verification results. No result
+// is fabricated for the real tree.
 func TestRealTreeFoundationCandidateIsNotPromotable(t *testing.T) {
 	root := realRoot()
 	assembled, err := AssembleFromRoot(root)
@@ -75,9 +75,8 @@ func TestRealTreeFoundationCandidateIsNotPromotable(t *testing.T) {
 	}
 
 	// The honest negative result: derive the candidate's capability set
-	// from the compiled contract (dp-v2-021 d6) with NO evidence recorded
-	// (the real contract's baseline capabilities all carry empty
-	// evidence_ids), and assert it is refused rather than fabricating
+	// from the compiled contract with NO runtime verification results, and
+	// assert it is refused rather than fabricating
 	// capability evidence for the real tree to make it pass.
 	input := buildFullCandidateInput(assembled, "candidate-foundation-real-tree")
 	input.Evidence = nil // no fabricated evidence for the real tree
@@ -91,7 +90,7 @@ func TestRealTreeFoundationCandidateIsNotPromotable(t *testing.T) {
 
 	err = candidate.CanPromote()
 	if err == nil {
-		t.Fatal("the real Foundation candidate must NOT be promotable: all twelve capabilities have empty evidence_ids")
+		t.Fatal("the real Foundation candidate must NOT be promotable without runtime verification results")
 	}
 	if !strings.Contains(err.Error(), "capability") {
 		t.Fatalf("refusal does not name a missing capability: %v", err)

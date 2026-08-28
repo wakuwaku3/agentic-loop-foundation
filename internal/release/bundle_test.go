@@ -55,14 +55,13 @@ func newSyntheticTree(t *testing.T, opts syntheticTreeOptions) string {
 	}
 
 	type rawCapability struct {
-		ID          string   `json:"id"`
-		Name        string   `json:"name"`
-		Status      string   `json:"status"`
-		EvidenceIDs []string `json:"evidence_ids"`
+		ID     string `json:"id"`
+		Name   string `json:"name"`
+		Status string `json:"status"`
 	}
 	caps := make([]rawCapability, 0, len(opts.CapabilityIDs))
 	for _, id := range opts.CapabilityIDs {
-		caps = append(caps, rawCapability{ID: id, Name: id, Status: "preview", EvidenceIDs: []string{}})
+		caps = append(caps, rawCapability{ID: id, Name: id, Status: "preview"})
 	}
 	contract := struct {
 		SchemaVersion string          `json:"schema_version"`

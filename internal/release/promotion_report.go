@@ -21,7 +21,7 @@
 //     not-observable-here condition keeps it false.
 //
 //   - It never hides the real tree's negative answer. The Foundation
-//     contract's twelve baseline capabilities all carry empty evidence_ids,
+//     candidate verification has not satisfied every baseline capability,
 //     so condition 2 is unmet for all twelve and the candidate is not
 //     promotable. That is the correct answer and is reported as such.
 //

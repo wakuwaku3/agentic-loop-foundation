@@ -678,7 +678,7 @@ func TestPlanAndPrepareAreMeasuredUnderEmergencyStop(t *testing.T) {
 //
 // REPRODUCTION FIRST. The two tests below were written and RUN RED before any
 // non-test file was edited, and their verbatim failures are recorded in
-// .agents/v2/evidence/V2-084-application.json. They are the permanent
+// the framing journey test. They are the permanent
 // assertions for A5 and for the "exactly one issuer" clause of the design.
 
 // TestAClaimedIncrementCarriesItsReadyParentIntoActive is V2-084 A5.

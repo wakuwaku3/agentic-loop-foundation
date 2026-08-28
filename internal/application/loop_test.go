@@ -684,7 +684,7 @@ func TestLoopPassRecoversOnlyWhenAnExecutionIsLost(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // TestLoopPassPlansAnIncrementOnlyForAnAssignedRequirement is v7, and its last
-// assertion is the consequence .agents/v2/DECLARATION-GAP.md names: with the
+// assertion captures the declared boundary: with the
 // pass wired, a running Control Plane HOLDS an Increment, so
 // POST /v1/runner/claims:acquire can succeed at all.
 func TestLoopPassPlansAnIncrementOnlyForAnAssignedRequirement(t *testing.T) {
@@ -826,14 +826,13 @@ func loopSyntheticRoot(t *testing.T, capabilities []string) string {
 		}
 	}
 	type rawCapability struct {
-		ID          string   `json:"id"`
-		Name        string   `json:"name"`
-		Status      string   `json:"status"`
-		EvidenceIDs []string `json:"evidence_ids"`
+		ID     string `json:"id"`
+		Name   string `json:"name"`
+		Status string `json:"status"`
 	}
 	caps := make([]rawCapability, 0, len(capabilities))
 	for _, id := range capabilities {
-		caps = append(caps, rawCapability{ID: id, Name: id, Status: "preview", EvidenceIDs: []string{}})
+		caps = append(caps, rawCapability{ID: id, Name: id, Status: "preview"})
 	}
 	contract := map[string]any{
 		"schema_version": "v1", "id": "rc-loop-synthetic", "kind": "release-contract",

@@ -160,48 +160,24 @@ func TestFoundationReleaseContractBaseline(t *testing.T) {
 		isBaseline = release[idx+1:] == "baseline"
 	}
 
-	evidenceIndexPath := filepath.Join(root, ".agents", "v2", "evidence", "index.json")
-	evidenceIDs := map[string]bool{}
-	for _, raw := range readJSON(t, evidenceIndexPath)["entries"].([]any) {
-		entry := raw.(map[string]any)
-		evidenceIDs[stringValue(entry["id"])] = true
-	}
-
 	for _, raw := range contractCaps {
 		capability := raw.(map[string]any)
 		id := stringValue(capability["id"])
 		status := stringValue(capability["status"])
-		evidenceRaw, present := capability["evidence_ids"]
-		evidenceList, _ := evidenceRaw.([]any)
-
 		// (d) baseline invariant.
 		if isBaseline {
 			if status != "preview" {
 				t.Errorf("%s: baseline release requires status preview, got %q", id, status)
 			}
-			if !present {
-				t.Errorf("%s: baseline release requires evidence_ids to be present", id)
-			} else if len(evidenceList) != 0 {
-				t.Errorf("%s: baseline release requires empty evidence_ids", id)
-			}
 		}
 
-		// (e) anti-fabrication invariant.
+		// (e) Stable claims must publish Stable documentation. Runtime
+		// verification results are carried by the candidate/session, not by
+		// identifiers in this tracked declaration.
 		if status == "stable" {
-			if len(evidenceList) == 0 {
-				t.Errorf("%s: status stable requires at least one evidence id", id)
-			}
 			declared := declByID[id]
 			if declared == nil || nestedString(declared, "documentation", "stable") == "" {
 				t.Errorf("%s: status stable requires documentation.stable", id)
-			}
-		}
-
-		// (f) evidence resolution.
-		for _, rawID := range evidenceList {
-			evidenceID := stringValue(rawID)
-			if !evidenceIDs[evidenceID] {
-				t.Errorf("%s: evidence id %q does not resolve in %s", id, evidenceID, evidenceIndexPath)
 			}
 		}
 	}
@@ -221,15 +197,6 @@ func TestFoundationReleaseContractBaseline(t *testing.T) {
 		checkDocumentationAnchor(t, root, id, "preview", stringValue(documentation["preview"]))
 		if stableRef, exists := documentation["stable"]; exists {
 			checkDocumentationAnchor(t, root, id, "stable", stringValue(stableRef))
-		}
-
-		// (h) evidence_schema path exists.
-		evidenceSchema := stringValue(capability["evidence_schema"])
-		if evidenceSchema == "" {
-			t.Fatalf("%s: evidence_schema missing", id)
-		}
-		if _, err := os.Stat(filepath.Join(root, evidenceSchema)); err != nil {
-			t.Errorf("%s: evidence_schema %q does not exist: %v", id, evidenceSchema, err)
 		}
 
 		// (i) owner_surfaces resolution.

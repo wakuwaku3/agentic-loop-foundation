@@ -112,12 +112,6 @@ func TestTheRealModeRefusesEveryUnsafeInputWithItsOwnStatus(t *testing.T) {
 	goodToken := writeTokenFile(t, tokenDir, 0o600)
 	wideTokenDir := t.TempDir()
 	wideToken := writeTokenFile(t, wideTokenDir, 0o644)
-	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
-	if err != nil {
-		t.Fatal(err)
-	}
-	preflight := filepath.Join(repoRoot, ".agents", "v2", "provider-preflight", "V2-028-provider-live-codex.json")
-
 	for _, tc := range []struct {
 		name       string
 		root       string
@@ -136,7 +130,7 @@ func TestTheRealModeRefusesEveryUnsafeInputWithItsOwnStatus(t *testing.T) {
 		{"a non-positive claim bound", absRoot, base, goodToken, 0, exitControlPlane},
 		{"a claim bound above the declared one", absRoot, base, goodToken, runner.MaxDriverClaims + 1, exitControlPlane},
 	} {
-		err := runReal(tc.root, tc.base, tc.tokenPath, "codex", preflight, repoRoot, tc.maxClaims)
+		err := runReal(tc.root, tc.base, tc.tokenPath, "codex", tc.maxClaims)
 		if err == nil {
 			t.Fatalf("%s: runReal returned no error", tc.name)
 		}
@@ -167,17 +161,18 @@ func TestTheRealModeRefusesEveryUnsafeInputWithItsOwnStatus(t *testing.T) {
 // It makes no assertion about elapsed time and starts no timer: the connection
 // to a closed local port is refused by the kernel synchronously.
 func TestTheRealModeRefusesAControlPlaneItCannotReachWithoutLeakingTheToken(t *testing.T) {
+	binDir := t.TempDir()
+	providerPath := filepath.Join(binDir, "codex")
+	if err := os.WriteFile(providerPath, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	root := t.TempDir()
 	if err := os.Chmod(root, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	tokenPath := writeTokenFile(t, t.TempDir(), 0o600)
-	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
-	if err != nil {
-		t.Fatal(err)
-	}
-	preflight := filepath.Join(repoRoot, ".agents", "v2", "provider-preflight", "V2-028-provider-live-codex.json")
-	err = runReal(root, "http://127.0.0.1:1", tokenPath, "codex", preflight, repoRoot, 1)
+	err := runReal(root, "http://127.0.0.1:1", tokenPath, "codex", 1)
 	if err == nil {
 		t.Fatal("runReal against a closed port returned no error")
 	}

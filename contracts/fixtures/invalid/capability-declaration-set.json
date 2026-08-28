@@ -1,1 +1,15 @@
-{"schema_version":"v1","id":"cd-example-0.1.0","kind":"not-a-capability-declaration-set","created_at":"2026-08-22T00:00:00Z","correlation_id":"c-fixture-001","release":"latest","representative_provider":"gemini","capabilities":[{"id":"cap-example","name":"Example capability"}]}
+{
+  "schema_version": "v1",
+  "id": "cd-example-0.1.0",
+  "kind": "not-a-capability-declaration-set",
+  "created_at": "2026-08-22T00:00:00Z",
+  "correlation_id": "c-fixture-001",
+  "release": "latest",
+  "representative_provider": "gemini",
+  "capabilities": [
+    {
+      "id": "cap-example",
+      "name": "Example capability"
+    }
+  ]
+}

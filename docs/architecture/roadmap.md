@@ -38,7 +38,6 @@ docs/stable/
 docs/preview/
 docs/architecture/
 test/journeys/
-.agents/v2/                  # canonical task state、work packet、evidence index
 .codex/agents/               # bootstrap期間のproject-scoped agent role
 ```
 

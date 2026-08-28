@@ -421,7 +421,7 @@ func TestAcceptResultWritesEffectOutbox(t *testing.T) {
 // eventually converge. Acceptance A1's reproduction against the unmodified
 // source (a real `go test` run showing the superseded Execution left at
 // status=running, version=2 after reclaim) was captured before this fix
-// landed and is recorded in .agents/v2/evidence/V2-058-application.json; it
+// landed and is covered by the executable journey; it
 // is not kept as a permanent test here because, once fixed, the same drive
 // sequence no longer reproduces the bug -- that outcome is what
 // TestClaimReclaimTerminatesSupersededExecutionAtSource below asserts

@@ -191,7 +191,7 @@ func TestRealTreeReportIsNotPromotableAndNamesEveryCapabilityWithoutEvidence(t *
 		t.Fatal("the compiled contract declares zero capabilities; this assertion must not pass vacuously")
 	}
 	if report.Promotable {
-		t.Fatal("the real tree report claims promotable; every baseline capability has empty evidence_ids")
+		t.Fatal("the real tree report claims promotable without runtime verification results")
 	}
 	if len(report.DeclaredCapabilities) != wantCapabilities {
 		t.Fatalf("report declares %d capabilities, contract declares %d", len(report.DeclaredCapabilities), wantCapabilities)
@@ -515,7 +515,7 @@ func TestOneVersionConditionIsDecidedByTheSourceVerifiers(t *testing.T) {
 	candidate.Evidence = evidenceFor(candidate, assembled.BundleDigest)
 	candidate.EvidenceDigest = computeEvidenceDigest(candidate.Evidence)
 	// Change a member's bytes after the members were recorded.
-	rewriteDoc(t, root, "contracts/schemas/task-state.json", "\"schema_version\"", "\"schema_version\" ")
+	rewriteDoc(t, root, "contracts/schemas/domain-event.json", "\"schema_version\"", "\"schema_version\" ")
 	report, err := BuildPromotionReport(ReportInput{Root: root, Candidate: candidate, Assembled: assembled, AssembledAt: injectedAssemblyInstant, EnvironmentClass: testEnvironmentClass})
 	if err != nil {
 		t.Fatalf("BuildPromotionReport: %v", err)

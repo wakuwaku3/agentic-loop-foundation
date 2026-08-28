@@ -25,9 +25,8 @@ IaC, local release gates, provider-neutral Codex/Claude/opencode contracts, and
 signed side-by-side Runner update primitives. Real Preview deployment and every
 affected Provider exercise remain mandatory before Stable promotion.
 
-Start with [the product definition](docs/product/definition.md), [the current
-user-facing specification](docs/product/user-facing-spec.md), and the
-[implementation roadmap](docs/architecture/roadmap.md). Operators should use
+Start with [the product definition](docs/product/definition.md) and [the current
+user-facing specification](docs/product/user-facing-spec.md). Operators should use
 the runbooks under `docs/operations/`; neither GitHub Issues nor pull requests
 are the v2 product queue.
 

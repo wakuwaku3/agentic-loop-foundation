@@ -30,7 +30,7 @@ import (
 // CURRENT MEASUREMENT, 2026-08-26 (V2-078): there is no delivery path at all,
 // and the claim is gone with it. Grant.Apply and ProviderClient.Grant were
 // deleted (dp-v2-078 route (b)) because the child's environment is built
-// solely from the approved provider-preflight record's environment.base_names
+// solely from the runtime invocation policy's environment allowlist
 // and handed to a supervisor that REPLACES the parent environment. The
 // authorisation mechanism below -- Permit under an effective stop, a non-zero
 // and matching fencing token, the per-provider name allowlist, single use and

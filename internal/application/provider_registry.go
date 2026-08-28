@@ -35,7 +35,7 @@ package application
 //     and no numeric runaway threshold appears anywhere in it. Reaching a
 //     threshold is a stop for inspection, never a success, never a failure and
 //     never a billing event; the numbers stay in the owner-approved,
-//     digest-bound provider-preflight record, which this surface names and
+//     runner-session invocation policy, which this surface names and
 //     does not copy (dp-v2-067 d6).
 //
 //  4. It is not a single connected flag. Authorization and authentication are
@@ -101,13 +101,10 @@ const MaxProviderAssignments = 24
 // registry to the shared accessor (dp-v2-067 d11).
 const ProviderConcurrencyDesignCeiling = 20
 
-// ProviderStandingAuthorizationRef is the id of the in-repository standing
-// authorization record (.agents/v2/packets/provider-standing-authorization
-// .json, kind provider-standing-authorization). It is a record id, not a
-// credential and not a person: the record's approver is an email address and
-// is deliberately never read into this package, never carried into a response
-// and never written to a log line.
-const ProviderStandingAuthorizationRef = "psa-foundation-001"
+// ProviderSessionAuthorizationRef identifies the direct runner session in
+// which the operator selected and authenticated a provider. Authorization is
+// runtime state; it is not persisted as a repository evidence file.
+const ProviderSessionAuthorizationRef = "runner-session"
 
 // ProviderRunawayScope names who owns the runaway detector. It is the local
 // Runner machine: the ledger and the CLIs live there, so the control plane
@@ -118,13 +115,8 @@ const ProviderRunawayScope = "runner-local"
 // copying any of them. Copying a safety threshold into a read model would
 // create a second copy that can silently disagree with the approved one.
 //
-// Recorded limitation: this names the approved standing authorization by id
-// and the per-exercise record by kind and location rather than naming one
-// provider-preflight record id, because the control plane cannot know which
-// record a Runner invoked under -- the record and the ledger are both on the
-// Runner machine (the V2-062 boundary), and learning the id would mean
-// widening provider_observation past the three fields V2-067 A10 closes it to.
-const ProviderRunawayThresholdsDeclaredIn = "psa-foundation-001 and the provider-preflight record under .agents/v2/provider-preflight/ that authorised the invocation"
+// The concrete limits and counters remain runner-local runtime state.
+const ProviderRunawayThresholdsDeclaredIn = "runner session invocation policy and external invocation ledger"
 
 // ---------------------------------------------------------------------------
 // Identity: a closed set of three names, pinned twice and independently
@@ -133,10 +125,9 @@ const ProviderRunawayThresholdsDeclaredIn = "psa-foundation-001 and the provider
 // ProviderName is the identity of a Provider, and it is the adapter name
 // alone. Identity is not name plus account: the subscription set is one
 // account per CLI, internal/runner.CostLedger already keys on the name,
-// contracts/schemas/provider-preflight.json keys provider.name, and
-// contracts/schemas/provider-standing-authorization.json constrains providers
-// to exactly this enum -- so keying on the name joins this registry to every
-// record that already exists with no mapping table. Adding an account
+// the runtime invocation policy keys provider identity by name, so keying on
+// the name joins this registry to runner observations with no mapping table.
+// Adding an account
 // discriminator would mean moving owner identity into a read model, which is
 // the class of value this repository keeps out of its schemas.
 //
@@ -167,8 +158,7 @@ func (p ProviderName) Valid() bool {
 }
 
 // declaredProviders is the registry's own name table in its documented order:
-// the order contracts/schemas/provider-standing-authorization.json declares
-// its enum in, and the order the standing authorization record lists. The
+// the order exposed by the runtime provider registry. The
 // order is fixed so the response is byte-identical across repeated calls.
 var declaredProviders = []ProviderName{ProviderCodex, ProviderClaude, ProviderOpenCode}
 
@@ -183,15 +173,15 @@ func DeclaredProviders() []ProviderName {
 // owner has authorised" are two different facts that happen to coincide today,
 // and a fourth declared Provider with no authorization must show up as
 // authorized false rather than inherit an approval nobody gave.
-var standingAuthorizedProviders = []ProviderName{ProviderCodex, ProviderClaude, ProviderOpenCode}
+var sessionAuthorizedProviders = []ProviderName{ProviderCodex, ProviderClaude, ProviderOpenCode}
 
 // providerAuthorization reports the owner's standing authorization for one
 // Provider. It returns the record id and never anything else from the record:
 // not the approver, not the approval instant, not the scope text.
 func providerAuthorization(name ProviderName) (bool, string) {
-	for _, authorized := range standingAuthorizedProviders {
+	for _, authorized := range sessionAuthorizedProviders {
 		if authorized == name {
-			return true, ProviderStandingAuthorizationRef
+			return true, ProviderSessionAuthorizationRef
 		}
 	}
 	return false, ""

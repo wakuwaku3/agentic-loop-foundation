@@ -45,13 +45,12 @@ type JustifiedEdge struct {
 }
 
 // JustifiedEdges holds every declared edge that no derivation source
-// produces. All three are contract-file reads: the depended-on component
+// produces. Both are contract-file reads: the depended-on component
 // owns contract files this component parses at test time, which is already
 // expressed in contract_dependencies but is not a Go import, not a test
 // import and not a check-target relation.
 var JustifiedEdges = []JustifiedEdge{
 	{From: "internal-contracts", To: "contracts", Reason: "contract-file read: internal/contracts parses contracts/** as data, expressed in contract_dependencies, never imported"},
-	{From: "task-ledger", To: "contracts", Reason: "contract-file read: the ledger validates .agents/** against contracts/schemas/*.json, expressed in contract_dependencies, never imported"},
 	{From: "release", To: "contracts", Reason: "contract-file read: internal/release reads contracts/release-contract/** and contracts/schemas/release-contract.json, expressed in contract_dependencies, never imported"},
 }
 

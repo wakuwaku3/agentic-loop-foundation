@@ -44,8 +44,6 @@
 | D36 | CIはcomponent／contract差分の影響閉包だけを実行しhash evidenceを再利用 | feedback短縮と境界品質を両立 | [Validation](../validation.md) |
 | D37 | Stable昇格前のPreview全capability実証は選択的CIと分離して常に行う | 外部統合と境界定義の漏れを検出 | [Validation](../validation.md) |
 | D38 | v2はmain由来の通常branchを白紙化し、checkpointを直接積んで最後に一括merge | ゼロベース開発と追跡可能な置換を両立 | [Migration](../roadmap.md) |
-| D39 | agent引き継ぎの正本はversion管理されたtask ledger／work packet／evidence | token枯渇やagent交代から再開可能にする | [Migration](../roadmap.md) |
-| D40 | Solは重要判断、Terraは詳細設計、Lunaは限定実装を担い、永続packetでhandoffする | 難易度に応じてmodel費用を配分しcontext汚染を防ぐ | [Orchestration](../orchestration.md) |
 
 ## Revisit trigger
 

@@ -122,14 +122,14 @@ func (f *FakeInvocationRunner) CallCount() int {
 // ErrSupervisedInvocationRunnerIncomplete is returned by Run (and starts no
 // process) whenever any required dependency is missing. There is no
 // exported constructor or field combination that lets a caller reach the
-// exec step without a CostLedger and an approved provider-preflight record
+// exec step without a CostLedger and a runtime invocation policy
 // (dp-v2-017 B4): every field below is required, and Run checks all of them
 // before doing anything else.
 var ErrSupervisedInvocationRunnerIncomplete = errors.New("supervised invocation runner dependencies are incomplete")
 
 // ErrInvocationWorkingDirectoryUnusable is returned by
 // SupervisedInvocationRunner.Run -- with no process started, no
-// provider-preflight record loaded and no ledger reservation debited -- when
+// invocation policy accepted and no ledger reservation debited -- when
 // the working directory the Invocation declares cannot be used as-is
 // (V2-077).
 //
@@ -157,7 +157,7 @@ var ErrInvocationWorkingDirectoryUnusable = errors.New("supervised invocation ru
 
 // ErrInvocationEnvironmentGrantUndeliverable is returned by
 // SupervisedInvocationRunner.Run -- with no process started and no ledger
-// reservation debited -- when the approved provider-preflight record declares
+// reservation debited -- when the runtime invocation policy declares
 // a non-empty environment.granted_names (V2-078, dp-v2-078 d3).
 //
 // The runner builds the child's environment solely from the record's
@@ -181,13 +181,13 @@ var ErrInvocationWorkingDirectoryUnusable = errors.New("supervised invocation ru
 // charged at worst case forever (dp-v2-017 d9). When a delivery path is
 // built, in the shape dp-v2-078 d7 names, whoever builds it deletes this
 // refusal in the same change.
-var ErrInvocationEnvironmentGrantUndeliverable = errors.New("supervised invocation runner: the approved provider-preflight record declares environment names the runner has no channel to deliver; refusing rather than running the child with a silently narrower environment")
+var ErrInvocationEnvironmentGrantUndeliverable = errors.New("supervised invocation runner: the runtime invocation policy declares environment names the runner has no channel to deliver; refusing rather than running the child with a silently narrower environment")
 
 // validateInvocationWorkingDirectory implements the five fail-closed
 // properties named on ErrInvocationWorkingDirectoryUnusable, plus the
 // confinement containment clause. It touches nothing and starts nothing: it
 // only reads directory metadata, so it is safe to run before a
-// provider-preflight record is loaded and before a ledger reservation is
+// runtime invocation policy is accepted and before a ledger reservation is
 // debited.
 func validateInvocationWorkingDirectory(dir string, confine *NamespaceConfinement) error {
 	if dir == "" {
@@ -245,7 +245,7 @@ func directoryFlagArgument(argv []string) (flag string, value string, found bool
 // a real provider.Invocation through ProcessSupervisor (the package's only
 // other reference to that type, dp-v2-017 B4/TestProcessSupervisorReferenced
 // ExactlyOnceInProviderExecutionPath) after first debiting a CostLedger
-// reservation against a freshly-loaded, approved provider-preflight record
+// reservation against the active runtime invocation policy
 // (dp-v2-017 d1). The order inside Run is strictly: (1) refuse if any
 // dependency is nil/empty, and refuse if the Invocation's declared working
 // directory is unusable (V2-077, see ErrInvocationWorkingDirectoryUnusable);
@@ -268,13 +268,9 @@ type SupervisedInvocationRunner struct {
 	Supervisor ProcessSupervisor
 	Log        *BoundedLog
 	Ledger     *CostLedger
-	// RepoRoot is the absolute path to the repository root (needed to
-	// locate contracts/schemas/provider-preflight.json and to resolve
-	// approval.subject_path).
-	RepoRoot string
-	// RecordPath is the absolute or RepoRoot-relative path to the approved
-	// provider-preflight record for this task.
-	RecordPath string
+	// Policy is supplied directly by the active Runner session. No tracked
+	// handoff, preflight or evidence file participates in invocation.
+	Policy InvocationPolicy
 	// Purpose names, for the ledger and for evidence, which named
 	// invocation (e.g. "V2-017-I1-happy-journey") this Run call is.
 	Purpose string
@@ -542,7 +538,7 @@ func wasSignaled(err error) bool {
 // Run implements InvocationRunner for a real, supervised claude CLI
 // process. See the type doc comment for the exact step order.
 func (r SupervisedInvocationRunner) Run(ctx context.Context, inv provider.Invocation) ([]byte, error) {
-	if r.Ledger == nil || r.Log == nil || r.RepoRoot == "" || r.RecordPath == "" || r.Purpose == "" {
+	if r.Ledger == nil || r.Log == nil || r.Policy.ProviderName == "" || r.Purpose == "" {
 		return nil, ErrSupervisedInvocationRunnerIncomplete
 	}
 	if len(inv.Argv) == 0 || inv.Argv[0] == "" {
@@ -561,10 +557,7 @@ func (r SupervisedInvocationRunner) Run(ctx context.Context, inv provider.Invoca
 		return nil, fmt.Errorf("%w: argv carries the directory flag %s with %q while the invocation declares %q; the two are one string by construction, so a disagreement is refused rather than resolved", ErrInvocationWorkingDirectoryUnusable, flag, value, inv.WorkingDirectory)
 	}
 
-	record, err := LoadPreflightRecord(r.RepoRoot, r.RecordPath)
-	if err != nil {
-		return nil, err
-	}
+	record := r.Policy
 	// V2-078: a declared grant the runner cannot deliver stops the
 	// invocation here, after the record is loaded (it is the record that
 	// declares it) and strictly before Ledger.Reserve (a reservation
@@ -667,7 +660,7 @@ func (r SupervisedInvocationRunner) Run(ctx context.Context, inv provider.Invoca
 // (dp-v2-078 route (b)). This type composes an adapter with an
 // InvocationRunner seam and contributes nothing to the child's environment;
 // the child's environment has exactly one authority, the approved
-// provider-preflight record that SupervisedInvocationRunner.Run loads.
+// runtime invocation policy that SupervisedInvocationRunner.Run receives.
 type ProviderClient struct {
 	Adapter provider.Adapter
 	Runner  InvocationRunner

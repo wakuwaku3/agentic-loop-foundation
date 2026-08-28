@@ -3,15 +3,12 @@ package runner
 import (
 	"bytes"
 	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"time"
-
-	"github.com/takushi/agentic-loop-foundation/v2/internal/contracts"
 )
 
 // CostAnomalyThresholdUSD is the single-invocation runaway-anomaly signal
@@ -36,113 +33,33 @@ var (
 	ErrCostLedgerOverBudget         = errors.New("cost ledger: reservation would exceed max_invocations or max_total_cost_usd")
 )
 
-// CostLimits mirrors a provider-preflight record's limits block. Reserve
-// always reads these from the freshly-loaded approved record, never from a
-// Go constant (dp-v2-017 d2).
+// CostLimits is the runtime invocation budget supplied by the active session.
 type CostLimits struct {
 	MaxInvocations          int
 	MaxTotalCostUSD         float64
 	WorstCaseReservationUSD float64
 }
 
-// PreflightRecord is the subset of an approved provider-preflight record
-// CostLedger.Reserve needs. LoadPreflightRecord produces it fresh from disk
-// on every call; nothing here is ever cached across a Reserve call, so an
-// edit to the approved record after the fact is caught before the next
-// invocation is admitted (dp-v2-017 d4).
-type PreflightRecord struct {
-	Path                 string
+// InvocationPolicy is the bounded provider authority supplied directly to a
+// Runner session. It is intentionally not loaded from a tracked handoff file.
+type InvocationPolicy struct {
 	ProviderName         string
 	ExecutablePath       string
 	Limits               CostLimits
 	LedgerPath           string
 	EnvironmentBaseNames []string
 	EnvironmentGranted   []string
-	Digest               string // sha256 (hex) of the record file's exact bytes.
+	Digest               string
 }
 
-// LoadPreflightRecord reads recordPath, validates it against
-// contracts/schemas/provider-preflight.json under repoRoot (which also runs
-// validateProviderPreflight's semantic rules, dispatched by contracts.Validate
-// on kind "provider-preflight"), verifies the record's own filename/task_id
-// and approval.subject_digest/subject_path binding the same way
-// contracts.CheckProviderPreflightLedger does for records in the canonical
-// directory, and returns the fields Reserve needs plus the record's sha256
-// digest. It performs no caching: call it again immediately before every
-// Reserve so a record edited after the fact is never trusted from memory.
-func LoadPreflightRecord(repoRoot, recordPath string) (PreflightRecord, error) {
-	schemaPath := filepath.Join(repoRoot, "contracts", "schemas", "provider-preflight.json")
-	schema, err := os.ReadFile(schemaPath)
-	if err != nil {
-		return PreflightRecord{}, fmt.Errorf("%w: reading schema: %v", ErrCostLedgerPreflightInvalid, err)
+func NewInvocationPolicy(providerName, executablePath, ledgerPath string, limits CostLimits, baseNames []string) (InvocationPolicy, error) {
+	if providerName == "" || !filepath.IsAbs(executablePath) || !filepath.IsAbs(ledgerPath) || limits.MaxInvocations <= 0 || limits.MaxTotalCostUSD <= 0 || limits.WorstCaseReservationUSD <= 0 || len(baseNames) == 0 {
+		return InvocationPolicy{}, ErrCostLedgerPreflightInvalid
 	}
-	raw, err := os.ReadFile(recordPath)
-	if err != nil {
-		return PreflightRecord{}, fmt.Errorf("%w: reading record: %v", ErrCostLedgerPreflightInvalid, err)
-	}
-	if err := contracts.Validate(schema, raw, contracts.ResolveSchemaRef(filepath.Join(repoRoot, "contracts", "schemas"))); err != nil {
-		return PreflightRecord{}, fmt.Errorf("%w: schema: %v", ErrCostLedgerPreflightInvalid, err)
-	}
-	var parsed struct {
-		TaskID   string `json:"task_id"`
-		Provider struct {
-			Name           string `json:"name"`
-			ExecutablePath string `json:"executable_path"`
-		} `json:"provider"`
-		Limits struct {
-			MaxInvocations          int     `json:"max_invocations"`
-			MaxTotalCostUSD         float64 `json:"max_total_cost_usd"`
-			WorstCaseReservationUSD float64 `json:"worst_case_reservation_usd"`
-			LedgerPath              string  `json:"ledger_path"`
-		} `json:"limits"`
-		Environment struct {
-			BaseNames    []string `json:"base_names"`
-			GrantedNames []string `json:"granted_names"`
-		} `json:"environment"`
-		Approval struct {
-			SubjectPath   string `json:"subject_path"`
-			SubjectDigest string `json:"subject_digest"`
-		} `json:"approval"`
-	}
-	if err := json.Unmarshal(raw, &parsed); err != nil {
-		return PreflightRecord{}, fmt.Errorf("%w: %v", ErrCostLedgerPreflightInvalid, err)
-	}
-	base := filepath.Base(recordPath)
-	if parsed.TaskID == "" || len(base) < len(parsed.TaskID) || base[:len(parsed.TaskID)] != parsed.TaskID {
-		return PreflightRecord{}, fmt.Errorf("%w: filename %q does not begin with task_id %q", ErrCostLedgerPreflightInvalid, base, parsed.TaskID)
-	}
-	subjectPath := filepath.Join(repoRoot, parsed.Approval.SubjectPath)
-	subjectBytes, err := os.ReadFile(subjectPath)
-	if err != nil {
-		return PreflightRecord{}, fmt.Errorf("%w: reading approval.subject_path %s: %v", ErrCostLedgerPreflightInvalid, subjectPath, err)
-	}
-	subjectDigest := fmt.Sprintf("%x", sha256.Sum256(subjectBytes))
-	if subjectDigest != parsed.Approval.SubjectDigest {
-		return PreflightRecord{}, fmt.Errorf("%w: approval.subject_digest does not match sha256 of %s", ErrCostLedgerPreflightInvalid, subjectPath)
-	}
-	// Repository-wide invariant: every provider-live evidence entry already
-	// recorded must be backed by an approved, digest-bound record whose
-	// approval precedes its observation. Re-checked on every load so a
-	// tampered evidence index or a stale/duplicated record is caught before
-	// the next invocation, not just at commit time.
-	if err := contracts.CheckProviderPreflightLedger(repoRoot); err != nil {
-		return PreflightRecord{}, fmt.Errorf("%w: repository-wide ledger check: %v", ErrCostLedgerPreflightInvalid, err)
-	}
-	sum := sha256.Sum256(raw)
-	return PreflightRecord{
-		Path:           recordPath,
-		ProviderName:   parsed.Provider.Name,
-		ExecutablePath: parsed.Provider.ExecutablePath,
-		Limits: CostLimits{
-			MaxInvocations:          parsed.Limits.MaxInvocations,
-			MaxTotalCostUSD:         parsed.Limits.MaxTotalCostUSD,
-			WorstCaseReservationUSD: parsed.Limits.WorstCaseReservationUSD,
-		},
-		LedgerPath:           parsed.Limits.LedgerPath,
-		EnvironmentBaseNames: append([]string(nil), parsed.Environment.BaseNames...),
-		EnvironmentGranted:   append([]string(nil), parsed.Environment.GrantedNames...),
-		Digest:               hex.EncodeToString(sum[:]),
-	}, nil
+	p := InvocationPolicy{ProviderName: providerName, ExecutablePath: executablePath, LedgerPath: ledgerPath, Limits: limits, EnvironmentBaseNames: append([]string(nil), baseNames...)}
+	raw, _ := json.Marshal(p)
+	p.Digest = fmt.Sprintf("%x", sha256.Sum256(raw))
+	return p, nil
 }
 
 // LedgerEntry is one accounted invocation. State is "reserved" until TrueUp
@@ -210,7 +127,7 @@ type CostLedger struct {
 	TaskID   string
 }
 
-func (c *CostLedger) readOrInit(record PreflightRecord) (ledgerFile, error) {
+func (c *CostLedger) readOrInit(record InvocationPolicy) (ledgerFile, error) {
 	b, err := os.ReadFile(c.Path)
 	if errors.Is(err, os.ErrNotExist) {
 		return ledgerFile{
@@ -277,12 +194,12 @@ func writeLedgerAtomic(path string, lf ledgerFile) error {
 
 // Reserve admits one invocation's worth of worst-case budget before any
 // process may start (dp-v2-017 d1 step 2, d2, d3). record must have just
-// been loaded fresh by LoadPreflightRecord. expectedArgv0 is the adapter's
+// was supplied directly by the active session. expectedArgv0 is the adapter's
 // own argv[0] (e.g. "claude"); Reserve refuses unless
 // filepath.Base(record.ExecutablePath) == expectedArgv0. On success it
 // returns the new entry's sequence number, having already fsynced the
 // updated ledger file to disk.
-func (c *CostLedger) Reserve(record PreflightRecord, expectedArgv0, purpose string, now time.Time) (int, error) {
+func (c *CostLedger) Reserve(record InvocationPolicy, expectedArgv0, purpose string, now time.Time) (int, error) {
 	if c == nil || c.Path == "" || c.Provider == "" || c.TaskID == "" {
 		return 0, errors.New("cost ledger is not configured")
 	}

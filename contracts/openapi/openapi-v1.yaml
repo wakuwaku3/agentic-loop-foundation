@@ -1149,10 +1149,9 @@ components:
       description: |
         The runner-local runaway detector, reported by state alone. There is
         deliberately no number in this object. The thresholds live in the
-        owner-approved, digest-bound provider-preflight record that
-        thresholds_declared_in names; republishing them here would create a
-        second copy of a safety threshold that can silently disagree with the
-        approved one.
+        runner session invocation policy and its external invocation ledger;
+        thresholds_declared_in names that runtime boundary. Republishing the
+        numbers here would create a second copy that can silently disagree.
         state is within-thresholds only when a fresh observation reported no
         stop. It is unknown when nothing has been observed, and also when the
         newest observation reporting no stop is older than the declared
@@ -1160,7 +1159,7 @@ components:
         not a statement about now. A stop for inspection is reported whatever
         its age: a stop that aged out into silence would be a stop nobody was
         told about.
-      properties: {scope: {type: string, description: 'who owns the detector; runner-local, because the ledger and the CLIs are on the Runner machine and the control plane cannot read them'}, state: {type: string, enum: [within-thresholds, stopped-for-inspection, unknown]}, thresholds_declared_in: {type: string, description: 'names the approved record the thresholds live in and copies none of them'}}
+      properties: {scope: {type: string, description: 'who owns the detector; runner-local, because the ledger and the CLIs are on the Runner machine and the control plane cannot read them'}, state: {type: string, enum: [within-thresholds, stopped-for-inspection, unknown]}, thresholds_declared_in: {type: string, description: 'names the runtime policy and external ledger boundary and copies no thresholds'}}
     ProviderConcurrency:
       type: object
       additionalProperties: false

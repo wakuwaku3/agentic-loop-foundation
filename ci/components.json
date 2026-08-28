@@ -87,7 +87,6 @@
       "dependencies": [
         "application",
         "domain",
-        "internal-contracts",
         "provider",
         "update"
       ],
@@ -299,8 +298,7 @@
         "provider",
         "release",
         "store-firestore",
-        "store-memory",
-        "update"
+        "store-memory"
       ],
       "check": {
         "runner": "make",
@@ -423,31 +421,6 @@
       "check": {
         "runner": "make",
         "target": "component-tooling"
-      }
-    },
-    {
-      "id": "task-ledger",
-      "roots": [
-        ".agents/**"
-      ],
-      "public_contracts": [],
-      "contract_dependencies": [
-        "contracts/schemas/task-state.json",
-        "contracts/schemas/task-state-transition.json",
-        "contracts/schemas/task-state-retry.json",
-        "contracts/schemas/evidence-index.json",
-        "contracts/schemas/historical-evidence-index.json",
-        "contracts/schemas/evidence.json"
-      ],
-      "dependencies": [
-        "contracts"
-      ],
-      "verification_dependencies": [
-        "internal-contracts"
-      ],
-      "check": {
-        "runner": "make",
-        "target": "component-contracts"
       }
     }
   ]

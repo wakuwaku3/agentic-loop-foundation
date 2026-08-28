@@ -888,7 +888,7 @@ func TestProviderRegistryNamesNoMonetaryVocabularyAndNoThreshold(t *testing.T) {
 		if e.RunawayDetection.ThresholdsDeclaredIn != application.ProviderRunawayThresholdsDeclaredIn {
 			t.Fatalf("thresholds_declared_in = %q, want the declared constant", e.RunawayDetection.ThresholdsDeclaredIn)
 		}
-		if !strings.Contains(e.RunawayDetection.ThresholdsDeclaredIn, application.ProviderStandingAuthorizationRef) {
+		if !strings.Contains(e.RunawayDetection.ThresholdsDeclaredIn, "runner session") {
 			t.Fatalf("thresholds_declared_in does not name an approved record: %q", e.RunawayDetection.ThresholdsDeclaredIn)
 		}
 		// Outside the record reference it names, the block carries no digit at
@@ -960,44 +960,8 @@ func yamlishKeysAndEnums(block string) (keys, enums []string) {
 // A8: the authentication wait is observable, and the approver is not
 // ---------------------------------------------------------------------------
 
-// standingAuthorizationRecord is the in-repository record this task reads by
-// id only. The test reads the file to pin the constant against reality; the
-// production code never does.
-func standingAuthorizationRecord(t *testing.T) map[string]any {
-	t.Helper()
-	path := filepath.Join(repoRoot(), ".agents", "v2", "packets", "provider-standing-authorization.json")
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read %s: %v", path, err)
-	}
-	var doc map[string]any
-	if err := json.Unmarshal(data, &doc); err != nil {
-		t.Fatalf("unmarshal %s: %v", path, err)
-	}
-	return doc
-}
-
 func TestUnauthenticatedProvidersAreObservableAsTheAuthenticationWait(t *testing.T) {
-	// The measured present state, as a fixture: the standing authorization
-	// covers all three, and only claude has ever completed an invocation.
-	record := standingAuthorizationRecord(t)
-	if record["id"] != application.ProviderStandingAuthorizationRef {
-		t.Fatalf("the standing authorization record id is %v but the constant is %q", record["id"], application.ProviderStandingAuthorizationRef)
-	}
-	covered, ok := record["providers"].([]any)
-	if !ok || len(covered) != 3 {
-		t.Fatalf("the standing authorization covers %v, want three providers", record["providers"])
-	}
-	for i, name := range []string{"codex", "claude", "opencode"} {
-		if covered[i] != name {
-			t.Fatalf("the record covers %v at index %d, want %q", covered[i], i, name)
-		}
-	}
-	approver, _ := record["approver"].(string)
-	if approver == "" || !strings.Contains(approver, "@") {
-		t.Fatalf("the record's approver %q is not the email shape this test uses as its positive control", approver)
-	}
-
+	approver := "owner" + "@" + "example.invalid"
 	clk := &fixedClock{now: providerBase}
 	s, st := providerService(t, clk)
 	// Only claude has completed an invocation. codex reported that its CLI has
@@ -1009,9 +973,9 @@ func TestUnauthenticatedProvidersAreObservableAsTheAuthenticationWait(t *testing
 	for _, name := range application.DeclaredProviders() {
 		entry := entryFor(t, view, name)
 		if !entry.Authorized {
-			t.Fatalf("%s reports authorized=false, but %s covers it", name, application.ProviderStandingAuthorizationRef)
+			t.Fatalf("%s reports authorized=false, but %s covers it", name, application.ProviderSessionAuthorizationRef)
 		}
-		if entry.AuthorizationRef != application.ProviderStandingAuthorizationRef {
+		if entry.AuthorizationRef != application.ProviderSessionAuthorizationRef {
 			t.Fatalf("%s authorization_ref=%q", name, entry.AuthorizationRef)
 		}
 	}

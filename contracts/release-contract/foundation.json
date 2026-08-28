@@ -9,76 +9,62 @@
     {
       "id": "cap-repository-registration",
       "name": "Repositoryを登録する",
-      "status": "preview",
-      "evidence_ids": []
+      "status": "preview"
     },
     {
       "id": "cap-requirement-intake",
       "name": "課題を登録する",
-      "status": "preview",
-      "evidence_ids": [
-        "ev-v2-022-release-live-dogfood"
-      ]
+      "status": "preview"
     },
     {
       "id": "cap-backlog-visibility",
       "name": "Backlogを見る",
-      "status": "preview",
-      "evidence_ids": []
+      "status": "preview"
     },
     {
       "id": "cap-autonomous-resolution",
       "name": "問題解決を自律実行する",
-      "status": "preview",
-      "evidence_ids": []
+      "status": "preview"
     },
     {
       "id": "cap-human-input-request",
       "name": "人間の入力を求める",
-      "status": "preview",
-      "evidence_ids": []
+      "status": "preview"
     },
     {
       "id": "cap-preview-operation",
       "name": "Previewを運用する",
-      "status": "preview",
-      "evidence_ids": []
+      "status": "preview"
     },
     {
       "id": "cap-stable-promotion",
       "name": "Stableへ昇格する",
-      "status": "preview",
-      "evidence_ids": []
+      "status": "preview"
     },
     {
       "id": "cap-loop-control",
       "name": "ループを制御する",
-      "status": "preview",
-      "evidence_ids": []
+      "status": "preview"
     },
     {
       "id": "cap-loop-self-update",
       "name": "ループ自身を更新する",
-      "status": "preview",
-      "evidence_ids": []
+      "status": "preview"
     },
     {
       "id": "cap-shared-resource-allocation",
       "name": "Backlogへ共有資源を配分する",
-      "status": "preview",
-      "evidence_ids": []
+      "status": "preview"
     },
     {
       "id": "cap-provider-operation",
       "name": "AI Providerを利用・切替する",
-      "status": "preview",
-      "evidence_ids": []
+      "status": "preview"
     },
     {
       "id": "cap-user-documentation",
       "name": "利用者文書を読む",
-      "status": "preview",
-      "evidence_ids": []
+      "status": "preview"
     }
   ],
   "verification": [

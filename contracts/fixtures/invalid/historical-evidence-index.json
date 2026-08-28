@@ -1,1 +1,0 @@
-{"schema_version":"v1","kind":"historical-evidence-index","release_eligible":false,"entries":[{"id":"ev-v2-000","task_id":"V2-000","source_path":".agents/v2/historical/V2-000-evidence.json","source_schema":"evidence-v1","sha256":"0000000000000000000000000000000000000000000000000000000000000000","classification":"historical-non-release","release_eligible":false}]}

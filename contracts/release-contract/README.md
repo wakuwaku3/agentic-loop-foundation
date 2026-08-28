@@ -9,8 +9,8 @@ joined by `contract_ref` and a shared `release` string; they are validated and
 cross-checked together, they are never merged into one document.
 
 A `release` value ending in `-baseline` (for example `0.1.0-baseline`) marks a
-release that has not been exercised in Preview: every capability in that
-release is `status: "preview"` with an empty `evidence_ids`. See
+release that has not been promoted from Preview: every capability in that
+release is `status: "preview"`. See
 [docs/architecture/release-contract.md](../../docs/architecture/release-contract.md)
 for what the fields mean and what promotion requires; this file does not
 restate it.

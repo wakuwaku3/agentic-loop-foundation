@@ -122,7 +122,7 @@ func receiverTypeName(fn *ast.FuncDecl) string {
 func TestProviderIdentityIsExactlyThreeAdapterNames(t *testing.T) {
 	// Half one: the runtime values are exactly the three declared names, in
 	// the documented order the standing authorization record and
-	// contracts/schemas/provider-standing-authorization.json's enum use.
+	// the runtime provider registry's enum use.
 	want := []string{"codex", "claude", "opencode"}
 	got := []string{provider.CodexAdapter{}.Name(), provider.ClaudeAdapter{}.Name(), provider.OpenCodeAdapter{}.Name()}
 	if !reflect.DeepEqual(got, want) {

@@ -1,1 +1,0 @@
-{"schema_version":"v1","id":"bad","kind":"work-order","created_at":"not-date","correlation_id":"c","problem_brief_ref":"p","design_packet_ref":"d","observable_outcome":"x","allowed_paths":["x"],"prohibited_paths":[],"contracts_changed":[],"acceptance_criteria":["x"],"validation":{"argv":["make"],"working_directory":".","timeout_seconds":0},"constraints":[],"failure_stop":true}

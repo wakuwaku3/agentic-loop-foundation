@@ -1,9 +1,0 @@
-{
-  "$schema": "https://json-schema.org/draft/2020-12/schema", "$id": "https://agentic-loop.dev/schemas/design-packet-v1.json", "title": "Design packet",
-  "type": "object", "additionalProperties": false, "required": ["schema_version", "id", "kind", "created_at", "correlation_id", "problem_brief_id", "decisions", "components", "verification"],
-  "properties": {
-    "schema_version": {"const": "v1"}, "id": {"type": "string", "minLength": 1}, "kind": {"const": "design-packet"}, "created_at": {"type": "string", "format": "date-time"}, "correlation_id": {"type": "string", "minLength": 1}, "problem_brief_id": {"type": "string", "minLength": 1},
-    "decisions": {"type": "array", "minItems": 1, "items": {"type": "object", "additionalProperties": false, "required": ["id", "decision", "rationale"], "properties": {"id": {"type": "string"}, "decision": {"type": "string", "minLength": 1}, "rationale": {"type": "string", "minLength": 1}}}},
-    "components": {"type": "array", "items": {"type": "string", "minLength": 1}}, "verification": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}}, "risks": {"type": "array", "items": {"type": "string"}}
-  }
-}

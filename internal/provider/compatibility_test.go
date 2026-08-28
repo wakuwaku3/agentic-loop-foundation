@@ -590,15 +590,12 @@ func TestTheAuthorityTableIsRecordedVerbatimInTheDocumentation(t *testing.T) {
 	for _, phrase := range []string{
 		"the source-declared interval in `internal/provider`",
 		"the Loop's own release identity read through the existing `ReleaseObserver`",
-		"the owner-approved, digest-bound provider-preflight record",
-		"nothing in this repository; only a live exercise, and V2-028 owns it",
+		"the runner session invocation policy",
+		"nothing in this repository; only a direct live exercise",
 	} {
 		if !strings.Contains(text, phrase) {
 			t.Fatalf("docs/operations/provider-registry.md does not carry the authority row %q", phrase)
 		}
-	}
-	if !strings.Contains(text, "V2-028") {
-		t.Fatal("the document does not attribute the live half to V2-028")
 	}
 	t.Log("all four authority rows, including the row that attributes the truth of a declared interval to a live exercise only, are present in docs/operations/provider-registry.md")
 }

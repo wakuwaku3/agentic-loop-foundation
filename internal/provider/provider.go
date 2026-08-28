@@ -94,7 +94,7 @@ type Request struct {
 	// would take a Provider out of service on an absence of information.
 	//
 	// The authority for the value is the owner-approved, digest-bound
-	// provider-preflight record's own --version measurement (dp-v2-074 d2 row
+	// runtime invocation policy's own --version measurement (dp-v2-074 d2 row
 	// c), never a version string a Provider printed inside a response envelope,
 	// and never a Runner's self-report.
 	//
@@ -198,7 +198,7 @@ type Provider interface {
 // value it carried ever reached a process.
 //
 // V2-078 removed it (dp-v2-078 route (b)): rebuilding the child's environment
-// from the approved provider-preflight record is the stronger guarantee,
+// from the runtime invocation policy is the stronger guarantee,
 // because the runner's supervisor REPLACES the parent environment rather than
 // extending it, so the record is already the complete and exclusive
 // description of what the child receives. Deleting the field makes that a

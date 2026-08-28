@@ -2,11 +2,10 @@
 
 `internal/release` はprovider-neutralなM5 local closureである。`CompileContract`
 はcanonical Release Contract surface（`id`、`kind`、`created_at`、
-`correlation_id`、`release`、capability毎の`name`/`status`/`evidence_ids`、
+`correlation_id`、`release`、capability毎の`name`/`status`、
 `verification`、`rollback{procedure,target}`）を`DisallowUnknownFields`で
-decodeし、drift／捏造fieldを含むcontractを拒否する。`status: "stable"`かつ
-`evidence_ids`が空のcapability宣言も拒否する。`Bundle`はcandidateをcloneして
-保持し、`Put`後の呼び出し元による書き換えを防ぐ。
+decodeし、drift／捏造fieldを含むcontractを拒否する。`Bundle`はcandidateを
+cloneして保持し、`Put`後の呼び出し元による書き換えを防ぐ。
 
 ## Bundleの7 roleとdigest framing
 
@@ -109,14 +108,14 @@ rollbackであり、`internal/release`から`internal/update`をimportするこ�
 
 doc setのどの文書も自身のdigest値を含まない。文書自身のdigestをその文書へ
 書き込むと、どのassemblyも満たせない不動点になるためである。digest値は
-in-memoryのcandidateと`.agents/v2/evidence/`のevidence recordだけに記録し、
+in-memoryのcandidateに記録し、
 `docs/preview/index.md`と`docs/stable/index.md`が持つのは
 固定形式の`Release: <value>` / `Stable release: <value>`という機械可読な
 release markerのみであり、値そのもの（digest）ではない。
 
 ## Journey・doc routing・実tree
 
-localのjourney testは、missing capability、stale evidence、documentation
+localのjourney testは、missing capability、stale verification、documentation
 drift、immutable conflict、preview promotion、monotonic rollbackを
 `internal/release/journey_test.go`のJourney 1（release segment）と
 Journey 7（local segment）で検証する。Preview実環境を実際にdeploy／破壊
@@ -128,7 +127,6 @@ anchor解決、capability anchor bijection、release marker、Preview必須
 AI documentレビューはこれらの代替にならない。
 
 実tree（repository root）に対する`AssembleFromRoot`はrole構成の健全性を
-証明するが、実contractの12 capabilityは全てevidence_idsが空であるため、
-実tree candidateはpromotion不能であるという誠実な否定結果を返す。
-Production storage／deploy adapterはこのpackageのpersistence portの外に
-留まる。
+検証する。Promotion可否はcandidateに結び付いた実行時検証結果で判定し、
+repository内の証跡ファイルには依存しない。Production storage／deploy
+adapterはこのpackageのpersistence portの外に留まる。

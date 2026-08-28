@@ -28,18 +28,7 @@ func Validate(schema, value []byte, resolver func(string) ([]byte, error)) error
 	if !ok {
 		return nil
 	}
-	switch obj["kind"] {
-	case "canonical-task-state":
-		return validateTaskState(obj)
-	case "evidence-index", "historical-evidence-index":
-		return validateEvidenceIndex(obj)
-	case "deployment-preflight":
-		return validateDeploymentPreflight(obj)
-	case "provider-preflight":
-		return validateProviderPreflight(obj)
-	case "provider-standing-authorization":
-		return validateProviderStandingAuthorization(obj)
-	}
+	_ = obj
 	return nil
 }
 

@@ -1,1 +1,39 @@
-{"schema_version":"v1","id":"cd-example-0.1.0","kind":"capability-declaration-set","created_at":"2026-08-22T00:00:00Z","correlation_id":"c-fixture-001","release":"0.1.0","contract_ref":"rc-example-0.1.0","capabilities":[{"id":"cap-example","name":"Example capability","user_action":"利用者はexample操作を行う。","observable_result":"利用者はexample結果を確認できる。","preview_exercise":"Preview環境でexample journeyを実行し結果を確認する。","external_dependencies":{"systems":["GitHub"],"providers":[],"scopes":[]},"outcome_conditions":{"success":"example操作が成功したことを観測できる","failure":"example操作が失敗したことを観測できる","rollback":"example操作前の状態へ戻せる"},"evidence_retention":{"location":".agents/v2/evidence/","retention":"rollback windowが閉じるまで保持する"},"documentation":{"preview":"docs/preview/example.md#cap-example"},"owner_surfaces":["/owner/"],"evidence_schema":"contracts/schemas/evidence.json","promotion_prerequisites":["Preview実環境でexample journeyを実行し成功すること"]}]}
+{
+  "schema_version": "v1",
+  "id": "cd-example-0.1.0",
+  "kind": "capability-declaration-set",
+  "created_at": "2026-08-22T00:00:00Z",
+  "correlation_id": "c-fixture-001",
+  "release": "0.1.0",
+  "contract_ref": "rc-example-0.1.0",
+  "capabilities": [
+    {
+      "id": "cap-example",
+      "name": "Example capability",
+      "user_action": "利用者はexample操作を行う。",
+      "observable_result": "利用者はexample結果を確認できる。",
+      "preview_exercise": "Preview環境でexample journeyを実行し結果を確認する。",
+      "external_dependencies": {
+        "systems": [
+          "GitHub"
+        ],
+        "providers": [],
+        "scopes": []
+      },
+      "outcome_conditions": {
+        "success": "example操作が成功したことを観測できる",
+        "failure": "example操作が失敗したことを観測できる",
+        "rollback": "example操作前の状態へ戻せる"
+      },
+      "documentation": {
+        "preview": "docs/preview/example.md#cap-example"
+      },
+      "owner_surfaces": [
+        "/owner/"
+      ],
+      "promotion_prerequisites": [
+        "Preview実環境でexample journeyを実行し成功すること"
+      ]
+    }
+  ]
+}

@@ -214,8 +214,8 @@ func TestEvidenceKeySensitivity(t *testing.T) {
 			}
 			before[c.ID] = k
 		}
-		if len(before) != 23 {
-			t.Fatalf("PC6: expected 23 components, got %d", len(before))
+		if len(before) != 22 {
+			t.Fatalf("PC6: expected 22 components, got %d", len(before))
 		}
 		appendByte(t, dir, "Makefile")
 		for _, c := range m.Components {

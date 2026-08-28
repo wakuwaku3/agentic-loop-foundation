@@ -1,1 +1,0 @@
-{"type":"object","additionalProperties":false,"required":["max_attempts","attempts_used","remaining"],"properties":{"max_attempts":{"type":"integer","minimum":1},"attempts_used":{"type":"integer","minimum":0},"remaining":{"type":"integer","minimum":0}}}

@@ -3,6 +3,7 @@ package runner
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -13,22 +14,45 @@ import (
 
 const multiProviderLiveGate = "AGENTIC_LOOP_LIVE_MULTI_PROVIDER"
 
+func runInvocation(ctx context.Context, invocationRunner InvocationRunner, adapter provider.Adapter, req provider.Request) ([]byte, provider.Result, error) {
+	if err := req.Validate(); err != nil {
+		return nil, provider.Result{}, err
+	}
+	inv, err := adapter.Build(req)
+	if err != nil {
+		return nil, provider.Result{}, err
+	}
+	raw, err := invocationRunner.Run(ctx, inv)
+	if err != nil {
+		return raw, provider.Result{}, err
+	}
+	result, err := adapter.Parse(raw)
+	return raw, result, err
+}
+
 func TestCodexAndOpenCodeLiveContract(t *testing.T) {
 	if os.Getenv(multiProviderLiveGate) != "1" {
 		t.Skip("Codex/OpenCode live contract is disabled")
 	}
-	repoRoot := mustRepoRoot(t)
 	cases := []struct {
-		name, version, record string
-		adapter               provider.Adapter
+		name, version, executable string
+		adapter                   provider.Adapter
 	}{
-		{"codex", "0.149.1", ".agents/v2/provider-preflight/V2-028-provider-live-codex.json", provider.CodexAdapter{}},
-		{"opencode", "1.18.18", ".agents/v2/provider-preflight/V2-028-provider-live-opencode.json", provider.OpenCodeAdapter{}},
+		{"codex", "0.149.1", "codex", provider.CodexAdapter{}},
+		{"opencode", "1.18.18", "opencode", provider.OpenCodeAdapter{}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			recordPath := filepath.Join(repoRoot, tc.record)
-			record, err := LoadPreflightRecord(repoRoot, recordPath)
+			executable, err := exec.LookPath(tc.executable)
+			if err != nil {
+				t.Fatal(err)
+			}
+			executable, err = filepath.Abs(executable)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ledgerPath := filepath.Join(t.TempDir(), "cost.json")
+			policy, err := NewInvocationPolicy(tc.name, executable, ledgerPath, CostLimits{MaxInvocations: 1, MaxTotalCostUSD: 10, WorstCaseReservationUSD: 1}, []string{"HOME", "PATH"})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -42,8 +66,8 @@ func TestCodexAndOpenCodeLiveContract(t *testing.T) {
 			}
 			runner := SupervisedInvocationRunner{
 				Supervisor: ProcessSupervisor{TermGrace: 3 * time.Second, Confine: &NamespaceConfinement{Workspace: workspace}},
-				Log:        log, RepoRoot: repoRoot, RecordPath: recordPath, Purpose: "V2-028-live-" + tc.name,
-				Ledger: &CostLedger{Path: record.LedgerPath, Provider: tc.name, TaskID: "V2-028"},
+				Log:        log, Policy: policy, Purpose: "live-" + tc.name,
+				Ledger: &CostLedger{Path: ledgerPath, Provider: tc.name, TaskID: "live-session"},
 			}
 			packet := provider.WorkPacket{Version: provider.ContractVersion, RequirementID: "req-v2-028-" + tc.name, IncrementID: "inc-v2-028-" + tc.name, RequirementSummary: "Return a short acknowledgement without using tools or reading files."}
 			request := provider.Request{OperationID: "op-v2-028-" + tc.name, Workspace: workspace, Packet: packet, CLIVersionDeclared: tc.version}

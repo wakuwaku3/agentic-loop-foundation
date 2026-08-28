@@ -36,7 +36,7 @@ package provider
 //	    release identity read through internal/application's existing
 //	    ReleaseObserver, and not a Runner's self-report;
 //	(c) what version a CLI actually is on a machine -- the owner-approved,
-//	    digest-bound provider-preflight record's provider.version, measured by
+//	    runner session invocation policy's provider version, measured by
 //	    that record's own --version verification argv, and not a version
 //	    string inside a Provider response envelope;
 //	(d) whether the declared support statement is TRUE of a real CLI --

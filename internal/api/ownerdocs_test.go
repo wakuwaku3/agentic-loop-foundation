@@ -240,7 +240,7 @@ func TestOwnerDocsRefusesEverythingOutsideTheAssembledSet(t *testing.T) {
 	for _, path := range []string{
 		"/owner/go.mod",
 		"/owner/contracts/release-contract/foundation.json",
-		"/owner/.agents/v2/evidence/index.json",
+		"/owner/.internal/records/index.json",
 		"/owner/../../../../etc/passwd",
 		"/owner/DOCS/preview/index.md",
 		"/owner/docsx/preview/index.md",

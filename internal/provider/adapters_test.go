@@ -146,7 +146,7 @@ func TestAdapterArgvIsExactlyWhatHelpDeclares(t *testing.T) {
 // follow-up. CURRENT MEASUREMENT, 2026-08-26, V2-078: that follow-up chose
 // dp-v2-078 route (b) and DELETED the field, together with Grant.Apply and
 // ProviderClient.Grant, because the runner already rebuilds the child's
-// environment from the approved provider-preflight record and hands it to a
+// environment from the runtime invocation policy and hands it to a
 // supervisor that replaces the parent environment. Invocation's exported
 // field set is now exactly {Argv, Stdin, WorkingDirectory}, all three
 // consumed by SupervisedInvocationRunner.Run, and

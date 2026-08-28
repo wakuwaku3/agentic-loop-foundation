@@ -31,6 +31,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"syscall"
@@ -78,8 +79,6 @@ func main() {
 	sessionTokenFile := flags.String("session-token-file", "", "path of a file, no wider than 0600, holding the runner session token (required for --real)")
 	maxClaims := flags.Int("max-claims", runner.MaxDriverClaims, "maximum Increments this pass may claim")
 	providerName := flags.String("provider", "", "provider to execute: codex or opencode (required for --real)")
-	providerPreflight := flags.String("provider-preflight", "", "approved provider-preflight record path (required for --real)")
-	repositoryRoot := flags.String("repository-root", "", "absolute repository root containing provider contracts (required for --real)")
 	if err := flags.Parse(os.Args[1:]); err != nil {
 		os.Exit(exitUsage)
 	}
@@ -88,7 +87,7 @@ func main() {
 		os.Exit(exitUsage)
 	}
 	if *real {
-		if err := runReal(*dataRoot, *controlPlane, *sessionTokenFile, *providerName, *providerPreflight, *repositoryRoot, *maxClaims); err != nil {
+		if err := runReal(*dataRoot, *controlPlane, *sessionTokenFile, *providerName, *maxClaims); err != nil {
 			// The error is printed as-is. Every error the client and the driver
 			// produce is asserted token-free in
 			// internal/runner/controlplane_test.go, so this line cannot leak the
@@ -152,7 +151,7 @@ func exitStatusFor(err error) int {
 
 // runReal validates every input explicitly -- nothing is defaulted -- and then
 // drives exactly ONE bounded pass.
-func runReal(dataRoot, base, sessionTokenFile, providerName, providerPreflight, repositoryRoot string, maxClaims int) error {
+func runReal(dataRoot, base, sessionTokenFile, providerName string, maxClaims int) error {
 	if dataRoot == "" {
 		return fmt.Errorf("%w: --data-root is required with --real; it is never a temporary directory in real mode", errDataRoot)
 	}
@@ -196,9 +195,6 @@ func runReal(dataRoot, base, sessionTokenFile, providerName, providerPreflight, 
 	if maxClaims > runner.MaxDriverClaims {
 		return fmt.Errorf("%w: --max-claims must not exceed the declared bound of %d", errControlPlaneC, runner.MaxDriverClaims)
 	}
-	if !filepath.IsAbs(repositoryRoot) || !filepath.IsAbs(providerPreflight) {
-		return fmt.Errorf("%w: --repository-root and --provider-preflight must be absolute", errDataRoot)
-	}
 	var adapter provider.Adapter
 	switch providerName {
 	case "codex":
@@ -208,14 +204,22 @@ func runReal(dataRoot, base, sessionTokenFile, providerName, providerPreflight, 
 	default:
 		return fmt.Errorf("%w: --provider must be codex or opencode", errDataRoot)
 	}
-	preflight, err := runner.LoadPreflightRecord(repositoryRoot, providerPreflight)
+	executable, err := exec.LookPath(providerName)
 	if err != nil {
-		return fmt.Errorf("%w: %v", errDataRoot, err)
+		return fmt.Errorf("%w: provider executable %q is unavailable: %v", errDataRoot, providerName, err)
 	}
-	if preflight.ProviderName != providerName {
-		return fmt.Errorf("%w: provider and preflight record disagree", errDataRoot)
+	executable, err = filepath.Abs(executable)
+	if err != nil {
+		return fmt.Errorf("%w: resolve provider executable: %v", errDataRoot, err)
 	}
-	ledger := &runner.CostLedger{Path: preflight.LedgerPath, Provider: providerName, TaskID: "V2-028"}
+	ledgerPath := filepath.Join(dataRoot, "provider-cost.json")
+	policy, err := runner.NewInvocationPolicy(providerName, executable, ledgerPath, runner.CostLimits{
+		MaxInvocations: maxClaims, MaxTotalCostUSD: 10, WorstCaseReservationUSD: 1,
+	}, []string{"HOME", "PATH"})
+	if err != nil {
+		return fmt.Errorf("%w: provider policy: %v", errDataRoot, err)
+	}
+	ledger := &runner.CostLedger{Path: ledgerPath, Provider: providerName, TaskID: "runner-session"}
 	workspaceRoot := filepath.Join(dataRoot, "workspaces")
 	if err := os.MkdirAll(workspaceRoot, 0o700); err != nil {
 		return fmt.Errorf("%w: %v", errDataRoot, err)
@@ -254,7 +258,7 @@ func runReal(dataRoot, base, sessionTokenFile, providerName, providerPreflight, 
 			}
 			invocationRunner := runner.SupervisedInvocationRunner{
 				Supervisor: runner.ProcessSupervisor{TermGrace: 3 * time.Second, Confine: &runner.NamespaceConfinement{Workspace: request.Workspace}},
-				Log:        log, Ledger: ledger, RepoRoot: repositoryRoot, RecordPath: providerPreflight,
+				Log:        log, Ledger: ledger, Policy: policy,
 				Purpose: "runner-real-" + providerName,
 			}
 			return (runner.ProviderClient{Adapter: adapter, Runner: invocationRunner}).Run(execCtx, request)

@@ -501,25 +501,6 @@
       ]
     },
     {
-      "component": "task-ledger",
-      "closure": [
-        "contracts",
-        "internal-contracts",
-        "task-ledger"
-      ],
-      "patterns": [
-        ".agents/**",
-        "contracts/**",
-        "contracts/schemas/evidence-index.json",
-        "contracts/schemas/evidence.json",
-        "contracts/schemas/historical-evidence-index.json",
-        "contracts/schemas/task-state-retry.json",
-        "contracts/schemas/task-state-transition.json",
-        "contracts/schemas/task-state.json",
-        "internal/contracts/**"
-      ]
-    },
-    {
       "component": "tooling",
       "closure": [
         "tooling"

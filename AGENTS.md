@@ -12,7 +12,7 @@ Routing:
 - Stable user documentation: `docs/stable/`
 - Preview behavior and differences: `docs/preview/`
 - Machine-readable contracts: `contracts/`
-- Work packets and evidence: `.agents/v2/`
+- Runtime work packets: Control Plane state and direct provider sessions
 
 The v2 tree is independent of the v1 GitHub Issue/PR loop. Do not restore v1
 source or add routing through legacy Issues. Changes use a dedicated task
@@ -21,6 +21,6 @@ repository-wide properties (all-ref scans, push-coupled CI attestation,
 repository-level hooks and settings) may use the primary checkout; record
 what was verified and never break the v1 loop on `main`.
 
-Secrets must never enter Git, task records, work packets, evidence summaries,
-prompts, or logs. Destructive, irreversible, credential-scope, deployment, or
-cost-bearing actions require a recorded preflight before their side effect.
+Secrets must never enter Git, work packets, prompts, or logs. Destructive,
+irreversible, credential-scope, deployment, or cost-bearing actions require
+explicit approval before their side effect.

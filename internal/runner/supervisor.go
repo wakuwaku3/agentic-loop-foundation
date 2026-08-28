@@ -29,7 +29,7 @@ import (
 // CURRENT MEASUREMENT, 2026-08-26 (V2-078): Grant.Apply and
 // ProviderClient.Grant are deleted, so there is no merge to be the only place
 // for. The single caller that sets Env is SupervisedInvocationRunner.Run,
-// which builds it from the approved provider-preflight record's
+// which builds it from the runtime invocation policy's
 // environment.base_names (plus its one declared ExtraEnv diagnostic) and
 // refuses outright when that record declares granted names it cannot deliver.
 // A future credential path belongs there, in the shape dp-v2-078 d7 names,

@@ -74,14 +74,6 @@ func TestCompileFoundationBaselineContract(t *testing.T) {
 		t.Fatal("(b) contract with an unknown capability field was accepted")
 	}
 
-	stableWithoutEvidence := decodeCopy(t, decoded)
-	capabilities = stableWithoutEvidence["capabilities"].([]any)
-	firstStable := capabilities[0].(map[string]any)
-	firstStable["status"] = "stable"
-	firstStable["evidence_ids"] = []any{}
-	if _, err := CompileContract(encodeCopy(t, stableWithoutEvidence), docs); err == nil {
-		t.Fatal("(c) capability with status stable and empty evidence_ids was accepted")
-	}
 }
 
 func decodeCopy(t *testing.T, value map[string]any) map[string]any {

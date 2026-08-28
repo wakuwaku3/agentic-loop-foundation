@@ -62,14 +62,12 @@ TFVARS_FILE=/tmp/agentic-loop.tfvars TF_STATE_BUCKET=<bucket> devbox run --pure 
 ```
 
 plan は `infra/build/infra.tfplan` に保存され、`infra/build/infra.plan.json`
-（`tofu show -json` の出力）とその sha256 が同時に出力される。この sha256 が preflight
-record（`contracts/schemas/deployment-preflight.json`、`.agents/v2/preflight/`）の
-`target.plan_digest` になり、人間の承認はこの digest に対して行う。apply は
+（`tofu show -json` の出力）とその sha256 が同時に出力される。人間の明示承認は
+この保存済み plan の digest に対して行う。apply は
 **承認された保存済み plan をそのまま apply する**のであって再 plan しない
 （`tofu apply -input=false build/infra.tfplan`）。deploy workflow の apply step は
-実行前に「plan step が今回生成した plan の sha256」と「承認済み preflight record の
-`target.plan_digest`」が一致することを確認し、不一致または record 欠落なら fail
-closed する。これは、承認された対象と実行される対象が別物になり得る
+実行前に plan step が今回生成した plan の sha256 を承認対象として表示し、承認が
+ない場合は fail closed する。これは、承認された対象と実行される対象が別物になり得る
 `tofu apply -auto-approve -var-file=...`（再 plan してしまう）を避けるためである。
 
 この環境では `gcloud auth list` と project を確認できない場合があるため、ローカルでの
