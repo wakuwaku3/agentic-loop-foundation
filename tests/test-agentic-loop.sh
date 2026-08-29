@@ -6845,6 +6845,22 @@ grep -Eq '^7205 needs-input open' "$state" || fail 'require mode did not block c
 assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'reason=workload-invalid' 'require mode did not record reason=workload-invalid'
 ! grep -Fq -- '--sandbox workspace-write' "$FAKE_GH_ROOT/codex-calls" || fail 'require mode let exec run despite an invalid workload record'
 
+# 4b) Missing and explicit-null required fields must not pass through the
+# record validator as the literal string "null" (Issue #240).
+for malformed in '{"operation":null,"per_unit":"1","growth":"O(1)","stop_condition":"none","reuse":"none"}' '{"operation":"poll","per_unit":"1","growth":"O(1)","stop_condition":"none","reuse":"none"}'; do
+  wl_record=$(workload_record_json 7208 added "[$malformed]" '["queue"]')
+  if [[ $malformed == *'"operation":"poll"'* ]]; then
+    wl_record=$(printf '{"schema":1,"issue":7208,"external_io":"added","units":[%s],"verification":["queue"],"exceptions":[{"site":null,"reason":"fixture"}]}' "$malformed")
+  fi
+  write_queue_config "$target/.agentic-loop.toml" WORKLOAD=require PREFLIGHT=off TRACEABILITY=off
+  printf '7208 running open\n' > "$state"
+  : > "$FAKE_GH_ROOT/$state_key.comments"
+  : > "$FAKE_GH_ROOT/codex-calls"
+  FAKE_CODEX_RESULT="$(workload_plan_body "$wl_record")" "$target/bin/agentic-loop" _worker 7208 workload-null-field-worker
+  grep -Eq '^7208 needs-input open' "$state" || fail 'null/missing workload required field was accepted'
+  ! grep -Fq -- '--sandbox workspace-write' "$FAKE_GH_ROOT/codex-calls" || fail 'invalid null/missing workload record reached exec'
+done
+
 # 5) A credential-like value anywhere in the record is rejected before it is
 # ever trusted, and the raw secret text never reaches a posted comment.
 wl_secret="ghp_$(printf '%s%s' 'abcdefghijklmnopqrst' 'uvwxyz0123456789')"

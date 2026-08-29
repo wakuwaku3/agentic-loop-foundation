@@ -142,19 +142,19 @@ capability_validate() {
     [[ -n $path ]] || continue
     capability_path_safe "$repo_root" "$path" || capability_add failure 'unsafe-path:ownership' "ownership[].path の値が安全なpathではありません: $path"
     [[ -e $repo_root/$path ]] || capability_add warning 'missing-path:ownership' "ownership[].path が実在しません: $path"
-  done < <(capability_query '.ownership[]?.path')
+  done < <(capability_query '.ownership[]?.path // ""')
 
   while IFS= read -r path; do
     [[ -n $path ]] || continue
     capability_path_safe "$repo_root" "$path" || capability_add failure 'unsafe-path:protected' "protected[].path の値が安全なpathではありません: $path"
     [[ -e $repo_root/$path ]] || capability_add warning 'missing-path:protected' "protected[].path が実在しません: $path"
-  done < <(capability_query '.protected[]?.path')
+  done < <(capability_query '.protected[]?.path // ""')
 
   local command
   while IFS= read -r command; do
     [[ -n $command ]] || continue
     capability_command_safe "$repo_root" "$command" || capability_add failure 'unsafe-command:external_environment' "external_environment[].apply の値が安全なcommand形式ではありません: $command"
-  done < <(capability_query '.external_environment[]?.apply')
+  done < <(capability_query '.external_environment[]?.apply // ""')
 
   local undetermined_count
   undetermined_count=$(capability_query '.undetermined | length') || undetermined_count=0

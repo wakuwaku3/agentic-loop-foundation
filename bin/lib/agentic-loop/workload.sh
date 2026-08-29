@@ -77,13 +77,17 @@ workload_validate_schema() {
   done < <(yq -p json -o json -I=0 '.units[]?' <<< "$manifest" 2>/dev/null)
 
   local operation per_unit growth stop_condition reuse field
-  while IFS=$'\t' read -r operation per_unit growth stop_condition reuse; do
-    [[ -n $operation ]] || continue
+  while IFS= read -r item; do
+    operation=$(yq -p json -r '.operation // ""' <<< "$item" 2>/dev/null)
+    per_unit=$(yq -p json -r '.per_unit // ""' <<< "$item" 2>/dev/null)
+    growth=$(yq -p json -r '.growth // ""' <<< "$item" 2>/dev/null)
+    stop_condition=$(yq -p json -r '.stop_condition // ""' <<< "$item" 2>/dev/null)
+    reuse=$(yq -p json -r '.reuse // ""' <<< "$item" 2>/dev/null)
     for field in "$operation" "$per_unit" "$growth" "$stop_condition" "$reuse"; do
       workload_text_field_safe "$field" 200 || { WORKLOAD_INVALID_REASON='schema-invalid'; return 1; }
     done
     [[ -n $per_unit && -n $growth && -n $stop_condition && -n $reuse ]] || { WORKLOAD_INVALID_REASON='schema-invalid'; return 1; }
-  done < <(yq -p json -r '.units[]? | [.operation, (.per_unit // ""), (.growth // ""), (.stop_condition // ""), (.reuse // "")] | @tsv' <<< "$manifest" 2>/dev/null)
+  done < <(yq -p json -o json -I=0 '.units[]?' <<< "$manifest" 2>/dev/null)
 
   local verification_text
   while IFS= read -r verification_text; do
@@ -108,12 +112,15 @@ workload_validate_schema() {
     ekeys=$(yq -p json -r 'keys | .[]' <<< "$item" 2>/dev/null) || { WORKLOAD_INVALID_REASON='schema-invalid'; return 1; }
     while IFS= read -r k; do case $k in site | reason | track) ;; *) WORKLOAD_INVALID_REASON='schema-invalid'; return 1 ;; esac; done <<< "$ekeys"
   done < <(yq -p json -o json -I=0 '.exceptions[]?' <<< "$manifest" 2>/dev/null)
-  while IFS=$'\t' read -r site reason track; do
-    [[ -n $site ]] || continue
+  while IFS= read -r item; do
+    site=$(yq -p json -r '.site // ""' <<< "$item" 2>/dev/null)
+    reason=$(yq -p json -r '.reason // ""' <<< "$item" 2>/dev/null)
+    track=$(yq -p json -r '.track // ""' <<< "$item" 2>/dev/null)
+    [[ -n $site ]] || { WORKLOAD_INVALID_REASON='schema-invalid'; return 1; }
     workload_text_field_safe "$site" 200 || { WORKLOAD_INVALID_REASON='schema-invalid'; return 1; }
     workload_text_field_safe "$reason" 200 || { WORKLOAD_INVALID_REASON='schema-invalid'; return 1; }
     [[ -z $track || $track =~ ^#[0-9]+$ ]] || { WORKLOAD_INVALID_REASON='schema-invalid'; return 1; }
-  done < <(yq -p json -r '.exceptions[]? | [.site, (.reason // ""), (.track // "")] | @tsv' <<< "$manifest" 2>/dev/null)
+  done < <(yq -p json -o json -I=0 '.exceptions[]?' <<< "$manifest" 2>/dev/null)
 
   return 0
 }
