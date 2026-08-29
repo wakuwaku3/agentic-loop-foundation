@@ -155,7 +155,7 @@ load_project_content() {
 
 project_add_content() {
   local url=$1
-  graphql_budget_allows "$((GRAPHQL_RESERVE + PROJECT_OPERATION_BUDGET))" || { queue_project_sync "content $url"; return 0; }
+  graphql_budget_allows "$((GRAPHQL_RESERVE + PROJECT_OPERATION_BUDGET))" || { queue_project_sync "content $url"; return 1; }
   [[ -r $STATE_ROOT/project.env ]] || return 0
   local PROJECT_OWNER='' PROJECT_NUMBER='' key value added_id
   while IFS='=' read -r key value; do
@@ -167,12 +167,12 @@ project_add_content() {
   # rc 1 = retryable failure (queue a hint); rc 2 = a confirmed non-member,
   # which is exactly the state item-add exists to fix.  Only rc 1 suppresses
   # the membership mutation.
-  if (( content_rc == 1 )); then queue_project_sync "content $url"; return 0; fi
+  if (( content_rc == 1 )); then queue_project_sync "content $url"; return 1; fi
   [[ -n ${PROJECT_ITEM_IDS[$url]:-} ]] && return 0
   if ! added_id=$(gh project item-add "$PROJECT_NUMBER" --owner "$PROJECT_OWNER" --url "$url" --format json --jq .id 2>/dev/null); then
     invalidate_graphql_budget
     queue_project_sync "content $url"
-    return 0
+    return 1
   fi
   invalidate_graphql_budget
   PROJECT_ITEM_IDS[$url]=$added_id
@@ -263,7 +263,7 @@ project_add_issue() {
 
 
 project_add_pull_requests() {
-  graphql_budget_allows "$((GRAPHQL_RESERVE + 1))" || { queue_project_sync "pulls $1"; return 0; }
+  graphql_budget_allows "$((GRAPHQL_RESERVE + 1))" || { queue_project_sync "pulls $1"; return 1; }
   [[ -r $STATE_ROOT/project.env ]] || return 0
   local branch=$1 url PROJECT_OWNER='' PROJECT_NUMBER='' key value
   while IFS='=' read -r key value; do
@@ -272,15 +272,16 @@ project_add_pull_requests() {
   [[ -n $PROJECT_OWNER && $PROJECT_NUMBER =~ ^[0-9]+$ ]] || return 0
   # The head filter is bounded by GitHub's paginated endpoint; each returned
   # PR is processed once, so work is O(P) in the number of matching PRs.
-  local urls="$STATE_ROOT/project-pulls.$$"
+  local urls="$STATE_ROOT/project-pulls.$$" add_rc=0
   if ! repo_api pulls --method GET -f state=all -f head="${PROJECT_OWNER}:$branch" -f per_page=100 --paginate --jq '.[].html_url' >"$urls" 2>/dev/null; then
-    rm -f "$urls"; queue_project_sync "pulls $branch"; return 0
+    rm -f "$urls"; queue_project_sync "pulls $branch"; return 1
   fi
   while IFS= read -r url; do
     [[ -n $url ]] || continue
-    project_add_content "$url"
+    project_add_content "$url" || add_rc=1
   done < "$urls"
   rm -f "$urls"
+  return "$add_rc"
 }
 
 
@@ -302,6 +303,7 @@ reconcile_pending_project() {
   ( flock 9; cp "$STATE_ROOT/project-pending" "$snapshot"; : > "$inflight" ) 9> "$STATE_ROOT/project-pending.lock"
   while IFS= read -r hint; do
     [[ -n $hint ]] || continue
+    issue=''
     # Hints written before #115 carried the whole event ("conflict 110 <b64>",
     # "state 155 running") rather than the bare Issue number this queue holds
     # today.  Matching only bare numbers left every such line unacknowledged
@@ -313,6 +315,10 @@ reconcile_pending_project() {
     elif [[ $hint =~ ^([a-z-]+[[:space:]]+)?([1-9][0-9]*)$ ]]; then issue=${BASH_REMATCH[2]}
     elif [[ $hint =~ /issues/([1-9][0-9]*)$ ]]; then issue=${BASH_REMATCH[1]}
     else project_pending_ack "$hint"; continue; fi
+    if [[ $kind == branch && $value =~ [[:space:]] ]] ||
+       [[ $kind == content && ! $value =~ ^https?://[^[:space:]]+/pull/[1-9][0-9]*$ ]]; then
+      project_pending_ack "$hint"; continue
+    fi
     if (( processed >= PROJECT_RECONCILE_BATCH )); then continue; fi
     ( flock 9; printf '%s\n' "$hint" >> "$inflight" ) 9> "$STATE_ROOT/project-pending.lock"
     rc=0
@@ -321,12 +327,6 @@ reconcile_pending_project() {
       content) project_add_content "$value" || rc=$? ;;
       branch) project_add_pull_requests "$value" || rc=$? ;;
     esac
-    # Project mutation helpers intentionally remain best-effort for callers;
-    # the durable queue is therefore the failure signal for PR hints.  Do not
-    # acknowledge the snapshot while the same retry hint (or a PR discovered
-    # from a branch) is still queued.
-    if [[ $kind == content ]] && grep -Fxq -- "content $value" "$STATE_ROOT/project-pending" 2>/dev/null; then rc=1; fi
-    if [[ $kind == branch ]] && grep -Fxq -- "pulls $value" "$STATE_ROOT/project-pending" 2>/dev/null; then rc=1; fi
     # rc 0 (converged) and rc 2 (confirmed non-member / invalid labels, no
     # mutation to make) are both acknowledgement-worthy; only rc 1 is a
     # retryable failure that must remain so a crash cannot drop the entry.
