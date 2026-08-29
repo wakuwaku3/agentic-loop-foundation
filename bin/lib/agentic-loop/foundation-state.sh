@@ -1,3 +1,5 @@
+# Module: foundation-state.sh. Sourced by bin/agentic-loop.
+# shellcheck shell=bash
 # Foundation installation state lives beside the common Git directory, never
 # in the repository worktree.  The file is deliberately JSON so shell clients
 # and yq can inspect it without introducing another runtime dependency.
