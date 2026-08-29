@@ -641,6 +641,15 @@ case "${1:-} ${2:-}" in
       if [[ $method == POST ]]; then
         body=''; for arg in "$@"; do [[ $arg == body=* ]] && body=${arg#body=}; done
         body=$(encode_comment_body "$body")
+        if [[ ${FAKE_FAIL_COMMENT_ONCE:-} == 1 ]]; then
+          comment_failure_count=0
+          [[ -r $FAKE_GH_ROOT/comment-failure-count ]] && read -r comment_failure_count < "$FAKE_GH_ROOT/comment-failure-count"
+          if (( comment_failure_count < 3 )); then
+            printf '%s\n' "$((comment_failure_count + 1))" > "$FAKE_GH_ROOT/comment-failure-count"
+            printf 'HTTP 503: transient comment failure\n' >&2
+            exit 1
+          fi
+        fi
         printf '%s\n' "$body" >> "$comment_bodies_log"
         ( flock 9
           printf '%s %s\n' "$issue" "$body" >> "$comments"
@@ -734,6 +743,16 @@ case "${1:-} ${2:-}" in
       dep_number=$((issue_id_arg - 900000))
       if [[ ! $issue_id_arg =~ ^[0-9]+$ ]] || (( dep_number < 1 )); then
         printf 'HTTP 422: Unprocessable Entity\n' >&2; exit 1
+      fi
+      if [[ ${FAKE_DEPENDENCY_POST_FAIL_ONCE:-0} == 1 ]]; then
+        post_count=0
+        [[ -r $FAKE_GH_ROOT/dependency-post-count ]] && read -r post_count < "$FAKE_GH_ROOT/dependency-post-count"
+        if (( post_count >= 1 && post_count < 4 )); then
+          printf '%s\n' "$((post_count + 1))" > "$FAKE_GH_ROOT/dependency-post-count"
+          printf 'HTTP 503: dependency transfer failure\n' >&2
+          exit 1
+        fi
+        printf '%s\n' "$((post_count + 1))" > "$FAKE_GH_ROOT/dependency-post-count"
       fi
       ( flock 9
         existing_line=$(awk -v n="$issue" '$1 == n {print $2}' "$FAKE_GH_ROOT/$key.dep-links" 2>/dev/null || true)
@@ -2708,6 +2727,43 @@ grep -Eq '^72 cancelled closed' "$state" || fail 'authorized dispose did not clo
 assert_contains "$closes" $'72\tnot_planned' 'dispose close did not record state_reason=not_planned'
 assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:dispose' 'dispose did not record its audit marker'
 
+# A one-shot comment outage leaves an open disposed Issue recoverable: retrying
+# the same authorized dispose completes the audit and not_planned close.
+printf '75 needs-input open none 2026-01-01T00:00:00Z\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+rm -f "$closes" "$FAKE_GH_ROOT/comment-failure-count"
+if FAKE_FAIL_COMMENT_ONCE=1 "$target/bin/agentic-loop" dispose 75 --reason cancelled; then
+  fail 'dispose unexpectedly succeeded during the injected comment failure'
+fi
+grep -Eq '^75 cancelled open' "$state" || fail 'partial dispose did not retain its terminal label and open state'
+"$target/bin/agentic-loop" dispose 75 --reason cancelled
+grep -Eq '^75 cancelled closed' "$state" || fail 'retry did not complete the partial dispose close'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:dispose' 'retry did not record the final audit comment'
+assert_contains "$closes" $'75\tnot_planned' 'retry did not close with state_reason=not_planned'
+
+# If the stopping transition's comment fails, a retry must still stop the
+# local worker before closing the disposed Issue.
+printf '76 running open none 2026-01-01T00:00:00Z\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+rm -f "$closes" "$FAKE_GH_ROOT/comment-failure-count"
+sleep 60 & stopping_worker=$!
+mkdir -p "$state_root/workers"
+printf '%s\n' "$stopping_worker" > "$state_root/workers/76.pid"
+if FAKE_FAIL_COMMENT_ONCE=1 "$target/bin/agentic-loop" dispose 76 --reason cancelled; then
+  fail 'dispose unexpectedly succeeded during the stopping comment failure'
+fi
+grep -Eq '^76 stopping open' "$state" || fail 'failed stopping transition did not retain agent:stopping'
+"$target/bin/agentic-loop" dispose 76 --reason cancelled
+grep -Eq '^76 cancelled closed' "$state" || fail 'retry did not close the stopping Issue'
+if kill -0 "$stopping_worker" 2>/dev/null; then kill "$stopping_worker" 2>/dev/null || true; fail 'retry left the local worker alive'; fi
+
+# Immutable disposition changes and closed Issues remain rejected.
+printf '77 needs-input open none 2026-01-01T00:00:00Z\n78 cancelled closed none 2026-01-01T00:00:00Z\n' > "$state"
+if "$target/bin/agentic-loop" dispose 77 --reason merged; then fail 'different terminal reason was accepted'; fi
+if "$target/bin/agentic-loop" dispose 78 --reason cancelled; then fail 'closed Issue dispose was accepted'; fi
+grep -Eq '^77 needs-input open none' "$state" || fail 'rejected reason changed Issue state'
+grep -Eq '^78 cancelled closed none' "$state" || fail 'closed Issue changed state after rejection'
+
 # dispose --target transfers the source Issue's native blocked_by
 # dependencies to the consolidation target. Regression guard for Issue #252:
 # issue_id must be the blocking Issue's *database id* (this fixture's
@@ -2728,6 +2784,24 @@ assert_contains "$TEST_ROOT/dispose-transfer-calls.log" 'issues/74/dependencies/
 grep -q -- '-f issue_id=' "$TEST_ROOT/dispose-transfer-calls.log" && fail 'dependency transfer still sends issue_id as an untyped -f string parameter'
 grep -Eq -- 'issue_id=(810|811)([^0-9]|$)' "$TEST_ROOT/dispose-transfer-calls.log" && fail 'dependency transfer sent the blocking Issue number instead of its database id'
 rm -f "$FAKE_GH_ROOT/$state_key.dep-links"
+
+# A failure after the first dependency is transferred must be resumable: the
+# retry skips the existing dependency and posts only the remaining one.
+printf '73 needs-input open\n74 needs-input open\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+rm -f "$closes" "$FAKE_GH_ROOT/dependency-post-count"
+printf '73 810,811\n74 \n' > "$FAKE_GH_ROOT/$state_key.dep-links"
+if FAKE_DEPENDENCY_POST_FAIL_ONCE=1 "$target/bin/agentic-loop" dispose 73 --reason superseded --target 74; then
+  fail 'dispose unexpectedly succeeded during injected dependency failure'
+fi
+grep -Eq '^73 (stopping|superseded|needs-input) open' "$state" || fail 'dependency failure did not retain source Issue as recoverable'
+before_retry=$(wc -l < "$FAKE_GH_ROOT/calls")
+"$target/bin/agentic-loop" dispose 73 --reason superseded --target 74
+grep -Eq '^73 superseded closed' "$state" || fail 'dependency retry did not close the source Issue'
+retry_calls=$(tail -n "+$((before_retry + 1))" "$FAKE_GH_ROOT/calls")
+[[ $(grep -c 'issues/74/dependencies/blocked_by --method POST' <<< "$retry_calls") -eq 1 ]] || fail 'dependency retry reposted an already transferred dependency'
+grep -Eq '^74 810,811$' "$FAKE_GH_ROOT/$state_key.dep-links" || fail 'dependency retry did not complete the missing dependency'
+rm -f "$FAKE_GH_ROOT/$state_key.dep-links" "$FAKE_GH_ROOT/dependency-post-count"
 
 # A token/rate-limit exhaustion re-queues the Issue (never failed) and pauses
 # the supervisor; claiming resumes once the pool's exhaustion clears. The real
