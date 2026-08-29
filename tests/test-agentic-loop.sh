@@ -842,7 +842,9 @@ case "${1:-} ${2:-}" in
       fi
     elif [[ $endpoint =~ ^pulls/[0-9]+/files$ ]]; then
       # trace.sh's trace_evaluate PR changed-files read (Issue #53).
-      [[ -n ${FAKE_PR_FILES:-} ]] && printf '%s\n' "$FAKE_PR_FILES"
+      # An unset/empty fixture models a successful empty JSON response, not an
+      # API failure; trace_evaluate must distinguish those cases.
+      printf '%s\n' "${FAKE_PR_FILES:-}"
     elif [[ $endpoint =~ ^pulls/[0-9]+$ ]]; then
       jqarg=''
       for ((i = 1; i <= $#; i++)); do [[ ${!i} == --jq ]] && { j=$((i + 1)); jqarg=${!j}; }; done
