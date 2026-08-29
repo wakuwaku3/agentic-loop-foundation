@@ -355,7 +355,7 @@ grep -Fq 'capabilities --format json' docs/operations/issue-queue.md || { printf
 grep -Fq 'docs/operations/capability-manifest.md' scripts/lib/foundation-files.sh || { printf 'Capability manifest documentation is not distributed.\n' >&2; exit 1; }
 grep -Fq 'docs/decisions/0018-repository-capability-manifest.md' scripts/lib/foundation-files.sh || { printf 'Capability manifest ADR is not distributed.\n' >&2; exit 1; }
 grep -Fq 'capability_generate' scripts/install-target.sh scripts/upgrade/migrations/0003-capability-manifest.sh || { printf 'Capability manifest is not seeded on install/upgrade.\n' >&2; exit 1; }
-grep -Fq '.agentic-loop/capabilities.toml' .agentic-loop/update-main.sh || { printf 'Main-sync does not tolerate a freshly generated, uncommitted capability manifest.\n' >&2; exit 1; }
+grep -Fq 'dirty_beyond_manifest' .agentic-loop/update-main.sh || { printf 'Main-sync does not enforce a clean worktree before synchronization.\n' >&2; exit 1; }
 # shellcheck source=bin/lib/agentic-loop/capability.sh
 source bin/lib/agentic-loop/capability.sh
 if ! capability_validate "$PWD" "$(yq -p toml -r '.foundation.verify_command // ""' .agentic-loop.toml 2>/dev/null)"; then

@@ -1577,33 +1577,20 @@ git -C "$publisher" push --quiet
 same_head=$(git -C "$target" rev-parse HEAD)
 "$target/.agentic-loop/update-main.sh" sync "$target"
 [[ $(git -C "$target" rev-parse HEAD) == "$same_head" ]] || fail 'periodic updater changed an already synchronized main'
-# A machine-generated manifest rewrite (what install/upgrade leave behind) must
-# not stall main sync: fast-forward proceeds and preserves the rewritten
-# manifest, so the installed-revision record is never silently dropped.
-yq -p json -o json '.installed_at = 1' "$target/.agentic-loop/manifest.json" > "$target/.agentic-loop/manifest.json.new"
-mv "$target/.agentic-loop/manifest.json.new" "$target/.agentic-loop/manifest.json"
-[[ $(git -C "$target" status --porcelain) == ' M .agentic-loop/manifest.json' ]] || fail 'fixture: expected a manifest-only dirty state'
+# Foundation state lives beside the common Git directory and must never make
+# the main worktree dirty.  Sync therefore has no legacy manifest exception.
+state_path=$(git -C "$target" rev-parse --path-format=absolute --git-common-dir)/agentic-loop/foundation-state.json
+[[ -s $state_path && -z $(git -C "$target" status --porcelain) ]] || fail 'fixture: install state was not kept out of the worktree'
 printf 'second remote update\n' > "$publisher/remote2.txt"
 git -C "$publisher" add remote2.txt
 git -C "$publisher" commit --quiet -m 'second update'
 git -C "$publisher" push --quiet
-manifest_before=$(cat "$target/.agentic-loop/manifest.json")
 "$target/.agentic-loop/update-main.sh" sync "$target"
 [[ -f $target/remote2.txt ]] || fail 'periodic updater did not fast-forward main with a manifest-only dirty state'
-[[ $(cat "$target/.agentic-loop/manifest.json") == "$manifest_before" ]] || fail 'sync dropped the locally rewritten manifest'
-# A manifest rewrite combined with any other user change is still refused.
+# User changes are still refused.
 printf 'user work\n' > "$target/user.txt"
 if "$target/.agentic-loop/update-main.sh" sync "$target" >/dev/null 2>&1; then fail 'periodic updater accepted user changes alongside a rewritten manifest'; fi
 rm "$target/user.txt"
-# Incoming manifest changes over a locally rewritten manifest have no safe
-# automatic resolution: refused without touching HEAD.
-printf '\n# upstream rewrite\n' >> "$publisher/.agentic-loop/manifest.json"
-git -C "$publisher" add .agentic-loop/manifest.json
-git -C "$publisher" commit --quiet -m 'upstream manifest rewrite'
-git -C "$publisher" push --quiet
-before_head=$(git -C "$target" rev-parse HEAD)
-if "$target/.agentic-loop/update-main.sh" sync "$target" >/dev/null 2>&1; then fail 'periodic updater merged an incoming manifest rewrite over a locally rewritten manifest'; fi
-[[ $(git -C "$target" rev-parse HEAD) == "$before_head" ]] || fail 'refused sync still changed HEAD'
 printf 'local work\n' > "$target/local.txt"
 if "$target/.agentic-loop/update-main.sh" sync "$target" >/dev/null 2>&1; then fail 'periodic updater accepted a dirty main worktree'; fi
 rm "$target/local.txt"
@@ -1628,11 +1615,8 @@ git -C "$target" reset --quiet --hard refs/remotes/origin/main
 printf '88 inbox open none 2025-01-01T00:00:00Z\n89 inbox closed none 2025-01-02T00:00:00Z\n' > "$FAKE_GH_ROOT/$state_key.state"
 calls_before=$(wc -l < "$FAKE_GH_ROOT/calls")
 AGENTIC_LOOP_SOURCE="$PROJECT_ROOT" AGENTIC_LOOP_TARGET="$target" AGENTIC_LOOP_SKIP_START=1 "$PROJECT_ROOT/install.sh"
-# A reinstall on a clean main leaves exactly one machine-generated worktree
-# change: the manifest recording the applied revision. That is the state main
-# sync tolerates (verified above), so install never silently stalls sync.
-[[ $(git -C "$target" status --porcelain) == ' M .agentic-loop/manifest.json' ]] || fail 'reinstall left unexpected worktree changes beyond the manifest'
-[[ $(yq -p json -o yaml '.source.revision // ""' "$target/.agentic-loop/manifest.json" 2>/dev/null) =~ ^[0-9a-f]{40}$ ]] || fail 'reinstall manifest did not record the applied revision'
+[[ -z $(git -C "$target" status --porcelain) ]] || fail 'reinstall left worktree changes'
+[[ $(yq -p json -o yaml '.source.revision // ""' "$state_path" 2>/dev/null) =~ ^[0-9a-f]{40}$ ]] || fail 'reinstall state did not record the applied revision'
 tail -n "+$((calls_before + 1))" "$FAKE_GH_ROOT/calls" > "$TEST_ROOT/reinstall-calls.log"
 [[ $(grep -c $'\tapi graphql ' "$TEST_ROOT/reinstall-calls.log" || true) -eq 1 ]] || fail 'reinstall repeated GraphQL work beyond its permission check'
 [[ $(grep -Ec $'\tproject (list|view|field-list|link|field-create|item-add|item-edit)' "$TEST_ROOT/reinstall-calls.log" || true) -eq 0 ]] || fail 'reinstall scanned or mutated the existing Project'
@@ -7532,15 +7516,16 @@ assert_contains "$empty/docs/policies/documentation.md" '基本利用者' 'insta
 assert_contains "$empty/AGENTS.md" '[文書ポリシー](docs/policies/documentation.md)' 'installed AGENTS.md does not reference the documentation policy invariant'
 [[ -f $empty/docs/development.md ]] || fail 'init did not seed docs/development.md'
 assert_contains "$empty/docs/development.md" '要求の伝え方' 'installed docs/development.md is missing the human requirement-submission responsibility'
-[[ $(yq -p json -r '.files[] | select(.path == "docs/policies/documentation.md") | .class' "$empty/.agentic-loop/manifest.json") == shared ]] || fail 'manifest did not classify docs/policies/documentation.md as shared'
-[[ $(yq -p json -r '.files[] | select(.path == "docs/development.md") | .class' "$empty/.agentic-loop/manifest.json") == init ]] || fail 'manifest did not classify docs/development.md as init (target-owned)'
+empty_state=$(git -C "$empty" rev-parse --path-format=absolute --git-common-dir)/agentic-loop/foundation-state.json
+[[ $(yq -p json -r '.files[] | select(.path == "docs/policies/documentation.md") | .class' "$empty_state") == shared ]] || fail 'state did not classify documentation policy as shared'
+[[ $(yq -p json -r '.files[] | select(.path == "docs/development.md") | .class' "$empty_state") == init ]] || fail 'state did not classify development docs as init'
 
 # init (empty repository) receives this Foundation's own capability manifest
 # verbatim: it also received this Foundation's own devbox.json/Makefile/CI, so
 # the declarations are facts for it too (see docs/decisions/0018). It must
 # fully declare itself (no undetermined items) and never be touched by upgrade.
 cmp -s "$PROJECT_ROOT/.agentic-loop/capabilities.toml" "$empty/.agentic-loop/capabilities.toml" || fail 'init did not distribute this capability manifest verbatim'
-[[ $(yq -p json -r '.files[] | select(.path == ".agentic-loop/capabilities.toml") | .class' "$empty/.agentic-loop/manifest.json") == init ]] || fail 'manifest did not classify the init-seeded capability manifest as init (target-owned)'
+[[ $(yq -p json -r '.files[] | select(.path == ".agentic-loop/capabilities.toml") | .class' "$empty_state") == init ]] || fail 'state did not classify the capability manifest as init'
 empty_cap_json=$("$empty/bin/agentic-loop" capabilities --format json)
 [[ $(yq -p json -r '.valid' <<< "$empty_cap_json") == true ]] || fail 'the distributed capability manifest failed its own validation'
 [[ $(yq -p json -r '.data.undetermined | length' <<< "$empty_cap_json") -eq 0 ]] || fail 'the distributed capability manifest left items undetermined for a repository that received this whole Foundation'
@@ -7825,7 +7810,8 @@ cap_json=$("$target/bin/agentic-loop" capabilities --format json)
 [[ $(yq -p json -r '.data.validation.fast_check' <<< "$cap_json") == '.githooks/pre-commit' ]] || fail 'capabilities did not detect the fast check entry point'
 [[ $(yq -p json -r '.data.validation.secret_guard' <<< "$cap_json") == '.agentic-loop/guard-secrets.sh' ]] || fail 'capabilities did not detect the secret guard entry point'
 grep -Fxq 'validation.full_check' <(yq -p json -r '.data.undetermined[]' <<< "$cap_json") || fail 'capabilities fabricated a full_check value for a repository without Devbox or Make'
-[[ $(yq -p json -o yaml '.files[] | select(.path == ".agentic-loop/capabilities.toml") | .class' "$target/.agentic-loop/manifest.json") == init ]] || fail 'manifest did not classify the generated capability manifest as init (target-owned)'
+target_state=$(git -C "$target" rev-parse --path-format=absolute --git-common-dir)/agentic-loop/foundation-state.json
+[[ $(yq -p json -o yaml '.files[] | select(.path == ".agentic-loop/capabilities.toml") | .class' "$target_state") == init ]] || fail 'state did not classify the generated capability manifest as init'
 doctor_cap_out=$("$target/bin/agentic-loop" doctor || true)
 grep -Fq '[成功] 能力manifest' <<< "$doctor_cap_out" || fail 'doctor did not report the detection-only capability manifest as healthy'
 
@@ -9211,21 +9197,12 @@ upgrade_target=$(new_repository upgrade-target)
 AGENTIC_LOOP_SOURCE="$PROJECT_ROOT" AGENTIC_LOOP_TARGET="$upgrade_target" AGENTIC_LOOP_SKIP_START=1 "$PROJECT_ROOT/install.sh" >/dev/null
 [[ -x $upgrade_target/.claude/hooks/confirm-main-worktree-edit.sh ]] || fail 'install did not distribute an executable Claude edit hook'
 [[ $(yq -p json -r '.hooks.PreToolUse[0].matcher' "$upgrade_target/.claude/settings.json") == 'Edit|Write|NotebookEdit' ]] || fail 'install did not distribute Claude hook settings'
-[[ $(yq -p json -r '.files[] | select(.path == ".claude/hooks/confirm-main-worktree-edit.sh") | .class' "$upgrade_target/.agentic-loop/manifest.json") == shared ]] || fail 'manifest did not classify the Claude edit hook as shared'
 [[ -x $upgrade_target/.claude/hooks/require-gh-body-file.sh ]] || fail 'install did not distribute an executable gh --body Bash hook'
 [[ $(yq -p json -r '.hooks.PreToolUse[1].matcher' "$upgrade_target/.claude/settings.json") == Bash ]] || fail 'install did not distribute the gh --body Bash hook settings'
-[[ $(yq -p json -r '.files[] | select(.path == ".claude/hooks/require-gh-body-file.sh") | .class' "$upgrade_target/.agentic-loop/manifest.json") == shared ]] || fail 'manifest did not classify the gh --body Bash hook as shared'
-[[ -f $upgrade_target/.agentic-loop/manifest.json ]] || fail 'install did not write a Foundation manifest'
-[[ $(yq -p json -o yaml '.mode' "$upgrade_target/.agentic-loop/manifest.json") == install ]] || fail 'manifest recorded the wrong install mode'
-[[ $(yq -p json -o yaml '.source.repository' "$upgrade_target/.agentic-loop/manifest.json") == 'wakuwaku3/agentic-loop-foundation' ]] || fail 'manifest recorded the wrong source repository'
-[[ $(yq -p json -o yaml '.source.revision' "$upgrade_target/.agentic-loop/manifest.json") =~ ^[0-9a-f]{40}$ ]] || fail 'manifest did not record a resolved 40-hex revision'
-[[ $(yq -p json -o yaml '.files | map(select(.class == "shared")) | length' "$upgrade_target/.agentic-loop/manifest.json") -gt 0 ]] || fail 'manifest recorded no shared files'
-# The one deliberate exception (Issue #56, ADR 0018): an install-mode target
-# still gets its own detection-only capability manifest, recorded class=init
-# (target-owned; upgrade never removes or overwrites it) precisely because it
-# is not one of the brand-new-repository INIT_FILES. No other path may be
-# misclassified this way.
-[[ $(yq -p json -r '[.files[] | select(.class == "init") | .path] | join(",")' "$upgrade_target/.agentic-loop/manifest.json") == '.agentic-loop/capabilities.toml' ]] || fail 'an install-mode manifest recorded an unexpected init-class file'
+[[ ! -e $upgrade_target/.agentic-loop/manifest.json ]] || fail 'install created a legacy manifest instead of common-dir state'
+state_path=$(git -C "$upgrade_target" rev-parse --path-format=absolute --git-common-dir)/agentic-loop/foundation-state.json
+[[ $(yq -p json -o yaml '.mode' "$state_path") == install ]] || fail 'state recorded the wrong install mode'
+[[ $(yq -p json -o yaml '.source.repository' "$state_path") == 'wakuwaku3/agentic-loop-foundation' ]] || fail 'state recorded the wrong source repository'
 git -C "$upgrade_target" add -A && git -C "$upgrade_target" commit --quiet -m 'install foundation' && git -C "$upgrade_target" push --quiet
 
 # A "new" Foundation revision: this checkout, plus a shared-file update and a
@@ -9258,7 +9235,8 @@ assert_contains "$upgrade_target/AGENTS.md" '# upgraded' 'apply did not update A
 # docs/policies/documentation.md (Issue #64, ADR 0023) is Foundation-managed
 # (SHARED_FILES) and upstream updates apply through the ordinary shared-file path.
 assert_contains "$upgrade_target/docs/policies/documentation.md" '# upgraded documentation policy' 'apply did not update docs/policies/documentation.md as a shared file'
-[[ $(yq -p json -o yaml '.source.revision' "$upgrade_target/.agentic-loop/manifest.json") == unknown ]] || fail 'manifest should record "unknown" for an unpinned --source without its own Git history'
+upgrade_state=$(git -C "$upgrade_target" rev-parse --path-format=absolute --git-common-dir)/agentic-loop/foundation-state.json
+[[ $(yq -p json -o yaml '.source.revision' "$upgrade_state") == unknown ]] || fail 'state should record "unknown" for an unpinned --source without its own Git history'
 git -C "$upgrade_target" add -A && git -C "$upgrade_target" commit --quiet -m 'apply update'
 rerun_out=$("$upgrade_target/bin/agentic-loop" upgrade --source "$new_source")
 [[ $rerun_out == *'変更はありません'* ]] || fail 'rerunning upgrade after a completed update was not a no-op'
@@ -9276,7 +9254,8 @@ first_seen_dry_run=$("$first_seen_target/bin/agentic-loop" upgrade --source "$ne
 "$first_seen_target/bin/agentic-loop" upgrade --source "$new_source" --apply --skip-verify >/dev/null || fail 'first-seen conflict apply failed'
 assert_contains "$first_seen_target/docs/operations/new-feature.md" 'user-owned new shared file' 'first-seen conflict overwrote the user file'
 [[ -f "$first_seen_target/docs/operations/new-feature.md.agentic-loop-new" ]] || fail 'first-seen conflict did not stage new content'
-[[ $(yq -p json -r '.files[]? | select(.path == "docs/operations/new-feature.md") | .sha256' "$first_seen_target/.agentic-loop/manifest.json") == '' ]] || fail 'first-seen conflict recorded a user hash as a baseline'
+first_seen_state=$(git -C "$first_seen_target" rev-parse --path-format=absolute --git-common-dir)/agentic-loop/foundation-state.json
+[[ $(yq -p json -r '.files[]? | select(.path == "docs/operations/new-feature.md") | .sha256' "$first_seen_state") == '' ]] || fail 'first-seen conflict recorded a user hash as a baseline'
 git -C "$first_seen_target" add -A && git -C "$first_seen_target" commit --quiet -m 'record first-seen conflict'
 first_seen_second=$("$first_seen_target/bin/agentic-loop" upgrade --source "$new_source")
 [[ $first_seen_second == *'[conflict] docs/operations/new-feature.md'* ]] || fail 'first-seen conflict disappeared on the second upgrade'
@@ -9342,8 +9321,9 @@ migration_out=$("$migration_target/bin/agentic-loop" upgrade --source "$PROJECT_
 grep -Fq '[foundation]' "$migration_target/.agentic-loop.toml" || fail 'migration did not add the [foundation] section'
 resolved_revision=$(git -C "$PROJECT_ROOT" rev-parse HEAD)
 assert_contains "$migration_target/.agentic-loop.toml" "revision = \"$resolved_revision\"" 'migration apply did not pin the applied revision'
-[[ $(yq -p json -o yaml '.source.revision' "$migration_target/.agentic-loop/manifest.json") == "$resolved_revision" ]] || fail 'upgrade manifest did not record the applied revision'
-[[ $(yq -p json -o yaml '.migration_level' "$migration_target/.agentic-loop/manifest.json") -eq 7 ]] || fail 'manifest migration_level was not bumped after applying the migration'
+state_path=$(git -C "$migration_target" rev-parse --path-format=absolute --git-common-dir)/agentic-loop/foundation-state.json
+[[ $(yq -p json -o yaml '.source.revision' "$state_path") == "$resolved_revision" ]] || fail 'upgrade state did not record the applied revision'
+[[ $(yq -p json -o yaml '.migration_level' "$state_path") -eq 8 ]] || fail 'state migration_level was not bumped after applying the migration'
 migration_rerun=$("$migration_target/bin/agentic-loop" upgrade --source "$PROJECT_ROOT")
 [[ $migration_rerun == *'変更はありません'* ]] || fail 'rerunning upgrade after a completed migration was not a no-op'
 
@@ -9449,7 +9429,8 @@ interrupted_check=$( ("$verify_target/bin/agentic-loop" doctor --format json || 
 [[ $interrupted_check == failure ]] || fail 'doctor should report the unfinished upgrade as a failure'
 "$verify_target/bin/agentic-loop" upgrade --rollback || fail 'rollback failed'
 git -C "$verify_target" diff --quiet -- AGENTS.md || fail 'rollback did not restore AGENTS.md'
-git -C "$verify_target" diff --quiet -- .agentic-loop/manifest.json || fail 'rollback did not restore the installed-revision manifest'
+verify_state=$(git -C "$verify_target" rev-parse --path-format=absolute --git-common-dir)/agentic-loop/foundation-state.json
+[[ $(yq -p json -r '.source.revision' "$verify_state") == unknown ]] || fail 'rollback did not restore the installed-revision state'
 [[ ! -f $verify_target/docs/operations/new-feature.md ]] || fail 'rollback did not remove a newly added file'
 [[ ! -f $verify_target/.git/agentic-loop/upgrade-last-apply.json ]] || fail 'rollback did not clear the apply record'
 interrupted_check_after=$( ("$verify_target/bin/agentic-loop" doctor --format json || true) | yq -p json '.checks[] | select(.name == "中断したupgrade") | .level')

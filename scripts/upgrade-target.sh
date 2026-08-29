@@ -51,8 +51,8 @@ doctor_failures_relevant_to_upgrade() {
 
 readonly REPOSITORY="${AGENTIC_LOOP_REPOSITORY:-wakuwaku3/agentic-loop-foundation}"
 readonly NEW_REVISION="${AGENTIC_LOOP_RESOLVED_REVISION:-unknown}"
-readonly MANIFEST="$TARGET/.agentic-loop/manifest.json"
 readonly STATE_ROOT="$(git -C "$TARGET" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || printf '%s/.git' "$TARGET")/agentic-loop"
+MANIFEST="$STATE_ROOT/foundation-state.json"
 readonly LAST_APPLY="$STATE_ROOT/upgrade-last-apply.json"
 
 git -C "$TARGET" rev-parse --git-dir >/dev/null 2>&1 || fail 'target must be a Git repository'
@@ -61,6 +61,9 @@ declare -A OLD_HASH=() OLD_CLASS=()
 OLD_MODE=''
 OLD_REVISION=''
 OLD_MIGRATION_LEVEL=0
+if [[ ! -r $MANIFEST && -r "$TARGET/.agentic-loop/manifest.json" ]]; then
+  MANIFEST="$TARGET/.agentic-loop/manifest.json"
+fi
 if [[ -r $MANIFEST ]]; then
   OLD_MODE=$(yq -p json -o yaml '.mode // ""' "$MANIFEST" 2>/dev/null || true)
   OLD_REVISION=$(yq -p json -o yaml '.source.revision // ""' "$MANIFEST" 2>/dev/null || true)
@@ -283,13 +286,11 @@ old_history=$(yq -p json -o json -I0 '(.history // [])[]' "$MANIFEST" 2>/dev/nul
 new_history_entry=$(printf '{"at":%s,"from_revision":"%s","to_revision":"%s","from_level":%s,"to_level":%s,"steps":%s,"result":"applied"}' \
   "$(date +%s)" "$(foundation_json_escape "$OLD_REVISION")" "$(foundation_json_escape "$NEW_REVISION")" "$OLD_MIGRATION_LEVEL" "$new_migration_level" "$steps")
 if [[ -n $old_history ]]; then history="$old_history,$new_history_entry"; else history="$new_history_entry"; fi
-foundation_manifest_write "$TARGET" "${OLD_MODE:-install}" "$REPOSITORY" "$NEW_REVISION" "${AGENTIC_LOOP_REVISION:-$NEW_REVISION}" "$new_migration_level" "$entries" "$history"
-
-# Verify the rewritten manifest records exactly the revision this upgrade
-# applied, so a broken write never leaves the installed-revision record stale
-# (main sync tolerates this manifest-only change; upgrade/rollback rely on it).
-[[ $(yq -p json -o yaml '.source.revision // ""' "$MANIFEST" 2>/dev/null) == "$NEW_REVISION" ]] ||
-  fail "upgrade manifest does not record the applied revision: $NEW_REVISION"
+foundation_state_write "$TARGET" "${OLD_MODE:-install}" "$REPOSITORY" "$NEW_REVISION" "${AGENTIC_LOOP_REVISION:-$NEW_REVISION}" "$new_migration_level" "$entries" "$history"
+# The legacy manifest is intentionally never rewritten. It remains a
+# read-only migration source/fallback; common-dir state is authoritative.
+[[ $(yq -p json -o yaml '.source.revision // ""' "$STATE_ROOT/foundation-state.json" 2>/dev/null) == "$NEW_REVISION" ]] ||
+  fail "upgrade state does not record the applied revision: $NEW_REVISION"
 
 # --- Post-apply verification: doctor, then the configured full check ------
 verify_failed=0

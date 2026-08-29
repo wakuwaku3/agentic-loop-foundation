@@ -194,6 +194,7 @@ source "$SCRIPT_ROOT/bin/lib/agentic-loop/status.sh"
 source "$SCRIPT_ROOT/bin/lib/agentic-loop/doctor.sh"
 # shellcheck source=lib/agentic-loop/upgrade.sh
 source "$SCRIPT_ROOT/bin/lib/agentic-loop/upgrade.sh"
+source "$SCRIPT_ROOT/bin/lib/agentic-loop/foundation-state.sh"
 # shellcheck source=lib/agentic-loop/metrics.sh
 source "$SCRIPT_ROOT/bin/lib/agentic-loop/metrics.sh"
 # shellcheck source=lib/agentic-loop/project.sh

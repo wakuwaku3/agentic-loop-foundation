@@ -21,7 +21,7 @@ readonly SHARED_FILES=(
   .claude/skills/diagnose-codebase/SKILL.md
   .claude/skills/postmortem/SKILL.md
   .claude/skills/direct-edit/SKILL.md
-  .agentic-loop/guard-secrets.sh .agentic-loop/gitleaks.toml .agentic-loop/update-main.sh .agentic-loop/diagnose-codebase.sh .agentic-loop.toml
+  .agentic-loop/guard-secrets.sh .agentic-loop/gitleaks.toml .agentic-loop/update-main.sh .agentic-loop/diagnose-codebase.sh .agentic-loop.toml bin/lib/agentic-loop/foundation-state.sh
   .githooks/pre-commit .githooks/pre-push bin/agentic-loop bin/agentic-loop-diagnose
   bin/lib/agentic-loop/common.sh bin/lib/agentic-loop/config.sh bin/lib/agentic-loop/api.sh bin/lib/agentic-loop/agent.sh
   bin/lib/agentic-loop/setup.sh bin/lib/agentic-loop/service.sh bin/lib/agentic-loop/status.sh bin/lib/agentic-loop/doctor.sh
@@ -52,6 +52,18 @@ foundation_json_escape() {
 }
 
 foundation_sha256() { sha256sum "$1" | cut -d' ' -f1; }
+
+# Keep the state writer available to install/upgrade without making the
+# repository-local manifest part of the machine's mutable working tree.
+foundation_state_write() {
+  local target=$1 mode=$2 repository=$3 revision=$4 revision_ref=$5 migration_level=$6 entries=$7 history=$8
+  local out="$(git -C "$target" rev-parse --path-format=absolute --git-common-dir)/agentic-loop/foundation-state.json" tmp path class hash sep=''
+  mkdir -p "$(dirname "$out")"; tmp="$out.tmp.$$"
+  { printf '{"schema_version":1,"source":{"repository":"%s","revision":"%s","revision_ref":"%s"},"installed_at":%s,"mode":"%s","migration_level":%s,"files":[' "$(foundation_json_escape "$repository")" "$(foundation_json_escape "$revision")" "$(foundation_json_escape "$revision_ref")" "$(date +%s)" "$(foundation_json_escape "$mode")" "$migration_level"
+    while IFS=$'\t' read -r path class hash; do [[ -n $path ]] || continue; [[ -n $hash ]] || hash=$(foundation_sha256 "$target/$path"); printf '%s{"path":"%s","class":"%s","sha256":"%s"}' "$sep" "$(foundation_json_escape "$path")" "$class" "$hash"; sep=,; done <<< "$entries"
+    printf '],"history":[%s]}\n' "$history"; } > "$tmp"
+  mv -f -- "$tmp" "$out"
+}
 
 # Write .agentic-loop/manifest.json recording what was just installed/upgraded:
 # distribution revision, which files Foundation manages (class=shared, upgrade
