@@ -418,6 +418,14 @@ case "${1:-} ${2:-}" in
     fi
     endpoint=${2#repos/}; endpoint=${endpoint#*/}
     if [[ $endpoint == */* ]]; then endpoint=${endpoint#*/}; else endpoint=''; fi
+    if [[ $endpoint =~ ^commits/.+/check-runs$ && ${FAKE_TRACE_CHECKRUNS_FAIL:-0} == 1 ]]; then
+      printf 'HTTP 503: Service Unavailable\n' >&2
+      exit 1
+    fi
+    if [[ $endpoint =~ ^pulls/[0-9]+/files$ && ${FAKE_TRACE_FILES_FAIL:-0} == 1 ]]; then
+      printf 'HTTP 503: Service Unavailable\n' >&2
+      exit 1
+    fi
     method=GET wanted='' form_state='' form_state_reason='' input_file=''
     for ((i=1; i<=$#; i++)); do
       case ${!i} in
@@ -6207,7 +6215,53 @@ assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'reason=traceability-invalid
 [[ -e $target-worktrees/issue-7012 ]] || fail 'traceability require mode removed the worktree despite blocking completion'
 git -C "$target" show-ref --verify --quiet refs/heads/agent/issue-7012 || fail 'traceability require mode removed the branch despite blocking completion'
 
-# 13) A record containing credential-like content is rejected before it is
+# 13) A failed check-runs or changed-files observation is not converted into
+# evidence-mismatch. require requeues without consuming attempts or cleanup;
+# warn completes while leaving a machine-readable hold comment.
+write_queue_config "$target/.agentic-loop.toml" TRACEABILITY=require API_RETRY_ATTEMPTS=2
+trace_id1=$(criterion_id 'Observation failure is retryable')
+trace_c1=$(trace_criterion_json "$trace_id1" issue-body satisfied automated '' '' "$(trace_change_json bin/trace-observation.sh)" "$(trace_check_json check success)")
+trace_record=$(trace_record_json 7016 "$trace_c1")
+printf '%s' "$(trace_pr_body "$trace_record")" > "$TEST_ROOT/trace-pr-body"
+printf '7016 running open none 2026-01-01T00:00:00Z none none %s\n' "$(criteria_body 'Observation failure is retryable')" > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+: > "$FAKE_GH_ROOT/calls"
+FAKE_PR_BODY_FILE="$TEST_ROOT/trace-pr-body" FAKE_PR_FILES='bin/trace-observation.sh' FAKE_TRACE_CHECKRUNS_FAIL=1 FAKE_TRACE_FILES_FAIL=0 \
+  "$target/bin/agentic-loop" _worker 7016 trace-observation-check-failure-worker
+grep -Eq '^7016 queued open$' "$state" || fail 'check-runs observation failure was not requeued in require mode'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'reason=observation-unavailable' 'check-runs observation failure was not classified as observation-unavailable'
+! grep -Fq 'evidence-mismatch' "$FAKE_GH_ROOT/$state_key.comments" || fail 'check-runs observation failure was misclassified as evidence-mismatch'
+[[ -e $target-worktrees/issue-7016 ]] || fail 'observation failure removed the worktree'
+git -C "$target" show-ref --verify --quiet refs/heads/agent/issue-7016 || fail 'observation failure removed the branch'
+[[ $(grep -c 'commits/.*/check-runs' "$FAKE_GH_ROOT/calls") -eq 2 ]] || fail 'check-runs retries exceeded API_RETRY_ATTEMPTS or were not bounded'
+! grep -Fq 'pulls/99/files' "$FAKE_GH_ROOT/calls" || fail 'worker re-observed files after check-runs failure'
+
+write_queue_config "$target/.agentic-loop.toml" TRACEABILITY=warn API_RETRY_ATTEMPTS=2
+printf '7017 running open none 2026-01-01T00:00:00Z none none %s\n' "$(criteria_body 'Observation failure is retryable')" > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+: > "$FAKE_GH_ROOT/calls"
+FAKE_PR_BODY_FILE="$TEST_ROOT/trace-pr-body" FAKE_PR_FILES='bin/trace-observation.sh' FAKE_TRACE_CHECKRUNS_FAIL=0 FAKE_TRACE_FILES_FAIL=1 \
+  "$target/bin/agentic-loop" _worker 7017 trace-observation-files-failure-worker
+grep -Eq '^7017 completed closed$' "$state" || fail 'files observation failure blocked warn-mode completion'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'verdict=warn reason=observation-unavailable' 'warn mode did not expose files observation hold'
+! grep -Fq 'evidence-mismatch' "$FAKE_GH_ROOT/$state_key.comments" || fail 'files observation failure was misclassified as evidence-mismatch'
+[[ $(grep -c 'pulls/99/files' "$FAKE_GH_ROOT/calls") -eq 2 ]] || fail 'files retries exceeded API_RETRY_ATTEMPTS or were not bounded'
+
+# A successful empty response remains an observation, so it can still produce
+# the normal evidence-mismatch result rather than observation-unavailable.
+write_queue_config "$target/.agentic-loop.toml" TRACEABILITY=require API_RETRY_ATTEMPTS=2
+trace_id1=$(criterion_id 'Empty observation is distinct from failure')
+trace_c1=$(trace_criterion_json "$trace_id1" issue-body satisfied automated '' '' "$(trace_change_json bin/trace-empty.sh)" '')
+trace_record=$(trace_record_json 7018 "$trace_c1")
+printf '%s' "$(trace_pr_body "$trace_record")" > "$TEST_ROOT/trace-pr-body"
+printf '7018 running open none 2026-01-01T00:00:00Z none none %s\n' "$(criteria_body 'Empty observation is distinct from failure')" > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+FAKE_PR_BODY_FILE="$TEST_ROOT/trace-pr-body" FAKE_PR_FILES='' FAKE_TRACE_CHECKRUNS_FAIL=0 FAKE_TRACE_FILES_FAIL=0 \
+  "$target/bin/agentic-loop" _worker 7018 trace-empty-success-worker
+grep -Eq '^7018 failed open$' "$state" || fail 'successful empty observation did not remain an evidence mismatch'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'detail=evidence-mismatch' 'successful empty observation was not distinguished from unavailable observation'
+
+# 16) A record containing credential-like content is rejected before it is
 # ever trusted, and the raw secret text never reaches a posted comment.
 write_queue_config "$target/.agentic-loop.toml" TRACEABILITY=require
 trace_secret="ghp_$(printf '%s%s' 'abcdefghijklmnopqrst' 'uvwxyz0123456789')"
