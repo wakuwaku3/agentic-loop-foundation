@@ -491,7 +491,7 @@ reconcile_queued_categories() {
     else
       comment_issue "$issue" "<!-- agentic-loop:category-reconciled reason=multiple selected=$category -->\n複数のカテゴリを検出したため、定義済みの最上位カテゴリ \`category:$category\` だけを残しました。必要ならqueued中にカテゴリLabelを1つだけ残して再トリアージしてください。"
     fi
-  done < <(snapshot_state_rows queued || repo_api issues --method GET -f state=open -f labels="$(state_label queued)" -f per_page=100 --paginate --jq '.[] | select(.pull_request == null) | [.number, "queued", "", "", (if (.body // "") == "" then "-" else ((.body // "") | @base64) end), ([.labels[].name | select(startswith("category:"))] | join(","))] | @tsv' 2>/dev/null || true)
+  done < <(snapshot_state_rows queued || repo_api issues --method GET -f state=open -f labels="$(state_label queued)" -f per_page=100 --paginate --jq '.[] | select(.pull_request == null) | [.number, "queued", "-", "-", (if (.body // "") == "" then "-" else ((.body // "") | @base64) end), ([(.labels[].name | select(startswith("category:")))] | join(",") // "-")] | @tsv' 2>/dev/null || true)
 }
 
 
@@ -519,7 +519,7 @@ project_sync_diagnose() {
   PROJECT_SYNC_STATUS='unset'
   [[ -r $STATE_ROOT/project.env ]] || return 0
   local key value project_owner='' project_number=''
-  while IFS='=' read -r key value; do case $key in PROJECT_OWNER) project_owner=$value ;; PROJECT_NUMBER) project_number=$value ;; esac; done < "$STATE_ROOT/project.env"
+  while IFS='=' read -r key value; do case $key in PROJECT_OWNER) project_owner=$value ;; PROJECT_NUMBER) project_number=$value ;; esac; done < "$STATE_ROOT/project.env" || true
   [[ -n $project_owner && $project_number =~ ^[0-9]+$ ]] || return 0
   PROJECT_SYNC_STATUS=drift
   local view_out view_rc=0 project_id repository owner name graphql_out
@@ -552,6 +552,7 @@ project_sync_diagnose() {
   else
     project_sync_scope_signature "$graphql_out" && PROJECT_SYNC_STATUS=scope
   fi
+  return 0
 }
 
 

@@ -1561,6 +1561,10 @@ assert_contains "$target/.agents/skills/diagnose-codebase/SKILL.md" '`diagnosis`
 # shellcheck disable=SC2016 # Backticks are literal Markdown in installed documentation.
 assert_contains "$target/docs/operations/codebase-diagnosis.md" '`diagnosis`、`category:improvement`、`agent:queued`' 'installed diagnosis docs did not describe categorized queueing'
 assert_contains "$target/.agentic-loop/diagnose-codebase.sh" 'diagnosis, category:improvement, and agent:queued labels' 'installed diagnosis prompt did not request categorized queueing'
+# A missing loop CLI must still reach the configuration fallback under
+# nounset, and an empty provider result is a successful diagnosis run.
+assert_contains "$target/.agentic-loop/diagnose-codebase.sh" "pick=''" 'diagnosis fallback leaves pick unset when the loop CLI is absent'
+assert_contains "$target/.agentic-loop/diagnose-codebase.sh" 'return 0' 'empty diagnosis result is not normalized to successful completion'
 
 # Diagnosis honors the configured provider (agent.diagnose.provider).
 cp "$target/.agentic-loop.toml" "$target/.agentic-loop.toml.bak"
@@ -6919,6 +6923,22 @@ grep -Eq '^7205 needs-input open' "$state" || fail 'require mode did not block c
 assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'reason=workload-invalid' 'require mode did not record reason=workload-invalid'
 ! grep -Fq -- '--sandbox workspace-write' "$FAKE_GH_ROOT/codex-calls" || fail 'require mode let exec run despite an invalid workload record'
 
+# 4b) Missing and explicit-null required fields must not pass through the
+# record validator as the literal string "null" (Issue #240).
+for malformed in '{"operation":null,"per_unit":"1","growth":"O(1)","stop_condition":"none","reuse":"none"}' '{"operation":"poll","per_unit":"1","growth":"O(1)","stop_condition":"none","reuse":"none"}'; do
+  wl_record=$(workload_record_json 7208 added "[$malformed]" '["queue"]')
+  if [[ $malformed == *'"operation":"poll"'* ]]; then
+    wl_record=$(printf '{"schema":1,"issue":7208,"external_io":"added","units":[%s],"verification":["queue"],"exceptions":[{"site":null,"reason":"fixture"}]}' "$malformed")
+  fi
+  write_queue_config "$target/.agentic-loop.toml" WORKLOAD=require PREFLIGHT=off TRACEABILITY=off
+  printf '7208 running open\n' > "$state"
+  : > "$FAKE_GH_ROOT/$state_key.comments"
+  : > "$FAKE_GH_ROOT/codex-calls"
+  FAKE_CODEX_RESULT="$(workload_plan_body "$wl_record")" "$target/bin/agentic-loop" _worker 7208 workload-null-field-worker
+  grep -Eq '^7208 needs-input open' "$state" || fail 'null/missing workload required field was accepted'
+  ! grep -Fq -- '--sandbox workspace-write' "$FAKE_GH_ROOT/codex-calls" || fail 'invalid null/missing workload record reached exec'
+done
+
 # 5) A credential-like value anywhere in the record is rejected before it is
 # ever trusted, and the raw secret text never reaches a posted comment.
 wl_secret="ghp_$(printf '%s%s' 'abcdefghijklmnopqrst' 'uvwxyz0123456789')"
@@ -9102,6 +9122,33 @@ hook_result=$(run_edit_hook Edit "$hook_outside/main-link/tracked file.txt" "$ho
 [[ $hook_result == *'"permissionDecision":"deny"'* ]] || fail 'symlink path bypassed the edit hook'
 hook_result=$(printf '{"tool_name":"Edit","tool_input":{},"cwd":"%s"}' "$hook_main" | env -u AGENTIC_LOOP_AGENT "$PROJECT_ROOT/.claude/hooks/confirm-main-worktree-edit.sh")
 [[ $hook_result == *'"permissionDecision":"deny"'* ]] || fail 'malformed edit input did not fail safely'
+# Git discovery and tracked-file classification are fail-closed.  Use wrapper
+# commands so the fixture exercises each failure without modifying the test
+# repository or the hook's own PATH restoration.
+hook_git_stub="$TEST_ROOT/hook-git-stub"
+mkdir -p "$hook_git_stub"
+cat > "$hook_git_stub/git" <<'EOF'
+#!/usr/bin/env bash
+case " $* " in
+  *" worktree list --porcelain "*) exit 42 ;;
+  *) exec /usr/bin/git "$@" ;;
+esac
+EOF
+chmod +x "$hook_git_stub/git"
+hook_result=$(PATH="$hook_git_stub:$PATH" run_edit_hook Edit "$hook_main/tracked file.txt" "$hook_main")
+[[ $hook_result == *'"permissionDecision":"deny"'* && $hook_result == *'対象worktreeを確認できなかった'* ]] || fail 'git worktree discovery failure did not fail closed'
+hook_result=$(run_edit_hook Edit "$hook_main/tracked file.txt" "$TEST_ROOT")
+[[ $hook_result == *'"permissionDecision":"deny"'* && $hook_result == *'対象worktreeを確認できなかった'* ]] || fail 'non-repository cwd did not fail closed'
+hook_git_stub="$TEST_ROOT/hook-git-ls-files-stub"
+mkdir -p "$hook_git_stub"
+cat > "$hook_git_stub/git" <<'EOF'
+#!/usr/bin/env bash
+if [[ $1 == -C && $3 == ls-files ]]; then exit 42; fi
+exec /usr/bin/git "$@"
+EOF
+chmod +x "$hook_git_stub/git"
+hook_result=$(PATH="$hook_git_stub:$PATH" run_edit_hook Edit "$hook_main/tracked file.txt" "$hook_main")
+[[ $hook_result == *'"permissionDecision":"deny"'* && $hook_result == *'追跡ファイルか確認できなかった'* ]] || fail 'tracked-file classification failure did not fail closed'
 
 # --- gh --body "@path" Bash PreToolUse hook (Issue #272, ADR 0030) ---------
 # Fail-open by design: only a Bash tool_input.command containing an unexpanded
