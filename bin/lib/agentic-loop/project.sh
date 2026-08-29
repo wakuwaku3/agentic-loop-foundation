@@ -18,26 +18,35 @@ queue_project_sync() {
   # This file is deliberately only a wake-up hint.  Desired Project values are
   # never persisted locally: they are derived from a fresh GitHub Issue read
   # immediately before a mutation.
-  local hint=$1 issue occurrences was_empty=0 appended=0
-  if [[ $hint =~ ^([a-z-]+[[:space:]]+)?([1-9][0-9]*) ]]; then issue=${BASH_REMATCH[2]};
-  elif [[ $hint =~ /issues/([1-9][0-9]*)$ ]]; then issue=${BASH_REMATCH[1]};
-  else return 0; fi
+  local hint=$1 normalized occurrences was_empty=0 appended=0
+  if [[ $hint =~ ^([a-z-]+[[:space:]]+)?([1-9][0-9]*)$ ]]; then
+    normalized=${BASH_REMATCH[2]}
+  elif [[ $hint =~ ^pulls[[:space:]]+[^[:space:]]+$ ]]; then
+    normalized=$hint
+  elif [[ $hint =~ ^content[[:space:]]+https?://[^[:space:]]+/pull/[1-9][0-9]*$ ]]; then
+    normalized=$hint
+  elif [[ $hint =~ /issues/[1-9][0-9]*$ ]]; then
+    normalized=${BASH_REMATCH[0]}
+  else
+    printf 'Project同期ヒントを解釈できないため破棄しました（値は非表示）\n' >&2
+    return 0
+  fi
   mkdir -p "$STATE_ROOT"
   ( flock 9
     [[ -s $STATE_ROOT/project-pending ]] || was_empty=1
-    occurrences=$(grep -Fxc -- "$issue" "$STATE_ROOT/project-pending" 2>/dev/null || true); occurrences=${occurrences:-0}
+    occurrences=$(grep -Fxc -- "$normalized" "$STATE_ROOT/project-pending" 2>/dev/null || true); occurrences=${occurrences:-0}
     # An entry being reconciled remains in project-pending.  A second enqueue
     # for it is deliberately retained (but capped at one extra copy, not
     # unboundedly repeated), so an event that arrives between the read and the
     # ack cannot be mistaken for the entry we are acknowledging while a
     # permanently failing Issue cannot make this file grow without bound.
-    if grep -Fxq -- "$issue" "$STATE_ROOT/project-pending.inflight" 2>/dev/null; then
+    if grep -Fxq -- "$normalized" "$STATE_ROOT/project-pending.inflight" 2>/dev/null; then
       if (( occurrences < 2 )); then
-        printf '%s\n' "$issue" >> "$STATE_ROOT/project-pending"
+        printf '%s\n' "$normalized" >> "$STATE_ROOT/project-pending"
         appended=1
       fi
     elif (( occurrences == 0 )); then
-      printf '%s\n' "$issue" >> "$STATE_ROOT/project-pending"
+      printf '%s\n' "$normalized" >> "$STATE_ROOT/project-pending"
       appended=1
     fi
     # .since records when the pending queue first became non-empty, not this
@@ -261,10 +270,17 @@ project_add_pull_requests() {
     case $key in PROJECT_OWNER) PROJECT_OWNER=$value ;; PROJECT_NUMBER) PROJECT_NUMBER=$value ;; esac
   done < "$STATE_ROOT/project.env"
   [[ -n $PROJECT_OWNER && $PROJECT_NUMBER =~ ^[0-9]+$ ]] || return 0
+  # The head filter is bounded by GitHub's paginated endpoint; each returned
+  # PR is processed once, so work is O(P) in the number of matching PRs.
+  local urls="$STATE_ROOT/project-pulls.$$"
+  if ! repo_api pulls --method GET -f state=all -f head="${PROJECT_OWNER}:$branch" -f per_page=100 --paginate --jq '.[].html_url' >"$urls" 2>/dev/null; then
+    rm -f "$urls"; queue_project_sync "pulls $branch"; return 0
+  fi
   while IFS= read -r url; do
     [[ -n $url ]] || continue
     project_add_content "$url"
-  done < <(repo_api pulls --method GET -f state=all -f head="${PROJECT_OWNER}:$branch" -f per_page=100 --paginate --jq '.[].html_url' 2>/dev/null || true)
+  done < "$urls"
+  rm -f "$urls"
 }
 
 
@@ -282,7 +298,7 @@ project_pending_ack() {
 reconcile_pending_project() {
   [[ -s $STATE_ROOT/project-pending ]] || return 0
   graphql_budget_allows "$((GRAPHQL_RESERVE + PROJECT_OPERATION_BUDGET))" || return 0
-  local hint issue processed=0 rc snapshot="$STATE_ROOT/project-pending.snapshot.$$" inflight="$STATE_ROOT/project-pending.inflight"
+  local hint issue kind value processed=0 rc snapshot="$STATE_ROOT/project-pending.snapshot.$$" inflight="$STATE_ROOT/project-pending.inflight"
   ( flock 9; cp "$STATE_ROOT/project-pending" "$snapshot"; : > "$inflight" ) 9> "$STATE_ROOT/project-pending.lock"
   while IFS= read -r hint; do
     [[ -n $hint ]] || continue
@@ -291,15 +307,26 @@ reconcile_pending_project() {
     # today.  Matching only bare numbers left every such line unacknowledged
     # forever, so one legacy entry pinned status's project-sync-pending on
     # permanently; read the Issue out of them the way queue_project_sync does.
-    issue=''
-    [[ $hint =~ ^([a-z-]+[[:space:]]+)?([1-9][0-9]*)([[:space:]]|$) ]] && issue=${BASH_REMATCH[2]}
-    # A hint carrying no Issue number can never be acted on: keeping it would
-    # make the queue permanently non-empty for no possible work.
-    if [[ -z $issue ]]; then project_pending_ack "$hint"; continue; fi
+    kind=issue; value=$hint
+    if [[ $hint =~ ^pulls[[:space:]]+(.+)$ ]]; then kind=branch; value=${BASH_REMATCH[1]}
+    elif [[ $hint =~ ^content[[:space:]]+(.+)$ ]]; then kind=content; value=${BASH_REMATCH[1]}
+    elif [[ $hint =~ ^([a-z-]+[[:space:]]+)?([1-9][0-9]*)$ ]]; then issue=${BASH_REMATCH[2]}
+    elif [[ $hint =~ /issues/([1-9][0-9]*)$ ]]; then issue=${BASH_REMATCH[1]}
+    else project_pending_ack "$hint"; continue; fi
     if (( processed >= PROJECT_RECONCILE_BATCH )); then continue; fi
-    ( flock 9; printf '%s\n' "$issue" >> "$inflight" ) 9> "$STATE_ROOT/project-pending.lock"
+    ( flock 9; printf '%s\n' "$hint" >> "$inflight" ) 9> "$STATE_ROOT/project-pending.lock"
     rc=0
-    project_reconcile_issue "$issue" || rc=$?
+    case $kind in
+      issue) project_reconcile_issue "$issue" || rc=$? ;;
+      content) project_add_content "$value" || rc=$? ;;
+      branch) project_add_pull_requests "$value" || rc=$? ;;
+    esac
+    # Project mutation helpers intentionally remain best-effort for callers;
+    # the durable queue is therefore the failure signal for PR hints.  Do not
+    # acknowledge the snapshot while the same retry hint (or a PR discovered
+    # from a branch) is still queued.
+    if [[ $kind == content ]] && grep -Fxq -- "content $value" "$STATE_ROOT/project-pending" 2>/dev/null; then rc=1; fi
+    if [[ $kind == branch ]] && grep -Fxq -- "pulls $value" "$STATE_ROOT/project-pending" 2>/dev/null; then rc=1; fi
     # rc 0 (converged) and rc 2 (confirmed non-member / invalid labels, no
     # mutation to make) are both acknowledgement-worthy; only rc 1 is a
     # retryable failure that must remain so a crash cannot drop the entry.
