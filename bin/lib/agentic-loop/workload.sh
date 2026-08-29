@@ -86,7 +86,7 @@ workload_validate_schema() {
     for field in "$operation" "$per_unit" "$growth" "$stop_condition" "$reuse"; do
       workload_text_field_safe "$field" 200 || { WORKLOAD_INVALID_REASON='schema-invalid'; return 1; }
     done
-    [[ -n $per_unit && -n $growth && -n $stop_condition && -n $reuse ]] || { WORKLOAD_INVALID_REASON='schema-invalid'; return 1; }
+    [[ -n $operation && -n $per_unit && -n $growth && -n $stop_condition && -n $reuse ]] || { WORKLOAD_INVALID_REASON='schema-invalid'; return 1; }
   done < <(yq -p json -o json -I=0 '.units[]?' <<< "$manifest" 2>/dev/null)
 
   local verification_text
