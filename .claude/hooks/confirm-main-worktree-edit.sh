@@ -85,10 +85,30 @@ tool_name=$(printf '%s' "$payload" | yq -p json -r '.tool_name // ""' - 2>/dev/n
 case $tool_name in
   Edit|Write) path_query='.tool_input.file_path // ""' ;;
   NotebookEdit) path_query='.tool_input.notebook_path // ""' ;;
+  Bash)
+    # Bash has no structured path. Inspect only explicit write primitives and
+    # use the final operand as a conservative candidate.
+    command=$(printf '%s' "$payload" | yq -p json -r '.tool_input.command // ""' 2>/dev/null) || exit 0
+    [[ -n $command && $command != *$'\n'* && $command != *$'\r'* ]] || exit 0
+    case $command in
+      *'sed '*'-i'*|*'perl '*'-i'*) target_path=$(printf '%s\n' "$command" | awk '{print $NF}') ;;
+      *'tee '*|*'tee -a '*) target_path=$(printf '%s\n' "$command" | sed -E 's/.*tee[[:space:]]+(-a[[:space:]]+)?([^[:space:];|&]+).*/\2/') ;;
+      *'>'*) target_path=$(printf '%s\n' "$command" | sed -E 's/.*>{1,2}[[:space:]]*([^[:space:];|&]+).*/\1/') ;;
+      *' cp '*|cp\ *|*' mv '*|mv\ *|*' install '*) target_path=$(printf '%s\n' "$command" | awk '{print $NF}') ;;
+      *) exit 0 ;;
+    esac
+    ;;
   *) exit 0 ;;
 esac
-target_path=$(printf '%s' "$payload" | yq -p json -r "$path_query" - 2>/dev/null) || deny 'イベント解析に失敗したため編集を保留しました。対象worktreeのgitdirに agentic-loop-allow-edit を立てて再実行してください。'
+if [[ -n ${path_query:-} ]]; then
+  target_path=$(printf '%s' "$payload" | yq -p json -r "$path_query" 2>/dev/null) || deny 'イベント解析に失敗したため編集を保留しました。対象worktreeのgitdirに agentic-loop-allow-edit を立てて再実行してください。'
+fi
 cwd=$(printf '%s' "$payload" | yq -p json -r '.cwd // ""' - 2>/dev/null) || deny 'イベント解析に失敗したため編集を保留しました。対象worktreeのgitdirに agentic-loop-allow-edit を立てて再実行してください。'
+
+# Shell operands are commonly relative to the Bash event's cwd.
+if [[ $tool_name == Bash && $target_path != /* ]]; then
+  target_path="$cwd/$target_path"
+fi
 
 # Reject data that would make the checks below unreliable.
 [[ -n $target_path && -n $cwd && $target_path != *$'\n'* && $target_path != *$'\r'* && $cwd != *$'\n'* && $cwd != *$'\r'* ]] \

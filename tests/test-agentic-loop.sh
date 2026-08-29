@@ -8966,7 +8966,8 @@ git -C "$hook_main" init --quiet
 git -C "$hook_main" config user.email test@example.invalid
 git -C "$hook_main" config user.name test
 printf 'tracked\n' > "$hook_main/tracked file.txt"
-git -C "$hook_main" add 'tracked file.txt'
+printf 'tracked\n' > "$hook_main/tracked-bash.txt"
+git -C "$hook_main" add 'tracked file.txt' tracked-bash.txt
 git -C "$hook_main" commit --quiet -m tracked
 git -C "$hook_main" worktree add --quiet -b hook-worker "$hook_worker"
 ln -s "$hook_outside" "$hook_main/outside-link"
@@ -9028,6 +9029,21 @@ hook_result=$(run_edit_hook Edit "$hook_outside/main-link/tracked file.txt" "$ho
 [[ $hook_result == *'"permissionDecision":"deny"'* ]] || fail 'symlink path bypassed the edit hook'
 hook_result=$(printf '{"tool_name":"Edit","tool_input":{},"cwd":"%s"}' "$hook_main" | env -u AGENTIC_LOOP_AGENT "$PROJECT_ROOT/.claude/hooks/confirm-main-worktree-edit.sh")
 [[ $hook_result == *'"permissionDecision":"deny"'* ]] || fail 'malformed edit input did not fail safely'
+
+# Bash write primitives must use the same gate for tracked files. Read-only
+# Bash calls and untracked scratch files remain allowed.
+run_bash_edit_hook() { # COMMAND CWD
+  local cmd=$1 cwd=$2 escaped
+  escaped=${cmd//\\/\\\\}
+  escaped=${escaped//\"/\\\"}
+  printf '{"tool_name":"Bash","tool_input":{"command":"%s"},"cwd":"%s"}' "$escaped" "$cwd" \
+    | env AGENTIC_LOOP_AGENT=1 "$PROJECT_ROOT/.claude/hooks/confirm-main-worktree-edit.sh"
+}
+hook_result=$(run_bash_edit_hook 'sed -i s/x/y/ tracked-bash.txt' "$hook_main")
+[[ $hook_result == *'"permissionDecision":"deny"'* ]] || fail 'Bash sed write bypassed the main-worktree gate'
+[[ -z $(run_bash_edit_hook 'git status --short' "$hook_main") ]] || fail 'read-only Bash call was unexpectedly gated'
+[[ -z $(run_bash_edit_hook 'printf scratch > /tmp/agentic-loop-hook-scratch.txt' "$hook_main") ]] || fail 'Bash outside-worktree write was unexpectedly gated'
+[[ -z $(run_bash_edit_hook 'sed -i s/x/y/ tracked-bash.txt' "$hook_worker") ]] || fail 'Bash write in linked worker worktree was gated'
 
 # --- gh --body "@path" Bash PreToolUse hook (Issue #272, ADR 0030) ---------
 # Fail-open by design: only a Bash tool_input.command containing an unexpanded
