@@ -90,6 +90,7 @@ run_diagnosis() {
   # read-only through its sandbox; other providers rely on the prompt below.
   props=$(diagnose_props "$root")
   provider='' model='' effort=''
+  pick=''
   if [[ -x $root/bin/agentic-loop ]]; then
     pick=$("$root/bin/agentic-loop" _pick-tier diagnose 2>/dev/null) || pick=''
   fi
@@ -134,7 +135,10 @@ run_diagnosis() {
       opencode "${args[@]}" "$prompt" > "$result_file"
       ;;
   esac
-  [[ -s $result_file ]] && cat "$result_file"
+  if [[ -s $result_file ]]; then
+    cat "$result_file"
+  fi
+  return 0
 }
 
 case ${1:-} in
