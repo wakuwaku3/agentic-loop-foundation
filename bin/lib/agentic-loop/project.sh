@@ -519,7 +519,7 @@ project_sync_diagnose() {
   PROJECT_SYNC_STATUS='unset'
   [[ -r $STATE_ROOT/project.env ]] || return 0
   local key value project_owner='' project_number=''
-  while IFS='=' read -r key value; do case $key in PROJECT_OWNER) project_owner=$value ;; PROJECT_NUMBER) project_number=$value ;; esac; done < "$STATE_ROOT/project.env"
+  while IFS='=' read -r key value; do case $key in PROJECT_OWNER) project_owner=$value ;; PROJECT_NUMBER) project_number=$value ;; esac; done < "$STATE_ROOT/project.env" || true
   [[ -n $project_owner && $project_number =~ ^[0-9]+$ ]] || return 0
   PROJECT_SYNC_STATUS=drift
   local view_out view_rc=0 project_id repository owner name graphql_out
@@ -552,6 +552,7 @@ project_sync_diagnose() {
   else
     project_sync_scope_signature "$graphql_out" && PROJECT_SYNC_STATUS=scope
   fi
+  return 0
 }
 
 
