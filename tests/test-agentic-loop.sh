@@ -641,6 +641,15 @@ case "${1:-} ${2:-}" in
       if [[ $method == POST ]]; then
         body=''; for arg in "$@"; do [[ $arg == body=* ]] && body=${arg#body=}; done
         body=$(encode_comment_body "$body")
+        if [[ ${FAKE_FAIL_COMMENT_ONCE:-} == 1 ]]; then
+          comment_failure_count=0
+          [[ -r $FAKE_GH_ROOT/comment-failure-count ]] && read -r comment_failure_count < "$FAKE_GH_ROOT/comment-failure-count"
+          if (( comment_failure_count < 3 )); then
+            printf '%s\n' "$((comment_failure_count + 1))" > "$FAKE_GH_ROOT/comment-failure-count"
+            printf 'HTTP 503: transient comment failure\n' >&2
+            exit 1
+          fi
+        fi
         printf '%s\n' "$body" >> "$comment_bodies_log"
         ( flock 9
           printf '%s %s\n' "$issue" "$body" >> "$comments"
@@ -2703,6 +2712,43 @@ rm -f "$closes"
 grep -Eq '^72 cancelled closed' "$state" || fail 'authorized dispose did not close the Issue as cancelled'
 assert_contains "$closes" $'72\tnot_planned' 'dispose close did not record state_reason=not_planned'
 assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:dispose' 'dispose did not record its audit marker'
+
+# A one-shot comment outage leaves an open disposed Issue recoverable: retrying
+# the same authorized dispose completes the audit and not_planned close.
+printf '75 needs-input open none 2026-01-01T00:00:00Z\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+rm -f "$closes" "$FAKE_GH_ROOT/comment-failure-count"
+if FAKE_FAIL_COMMENT_ONCE=1 "$target/bin/agentic-loop" dispose 75 --reason cancelled; then
+  fail 'dispose unexpectedly succeeded during the injected comment failure'
+fi
+grep -Eq '^75 cancelled open' "$state" || fail 'partial dispose did not retain its terminal label and open state'
+"$target/bin/agentic-loop" dispose 75 --reason cancelled
+grep -Eq '^75 cancelled closed' "$state" || fail 'retry did not complete the partial dispose close'
+assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'agentic-loop:dispose' 'retry did not record the final audit comment'
+assert_contains "$closes" $'75\tnot_planned' 'retry did not close with state_reason=not_planned'
+
+# If the stopping transition's comment fails, a retry must still stop the
+# local worker before closing the disposed Issue.
+printf '76 running open none 2026-01-01T00:00:00Z\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+rm -f "$closes" "$FAKE_GH_ROOT/comment-failure-count"
+sleep 60 & stopping_worker=$!
+mkdir -p "$state_root/workers"
+printf '%s\n' "$stopping_worker" > "$state_root/workers/76.pid"
+if FAKE_FAIL_COMMENT_ONCE=1 "$target/bin/agentic-loop" dispose 76 --reason cancelled; then
+  fail 'dispose unexpectedly succeeded during the stopping comment failure'
+fi
+grep -Eq '^76 stopping open' "$state" || fail 'failed stopping transition did not retain agent:stopping'
+"$target/bin/agentic-loop" dispose 76 --reason cancelled
+grep -Eq '^76 cancelled closed' "$state" || fail 'retry did not close the stopping Issue'
+if kill -0 "$stopping_worker" 2>/dev/null; then kill "$stopping_worker" 2>/dev/null || true; fail 'retry left the local worker alive'; fi
+
+# Immutable disposition changes and closed Issues remain rejected.
+printf '77 needs-input open none 2026-01-01T00:00:00Z\n78 cancelled closed none 2026-01-01T00:00:00Z\n' > "$state"
+if "$target/bin/agentic-loop" dispose 77 --reason merged; then fail 'different terminal reason was accepted'; fi
+if "$target/bin/agentic-loop" dispose 78 --reason cancelled; then fail 'closed Issue dispose was accepted'; fi
+grep -Eq '^77 needs-input open none' "$state" || fail 'rejected reason changed Issue state'
+grep -Eq '^78 cancelled closed none' "$state" || fail 'closed Issue changed state after rejection'
 
 # dispose --target transfers the source Issue's native blocked_by
 # dependencies to the consolidation target. Regression guard for Issue #252:
