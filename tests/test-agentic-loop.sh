@@ -9200,7 +9200,7 @@ AGENTIC_LOOP_SOURCE="$PROJECT_ROOT" AGENTIC_LOOP_TARGET="$upgrade_target" AGENTI
 [[ -x $upgrade_target/.claude/hooks/require-gh-body-file.sh ]] || fail 'install did not distribute an executable gh --body Bash hook'
 [[ $(yq -p json -r '.hooks.PreToolUse[1].matcher' "$upgrade_target/.claude/settings.json") == Bash ]] || fail 'install did not distribute the gh --body Bash hook settings'
 [[ ! -e $upgrade_target/.agentic-loop/manifest.json ]] || fail 'install created a legacy manifest instead of common-dir state'
-state_path=$(git -C "$upgrade_target" rev-parse --git-common-dir)/agentic-loop/foundation-state.json
+state_path=$(git -C "$upgrade_target" rev-parse --path-format=absolute --git-common-dir)/agentic-loop/foundation-state.json
 [[ $(yq -p json -o yaml '.mode' "$state_path") == install ]] || fail 'state recorded the wrong install mode'
 [[ $(yq -p json -o yaml '.source.repository' "$state_path") == 'wakuwaku3/agentic-loop-foundation' ]] || fail 'state recorded the wrong source repository'
 git -C "$upgrade_target" add -A && git -C "$upgrade_target" commit --quiet -m 'install foundation' && git -C "$upgrade_target" push --quiet
@@ -9321,7 +9321,7 @@ migration_out=$("$migration_target/bin/agentic-loop" upgrade --source "$PROJECT_
 grep -Fq '[foundation]' "$migration_target/.agentic-loop.toml" || fail 'migration did not add the [foundation] section'
 resolved_revision=$(git -C "$PROJECT_ROOT" rev-parse HEAD)
 assert_contains "$migration_target/.agentic-loop.toml" "revision = \"$resolved_revision\"" 'migration apply did not pin the applied revision'
-state_path=$(git -C "$migration_target" rev-parse --git-common-dir)/agentic-loop/foundation-state.json
+state_path=$(git -C "$migration_target" rev-parse --path-format=absolute --git-common-dir)/agentic-loop/foundation-state.json
 [[ $(yq -p json -o yaml '.source.revision' "$state_path") == "$resolved_revision" ]] || fail 'upgrade state did not record the applied revision'
 [[ $(yq -p json -o yaml '.migration_level' "$state_path") -eq 7 ]] || fail 'state migration_level was not bumped after applying the migration'
 migration_rerun=$("$migration_target/bin/agentic-loop" upgrade --source "$PROJECT_ROOT")
