@@ -329,6 +329,7 @@ status_running_detail() {
   STATUS_RUN_HEARTBEAT=$LEASE_HEARTBEAT
   STATUS_RUN_LEASE_EXPIRED=0
   [[ $LEASE_EXPIRES =~ ^[0-9]+$ ]] && (( now > LEASE_EXPIRES )) && STATUS_RUN_LEASE_EXPIRED=1
+  STATUS_RUN_OBSERVATION_SCOPE=$(worker_observation_scope "$issue")
   STATUS_RUN_WORKTREE="$WORKTREE_ROOT/issue-$issue"
   STATUS_RUN_WORKTREE_EXISTS=0
   [[ -e $STATUS_RUN_WORKTREE ]] && STATUS_RUN_WORKTREE_EXISTS=1
@@ -463,7 +464,7 @@ status_collect_anomalies() {
       read -r started < "$(worker_started_file "$issue")" || started=''
       [[ $started =~ ^[0-9]+$ ]] || anomaly_add warning local-state-corrupt "#$issue" "workers/$issue.started の内容が不正です。" "workers/$issue.started を確認し、worker停止後に問題の workers/$issue.* state を除去してください。" "$(status_file_elapsed "$(worker_started_file "$issue")")" needs-attention
     fi
-    local to_exceeded=0 elapsed
+    local to_exceeded=0 elapsed observation_scope
     if (( WORKER_TIMEOUT_SECONDS > 0 )) && worker_pid_live "$issue"; then
       elapsed=$(worker_elapsed_seconds "$issue" 2>/dev/null || true)
       if [[ $elapsed =~ ^[0-9]+$ ]] && (( elapsed >= WORKER_TIMEOUT_SECONDS )); then
@@ -486,7 +487,12 @@ status_collect_anomalies() {
       if [[ -n $LEASE_ID && ! $LEASE_ID =~ ^[0-9]+$ ]]; then
         anomaly_add warning local-state-corrupt "#$issue" "workers/$issue.lease の内容が不正です。" "workers/$issue.lease を確認し、worker停止後に問題の workers/$issue.* state を除去してください。" "$(status_file_elapsed "$STATE_ROOT/workers/$issue.lease")" needs-attention
       elif [[ $LEASE_EXPIRES =~ ^[0-9]+$ ]] && (( $(date +%s) > LEASE_EXPIRES )); then
-        anomaly_add info lease-expired "#$issue" "リースが期限切れです（expires=$LEASE_EXPIRES）。" '次pollで安全にqueueへ戻します。' "$(status_elapsed_since "$LEASE_EXPIRES")" recovering
+        observation_scope=$(worker_observation_scope "$issue")
+        if [[ $observation_scope == remote-unconfirmed ]]; then
+          anomaly_add warning lease-expired-local "#$issue" "ローカルleaseが期限切れです（expires=$LEASE_EXPIRES）が、リモートleaseは未確認です。" 'リモートworkerの稼働を否定できないため、自動回復予定とは分類しません。' "$(status_elapsed_since "$LEASE_EXPIRES")" needs-attention
+        else
+          anomaly_add info lease-expired "#$issue" "リースが期限切れです（expires=$LEASE_EXPIRES）。" '次pollで安全にqueueへ戻します。' "$(status_elapsed_since "$LEASE_EXPIRES")" recovering
+        fi
       fi
     fi
   done
@@ -671,6 +677,7 @@ status_render_text() {
         if (( STATUS_RUN_LEASE_EXPIRED )); then suffix+=" (lease_expires: $STATUS_RUN_LEASE_EXPIRES 期限切れ)"
         else suffix+=" (lease_expires: $STATUS_RUN_LEASE_EXPIRES)"; fi
       fi
+      [[ -n $STATUS_RUN_OBSERVATION_SCOPE ]] && suffix+=" (lease_observation: $STATUS_RUN_OBSERVATION_SCOPE)"
       if (( STATUS_RUN_WORKTREE_EXISTS )); then suffix+=" (worktree: $STATUS_RUN_WORKTREE, dirty=${STATUS_RUN_DIRTY:-0}, diverged=${STATUS_RUN_DIVERGED:-0})"
       else suffix+=" (worktree: $STATUS_RUN_WORKTREE なし)"; fi
       [[ -n $STATUS_RUN_PR ]] && suffix+=" (pr: #$STATUS_RUN_PR state=${STATUS_RUN_PR_STATE:-unknown} checks=${STATUS_RUN_CHECKS:-unknown})"
@@ -828,11 +835,11 @@ status_render_json() {
         scope_sep=','
       done <<< "$STATUS_RUN_SCOPE"
     fi
-    printf '],"started_at":%s,"elapsed_seconds":%s,"timeout_at":%s,"timeout_exceeded":%s,"heartbeat_at":%s,"lease_expires_at":%s,"lease_expired":%s,"worktree":"%s","worktree_exists":%s,"dirty":%s,"diverged":%s,"branch":"%s","pr":%s,"pr_url":"%s","pr_state":"%s","checks":"%s","local_state":%s,"stage":"%s","progress_at":%s,"progress_age_seconds":%s,"stall_threshold_seconds":%s,"health":"%s"}' \
+    printf '],"started_at":%s,"elapsed_seconds":%s,"timeout_at":%s,"timeout_exceeded":%s,"heartbeat_at":%s,"lease_expires_at":%s,"lease_expired":%s,"lease_observation_scope":"%s","worktree":"%s","worktree_exists":%s,"dirty":%s,"diverged":%s,"branch":"%s","pr":%s,"pr_url":"%s","pr_state":"%s","checks":"%s","local_state":%s,"stage":"%s","progress_at":%s,"progress_age_seconds":%s,"stall_threshold_seconds":%s,"health":"%s"}' \
       "${STATUS_RUN_STARTED:-null}" "${STATUS_RUN_ELAPSED:-null}" "${STATUS_RUN_TIMEOUT_AT:-null}" \
       "$( ((STATUS_RUN_TIMEOUT_EXCEEDED)) && printf true || printf false )" \
       "${STATUS_RUN_HEARTBEAT:-null}" "${STATUS_RUN_LEASE_EXPIRES:-null}" \
-      "$( ((STATUS_RUN_LEASE_EXPIRED)) && printf true || printf false )" "$(json_escape "$STATUS_RUN_WORKTREE")" \
+      "$( ((STATUS_RUN_LEASE_EXPIRED)) && printf true || printf false )" "$(json_escape "$STATUS_RUN_OBSERVATION_SCOPE")" "$(json_escape "$STATUS_RUN_WORKTREE")" \
       "$( ((STATUS_RUN_WORKTREE_EXISTS)) && printf true || printf false )" \
       "$( ((STATUS_RUN_DIRTY)) && printf true || printf false )" "$( ((STATUS_RUN_DIVERGED)) && printf true || printf false )" \
       "$(json_escape "$STATUS_RUN_BRANCH")" \

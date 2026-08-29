@@ -352,6 +352,15 @@ lease_read() {
   IFS=$'\t' read -r LEASE_ID LEASE_EXPIRES LEASE_HEARTBEAT rest < "$file"
 }
 
+# A local lease file alone cannot establish ownership: another host may hold
+# the current GitHub lease. Recovery keeps its existing stronger checks.
+worker_observation_scope() {
+  local issue=$1
+  worker_alive "$issue" && { printf '%s\n' local-worker; return 0; }
+  [[ -e "$STATE_ROOT/workers/$issue.pid" ]] && { printf '%s\n' local-pidfile; return 0; }
+  printf '%s\n' remote-unconfirmed
+}
+
 
 # Whether the local worker recorded for this Issue is still running: its pid is
 # alive and its command line is this repository's worker for this Issue (a cmdline
