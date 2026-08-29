@@ -6899,6 +6899,22 @@ grep -Eq '^7205 needs-input open' "$state" || fail 'require mode did not block c
 assert_contains "$FAKE_GH_ROOT/$state_key.comments" 'reason=workload-invalid' 'require mode did not record reason=workload-invalid'
 ! grep -Fq -- '--sandbox workspace-write' "$FAKE_GH_ROOT/codex-calls" || fail 'require mode let exec run despite an invalid workload record'
 
+# 4b) Missing and explicit-null required fields must not pass through the
+# record validator as the literal string "null" (Issue #240).
+for malformed in '{"operation":null,"per_unit":"1","growth":"O(1)","stop_condition":"none","reuse":"none"}' '{"operation":"poll","per_unit":"1","growth":"O(1)","stop_condition":"none","reuse":"none"}'; do
+  wl_record=$(workload_record_json 7208 added "[$malformed]" '["queue"]')
+  if [[ $malformed == *'"operation":"poll"'* ]]; then
+    wl_record=$(printf '{"schema":1,"issue":7208,"external_io":"added","units":[%s],"verification":["queue"],"exceptions":[{"site":null,"reason":"fixture"}]}' "$malformed")
+  fi
+  write_queue_config "$target/.agentic-loop.toml" WORKLOAD=require PREFLIGHT=off TRACEABILITY=off
+  printf '7208 running open\n' > "$state"
+  : > "$FAKE_GH_ROOT/$state_key.comments"
+  : > "$FAKE_GH_ROOT/codex-calls"
+  FAKE_CODEX_RESULT="$(workload_plan_body "$wl_record")" "$target/bin/agentic-loop" _worker 7208 workload-null-field-worker
+  grep -Eq '^7208 needs-input open' "$state" || fail 'null/missing workload required field was accepted'
+  ! grep -Fq -- '--sandbox workspace-write' "$FAKE_GH_ROOT/codex-calls" || fail 'invalid null/missing workload record reached exec'
+done
+
 # 5) A credential-like value anywhere in the record is rejected before it is
 # ever trusted, and the raw secret text never reaches a posted comment.
 wl_secret="ghp_$(printf '%s%s' 'abcdefghijklmnopqrst' 'uvwxyz0123456789')"
@@ -9248,6 +9264,26 @@ assert_contains "$upgrade_target/docs/policies/documentation.md" '# upgraded doc
 git -C "$upgrade_target" add -A && git -C "$upgrade_target" commit --quiet -m 'apply update'
 rerun_out=$("$upgrade_target/bin/agentic-loop" upgrade --source "$new_source")
 [[ $rerun_out == *'変更はありません'* ]] || fail 'rerunning upgrade after a completed update was not a no-op'
+
+# A user-owned file that is introduced to SHARED_FILES by the new revision is
+# a first-seen conflict. It must not be recorded as a Foundation baseline:
+# subsequent upgrades must continue to report the conflict until --overwrite.
+first_seen_target=$(new_repository first-seen-conflict-target)
+AGENTIC_LOOP_SOURCE="$PROJECT_ROOT" AGENTIC_LOOP_TARGET="$first_seen_target" AGENTIC_LOOP_SKIP_START=1 "$PROJECT_ROOT/install.sh" >/dev/null
+printf 'user-owned new shared file\n' > "$first_seen_target/docs/operations/new-feature.md"
+git -C "$first_seen_target" add -A && git -C "$first_seen_target" commit --quiet -m 'add user-owned future shared file' && git -C "$first_seen_target" push --quiet
+first_seen_dry_run=$("$first_seen_target/bin/agentic-loop" upgrade --source "$new_source")
+[[ $first_seen_dry_run == *'[conflict] docs/operations/new-feature.md'* ]] || fail 'first-seen shared file was not reported as a conflict'
+[[ $(git -C "$first_seen_target" status --porcelain) == '' ]] || fail 'first-seen conflict dry-run modified the working tree'
+"$first_seen_target/bin/agentic-loop" upgrade --source "$new_source" --apply --skip-verify >/dev/null || fail 'first-seen conflict apply failed'
+assert_contains "$first_seen_target/docs/operations/new-feature.md" 'user-owned new shared file' 'first-seen conflict overwrote the user file'
+[[ -f "$first_seen_target/docs/operations/new-feature.md.agentic-loop-new" ]] || fail 'first-seen conflict did not stage new content'
+[[ $(yq -p json -r '.files[]? | select(.path == "docs/operations/new-feature.md") | .sha256' "$first_seen_target/.agentic-loop/manifest.json") == '' ]] || fail 'first-seen conflict recorded a user hash as a baseline'
+git -C "$first_seen_target" add -A && git -C "$first_seen_target" commit --quiet -m 'record first-seen conflict'
+first_seen_second=$("$first_seen_target/bin/agentic-loop" upgrade --source "$new_source")
+[[ $first_seen_second == *'[conflict] docs/operations/new-feature.md'* ]] || fail 'first-seen conflict disappeared on the second upgrade'
+"$first_seen_target/bin/agentic-loop" upgrade --source "$new_source" --apply --skip-verify >/dev/null || fail 'second first-seen conflict apply failed'
+assert_contains "$first_seen_target/docs/operations/new-feature.md" 'user-owned new shared file' 'second upgrade overwrote the user file'
 
 # revision must be explicit: no --revision/--source and an unpinned config -> exit 2.
 rc=0

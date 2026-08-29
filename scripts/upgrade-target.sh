@@ -266,7 +266,8 @@ fi
 entries=''
 for path in "${SHARED_FILES[@]}"; do
   [[ -f $TARGET/$path ]] || continue
-  if [[ -n ${PRESERVE_OLD_HASH[$path]:-} ]]; then entries+="$path"$'\t'"shared"$'\t'"${OLD_HASH[$path]:-}"$'\n'
+  if [[ -n ${PRESERVE_OLD_HASH[$path]:-} && -n ${OLD_HASH[$path]:-} ]]; then entries+="$path"$'\t'"shared"$'\t'"${OLD_HASH[$path]}"$'\n'
+  elif [[ -n ${PRESERVE_OLD_HASH[$path]:-} ]]; then : # unresolved first-seen conflicts have no baseline
   else entries+="$path"$'\t'"shared"$'\n'; fi
 done
 for path in "${!PRESERVE_OLD_HASH[@]}"; do
