@@ -62,8 +62,8 @@ Issue本文の受け入れ条件の文言を変更すると、そのcriterionの
 
 | mode | record不在・検証失敗時の動作 |
 | --- | --- |
-| `require` | 完了処理をせず、Issueを`agent:failed`にする。**closeしない。worktree/local branchも保持する**。PR本文を修正後、`agent:queued`を再付与すると再試行できる。 |
-| `warn` | 完了処理は継続する（Issueをclose）。失敗理由を含む助言commentを1件投稿する。 |
+| `require` | record不備・実不一致では完了処理をせず`agent:failed`にする。GitHub証跡を取得できない`observation-unavailable`ではattemptを消費せず`agent:queued`へ戻し、merge済みPRとworktree/local branchを保持して次回pollで再観測する。 |
+| `warn` | 完了処理は継続する（Issueをclose）。失敗理由を含む助言commentを1件投稿する。`observation-unavailable`は「照合保留」として可視化する。 |
 | `off` | 評価しない。追加のGitHub API呼び出しは発生しない。 |
 
 ## 失敗理由コード（`TRACE_INVALID_REASON`）
@@ -77,6 +77,7 @@ Issue本文の受け入れ条件の文言を変更すると、そのcriterionの
 | `schema-invalid` | トップレベルkeyや各criterionの形状・enum値が仕様と一致しない。 |
 | `criteria-missing` | Issue本文から導出できる識別子のうち、recordに含まれないものがある（条件変更の未対応を含む）。 |
 | `evidence-mismatch` | recordが主張する`checks[].result`または`changes[].path`が、GitHubの観測結果（PRのhead commitのcheck-runs、PRの変更ファイル一覧）と一致しない。 |
+| `observation-unavailable` | 上限付き再試行後もcheck-runsまたはPR変更ファイル一覧を取得できず、空集合との照合を行わなかった。 |
 
 ## `bin/agentic-loop trace`（読み取り専用CLI）
 

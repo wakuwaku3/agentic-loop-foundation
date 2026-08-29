@@ -278,6 +278,7 @@ trace_verification_count() { TRACE_VERIFICATION_ARG=$2 yq -p json -r '[.criteria
 # squash merges need no branch-commit ancestry at all).
 trace_evaluate() {
   local issue=$1 pr=$2 head_sha=$3 issue_body
+  local checkruns_ok=0 files_ok=0
   local -g TRACE_MANIFEST TRACE_CHECKRUNS TRACE_FILES TRACE_CHECKS_OVERALL TRACE_UNREF TRACE_INVALID_REASON
   TRACE_MANIFEST=$(trace_manifest_from_pr_body "$(repo_api "pulls/$pr" --jq '.body // ""' 2>/dev/null || true)")
   issue_body=$(repo_api "issues/$issue" --jq '.body // ""' 2>/dev/null || true)
@@ -285,9 +286,13 @@ trace_evaluate() {
     return 1
   fi
   # workload-unbounded: PRに紐づく有限のcheck-run件数と変更path件数を全件取得; bound=PR metadata count; track=#237
-  TRACE_CHECKRUNS=$(repo_api "commits/$head_sha/check-runs" -f per_page=100 --paginate --jq '.check_runs' 2>/dev/null || printf '[]')
+  if TRACE_CHECKRUNS=$(repo_api "commits/$head_sha/check-runs" -f per_page=100 --paginate --jq '.check_runs' 2>/dev/null); then checkruns_ok=1; else TRACE_CHECKRUNS=''; fi
   # workload-unbounded: PRの有限な変更path件数を全件取得; bound=PR file count; track=#237
-  TRACE_FILES=$(repo_api "pulls/$pr/files" --method GET -f per_page=100 --paginate --jq '.[].filename' 2>/dev/null || true)
+  if TRACE_FILES=$(repo_api "pulls/$pr/files" --method GET -f per_page=100 --paginate --jq '.[].filename' 2>/dev/null); then files_ok=1; else TRACE_FILES=''; fi
+  if (( ! checkruns_ok || ! files_ok )); then
+    TRACE_INVALID_REASON='observation-unavailable'
+    return 1
+  fi
   if ! trace_reconcile_checks "$TRACE_MANIFEST" "$(trace_checkrun_verdict "$TRACE_CHECKRUNS")" || ! trace_reconcile_paths "$TRACE_MANIFEST" "$TRACE_FILES"; then
     return 1
   fi
@@ -380,6 +385,10 @@ trace_gate() {
     return 0
   fi
   if [[ $mode == warn ]]; then
+    if [[ $TRACE_INVALID_REASON == observation-unavailable ]]; then
+      comment_issue "$issue" "<!-- agentic-loop:traceability schema=1 issue=$issue pr=$pr verdict=warn reason=observation-unavailable -->\nGitHubの証跡取得が再試行上限後も完了しなかったため、トレーサビリティ照合を保留しました（reason=observation-unavailable）。設定が \`warn\` のため完了処理は継続します。" || true
+      return 0
+    fi
     comment_issue "$issue" "<!-- agentic-loop:traceability schema=1 issue=$issue pr=$pr verdict=warn reason=$TRACE_INVALID_REASON -->\nトレーサビリティ記録を検証しましたが要件を満たしていません（reason=$TRACE_INVALID_REASON）。設定が \`warn\` のため完了処理は継続します。PR本文の \`agentic-loop:traceability\` code blockの修正を推奨します。" || true
     return 0
   fi
