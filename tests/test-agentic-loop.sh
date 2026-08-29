@@ -9342,8 +9342,9 @@ migration_out=$("$migration_target/bin/agentic-loop" upgrade --source "$PROJECT_
 grep -Fq '[foundation]' "$migration_target/.agentic-loop.toml" || fail 'migration did not add the [foundation] section'
 resolved_revision=$(git -C "$PROJECT_ROOT" rev-parse HEAD)
 assert_contains "$migration_target/.agentic-loop.toml" "revision = \"$resolved_revision\"" 'migration apply did not pin the applied revision'
-[[ $(yq -p json -o yaml '.source.revision' "$migration_target/.agentic-loop/manifest.json") == "$resolved_revision" ]] || fail 'upgrade manifest did not record the applied revision'
-[[ $(yq -p json -o yaml '.migration_level' "$migration_target/.agentic-loop/manifest.json") -eq 7 ]] || fail 'manifest migration_level was not bumped after applying the migration'
+state_path=$(git -C "$migration_target" rev-parse --git-common-dir)/agentic-loop/foundation-state.json
+[[ $(yq -p json -o yaml '.source.revision' "$state_path") == "$resolved_revision" ]] || fail 'upgrade state did not record the applied revision'
+[[ $(yq -p json -o yaml '.migration_level' "$state_path") -eq 7 ]] || fail 'state migration_level was not bumped after applying the migration'
 migration_rerun=$("$migration_target/bin/agentic-loop" upgrade --source "$PROJECT_ROOT")
 [[ $migration_rerun == *'変更はありません'* ]] || fail 'rerunning upgrade after a completed migration was not a no-op'
 

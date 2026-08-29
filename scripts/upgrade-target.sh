@@ -287,15 +287,10 @@ new_history_entry=$(printf '{"at":%s,"from_revision":"%s","to_revision":"%s","fr
   "$(date +%s)" "$(foundation_json_escape "$OLD_REVISION")" "$(foundation_json_escape "$NEW_REVISION")" "$OLD_MIGRATION_LEVEL" "$new_migration_level" "$steps")
 if [[ -n $old_history ]]; then history="$old_history,$new_history_entry"; else history="$new_history_entry"; fi
 foundation_state_write "$TARGET" "${OLD_MODE:-install}" "$REPOSITORY" "$NEW_REVISION" "${AGENTIC_LOOP_REVISION:-$NEW_REVISION}" "$new_migration_level" "$entries" "$history"
-# Keep the legacy record synchronized for older Foundation clients.  The
-# common-dir state is authoritative for current clients.
-foundation_manifest_write "$TARGET" "${OLD_MODE:-install}" "$REPOSITORY" "$NEW_REVISION" "${AGENTIC_LOOP_REVISION:-$NEW_REVISION}" "$new_migration_level" "$entries" "$history"
-
-# Verify the rewritten manifest records exactly the revision this upgrade
-# applied, so a broken write never leaves the installed-revision record stale
-# (main sync tolerates this manifest-only change; upgrade/rollback rely on it).
+# The legacy manifest is intentionally never rewritten. It remains a
+# read-only migration source/fallback; common-dir state is authoritative.
 [[ $(yq -p json -o yaml '.source.revision // ""' "$STATE_ROOT/foundation-state.json" 2>/dev/null) == "$NEW_REVISION" ]] ||
-  fail "upgrade manifest does not record the applied revision: $NEW_REVISION"
+  fail "upgrade state does not record the applied revision: $NEW_REVISION"
 
 # --- Post-apply verification: doctor, then the configured full check ------
 verify_failed=0
