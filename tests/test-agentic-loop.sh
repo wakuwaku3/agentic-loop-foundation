@@ -1819,6 +1819,29 @@ if [[ -e $pending_project ]] && grep -Fxq '93' "$pending_project"; then
   fail 'recovered reconciliation did not acknowledge the pending entry'
 fi
 
+# PR retry hints (Issue #249): transient failures retain branch/content hints,
+# cap duplicates, and a later successful poll drains them.
+rm -f "$(git -C "$target" rev-parse --absolute-git-dir)/agentic-loop/graphql-rate-limit" "$pending_project"
+printf '94 queued open none 2026-01-01T00:00:00Z none improvement\n' > "$FAKE_GH_ROOT/$state_key.state"
+printf 'pulls agent/issue-249\ncontent https://github.example/acme/installed-project/pull/6\n' > "$pending_project"
+FAKE_PROJECT_CONTENT_FAIL=1 AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _supervise
+grep -Fxq 'pulls agent/issue-249' "$pending_project" || fail 'failed branch PR reconciliation dropped its hint'
+grep -Fxq 'content https://github.example/acme/installed-project/pull/6' "$pending_project" || fail 'failed content PR reconciliation dropped its hint'
+[[ $(grep -Fxc 'pulls agent/issue-249' "$pending_project") -le 2 ]] || fail 'failed branch PR reconciliation exceeded duplicate cap'
+[[ $(grep -Fxc 'content https://github.example/acme/installed-project/pull/6' "$pending_project") -le 2 ]] || fail 'failed content PR reconciliation exceeded duplicate cap'
+rm -f "$(git -C "$target" rev-parse --absolute-git-dir)/agentic-loop/graphql-rate-limit"
+AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _supervise
+AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _supervise
+AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _supervise
+AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _supervise
+if [[ -e $pending_project ]] && { grep -Fxq 'pulls agent/issue-249' "$pending_project" || grep -Fxq 'content https://github.example/acme/installed-project/pull/6' "$pending_project"; }; then
+  cat "$pending_project" >&2
+  fail 'successful PR reconciliation did not acknowledge its hints'
+fi
+printf 'content not-a-url\n' > "$pending_project"
+AGENTIC_LOOP_RUN_ONCE=1 "$target/bin/agentic-loop" _supervise
+[[ ! -s $pending_project ]] || fail 'invalid PR hint was retained forever'
+
 # Legacy hint lines (issue #268): before #115 the queue held whole events
 # ("conflict 93 <b64>", "state 93 running") instead of bare Issue numbers.
 # Those lines matched nothing, were never acknowledged, and kept

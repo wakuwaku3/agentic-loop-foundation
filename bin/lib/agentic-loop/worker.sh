@@ -928,7 +928,9 @@ worker() {
     clear_worker_local "$issue"
     return 0
   fi
-  project_add_pull_requests "$branch"
+  # Project同期は再試行キューへ退避できる補助処理であり、失敗しても
+  # Issueの完了遷移やREST主体の後続処理を中断させない。
+  project_add_pull_requests "$branch" || true
   # A provider can finish cleanly twice without returning a terminal marker
   # while the PR is merged concurrently (Issue #262). The merge is an
   # independently observable completion fact, so let the existing completion
