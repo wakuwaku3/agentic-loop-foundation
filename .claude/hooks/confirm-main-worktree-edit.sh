@@ -105,6 +105,10 @@ canonical_target=$(realpath -m -- "$target_path" 2>/dev/null) \
 # is a prefix of the target so nested layouts resolve to the innermost worktree.
 primary_root=''
 target_root=''
+worktree_list=''
+if ! worktree_list=$(git -C "$cwd" worktree list --porcelain 2>/dev/null); then
+  deny '対象worktreeを確認できなかったため編集を保留しました。Gitの実行環境とcwdを確認し、意図的な直接編集なら対象worktreeのgitdirに agentic-loop-allow-edit を立てて再実行してください。'
+fi
 while IFS= read -r line; do
   case $line in
     'worktree '*)
@@ -118,7 +122,7 @@ while IFS= read -r line; do
       fi
       ;;
   esac
-done < <(git -C "$cwd" worktree list --porcelain 2>/dev/null)
+done <<< "$worktree_list"
 
 # Target outside every worktree (scratchpad, /tmp, ...) is never gated.
 [[ -n $target_root ]] || exit 0
@@ -126,14 +130,24 @@ done < <(git -C "$cwd" worktree list --porcelain 2>/dev/null)
 # Only tracked files are gated; a literal pathspec blocks glob magic in a
 # tool-supplied filename.  Untracked/new files pass through.
 relative_path=${canonical_target#"$target_root"/}
-git -C "$target_root" ls-files --error-unmatch -- ":(literal)$relative_path" >/dev/null 2>&1 || exit 0
+if git -C "$target_root" ls-files --error-unmatch -- ":(literal)$relative_path" >/dev/null 2>&1; then
+  : # tracked; continue with the policy below
+else
+  ls_files_status=$?
+  # Exit status 1 is the documented "path is not tracked" result.  Any
+  # other failure means that the tracked-file decision is indeterminate.
+  (( ls_files_status == 1 )) || deny '追跡ファイルか確認できなかったため編集を保留しました。Gitの実行環境を確認し、意図的な直接編集なら対象worktreeのgitdirに agentic-loop-allow-edit を立てて再実行してください。'
+  exit 0
+fi
 
 # --- Policy -------------------------------------------------------------------
 is_primary=0
 [[ $target_root == "$primary_root" ]] && is_primary=1
 
 # Escape-hatch flag lives in the TARGET worktree's own gitdir.
-target_gitdir=$(git -C "$target_root" rev-parse --absolute-git-dir 2>/dev/null || printf '')
+if ! target_gitdir=$(git -C "$target_root" rev-parse --absolute-git-dir 2>/dev/null); then
+  deny '対象worktreeのgitdirを確認できなかったため編集を保留しました。Gitの実行環境を確認し、意図的な直接編集なら対象worktreeのgitdirに agentic-loop-allow-edit を立てて再実行してください。'
+fi
 flag_present=0
 [[ -n $target_gitdir && -e $target_gitdir/$flag_basename ]] && flag_present=1
 
