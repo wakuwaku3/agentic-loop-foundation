@@ -287,9 +287,13 @@ trace_evaluate() {
   fi
   # workload-unbounded: PRに紐づく有限のcheck-run件数と変更path件数を全件取得; bound=PR metadata count; track=#237
   if TRACE_CHECKRUNS=$(repo_api "commits/$head_sha/check-runs" -f per_page=100 --paginate --jq '.check_runs' 2>/dev/null); then checkruns_ok=1; else TRACE_CHECKRUNS=''; fi
+  if (( ! checkruns_ok )); then
+    TRACE_INVALID_REASON='observation-unavailable'
+    return 1
+  fi
   # workload-unbounded: PRの有限な変更path件数を全件取得; bound=PR file count; track=#237
   if TRACE_FILES=$(repo_api "pulls/$pr/files" --method GET -f per_page=100 --paginate --jq '.[].filename' 2>/dev/null); then files_ok=1; else TRACE_FILES=''; fi
-  if (( ! checkruns_ok || ! files_ok )); then
+  if (( ! files_ok )); then
     TRACE_INVALID_REASON='observation-unavailable'
     return 1
   fi
