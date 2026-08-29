@@ -702,6 +702,16 @@ worker() {
           comment_issue "$issue" "<!-- agentic-loop:failed worker=$worker reason=merge-or-cleanup resumed=1 -->\n再開時の検査でPR $RESUME_PR_URL のmergeを確認しましたが、安全なcleanupを完了できませんでした。Issueはcloseせず、既存のworktree/branchを保持します。原因確認後に再試行するには \`agent:queued\` を再度付与してください。"
         fi
       else
+        if [[ ${TRACE_INVALID_REASON:-} == observation-unavailable ]]; then
+          clear_attempts "$issue"
+          progress_touch "$issue" queued
+          set_issue_state "$issue" queued
+          project_sync_state "$issue" queued
+          comment_issue "$issue" "<!-- agentic-loop:queued worker=$worker reason=observation-unavailable resumed=1 -->\nGitHub証跡を取得できなかったため、照合を完了せずIssueを再キューしました。既存のmerge済みPR、worktree、branchを保持し、次回pollで再観測します。"
+          worker_critical_end "$issue"
+          clear_worker_local "$issue"
+          return 0
+        fi
         progress_touch "$issue" failed
         set_issue_state "$issue" failed
         project_sync_state "$issue" failed
@@ -999,6 +1009,18 @@ worker() {
             comment_issue "$issue" "<!-- agentic-loop:failed worker=$worker reason=merge-or-cleanup -->\nWorkerは完了を報告しましたが、branch \`$branch\` のmerge済みPRと一致するcommitを確認できないか、安全なcleanupを完了できませんでした。Issueはcloseせず、残っているworktreeまたはbranch dataを保持します。原因確認後に再試行するには \`agent:queued\` を再度付与してください。"
           fi
         else
+          if [[ ${TRACE_INVALID_REASON:-} == observation-unavailable ]]; then
+            clear_attempts "$issue"
+            progress_touch "$issue" queued
+            set_issue_state "$issue" queued
+            project_sync_state "$issue" queued
+            comment_issue "$issue" "<!-- agentic-loop:queued worker=$worker reason=observation-unavailable -->\nGitHub証跡を取得できなかったため、照合を完了せずIssueを再キューしました。既存のmerge済みPR、worktree、branchを保持し、次回pollで再観測します。"
+            worker_critical_end "$issue"
+            scope_cache_clear "$issue"
+            clear_conflict_wait "$issue"
+            clear_worker_local "$issue"
+            return 0
+          fi
           exit_code=1
           progress_touch "$issue" failed
           set_issue_state "$issue" failed

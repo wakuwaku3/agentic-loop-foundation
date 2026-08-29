@@ -40,8 +40,16 @@ gh_api_call() {
     # failures for explicitly idempotent read methods. Other transient errors
     # retain the bounded retry behavior established by ADR 0025.
     local transient timeout_failure
-    transient=$(grep -Eqi 'rate limit|secondary rate|HTTP (429|5[0-9][0-9])|timed? out|timeout|connection reset|temporary failure|service unavailable|bad gateway' "$error"; printf '%s' "$?")
-    timeout_failure=$(grep -Eqi 'timed? out|timeout' "$error"; printf '%s' "$?")
+    if grep -Eqi 'rate limit|secondary rate|HTTP (429|5[0-9][0-9])|timed? out|timeout|connection reset|temporary failure|service unavailable|bad gateway' "$error"; then
+      transient=0
+    else
+      transient=1
+    fi
+    if grep -Eqi 'timed? out|timeout' "$error"; then
+      timeout_failure=0
+    else
+      timeout_failure=1
+    fi
     if (( attempt >= API_RETRY_ATTEMPTS )) || (( transient != 0 )) || { (( timeout_failure == 0 )) && [[ $method != GET && $method != HEAD ]]; }; then
       cat "$error" >&2; rm -f "$output" "$error" "$input"; return "$rc"
     fi
