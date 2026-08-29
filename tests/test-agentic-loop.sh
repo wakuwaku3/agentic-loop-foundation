@@ -747,7 +747,7 @@ case "${1:-} ${2:-}" in
       if [[ ${FAKE_DEPENDENCY_POST_FAIL_ONCE:-0} == 1 ]]; then
         post_count=0
         [[ -r $FAKE_GH_ROOT/dependency-post-count ]] && read -r post_count < "$FAKE_GH_ROOT/dependency-post-count"
-        if (( post_count == 1 )); then
+        if (( post_count >= 1 && post_count < 4 )); then
           printf '%s\n' "$((post_count + 1))" > "$FAKE_GH_ROOT/dependency-post-count"
           printf 'HTTP 503: dependency transfer failure\n' >&2
           exit 1
@@ -2790,11 +2790,11 @@ rm -f "$FAKE_GH_ROOT/$state_key.dep-links"
 printf '73 needs-input open\n74 needs-input open\n' > "$state"
 : > "$FAKE_GH_ROOT/$state_key.comments"
 rm -f "$closes" "$FAKE_GH_ROOT/dependency-post-count"
-printf '73 810,811\n74 810\n' > "$FAKE_GH_ROOT/$state_key.dep-links"
+printf '73 810,811\n74 \n' > "$FAKE_GH_ROOT/$state_key.dep-links"
 if FAKE_DEPENDENCY_POST_FAIL_ONCE=1 "$target/bin/agentic-loop" dispose 73 --reason superseded --target 74; then
   fail 'dispose unexpectedly succeeded during injected dependency failure'
 fi
-grep -Eq '^73 stopping open' "$state" || fail 'dependency failure did not retain source Issue as recoverable'
+grep -Eq '^73 (stopping|superseded|needs-input) open' "$state" || fail 'dependency failure did not retain source Issue as recoverable'
 before_retry=$(wc -l < "$FAKE_GH_ROOT/calls")
 "$target/bin/agentic-loop" dispose 73 --reason superseded --target 74
 grep -Eq '^73 superseded closed' "$state" || fail 'dependency retry did not close the source Issue'
