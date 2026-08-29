@@ -744,6 +744,16 @@ case "${1:-} ${2:-}" in
       if [[ ! $issue_id_arg =~ ^[0-9]+$ ]] || (( dep_number < 1 )); then
         printf 'HTTP 422: Unprocessable Entity\n' >&2; exit 1
       fi
+      if [[ ${FAKE_DEPENDENCY_POST_FAIL_ONCE:-0} == 1 ]]; then
+        post_count=0
+        [[ -r $FAKE_GH_ROOT/dependency-post-count ]] && read -r post_count < "$FAKE_GH_ROOT/dependency-post-count"
+        if (( post_count == 1 )); then
+          printf '%s\n' "$((post_count + 1))" > "$FAKE_GH_ROOT/dependency-post-count"
+          printf 'HTTP 503: dependency transfer failure\n' >&2
+          exit 1
+        fi
+        printf '%s\n' "$((post_count + 1))" > "$FAKE_GH_ROOT/dependency-post-count"
+      fi
       ( flock 9
         existing_line=$(awk -v n="$issue" '$1 == n {print $2}' "$FAKE_GH_ROOT/$key.dep-links" 2>/dev/null || true)
         new_line=$dep_number; [[ -z $existing_line ]] || new_line="$existing_line,$dep_number"
@@ -2770,6 +2780,24 @@ assert_contains "$TEST_ROOT/dispose-transfer-calls.log" 'issues/74/dependencies/
 grep -q -- '-f issue_id=' "$TEST_ROOT/dispose-transfer-calls.log" && fail 'dependency transfer still sends issue_id as an untyped -f string parameter'
 grep -Eq -- 'issue_id=(810|811)([^0-9]|$)' "$TEST_ROOT/dispose-transfer-calls.log" && fail 'dependency transfer sent the blocking Issue number instead of its database id'
 rm -f "$FAKE_GH_ROOT/$state_key.dep-links"
+
+# A failure after the first dependency is transferred must be resumable: the
+# retry skips the existing dependency and posts only the remaining one.
+printf '73 needs-input open\n74 needs-input open\n' > "$state"
+: > "$FAKE_GH_ROOT/$state_key.comments"
+rm -f "$closes" "$FAKE_GH_ROOT/dependency-post-count"
+printf '73 810,811\n74 810\n' > "$FAKE_GH_ROOT/$state_key.dep-links"
+if FAKE_DEPENDENCY_POST_FAIL_ONCE=1 "$target/bin/agentic-loop" dispose 73 --reason superseded --target 74; then
+  fail 'dispose unexpectedly succeeded during injected dependency failure'
+fi
+grep -Eq '^73 stopping open' "$state" || fail 'dependency failure did not retain source Issue as recoverable'
+before_retry=$(wc -l < "$FAKE_GH_ROOT/calls")
+"$target/bin/agentic-loop" dispose 73 --reason superseded --target 74
+grep -Eq '^73 superseded closed' "$state" || fail 'dependency retry did not close the source Issue'
+retry_calls=$(tail -n "+$((before_retry + 1))" "$FAKE_GH_ROOT/calls")
+[[ $(grep -c 'issues/74/dependencies/blocked_by --method POST' <<< "$retry_calls") -eq 1 ]] || fail 'dependency retry reposted an already transferred dependency'
+grep -Eq '^74 810,811$' "$FAKE_GH_ROOT/$state_key.dep-links" || fail 'dependency retry did not complete the missing dependency'
+rm -f "$FAKE_GH_ROOT/$state_key.dep-links" "$FAKE_GH_ROOT/dependency-post-count"
 
 # A token/rate-limit exhaustion re-queues the Issue (never failed) and pauses
 # the supervisor; claiming resumes once the pool's exhaustion clears. The real

@@ -57,9 +57,11 @@ dispose_transfer_dependencies() {
   # An unavailable endpoint/scope is not treated as an empty list.
   # workload-unbounded: manually-curated per-Issue dependency lists stay small by construction; bound=blocked_by count
   dependencies=$(repo_api "issues/$source/dependencies/blocked_by" --method GET -f per_page=100 --paginate --jq '.[].number' 2>/dev/null) || return 1
+  target_dependencies=$(repo_api "issues/$target/dependencies/blocked_by" --method GET -f per_page=100 --paginate --jq '.[].number' 2>/dev/null) || return 1
   while IFS= read -r dependency; do
     [[ -z $dependency ]] && continue
     [[ $dependency =~ ^[1-9][0-9]*$ && $dependency != "$target" ]] || return 1
+    grep -Fxq "$dependency" <<< "$target_dependencies" && continue
     # issue_id is a typed-integer property requiring the blocking Issue's
     # database id, not its Issue number (Issue #252): the GET above returns
     # numbers, so resolve each to its id before the POST.
