@@ -7014,9 +7014,9 @@ status_json=$("$target/bin/agentic-loop" status --format json)
 [[ $(printf '%s' "$status_json" | yq -p json '.states.parked.count') -eq 1 ]] || fail 'status --format json did not report the parked count'
 [[ $(printf '%s' "$status_json" | yq -p json '.states.parked.issues[0].number') -eq 54 ]] || fail 'status --format json did not list the parked Issue number'
 
-# Scenario: an expired lease is surfaced as a warning, both in the running
-# Issue's own line and as a structured anomaly, without mutating any state
-# (the supervisor's own recover_expired poll is what actually recovers it).
+# Scenario: a local-only expired lease is explicitly remote-unconfirmed, both
+# in the running Issue's own line and as a structured anomaly. status must not
+# promise recovery because another host may still hold the GitHub lease.
 printf '60 running open\n' > "$state"
 mkdir -p "$state_root/workers"
 now=$(date +%s)
@@ -7026,17 +7026,18 @@ status_output=$("$target/bin/agentic-loop" status); status_rc=$?
 (( status_rc == 0 )) || fail 'lease-expired status did not exit 0'
 grep -Fq '#60' <<< "$status_output" || fail 'lease-expired status did not list the running Issue'
 grep -Fq '期限切れ' <<< "$status_output" || fail 'lease-expired status did not mark the running Issue lease as expired'
-grep -Fq 'lease-expired' <<< "$status_output" || fail 'lease-expired status did not report a lease-expired anomaly'
-grep -Fq '自動回復中:' <<< "$status_output" || fail 'lease-expired status did not separate automatic recovery'
+grep -Fq 'lease-expired-local' <<< "$status_output" || fail 'local-only expired lease did not report a remote-unconfirmed anomaly'
+grep -Fq 'リモートleaseは未確認' <<< "$status_output" || fail 'local-only expired lease did not explain remote uncertainty'
+! grep -Fq '次pollで安全にqueueへ戻します。' <<< "$status_output" || fail 'local-only expired lease falsely promised automatic recovery'
 grep -Eq '経過[0-9]+(秒|分[0-9]+秒|時間[0-9]+分|日[0-9]+時間)' <<< "$status_output" || fail 'lease-expired status did not show a human-readable elapsed time'
-grep -Fq '次pollで安全にqueueへ戻します。' <<< "$status_output" || fail 'lease-expired status did not show the next automatic action'
 [[ $(git -C "$target" status --porcelain) == "$before_status" ]] || fail 'lease-expired status modified the repository working tree'
 lease_json=$("$target/bin/agentic-loop" status --format json)
 [[ $(printf '%s' "$lease_json" | yq -p json '.workers[0].lease_expired') == true ]] || fail 'status --format json did not mark the worker lease as expired'
-[[ $(printf '%s' "$lease_json" | yq -p json '.anomalies[] | select(.code == "lease-expired") | .subject') == '#60' ]] || fail 'status --format json did not report the lease-expired anomaly'
-[[ $(printf '%s' "$lease_json" | yq -p json '.anomalies[] | select(.code == "lease-expired") | .classification') == recovering ]] || fail 'status JSON did not classify lease-expired as recovering'
-[[ $(printf '%s' "$lease_json" | yq -p json '.anomalies[] | select(.code == "lease-expired") | .elapsed') -ge 1 ]] || fail 'status JSON did not include elapsed for lease-expired'
-[[ -n $(printf '%s' "$lease_json" | yq -p json '.anomalies[] | select(.code == "lease-expired") | .action') ]] || fail 'status JSON did not include action for lease-expired'
+[[ $(printf '%s' "$lease_json" | yq -p json '.workers[0].lease_observation_scope') == remote-unconfirmed ]] || fail 'status JSON did not expose remote-unconfirmed lease observation scope'
+[[ $(printf '%s' "$lease_json" | yq -p json '.anomalies[] | select(.code == "lease-expired-local") | .subject') == '#60' ]] || fail 'status --format json did not report the local-only expired lease anomaly'
+[[ $(printf '%s' "$lease_json" | yq -p json '.anomalies[] | select(.code == "lease-expired-local") | .classification') == needs-attention ]] || fail 'status JSON classified remote-unconfirmed lease as recovering'
+[[ $(printf '%s' "$lease_json" | yq -p json '.anomalies[] | select(.code == "lease-expired-local") | .elapsed') -ge 1 ]] || fail 'status JSON did not include elapsed for local-only expired lease'
+[[ -n $(printf '%s' "$lease_json" | yq -p json '.anomalies[] | select(.code == "lease-expired-local") | .action') ]] || fail 'status JSON did not include action for local-only expired lease'
 rm -rf "$state_root/workers"
 
 # Scenario: corrupted local-state files (a non-numeric .started, a malformed
