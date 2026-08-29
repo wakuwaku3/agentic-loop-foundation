@@ -135,8 +135,16 @@ doctor_collect() {
     (( DOCTOR_FAILURES == 0 )) && doctor_add success '設定ファイル' '設定値を安全に解釈できます。' '対応は不要です。'
   fi
 
-  local workload_violations
-  workload_violations=$(workload_scan "$REPO_ROOT" 2>/dev/null | wc -l | tr -d ' ')
+  local workload_violations workload_output
+  # workload_scan deliberately returns 1 when it finds violations.  Capture
+  # its output separately so pipefail/errexit cannot abort the report before
+  # the violations become a warning.
+  workload_output=$(workload_scan "$REPO_ROOT" 2>/dev/null || true)
+  if [[ -n $workload_output ]]; then
+    workload_violations=$(wc -l <<< "$workload_output" | tr -d ' ')
+  else
+    workload_violations=0
+  fi
   if [[ ${workload_violations:-0} -gt 0 ]]; then
     doctor_add warning '有限資源とスケーラビリティの静的検査' "注釈の無い違反が ${workload_violations} 件あります。" 'bin/agentic-loop workload を実行し、docs/operations/workload-budget.md の注釈文法に従って解消してください。'
   else
@@ -226,7 +234,7 @@ doctor_collect() {
   local runtime_profile="$RUNTIME_ROOT/.devbox/nix/profile/default" runtime_dirs_ok=1 runtime_dir
   if [[ -r $RUNTIME_PATH_FILE ]]; then
     local -a runtime_dirs=()
-    IFS=: read -r -a runtime_dirs < "$RUNTIME_PATH_FILE"
+    IFS=: read -r -a runtime_dirs < "$RUNTIME_PATH_FILE" || true
     for runtime_dir in "${runtime_dirs[@]}"; do [[ -d $runtime_dir ]] || runtime_dirs_ok=0; done
     if [[ -L $runtime_profile && ! -e $runtime_profile ]]; then runtime_dirs_ok=0; fi
     if (( runtime_dirs_ok )); then
@@ -298,8 +306,10 @@ doctor_collect() {
     *) doctor_add warning 'GitHub Project同期' '任意の可視化層を参照できません。Issue Labelキューは継続できます。' 'bin/agentic-loop setup を実行してください（field・View構成のずれを自動的に復旧します）。' ;;
   esac
 
-  issue_worktrees=$(git -C "$REPO_ROOT" worktree list --porcelain 2>/dev/null | awk -v root="$WORKTREE_ROOT/issue-" '$1 == "worktree" && index($2, root) == 1 {print $2}' | head -n 3)
-  agent_branches=$(git -C "$REPO_ROOT" for-each-ref --format='%(refname:short)' refs/heads/agent/ 2>/dev/null | head -n 3)
+  # Read all upstream output before limiting display; head can close the pipe
+  # early and turn a large residual state into SIGPIPE/exit 141.
+  issue_worktrees=$(git -C "$REPO_ROOT" worktree list --porcelain 2>/dev/null | awk -v root="$WORKTREE_ROOT/issue-" '$1 == "worktree" && index($2, root) == 1 { if (shown < 3) print $2; shown++ }')
+  agent_branches=$(git -C "$REPO_ROOT" for-each-ref --format='%(refname:short)' refs/heads/agent/ 2>/dev/null | awk 'shown < 3 { print; shown++ }')
   log_files=$(find "$STATE_ROOT/logs" -type f -size +0c -print -quit 2>/dev/null || true)
   if [[ -n $issue_worktrees || -n $agent_branches || -n $log_files ]]; then
     if pid_alive && doctor_residual_belongs_to_running "$issue_worktrees" "$agent_branches"; then
