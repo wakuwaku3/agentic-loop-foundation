@@ -287,6 +287,9 @@ new_history_entry=$(printf '{"at":%s,"from_revision":"%s","to_revision":"%s","fr
   "$(date +%s)" "$(foundation_json_escape "$OLD_REVISION")" "$(foundation_json_escape "$NEW_REVISION")" "$OLD_MIGRATION_LEVEL" "$new_migration_level" "$steps")
 if [[ -n $old_history ]]; then history="$old_history,$new_history_entry"; else history="$new_history_entry"; fi
 foundation_state_write "$TARGET" "${OLD_MODE:-install}" "$REPOSITORY" "$NEW_REVISION" "${AGENTIC_LOOP_REVISION:-$NEW_REVISION}" "$new_migration_level" "$entries" "$history"
+# Keep the legacy record synchronized for older Foundation clients.  The
+# common-dir state is authoritative for current clients.
+foundation_manifest_write "$TARGET" "${OLD_MODE:-install}" "$REPOSITORY" "$NEW_REVISION" "${AGENTIC_LOOP_REVISION:-$NEW_REVISION}" "$new_migration_level" "$entries" "$history"
 
 # Verify the rewritten manifest records exactly the revision this upgrade
 # applied, so a broken write never leaves the installed-revision record stale

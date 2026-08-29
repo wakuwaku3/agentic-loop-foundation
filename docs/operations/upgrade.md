@@ -40,7 +40,7 @@ journalctl --user -u 'agentic-loop-main-sync-*'
 
 ## 導入版数の記録: Git common dirのstate
 
-install/upgradeの度に、target repositoryのGit common dir配下`agentic-loop/foundation-state.json`へ原子的に記録する。通常の作業treeには差分を作らない。既存の`.agentic-loop/manifest.json`は移行元として変更せず、stateが無い間だけ読み取る。
+install/upgradeの度に、target repositoryのGit common dir配下`agentic-loop/foundation-state.json`へ原子的に記録する。通常の作業treeには差分を作らない。既存の`.agentic-loop/manifest.json`は旧クライアント互換の記録として同期し、stateが無い場合の移行元にも使う。
 
 ```json
 {
@@ -60,7 +60,7 @@ install/upgradeの度に、target repositoryのGit common dir配下`agentic-loop
 
 ### legacy manifestからの移行
 
-旧manifestのshared/init分類とhashは初回state生成時に引き継ぐ。旧manifestは削除・書換えせず、state破損時は自動適用を停止し、doctor/statusが復旧を案内する。
+旧manifestのshared/init分類とhashは初回state生成時に引き継ぐ。state破損時は自動適用を停止し、doctor/statusが復旧を案内する。
 
 `.agentic-loop/update-main.sh sync`はこの**manifest単独の生成差分を許容**する。`git status --porcelain`の差分が` M .agentic-loop/manifest.json`だけなら、fast-forwardを中止せず、ローカルのmanifest内容(適用済みrevisionの記録)を保持したまま`origin/main`へ進める。manifestを破棄・上書きせず、`git merge --ff-only`が差分を温存する性質を利用している。
 
