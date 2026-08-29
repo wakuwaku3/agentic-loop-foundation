@@ -1542,6 +1542,10 @@ assert_contains "$target/.agents/skills/diagnose-codebase/SKILL.md" '`diagnosis`
 # shellcheck disable=SC2016 # Backticks are literal Markdown in installed documentation.
 assert_contains "$target/docs/operations/codebase-diagnosis.md" '`diagnosis`、`category:improvement`、`agent:queued`' 'installed diagnosis docs did not describe categorized queueing'
 assert_contains "$target/.agentic-loop/diagnose-codebase.sh" 'diagnosis, category:improvement, and agent:queued labels' 'installed diagnosis prompt did not request categorized queueing'
+# A missing loop CLI must still reach the configuration fallback under
+# nounset, and an empty provider result is a successful diagnosis run.
+assert_contains "$target/.agentic-loop/diagnose-codebase.sh" "pick=''" 'diagnosis fallback leaves pick unset when the loop CLI is absent'
+assert_contains "$target/.agentic-loop/diagnose-codebase.sh" 'return 0' 'empty diagnosis result is not normalized to successful completion'
 
 # Diagnosis honors the configured provider (agent.diagnose.provider).
 cp "$target/.agentic-loop.toml" "$target/.agentic-loop.toml.bak"
