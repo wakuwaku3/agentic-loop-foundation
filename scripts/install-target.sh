@@ -156,6 +156,10 @@ main() {
   history=$(printf '{"at":%s,"from_revision":"none","to_revision":"%s","from_level":0,"to_level":%s,"steps":[],"result":"installed"}' "$(date +%s)" "$(foundation_json_escape "$revision")" "$migration_level")
   foundation_state_write "$target" "$mode" "$repository" "$revision" "$revision_ref" "$migration_level" "$entries" "$history"
 
+  # Compatibility seed for pre-state consumers: a new installation receives
+  # the same immutable baseline record; subsequent upgrades never rewrite it.
+  foundation_manifest_write "$target" "$mode" "$repository" "$revision" "$revision_ref" "$migration_level" "$entries" "$history"
+
   # The manifest is the machine-generated record install leaves in the target
   # (see docs/operations/upgrade.md); verify it immediately so a broken write
   # can never silently mislabel which revision is installed. main sync
