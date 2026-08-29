@@ -8987,7 +8987,8 @@ git -C "$hook_main" init --quiet
 git -C "$hook_main" config user.email test@example.invalid
 git -C "$hook_main" config user.name test
 printf 'tracked\n' > "$hook_main/tracked file.txt"
-git -C "$hook_main" add 'tracked file.txt'
+printf 'tracked\n' > "$hook_main/tracked-bash.txt"
+git -C "$hook_main" add 'tracked file.txt' tracked-bash.txt
 git -C "$hook_main" commit --quiet -m tracked
 git -C "$hook_main" worktree add --quiet -b hook-worker "$hook_worker"
 ln -s "$hook_outside" "$hook_main/outside-link"
@@ -9076,6 +9077,21 @@ EOF
 chmod +x "$hook_git_stub/git"
 hook_result=$(PATH="$hook_git_stub:$PATH" run_edit_hook Edit "$hook_main/tracked file.txt" "$hook_main")
 [[ $hook_result == *'"permissionDecision":"deny"'* && $hook_result == *'追跡ファイルか確認できなかった'* ]] || fail 'tracked-file classification failure did not fail closed'
+
+# Bash write primitives must use the same gate for tracked files. Read-only
+# Bash calls and untracked scratch files remain allowed.
+run_bash_edit_hook() { # COMMAND CWD
+  local cmd=$1 cwd=$2 escaped
+  escaped=${cmd//\\/\\\\}
+  escaped=${escaped//\"/\\\"}
+  printf '{"tool_name":"Bash","tool_input":{"command":"%s"},"cwd":"%s"}' "$escaped" "$cwd" \
+    | env AGENTIC_LOOP_AGENT=1 "$PROJECT_ROOT/.claude/hooks/confirm-main-worktree-edit.sh"
+}
+hook_result=$(run_bash_edit_hook 'sed -i s/x/y/ tracked-bash.txt' "$hook_main")
+[[ $hook_result == *'"permissionDecision":"deny"'* ]] || fail 'Bash sed write bypassed the main-worktree gate'
+[[ -z $(run_bash_edit_hook 'git status --short' "$hook_main") ]] || fail 'read-only Bash call was unexpectedly gated'
+[[ -z $(run_bash_edit_hook 'printf scratch > /tmp/agentic-loop-hook-scratch.txt' "$hook_main") ]] || fail 'Bash outside-worktree write was unexpectedly gated'
+[[ -z $(run_bash_edit_hook 'sed -i s/x/y/ tracked-bash.txt' "$hook_worker") ]] || fail 'Bash write in linked worker worktree was gated'
 
 # --- gh --body "@path" Bash PreToolUse hook (Issue #272, ADR 0030) ---------
 # Fail-open by design: only a Bash tool_input.command containing an unexpanded
