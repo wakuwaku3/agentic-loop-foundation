@@ -9211,21 +9211,12 @@ upgrade_target=$(new_repository upgrade-target)
 AGENTIC_LOOP_SOURCE="$PROJECT_ROOT" AGENTIC_LOOP_TARGET="$upgrade_target" AGENTIC_LOOP_SKIP_START=1 "$PROJECT_ROOT/install.sh" >/dev/null
 [[ -x $upgrade_target/.claude/hooks/confirm-main-worktree-edit.sh ]] || fail 'install did not distribute an executable Claude edit hook'
 [[ $(yq -p json -r '.hooks.PreToolUse[0].matcher' "$upgrade_target/.claude/settings.json") == 'Edit|Write|NotebookEdit' ]] || fail 'install did not distribute Claude hook settings'
-[[ $(yq -p json -r '.files[] | select(.path == ".claude/hooks/confirm-main-worktree-edit.sh") | .class' "$upgrade_target/.agentic-loop/manifest.json") == shared ]] || fail 'manifest did not classify the Claude edit hook as shared'
 [[ -x $upgrade_target/.claude/hooks/require-gh-body-file.sh ]] || fail 'install did not distribute an executable gh --body Bash hook'
 [[ $(yq -p json -r '.hooks.PreToolUse[1].matcher' "$upgrade_target/.claude/settings.json") == Bash ]] || fail 'install did not distribute the gh --body Bash hook settings'
-[[ $(yq -p json -r '.files[] | select(.path == ".claude/hooks/require-gh-body-file.sh") | .class' "$upgrade_target/.agentic-loop/manifest.json") == shared ]] || fail 'manifest did not classify the gh --body Bash hook as shared'
-[[ -f $upgrade_target/.agentic-loop/manifest.json ]] || fail 'install did not write a Foundation manifest'
-[[ $(yq -p json -o yaml '.mode' "$upgrade_target/.agentic-loop/manifest.json") == install ]] || fail 'manifest recorded the wrong install mode'
-[[ $(yq -p json -o yaml '.source.repository' "$upgrade_target/.agentic-loop/manifest.json") == 'wakuwaku3/agentic-loop-foundation' ]] || fail 'manifest recorded the wrong source repository'
-[[ $(yq -p json -o yaml '.source.revision' "$upgrade_target/.agentic-loop/manifest.json") =~ ^[0-9a-f]{40}$ ]] || fail 'manifest did not record a resolved 40-hex revision'
-[[ $(yq -p json -o yaml '.files | map(select(.class == "shared")) | length' "$upgrade_target/.agentic-loop/manifest.json") -gt 0 ]] || fail 'manifest recorded no shared files'
-# The one deliberate exception (Issue #56, ADR 0018): an install-mode target
-# still gets its own detection-only capability manifest, recorded class=init
-# (target-owned; upgrade never removes or overwrites it) precisely because it
-# is not one of the brand-new-repository INIT_FILES. No other path may be
-# misclassified this way.
-[[ $(yq -p json -r '[.files[] | select(.class == "init") | .path] | join(",")' "$upgrade_target/.agentic-loop/manifest.json") == '.agentic-loop/capabilities.toml' ]] || fail 'an install-mode manifest recorded an unexpected init-class file'
+[[ ! -e $upgrade_target/.agentic-loop/manifest.json ]] || fail 'install created a legacy manifest instead of common-dir state'
+state_path=$(git -C "$upgrade_target" rev-parse --git-common-dir)/agentic-loop/foundation-state.json
+[[ $(yq -p json -o yaml '.mode' "$state_path") == install ]] || fail 'state recorded the wrong install mode'
+[[ $(yq -p json -o yaml '.source.repository' "$state_path") == 'wakuwaku3/agentic-loop-foundation' ]] || fail 'state recorded the wrong source repository'
 git -C "$upgrade_target" add -A && git -C "$upgrade_target" commit --quiet -m 'install foundation' && git -C "$upgrade_target" push --quiet
 
 # A "new" Foundation revision: this checkout, plus a shared-file update and a
