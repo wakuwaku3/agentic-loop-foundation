@@ -24,7 +24,7 @@ upgrade_rollback() {
   # pre-apply manifest. Restore it too, or the installed-revision record would
   # keep claiming the rolled-back revision while the files are back at the old
   # one (and a later upgrade would misclassify every shared file as a conflict).
-  git -C "$REPO_ROOT" checkout -q HEAD -- .agentic-loop/manifest.json 2>/dev/null || rm -f "$REPO_ROOT/.agentic-loop/manifest.json"
+  git -C "$REPO_ROOT" checkout -q HEAD -- .agentic-loop/manifest.json 2>/dev/null || true
   rm -f "$last_apply"
   say 'upgrade適用前の状態にrollbackしました。git status で内容を確認してください。'
 }

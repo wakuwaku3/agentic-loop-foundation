@@ -74,7 +74,7 @@ path = ".agentic-loop"
 purpose = "配布物であるguard/update-main/diagnose/capabilities宣言そのもの"
 
 [[protected]]
-path = ".agentic-loop/manifest.json"
+path = "bin/lib/agentic-loop/foundation-state.sh"
 reason = "install/upgradeが生成する機械記録。手編集しない"
 change_requires = "tooling"
 

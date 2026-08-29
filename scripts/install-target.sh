@@ -154,7 +154,7 @@ main() {
     [[ -e $target/.agentic-loop/capabilities.toml ]] && entries+=".agentic-loop/capabilities.toml"$'\t'"init"$'\n'
   fi
   history=$(printf '{"at":%s,"from_revision":"none","to_revision":"%s","from_level":0,"to_level":%s,"steps":[],"result":"installed"}' "$(date +%s)" "$(foundation_json_escape "$revision")" "$migration_level")
-  foundation_manifest_write "$target" "$mode" "$repository" "$revision" "$revision_ref" "$migration_level" "$entries" "$history"
+  foundation_state_write "$target" "$mode" "$repository" "$revision" "$revision_ref" "$migration_level" "$entries" "$history"
 
   # The manifest is the machine-generated record install leaves in the target
   # (see docs/operations/upgrade.md); verify it immediately so a broken write

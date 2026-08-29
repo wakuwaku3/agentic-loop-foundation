@@ -319,7 +319,8 @@ doctor_collect() {
     fi
   else doctor_add success '残存状態' '不要なworktree、agent branch、非空logは見つかりません。' '対応は不要です。'; fi
 
-  local manifest_path="$REPO_ROOT/.agentic-loop/manifest.json" foundation_revision drift_count=0 mpath mhash
+  local manifest_path="$STATE_ROOT/foundation-state.json" foundation_revision drift_count=0 mpath mhash
+  [[ -r $manifest_path ]] || manifest_path="$REPO_ROOT/.agentic-loop/manifest.json"
   if [[ -r $manifest_path ]] && command -v yq >/dev/null 2>&1; then
     while IFS=$'\t' read -r mpath mhash; do
       [[ -n $mpath && -f $REPO_ROOT/$mpath ]] || continue

@@ -107,6 +107,24 @@ sync_main() {
     fail 'origin/main rewrites .agentic-loop/manifest.json; commit or restore the local manifest before syncing'
   fi
   git -C "$repository" merge --quiet --ff-only refs/remotes/origin/main
+  auto_upgrade "$repository"
+}
+
+# One bounded observation per timer cycle.  A missing/invalid configuration or
+# an unavailable source is a safe no-op; the next cycle observes a new SHA.
+auto_upgrade() {
+  local repository=$1 source_repo revision tmp
+  [[ ${AGENTIC_LOOP_AUTO_UPDATE:-1} == 1 ]] || return 0
+  command -v yq >/dev/null 2>&1 || return 0
+  source_repo=$(yq -p toml -o yaml '.foundation.repository // "wakuwaku3/agentic-loop-foundation"' "$repository/.agentic-loop.toml" 2>/dev/null || true)
+  [[ $source_repo =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || return 0
+  tmp=$(mktemp -d)
+  if ! git init -q "$tmp" || ! git -C "$tmp" fetch -q --depth 1 "https://github.com/$source_repo" main; then rm -rf "$tmp"; return 0; fi
+  revision=$(git -C "$tmp" rev-parse FETCH_HEAD)
+  if [[ -x $repository/bin/agentic-loop ]]; then
+    "$repository/bin/agentic-loop" upgrade --source "$tmp" --revision "$revision" --apply >/dev/null 2>&1 || true
+  fi
+  rm -rf "$tmp"
 }
 
 case ${1:-} in
