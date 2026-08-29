@@ -329,10 +329,10 @@ doctor_collect() {
     if (( drift_count > 0 )); then
       doctor_add warning 'Foundation管理fileの変更' "Foundationが管理する${drift_count}件のfileが導入時から変更されています。" 'bin/agentic-loop upgrade（既定はdry-run）で差分を確認してください。意図した変更であれば対応不要です。'
     else
-      doctor_add success 'Foundation manifest' '導入版数・適用履歴・管理fileの整合性を確認できます。' '対応は不要です。'
+    doctor_add success 'Foundation state' 'Git common dirの導入版数・適用履歴・管理fileの整合性を確認できます。' '対応は不要です。'
     fi
   else
-    doctor_add warning 'Foundation manifest' '導入版数を追跡できないため、初回のupgradeは全fileの競合として報告されます。' 'bin/agentic-loop upgrade を実行し、報告される内容を確認してください。'
+    doctor_add warning 'Foundation state' '導入版数を追跡できないため、初回のupgradeはlegacy manifest fallbackまたは全file競合として報告されます。' 'bin/agentic-loop upgrade を実行し、報告される内容を確認してください。'
   fi
 
   foundation_revision=$(config_value 'foundation.revision')

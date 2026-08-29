@@ -38,9 +38,9 @@ systemctl --user list-timers 'agentic-loop-main-sync-*'
 journalctl --user -u 'agentic-loop-main-sync-*'
 ```
 
-## 導入版数の記録: `.agentic-loop/manifest.json`
+## 導入版数の記録: Git common dirのstate
 
-install/upgradeの度に、target repositoryへ`.agentic-loop/manifest.json`を書き込む(git管理下に置き、通常のcommit対象とする)。
+install/upgradeの度に、target repositoryのGit common dir配下`agentic-loop/foundation-state.json`へ原子的に記録する。通常の作業treeには差分を作らない。既存の`.agentic-loop/manifest.json`は移行元として変更せず、stateが無い間だけ読み取る。
 
 ```json
 {
@@ -58,9 +58,9 @@ install/upgradeの度に、target repositoryへ`.agentic-loop/manifest.json`を�
 - `class: init`(同`INIT_FILES`、`mode: init`で導入されたrepositoryのみ): 新規repository向けの一度きりの種。**upgradeは絶対に書き込まない**。上流に変更があっても通知するだけ。
 - `manifest.json`が無い(#50より前の導入、または削除された)場合、upgradeは全fileの内容を新revisionと直接比較し、一致しないものはすべて競合として扱う(無断上書きしない)。
 
-### manifestは機械生成の未commit変更として残る
+### legacy manifestからの移行
 
-install/upgradeは適用したrevisionを`manifest.json`へ書き込むが、この変更は**自動ではcommitしない**。利用者が置いた未commit変更を巻き込まないためである。そのためinstall/upgrade直後のworktreeは、`manifest.json`だけがdirtyになる(利用者の変更やFoundation管理fileに差分が無い場合)。
+旧manifestのshared/init分類とhashは初回state生成時に引き継ぐ。旧manifestは削除・書換えせず、state破損時は自動適用を停止し、doctor/statusが復旧を案内する。
 
 `.agentic-loop/update-main.sh sync`はこの**manifest単独の生成差分を許容**する。`git status --porcelain`の差分が` M .agentic-loop/manifest.json`だけなら、fast-forwardを中止せず、ローカルのmanifest内容(適用済みrevisionの記録)を保持したまま`origin/main`へ進める。manifestを破棄・上書きせず、`git merge --ff-only`が差分を温存する性質を利用している。
 
