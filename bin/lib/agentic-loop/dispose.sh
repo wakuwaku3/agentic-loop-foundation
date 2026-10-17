@@ -57,9 +57,11 @@ dispose_transfer_dependencies() {
   # An unavailable endpoint/scope is not treated as an empty list.
   # workload-unbounded: manually-curated per-Issue dependency lists stay small by construction; bound=blocked_by count
   dependencies=$(repo_api "issues/$source/dependencies/blocked_by" --method GET -f per_page=100 --paginate --jq '.[].number' 2>/dev/null) || return 1
+  target_dependencies=$(repo_api "issues/$target/dependencies/blocked_by" --method GET -f per_page=100 --paginate --jq '.[].number' 2>/dev/null) || return 1
   while IFS= read -r dependency; do
     [[ -z $dependency ]] && continue
     [[ $dependency =~ ^[1-9][0-9]*$ && $dependency != "$target" ]] || return 1
+    grep -Fxq "$dependency" <<< "$target_dependencies" && continue
     # issue_id is a typed-integer property requiring the blocking Issue's
     # database id, not its Issue number (Issue #252): the GET above returns
     # numbers, so resolve each to its id before the POST.
@@ -91,8 +93,11 @@ cmd_dispose() {
   # operation is harmless; changing its reason/target requires a new Issue.
   for existing in "${DISPOSITION_LABELS[@]}"; do
     if [[ ,$labels, == *",agent:$existing,"* ]]; then
-      [[ $existing == "$reason" ]] && { say "Issue #$issue は既に $reason です。"; return 0; }
-      fail "Issue #$issue already has an immutable disposition: $existing"
+      [[ $existing == "$reason" ]] || fail "Issue #$issue already has an immutable disposition: $existing"
+      # An open Issue with the same disposition may be left here by a
+      # partially failed dispose. Keep processing so the audit, worker stop,
+      # and close operations are completed on the retry.
+      break
     fi
   done
   dispose_validate_target "$issue" "$reason" "$target" || fail 'target must be a distinct, open, non-disposed Issue in this repository'
@@ -101,7 +106,7 @@ cmd_dispose() {
     fail 'a completed Issue with a merged pull request cannot be disposed; create a revert/follow-up Issue instead'
   fi
   now=$(date +%s); marker=$(dispose_marker "$actor" "$reason" "$issue" "$target" "$now")
-  case ,$labels, in *,agent:running,*|*,agent:in-review,*)
+  case ,$labels, in *,agent:running,*|*,agent:in-review,*|*,agent:stopping,*)
     set_issue_state "$issue" stopping; project_sync_state "$issue" stopping
     comment_issue "$issue" "$marker\n認可済みの終了操作を受け付け、workerとPRの安全な停止を開始しました。未保存または未pushの成果物は削除しません。"
     dispose_stop_local_worker "$issue"
