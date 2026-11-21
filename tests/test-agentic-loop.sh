@@ -9229,7 +9229,7 @@ printf '\n# upgraded development doc\n' >> "$new_source/docs/development.md"
 # ADRs through upgrade, including state classification and idempotent reruns.
 adr_old_source="$TEST_ROOT/foundation-before-adr-0027"
 cp -a "$PROJECT_ROOT" "$adr_old_source"
-sed -i 's#docs/decisions/0027-exhaustion-hardening.md ##; s#docs/decisions/0028-content-based-category-triage-and-bug-category.md ##; s#docs/decisions/0029-worker-orphan-reap.md ##' "$adr_old_source/scripts/lib/foundation-files.sh"
+sed -i -E 's#docs/decisions/0027-exhaustion-hardening\.md([[:space:]]|$)##; s#docs/decisions/0028-content-based-category-triage-and-bug-category\.md([[:space:]]|$)##; s#docs/decisions/0029-worker-orphan-reap\.md([[:space:]]|$)##' "$adr_old_source/scripts/lib/foundation-files.sh"
 adr_upgrade_target=$(new_repository adr-upgrade-target)
 AGENTIC_LOOP_SOURCE="$adr_old_source" AGENTIC_LOOP_TARGET="$adr_upgrade_target" AGENTIC_LOOP_SKIP_START=1 "$PROJECT_ROOT/install.sh" >/dev/null
 adr_state=$(git -C "$adr_upgrade_target" rev-parse --path-format=absolute --git-common-dir)/agentic-loop/foundation-state.json
