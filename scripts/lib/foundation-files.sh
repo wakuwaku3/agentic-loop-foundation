@@ -6,6 +6,7 @@
 # are a one-time seed for brand-new repositories only; once copied they become
 # the target's own files and upgrade never overwrites or removes them.
 readonly SHARED_FILES=(
+  docs/decisions/0027-exhaustion-hardening.md docs/decisions/0028-content-based-category-triage-and-bug-category.md docs/decisions/0029-worker-orphan-reap.md
   AGENTS.md .codex/config.toml .claude/settings.json .claude/hooks/confirm-main-worktree-edit.sh .claude/hooks/require-gh-body-file.sh docs/policies/cost.md docs/policies/testing.md docs/policies/external-environment.md docs/policies/development-environment.md docs/policies/ai-tool-neutrality.md
   docs/policies/github-language.md docs/policies/validation-harness.md docs/policies/continuous-delivery.md
   docs/policies/documentation.md docs/policies/resource-scalability.md
