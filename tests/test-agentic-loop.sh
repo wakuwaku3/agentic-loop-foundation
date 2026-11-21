@@ -1581,6 +1581,13 @@ same_head=$(git -C "$target" rev-parse HEAD)
 # the main worktree dirty.  Sync therefore has no legacy manifest exception.
 state_path=$(git -C "$target" rev-parse --path-format=absolute --git-common-dir)/agentic-loop/foundation-state.json
 [[ -s $state_path && -z $(git -C "$target" status --porcelain) ]] || fail 'fixture: install state was not kept out of the worktree'
+for shared_adr in \
+  docs/decisions/0027-exhaustion-hardening.md \
+  docs/decisions/0028-content-based-category-triage-and-bug-category.md \
+  docs/decisions/0029-worker-orphan-reap.md; do
+  [[ -f $target/$shared_adr ]] || fail "install did not distribute $shared_adr"
+  grep -Fq "\"path\":\"$shared_adr\",\"class\":\"shared\"" "$state_path" || fail "install did not record $shared_adr as shared"
+done
 printf 'second remote update\n' > "$publisher/remote2.txt"
 git -C "$publisher" add remote2.txt
 git -C "$publisher" commit --quiet -m 'second update'
@@ -9217,6 +9224,41 @@ printf 'new doc\n' > "$new_source/docs/operations/new-feature.md"
 sed -i 's#docs/operations/upgrade.md#docs/operations/upgrade.md docs/operations/new-feature.md#' "$new_source/scripts/lib/foundation-files.sh"
 printf '\n# upgraded documentation policy\n' >> "$new_source/docs/policies/documentation.md"
 printf '\n# upgraded development doc\n' >> "$new_source/docs/development.md"
+
+# Existing installations made before ADR 0027--0029 receive all three shared
+# ADRs through upgrade, including state classification and idempotent reruns.
+adr_old_source="$TEST_ROOT/foundation-before-adr-0027"
+cp -a "$PROJECT_ROOT" "$adr_old_source"
+sed -i 's#docs/decisions/0027-exhaustion-hardening.md ##; s#docs/decisions/0028-content-based-category-triage-and-bug-category.md ##; s#docs/decisions/0029-worker-orphan-reap.md ##' "$adr_old_source/scripts/lib/foundation-files.sh"
+adr_upgrade_target=$(new_repository adr-upgrade-target)
+AGENTIC_LOOP_SOURCE="$adr_old_source" AGENTIC_LOOP_TARGET="$adr_upgrade_target" AGENTIC_LOOP_SKIP_START=1 "$PROJECT_ROOT/install.sh" >/dev/null
+adr_state=$(git -C "$adr_upgrade_target" rev-parse --path-format=absolute --git-common-dir)/agentic-loop/foundation-state.json
+for shared_adr in \
+  docs/decisions/0027-exhaustion-hardening.md \
+  docs/decisions/0028-content-based-category-triage-and-bug-category.md \
+  docs/decisions/0029-worker-orphan-reap.md; do
+  [[ ! -e $adr_upgrade_target/$shared_adr ]] || fail "old Foundation fixture unexpectedly installed $shared_adr"
+done
+git -C "$adr_upgrade_target" add -A && git -C "$adr_upgrade_target" commit --quiet -m 'install old foundation' && git -C "$adr_upgrade_target" push --quiet
+adr_before_status=$(git -C "$adr_upgrade_target" status --porcelain)
+adr_dry_run=$("$adr_upgrade_target/bin/agentic-loop" upgrade --source "$PROJECT_ROOT")
+for shared_adr in \
+  docs/decisions/0027-exhaustion-hardening.md \
+  docs/decisions/0028-content-based-category-triage-and-bug-category.md \
+  docs/decisions/0029-worker-orphan-reap.md; do
+  [[ $adr_dry_run == *"[add] $shared_adr"* ]] || fail "upgrade dry-run did not report $shared_adr"
+done
+[[ $(git -C "$adr_upgrade_target" status --porcelain) == "$adr_before_status" ]] || fail 'ADR upgrade dry-run modified the target worktree'
+"$adr_upgrade_target/bin/agentic-loop" upgrade --source "$PROJECT_ROOT" --apply --skip-verify >/dev/null || fail 'ADR upgrade apply failed'
+for shared_adr in \
+  docs/decisions/0027-exhaustion-hardening.md \
+  docs/decisions/0028-content-based-category-triage-and-bug-category.md \
+  docs/decisions/0029-worker-orphan-reap.md; do
+  [[ -f $adr_upgrade_target/$shared_adr ]] || fail "upgrade did not add $shared_adr"
+  grep -Fq "\"path\":\"$shared_adr\",\"class\":\"shared\"" "$adr_state" || fail "upgrade did not record $shared_adr as shared"
+done
+git -C "$adr_upgrade_target" add -A && git -C "$adr_upgrade_target" commit --quiet -m 'upgrade shared ADRs'
+[[ $("$adr_upgrade_target/bin/agentic-loop" upgrade --source "$PROJECT_ROOT") == *'変更はありません'* ]] || fail 'ADR upgrade rerun was not idempotent'
 
 # Pristine: no upstream changes -> no-op dry-run, zero writes.
 before_status=$(git -C "$upgrade_target" status --porcelain)
